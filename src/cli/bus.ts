@@ -773,6 +773,395 @@ function runHook(hookName: string): void {
   process.exit(result.status ?? 0);
 }
 
+// ---------------------------------------------------------------------------
+// Telegram utility commands — parity with bash edit-message / answer-callback
+// ---------------------------------------------------------------------------
+
+busCommand
+  .command('edit-message')
+  .description('Edit an existing Telegram message text and optionally update inline keyboard')
+  .argument('<chat-id>', 'Telegram chat ID')
+  .argument('<message-id>', 'Message ID to edit')
+  .argument('<new-text>', 'Replacement text (Telegram Markdown)')
+  .argument('[reply-markup]', 'Optional JSON inline keyboard markup (pass "null" to clear)')
+  .action(async (chatId: string, messageId: string, newText: string, replyMarkup?: string) => {
+    const env = resolveEnv();
+    let botToken = '';
+    if (env.agentDir) {
+      const { readFileSync, existsSync } = require('fs');
+      const agentEnv = require('path').join(env.agentDir, '.env');
+      if (existsSync(agentEnv)) {
+        const match = readFileSync(agentEnv, 'utf-8').match(/^BOT_TOKEN=(.+)$/m);
+        if (match?.[1]?.trim()) botToken = match[1].trim();
+      }
+    }
+    if (!botToken) botToken = process.env.BOT_TOKEN || '';
+    if (!botToken) { console.error('Error: BOT_TOKEN not set'); process.exit(1); }
+
+    const api = new TelegramAPI(botToken);
+    let markup: object | undefined;
+    if (replyMarkup && replyMarkup !== 'null') {
+      try { markup = JSON.parse(replyMarkup); } catch { console.error('Invalid reply-markup JSON'); process.exit(1); }
+    } else {
+      markup = { inline_keyboard: [] }; // clear keyboard
+    }
+
+    try {
+      await api.editMessageText(parseInt(chatId, 10), parseInt(messageId, 10), newText, markup);
+      console.log('Message edited');
+    } catch (err: any) {
+      console.error(`Failed to edit message: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('answer-callback')
+  .description('Answer a Telegram callback query to dismiss button loading state')
+  .argument('<callback-query-id>', 'Callback query ID from Telegram update')
+  .argument('[toast-text]', 'Optional toast notification text', 'Got it')
+  .action(async (callbackQueryId: string, toastText: string) => {
+    const env = resolveEnv();
+    let botToken = '';
+    if (env.agentDir) {
+      const { readFileSync, existsSync } = require('fs');
+      const agentEnv = require('path').join(env.agentDir, '.env');
+      if (existsSync(agentEnv)) {
+        const match = readFileSync(agentEnv, 'utf-8').match(/^BOT_TOKEN=(.+)$/m);
+        if (match?.[1]?.trim()) botToken = match[1].trim();
+      }
+    }
+    if (!botToken) botToken = process.env.BOT_TOKEN || '';
+    if (!botToken) { console.error('Error: BOT_TOKEN not set'); process.exit(1); }
+
+    const api = new TelegramAPI(botToken);
+    try {
+      await api.answerCallbackQuery(callbackQueryId, toastText);
+      console.log('Callback answered');
+    } catch (err: any) {
+      console.error(`Failed to answer callback: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Agent discovery and skill discovery
+// ---------------------------------------------------------------------------
+
+busCommand
+  .command('list-agents')
+  .description('Discover all agents in the system with their status and roles')
+  .option('--org <org>', 'Filter by organization')
+  .option('--status <filter>', 'Filter by status: running|all', 'all')
+  .option('--format <fmt>', 'Output format: json|text', 'json')
+  .action((opts: { org?: string; status?: string; format?: string }) => {
+    const { existsSync, readdirSync, readFileSync } = require('fs');
+    const { join } = require('path');
+    const { execSync } = require('child_process');
+    const env = resolveEnv();
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
+    const frameworkRoot = env.frameworkRoot || process.cwd();
+
+    // Collect agents from enabled-agents.json + filesystem scan
+    const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
+    const agentMap: Record<string, { org: string; enabled: boolean }> = {};
+
+    if (existsSync(enabledFile)) {
+      try {
+        const data = JSON.parse(readFileSync(enabledFile, 'utf-8'));
+        for (const [name, cfg] of Object.entries(data as Record<string, any>)) {
+          agentMap[name] = { org: cfg.org ?? '', enabled: cfg.enabled !== false };
+        }
+      } catch { /* skip corrupt */ }
+    }
+
+    // Also scan org agent directories
+    const orgsDir = join(frameworkRoot, 'orgs');
+    if (existsSync(orgsDir)) {
+      for (const org of readdirSync(orgsDir)) {
+        const agentsDir = join(orgsDir, org, 'agents');
+        if (!existsSync(agentsDir)) continue;
+        for (const name of readdirSync(agentsDir)) {
+          if (!agentMap[name]) agentMap[name] = { org, enabled: true };
+        }
+      }
+    }
+
+    const results = [];
+    for (const [name, info] of Object.entries(agentMap)) {
+      if (opts.org && info.org !== opts.org) continue;
+
+      // Check if tmux session is running
+      const tmuxName = info.org
+        ? `ctx-${env.instanceId}-${info.org}-${name}`
+        : `ctx-${env.instanceId}-${name}`;
+      let running = false;
+      try {
+        execSync(`tmux has-session -t "${tmuxName}"`, { stdio: 'ignore' });
+        running = true;
+      } catch { /* not running */ }
+
+      if (opts.status === 'running' && !running) continue;
+
+      // Read role from IDENTITY.md
+      let role = '';
+      const agentDir = info.org
+        ? join(frameworkRoot, 'orgs', info.org, 'agents', name)
+        : join(frameworkRoot, 'agents', name);
+      const identityFile = join(agentDir, 'IDENTITY.md');
+      if (existsSync(identityFile)) {
+        const content = readFileSync(identityFile, 'utf-8');
+        const m = content.match(/^## Role\s*\n(.+)/m);
+        if (m) role = m[1].trim();
+      }
+
+      // Read heartbeat
+      const hbFile = join(ctxRoot, 'state', name, 'heartbeat.json');
+      let lastHeartbeat = '', currentTask = '', mode = '';
+      if (existsSync(hbFile)) {
+        try {
+          const hb = JSON.parse(readFileSync(hbFile, 'utf-8'));
+          lastHeartbeat = hb.last_heartbeat ?? '';
+          currentTask = hb.current_task ?? '';
+          mode = hb.mode ?? '';
+        } catch { /* skip */ }
+      }
+
+      results.push({ name, org: info.org, role, enabled: info.enabled, running, last_heartbeat: lastHeartbeat, current_task: currentTask, mode });
+    }
+
+    if (opts.format === 'text') {
+      console.log(`Agents in system:\n`);
+      for (const a of results) {
+        const status = a.running ? 'RUNNING' : 'stopped';
+        console.log(`  ${a.name} (${a.org || 'root'}) [${status}]`);
+        if (a.role) console.log(`    Role: ${a.role}`);
+        if (a.current_task) console.log(`    Working on: ${a.current_task}`);
+        console.log('');
+      }
+      console.log(`Total: ${results.length} agents`);
+    } else {
+      console.log(JSON.stringify(results, null, 2));
+    }
+  });
+
+busCommand
+  .command('list-skills')
+  .description('Discover available skills for the current agent')
+  .option('--format <fmt>', 'Output format: json|text', 'json')
+  .action((opts: { format?: string }) => {
+    const { existsSync, readdirSync, readFileSync } = require('fs');
+    const { join } = require('path');
+    const env = resolveEnv();
+    const frameworkRoot = env.frameworkRoot || process.cwd();
+    const agentDir = env.agentDir || process.cwd();
+
+    // Read template from config.json
+    let template = '';
+    const configFile = join(agentDir, 'config.json');
+    if (existsSync(configFile)) {
+      try { template = JSON.parse(readFileSync(configFile, 'utf-8')).template ?? ''; } catch { /* skip */ }
+    }
+
+    // Parse YAML frontmatter from SKILL.md
+    function parseSkillFrontmatter(filePath: string): { name: string; description: string } | null {
+      try {
+        const content = readFileSync(filePath, 'utf-8');
+        const lines = content.split('\n');
+        let inFrontmatter = false;
+        let name = '', description = '';
+        for (const line of lines) {
+          if (line.trim() === '---') {
+            if (inFrontmatter) break;
+            inFrontmatter = true;
+            continue;
+          }
+          if (!inFrontmatter) continue;
+          const nm = line.match(/^name:\s*['"]?(.+?)['"]?\s*$/);
+          if (nm) name = nm[1];
+          const dm = line.match(/^description:\s*['"]?(.+?)['"]?\s*$/);
+          if (dm) description = dm[1];
+        }
+        return name ? { name, description } : null;
+      } catch { return null; }
+    }
+
+    // Scan a skills directory, returns map of name -> skill info
+    function scanSkillsDir(dir: string, source: string): Map<string, object> {
+      const map = new Map<string, object>();
+      if (!existsSync(dir)) return map;
+      for (const entry of readdirSync(dir)) {
+        const skillFile = join(dir, entry, 'SKILL.md');
+        if (!existsSync(skillFile)) continue;
+        const parsed = parseSkillFrontmatter(skillFile);
+        if (parsed) map.set(parsed.name, { ...parsed, path: skillFile, source });
+      }
+      return map;
+    }
+
+    // Merge in priority order: framework < template < agent (agent wins)
+    const merged = new Map<string, object>();
+    for (const [k, v] of scanSkillsDir(join(frameworkRoot, 'skills'), 'framework')) merged.set(k, v);
+    if (template) {
+      for (const [k, v] of scanSkillsDir(join(frameworkRoot, 'templates', template, 'skills'), `template:${template}`)) merged.set(k, v);
+    }
+    for (const [k, v] of scanSkillsDir(join(agentDir, 'skills'), 'agent')) merged.set(k, v);
+
+    const skills = Array.from(merged.values()).sort((a: any, b: any) => a.name.localeCompare(b.name));
+
+    if (opts.format === 'text') {
+      console.log(`Available skills for ${env.agentName}:\n`);
+      for (const s: any of skills) {
+        console.log(`  ${s.name} (${s.source})`);
+        if (s.description) console.log(`    ${s.description}`);
+        console.log('');
+      }
+      console.log(`Total: ${skills.length} skills`);
+    } else {
+      console.log(JSON.stringify(skills, null, 2));
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Agent coordination: notify-agent, soft-restart, send-mobile-reply
+// ---------------------------------------------------------------------------
+
+busCommand
+  .command('notify-agent')
+  .description('Send urgent signal to another agent for immediate delivery via fast-checker')
+  .argument('<agent>', 'Target agent name')
+  .argument('<message>', 'Urgent message text')
+  .action((targetAgent: string, message: string) => {
+    const { mkdirSync, writeFileSync } = require('fs');
+    const { join } = require('path');
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
+
+    // Write urgent signal file that fast-checker checks on every poll
+    const signalDir = join(ctxRoot, 'state', targetAgent);
+    mkdirSync(signalDir, { recursive: true });
+    const signal = {
+      from: env.agentName,
+      message,
+      timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    };
+    writeFileSync(join(signalDir, '.urgent-signal'), JSON.stringify(signal));
+
+    // Also send via normal message bus for persistence
+    try {
+      sendMessage(paths, env.agentName, targetAgent, 'urgent', message);
+    } catch { /* signal already written */ }
+
+    console.log(`Signal sent to ${targetAgent}`);
+  });
+
+busCommand
+  .command('soft-restart')
+  .description('Gracefully restart another agent by writing the restart marker then sending /exit')
+  .argument('<agent>', 'Target agent name to restart')
+  .argument('[reason]', 'Reason for restart', 'user request via soft-restart')
+  .action((targetAgent: string, reason: string) => {
+    const { mkdirSync, writeFileSync } = require('fs');
+    const { join } = require('path');
+    const { execSync } = require('child_process');
+    const env = resolveEnv();
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
+
+    // Resolve tmux session name (try org-scoped first)
+    const tmuxName = env.org
+      ? `ctx-${env.instanceId}-${env.org}-${targetAgent}`
+      : `ctx-${env.instanceId}-${targetAgent}`;
+
+    // Verify session exists
+    try {
+      execSync(`tmux has-session -t "${tmuxName}"`, { stdio: 'ignore' });
+    } catch {
+      console.error(`ERROR: No tmux session found for ${targetAgent} (tried ${tmuxName})`);
+      process.exit(1);
+    }
+
+    // Step 1: Write .user-restart marker BEFORE sending /exit
+    const stateDir = join(ctxRoot, 'state', targetAgent);
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(join(stateDir, '.user-restart'), reason);
+    console.log(`Wrote .user-restart marker for ${targetAgent}: ${reason}`);
+
+    // Step 2: Escape to clear any TUI state, then send /exit
+    try {
+      execSync(`tmux send-keys -t "${tmuxName}" Escape`, { stdio: 'ignore' });
+      setTimeout(() => {
+        execSync(`tmux send-keys -t "${tmuxName}" "/exit" Enter`, { stdio: 'ignore' });
+        console.log(`Sent /exit to ${targetAgent} (session: ${tmuxName})`);
+        console.log('Agent will restart via launchd/wrapper. crash-alert will categorize as user_initiated.');
+      }, 1000);
+    } catch (err: any) {
+      console.error(`Failed to send /exit: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('send-mobile-reply')
+  .description('Reply to a mobile app user message and ACK the inbox message')
+  .argument('<agent>', 'Agent name sending the reply')
+  .argument('<reply>', 'Reply text')
+  .argument('[msg-id]', 'Inbox message ID to ACK')
+  .action((agent: string, reply: string, msgId?: string) => {
+    const { mkdirSync, appendFileSync } = require('fs');
+    const { join } = require('path');
+    const env = resolveEnv();
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
+
+    // Write to outbound-messages.jsonl so iOS app chat history picks it up
+    const logDir = join(ctxRoot, 'logs', agent);
+    mkdirSync(logDir, { recursive: true });
+    const entry = JSON.stringify({
+      timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      agent,
+      text: reply,
+      message_id: `mobile-reply-${Date.now()}`,
+      type: 'text',
+    });
+    appendFileSync(join(logDir, 'outbound-messages.jsonl'), entry + '\n');
+
+    // ACK the original inbox message
+    if (msgId) {
+      const paths = resolvePaths(agent, env.instanceId, env.org);
+      try { ackInbox(paths, msgId); } catch { /* best effort */ }
+    }
+
+    console.log('Replied to mobile user');
+  });
+
+// ---------------------------------------------------------------------------
+// list-approvals — was missing from CLI, only available via dashboard
+// ---------------------------------------------------------------------------
+
+busCommand
+  .command('list-approvals')
+  .description('List pending approval requests')
+  .option('--format <fmt>', 'Output format: json|text', 'json')
+  .action((opts: { format?: string }) => {
+    const { listPendingApprovals } = require('../bus/approval.js');
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const approvals = listPendingApprovals(paths);
+
+    if (opts.format === 'text') {
+      if (approvals.length === 0) { console.log('No pending approvals'); return; }
+      for (const a of approvals) {
+        console.log(`[${a.id}] ${a.title}`);
+        console.log(`  Category: ${a.category} | Agent: ${a.requesting_agent} | Created: ${a.created_at}`);
+        if (a.description) console.log(`  Context: ${a.description}`);
+        console.log('');
+      }
+      console.log(`Total: ${approvals.length} pending`);
+    } else {
+      console.log(JSON.stringify(approvals, null, 2));
+    }
+  });
+
 busCommand
   .command('hook-ask-telegram')
   .description('PreToolUse hook: forward AskUserQuestion to Telegram (cross-platform)')
