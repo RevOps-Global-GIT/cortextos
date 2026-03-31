@@ -267,11 +267,13 @@ export class AgentProcess {
     const launchDir = this.config.working_directory || this.env.agentDir;
     if (!launchDir) return false;
 
+    // Claude projects dir uses the absolute path with all slashes replaced by dashes
+    // e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss (leading slash becomes -)
     const convDir = join(
       process.env.HOME || '',
       '.claude',
       'projects',
-      '-' + launchDir.replace(/\//g, '-'),
+      launchDir.replace(/\//g, '-'),
     );
 
     try {

@@ -5,7 +5,8 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 
-const DB_PATH = path.join(process.cwd(), '.data', 'cortextos.db');
+const instanceId = process.env.CTX_INSTANCE_ID ?? 'default';
+const DB_PATH = path.join(process.cwd(), '.data', `cortextos-${instanceId}.db`);
 
 function createDatabase(): Database.Database {
   // Ensure .data directory exists
