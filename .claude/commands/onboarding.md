@@ -15,16 +15,23 @@ You are guiding the user through a complete interactive onboarding for cortextOS
 
 ### 1a. Welcome
 
-> "cortextOS is a system for running persistent 24/7 Claude Code agents. Your agents run in the background, coordinate with each other, manage tasks, request your approval for important decisions, and you control everything from Telegram on your phone or a web dashboard."
+> "cortextOS is a system for running persistent 24/7 Claude Code agents. Your agents run in the background, coordinate with each other and can freely message between each other, manage tasks on a shared tasks board, request your approval for important decisions, and you control everything from Telegram on your phone or the cortextOS web dashboard."
 
 > "Here's what you're about to set up:"
-> - **Persistent agents** that run 24/7 with automatic crash recovery and session continuation
-> - **Telegram control** — text back and forth with your agents from your phone with full Claude Code capabilities
-> - **Organizations** — groups of agents working together toward shared goals
-> - **Task management** — agents create, assign, and complete tasks visible on a dashboard
-> - **Approval workflows** — agents request your sign-off before taking high-stakes actions
-> - **Analytics** — cost tracking, task throughput, agent effectiveness metrics
-> - **Web dashboard** — real-time monitoring of your entire system in a browser
+> - **Persistent agents** that run 24/7 with automatic crash recovery and session continuation. Each agent is a full Claude Code CLI session.
+> - **Telegram control** — text back and forth with your agents from your phone with full Claude Code capabilities.
+> - **Organizations** — groups of agents working together toward shared goals. Create as many organizations as you want and switch between them in the dashboard.
+> - **Task management** — agents create, assign, and complete tasks visible on a dashboard.
+> - **Approval workflows** — agents request your sign-off before taking high-stakes actions. Agents can also assign you tasks when they need your help.
+> - **Analytics** — cost tracking, task throughput, agent effectiveness metrics for optimization.
+> - **Web dashboard** — real-time monitoring of your entire system in a browser.
+> - **Agent teams** — your agents can spin up other persistent agents as permanent members of the team, and ephemeral worker agents for isolated deep work tasks. Agents can manage other agents as many layers deep as you want.
+> - **Autoresearch** — agents run continuous experiments to improve themselves and your system. Measure outcomes, learn, propose changes — all gated by your approval.
+> - **Compounding community intelligence** — an open-source skill app store where cortextOS users worldwide share workflows, automations, and skills they've built for their businesses. Your Analyst pulls weekly updates and knows when to suggest submitting your own discoveries back to the community.
+> - **Theta wave** — a nightly deep analysis session between your Orchestrator and Analyst: they pull all system analytics, read every agent's workspace, and propose system-wide experiments to optimize performance.
+> - **Semantic Knowledge Base** *(coming soon)* — agents upload files from their workspace into a shared RAG database, searchable from the dashboard. Supports docs, images, audio, video — anything you want them to store as long-term shared memory.
+> - **Native iPhone App** *(coming soon)* — dashboard + Telegram in one app with push notifications and full system control from your phone.
+> - **Full codebase access** — agents can read and write your dashboard, core scripts, and the markdown files that define their own behavior. They can build custom dashboard pages for your business and eventually extend the iPhone app.
 
 > "Here's how it works under the hood: A Node.js daemon manages your agents as persistent processes. Each agent is a Claude Code session running in a PTY — it reads its own markdown files (identity, goals, soul, heartbeat), sets up scheduled tasks, and communicates via a file-based message bus. You talk to agents over Telegram via their own bots. Everything is logged, monitored, and visible on a dashboard."
 
