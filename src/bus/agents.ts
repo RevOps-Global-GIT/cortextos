@@ -119,6 +119,11 @@ function buildAgentInfo(
       lastHeartbeat = hb.last_heartbeat || hb.timestamp || null;
       currentTask = hb.current_task || null;
       mode = hb.mode || null;
+      // Running = heartbeat written within last 10 minutes
+      if (lastHeartbeat) {
+        const age = Date.now() - new Date(lastHeartbeat).getTime();
+        running = age < 10 * 60 * 1000;
+      }
     } catch {
       // Skip corrupt
     }
