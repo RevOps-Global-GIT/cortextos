@@ -1,6 +1,6 @@
 import { platform } from 'os';
 import { join } from 'path';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import { ensureDir } from '../utils/atomic.js';
@@ -186,6 +186,29 @@ export class AgentPTY {
 
     if (this.config.model) {
       parts.push('--model', this.config.model);
+    }
+
+    // Local override pattern (feat #20): concatenate {agentDir}/local/*.md files
+    // and append as system prompt. The local/ dir is gitignored so users can customize
+    // agent behavior without merge conflicts on framework updates.
+    const agentDir = this.env.agentDir;
+    if (agentDir) {
+      const localDir = join(agentDir, 'local');
+      if (existsSync(localDir)) {
+        try {
+          const mdFiles = readdirSync(localDir)
+            .filter(f => f.endsWith('.md'))
+            .sort()
+            .map(f => join(localDir, f));
+          if (mdFiles.length > 0) {
+            const localContent = mdFiles
+              .map(f => readFileSync(f, 'utf-8'))
+              .join('\n\n');
+            const escaped = localContent.replace(/'/g, "'\\''");
+            parts.push('--append-system-prompt', `'${escaped}'`);
+          }
+        } catch { /* ignore read errors */ }
+      }
     }
 
     // Escape single quotes in prompt for shell
