@@ -62,14 +62,22 @@ export const initCommand = new Command('init')
         value_prop: '',
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         orchestrator: '',
+        day_mode_start: '08:00',
+        day_mode_end: '00:00',
+        default_approval_categories: ['external-comms', 'financial', 'deployment', 'data-deletion'],
+        communication_style: 'direct and casual',
       }, null, 2) + '\n', 'utf-8');
       console.log('  Created org context.json');
     } else {
-      // Fill in timezone and name if empty
+      // Fill in any missing fields (handles upgrades from older context.json without new fields)
       try {
         const ctx = JSON.parse(readFileSync(contextPath, 'utf-8'));
         if (!ctx.timezone) ctx.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
         if (!ctx.name) ctx.name = orgName;
+        if (!ctx.day_mode_start) ctx.day_mode_start = '08:00';
+        if (!ctx.day_mode_end) ctx.day_mode_end = '00:00';
+        if (!ctx.default_approval_categories) ctx.default_approval_categories = ['external-comms', 'financial', 'deployment', 'data-deletion'];
+        if (!ctx.communication_style) ctx.communication_style = 'direct and casual';
         writeFileSync(contextPath, JSON.stringify(ctx, null, 2) + '\n', 'utf-8');
       } catch { /* ignore */ }
     }

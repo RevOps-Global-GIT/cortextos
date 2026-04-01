@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
 import { join, resolve } from 'path';
+import { OrgContext } from '../types';
 
 export const addAgentCommand = new Command('add-agent')
   .argument('<name>', 'Agent name')
@@ -92,36 +93,67 @@ export const addAgentCommand = new Command('add-agent')
     // Dynamic data (agent roster, health) is discovered live via list-agents + read-all-heartbeats.
     const contextPath = join(projectRoot, 'orgs', org, 'context.json');
     if (existsSync(contextPath)) {
+      // Read context.json once and reuse for both SYSTEM.md generation and config seeding.
+      let ctx: OrgContext | null = null;
       try {
-        const ctx = JSON.parse(readFileSync(contextPath, 'utf-8'));
-        const orgName = ctx.name || org;
-        const timezone = ctx.timezone || 'UTC';
-        const orchestrator = ctx.orchestrator || '(not set)';
-        const dashboardUrl = ctx.dashboard_url || '(not configured)';
-        const systemMd = [
-          '# System Context',
-          '',
-          `**Organization:** ${orgName}`,
-          `**Timezone:** ${timezone}`,
-          `**Orchestrator:** ${orchestrator}`,
-          `**Dashboard:** ${dashboardUrl}`,
-          '**Framework:** cortextOS Node.js',
-          '',
-          '---',
-          '',
-          'This file contains static org context only. For the live agent roster, run:',
-          '```bash',
-          'cortextos list-agents',
-          '```',
-          '',
-          'For agent health (last heartbeat per agent), run:',
-          '```bash',
-          'cortextos bus read-all-heartbeats',
-          '```',
-          '',
-        ].join('\n');
-        writeFileSync(join(agentDir, 'SYSTEM.md'), systemMd, 'utf-8');
+        ctx = JSON.parse(readFileSync(contextPath, 'utf-8')) as OrgContext;
       } catch { /* leave template SYSTEM.md in place if context.json is unreadable */ }
+
+      if (ctx) {
+        // Generate SYSTEM.md
+        try {
+          const orgName = ctx.name || org;
+          const timezone = ctx.timezone || 'UTC';
+          const orchestrator = ctx.orchestrator || '(not set)';
+          const dashboardUrl = ctx.dashboard_url || '(not configured)';
+          const systemMd = [
+            '# System Context',
+            '',
+            `**Organization:** ${orgName}`,
+            `**Timezone:** ${timezone}`,
+            `**Orchestrator:** ${orchestrator}`,
+            `**Dashboard:** ${dashboardUrl}`,
+            '**Framework:** cortextOS Node.js',
+            '',
+            '---',
+            '',
+            'This file contains static org context only. For the live agent roster, run:',
+            '```bash',
+            'cortextos list-agents',
+            '```',
+            '',
+            'For agent health (last heartbeat per agent), run:',
+            '```bash',
+            'cortextos bus read-all-heartbeats',
+            '```',
+            '',
+          ].join('\n');
+          writeFileSync(join(agentDir, 'SYSTEM.md'), systemMd, 'utf-8');
+        } catch { /* leave template SYSTEM.md in place on write error */ }
+
+        // Seed org-level tuning knobs into agent config.json
+        try {
+          const agentConfigPath = join(agentDir, 'config.json');
+          if (existsSync(agentConfigPath)) {
+            const agentCfg = JSON.parse(readFileSync(agentConfigPath, 'utf-8'));
+            agentCfg.timezone = ctx.timezone || 'UTC';
+            // Only seed day_mode_start/end if they look like valid HH:MM strings
+            const timeRegex = /^\d{2}:\d{2}$/;
+            agentCfg.day_mode_start = (typeof ctx.day_mode_start === 'string' && timeRegex.test(ctx.day_mode_start))
+              ? ctx.day_mode_start : '08:00';
+            agentCfg.day_mode_end = (typeof ctx.day_mode_end === 'string' && timeRegex.test(ctx.day_mode_end))
+              ? ctx.day_mode_end : '00:00';
+            agentCfg.communication_style = ctx.communication_style || 'direct and casual';
+            agentCfg.approval_rules = {
+              always_ask: Array.isArray(ctx.default_approval_categories)
+                ? ctx.default_approval_categories
+                : ['external-comms', 'financial', 'deployment', 'data-deletion'],
+              never_ask: [],
+            };
+            writeFileSync(agentConfigPath, JSON.stringify(agentCfg, null, 2) + '\n', 'utf-8');
+          }
+        } catch { /* org context may be incomplete — agent keeps template defaults */ }
+      }
     }
 
     // Update org context.json if this is the orchestrator

@@ -16,9 +16,26 @@ interface OrgData {
   brandVoice: string;
 }
 
+interface OrgConfig {
+  timezone?: string;
+  day_mode_start?: string;
+  day_mode_end?: string;
+  communication_style?: string;
+  default_approval_categories?: string[];
+}
+
+const APPROVAL_CATEGORIES = ['external-comms', 'financial', 'deployment', 'data-deletion'] as const;
+
 export function OrganizationTab() {
   const [data, setData] = useState<OrgData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [org, setOrg] = useState<string>('');
+
+  // Operational config state
+  const [opConfig, setOpConfig] = useState<OrgConfig>({});
+  const [opLoading, setOpLoading] = useState(false);
+  const [opSaving, setOpSaving] = useState(false);
+  const [opMessage, setOpMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const load = useCallback(async () => {
     const result = await fetchOrgMetadata();
@@ -29,6 +46,78 @@ export function OrganizationTab() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Discover org slug from agents list
+  useEffect(() => {
+    fetch('/api/agents')
+      .then(r => r.json())
+      .then((d: Array<{ org?: string }>) => {
+        const firstOrg = d.find(a => a.org)?.org;
+        if (firstOrg) setOrg(firstOrg);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Load operational config once org is known
+  useEffect(() => {
+    if (!org) return;
+    setOpLoading(true);
+    fetch(`/api/org/config?org=${encodeURIComponent(org)}`)
+      .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
+      .then(d => {
+        if (d.config) {
+          setOpConfig({
+            timezone: d.config.timezone || '',
+            day_mode_start: d.config.day_mode_start || '',
+            day_mode_end: d.config.day_mode_end || '',
+            communication_style: d.config.communication_style || '',
+            default_approval_categories: d.config.default_approval_categories || [],
+          });
+        }
+        setOpLoading(false);
+      })
+      .catch(() => setOpLoading(false));
+  }, [org]);
+
+  const saveOpConfig = async () => {
+    if (!org) return;
+    const timeRegex = /^\d{2}:\d{2}$/;
+    if (opConfig.day_mode_start && !timeRegex.test(opConfig.day_mode_start)) {
+      setOpMessage({ type: 'error', text: 'Day mode start must be HH:MM format' });
+      return;
+    }
+    if (opConfig.day_mode_end && !timeRegex.test(opConfig.day_mode_end)) {
+      setOpMessage({ type: 'error', text: 'Day mode end must be HH:MM format' });
+      return;
+    }
+    setOpSaving(true);
+    setOpMessage(null);
+    try {
+      const res = await fetch(`/api/org/config?org=${encodeURIComponent(org)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(opConfig),
+      });
+      const d = await res.json();
+      if (!res.ok) {
+        setOpMessage({ type: 'error', text: d.error || 'Failed to save' });
+      } else {
+        setOpMessage({ type: 'success', text: 'Saved. Agents notified to reload config.' });
+      }
+    } catch {
+      setOpMessage({ type: 'error', text: 'Network error' });
+    } finally {
+      setOpSaving(false);
+    }
+  };
+
+  const toggleApprovalCategory = (cat: string) => {
+    setOpConfig(prev => {
+      const cats = prev.default_approval_categories || [];
+      const next = cats.includes(cat) ? cats.filter(c => c !== cat) : [...cats, cat];
+      return { ...prev, default_approval_categories: next };
+    });
+  };
 
   if (loading) {
     return <div className="h-48 rounded-xl bg-muted/30 animate-pulse" />;
@@ -81,6 +170,95 @@ export function OrganizationTab() {
             <pre className="text-sm whitespace-pre-wrap font-sans text-muted-foreground">
               {data.brandVoice}
             </pre>
+          </CardContent>
+        </Card>
+      )}
+
+      {org && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Operational Config</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {opLoading ? (
+              <div className="h-24 rounded bg-muted/30 animate-pulse" />
+            ) : (
+              <>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Timezone</Label>
+                    <input
+                      type="text"
+                      value={opConfig.timezone || ''}
+                      onChange={e => setOpConfig(p => ({ ...p, timezone: e.target.value }))}
+                      placeholder="America/New_York"
+                      className="mt-1 block w-full rounded-md border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Communication Style</Label>
+                    <input
+                      type="text"
+                      value={opConfig.communication_style || ''}
+                      onChange={e => setOpConfig(p => ({ ...p, communication_style: e.target.value }))}
+                      placeholder="casual, brief, emoji-friendly"
+                      className="mt-1 block w-full rounded-md border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Day Mode Start</Label>
+                    <input
+                      type="text"
+                      value={opConfig.day_mode_start || ''}
+                      onChange={e => setOpConfig(p => ({ ...p, day_mode_start: e.target.value }))}
+                      placeholder="08:00"
+                      className="mt-1 block w-full rounded-md border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-xs text-muted-foreground">Day Mode End</Label>
+                    <input
+                      type="text"
+                      value={opConfig.day_mode_end || ''}
+                      onChange={e => setOpConfig(p => ({ ...p, day_mode_end: e.target.value }))}
+                      placeholder="00:00"
+                      className="mt-1 block w-full rounded-md border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <Label className="text-xs text-muted-foreground">Default Approval Categories</Label>
+                  <div className="mt-2 flex flex-wrap gap-3">
+                    {APPROVAL_CATEGORIES.map(cat => (
+                      <label key={cat} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={(opConfig.default_approval_categories || []).includes(cat)}
+                          onChange={() => toggleApprovalCategory(cat)}
+                          className="rounded"
+                        />
+                        {cat}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {opMessage && (
+                  <div className={`rounded-md px-3 py-2 text-xs ${opMessage.type === 'success' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
+                    {opMessage.text}
+                  </div>
+                )}
+
+                <button
+                  onClick={saveOpConfig}
+                  disabled={opSaving}
+                  className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {opSaving ? 'Saving...' : 'Save Operational Config'}
+                </button>
+              </>
+            )}
           </CardContent>
         </Card>
       )}

@@ -18,6 +18,7 @@ import { ecosystemCommand } from './ecosystem.js';
 import { uninstallCommand } from './uninstall.js';
 import { dashboardCommand } from './dashboard.js';
 import { tunnelCommand } from './tunnel.js';
+import { getConfigCommand } from './get-config.js';
 
 const program = new Command();
 
@@ -43,6 +44,7 @@ program.addCommand(ecosystemCommand);
 program.addCommand(uninstallCommand);
 program.addCommand(dashboardCommand);
 program.addCommand(tunnelCommand);
+program.addCommand(getConfigCommand);
 
 // crash-alert: SessionEnd hook — cross-platform replacement for crash-alert.sh
 const crashAlertCommand = new Command('crash-alert')

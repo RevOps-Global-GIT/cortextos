@@ -123,11 +123,34 @@ export interface AgentConfig {
   working_directory?: string;
   enabled?: boolean;
   crons?: CronEntry[];
+  timezone?: string;
+  day_mode_start?: string;
+  day_mode_end?: string;
+  communication_style?: string;
+  approval_rules?: {
+    always_ask: string[];
+    never_ask: string[];
+  };
 }
 
 export interface CronEntry {
   interval: string; // e.g., "10m", "1h"
-  command: string;
+  prompt: string;
+}
+
+export interface OrgContext {
+  name?: string;
+  description?: string;
+  industry?: string;
+  icp?: string;
+  value_prop?: string;
+  timezone?: string;
+  orchestrator?: string;
+  day_mode_start?: string;
+  day_mode_end?: string;
+  default_approval_categories?: string[];
+  communication_style?: string;
+  dashboard_url?: string;
 }
 
 // Telegram Types
