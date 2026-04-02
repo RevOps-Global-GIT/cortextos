@@ -124,6 +124,14 @@ function initializeSchema(db: Database.Database): void {
       last_synced TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    -- Rate limit table: persists across server restarts so limits survive hot-reloads
+    -- and intentional restarts. reset_at is a Unix timestamp in milliseconds.
+    CREATE TABLE IF NOT EXISTS rate_limits (
+      ip TEXT PRIMARY KEY,
+      count INTEGER NOT NULL DEFAULT 0,
+      reset_at INTEGER NOT NULL
+    );
+
     -- Indexes for common queries
     CREATE INDEX IF NOT EXISTS idx_tasks_org ON tasks(org);
     CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
