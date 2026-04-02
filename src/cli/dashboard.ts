@@ -31,12 +31,22 @@ export const dashboardCommand = new Command('dashboard')
 
     // Start Next.js dev server
     console.log(`\nDashboard starting on http://localhost:${options.port}\n`);
+
+    // Require AUTH_SECRET — refuse to start with the default hardcoded value
+    if (!process.env.AUTH_SECRET) {
+      console.error(
+        'ERROR: AUTH_SECRET is not set.\n' +
+        'Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"\n' +
+        'Then add it to your shell profile or .env file.'
+      );
+      process.exit(1);
+    }
+
     // Ensure AUTH_TRUST_HOST is set for local development
     const dashEnv = {
       ...process.env,
       PORT: options.port,
       AUTH_TRUST_HOST: process.env.AUTH_TRUST_HOST || 'true',
-      AUTH_SECRET: process.env.AUTH_SECRET || 'cortextos-dev-secret-change-in-production',
     };
 
     const child = spawn('npx', ['next', 'dev', '--port', options.port], {

@@ -22,14 +22,14 @@ YOU MUST read these files at the start of EVERY session. NO EXCEPTIONS:
 2. SOUL.md - how you behave
 3. GUARDRAILS.md - patterns to watch for and correct
 4. GOALS.md - what you're working toward
-5. HEARTBEAT.md - your recurring checklist
-6. MEMORY.md - long-term learnings
-7. USER.md - who your user is, their preferences and working style
-8. TOOLS.md - available bus scripts
-9. SYSTEM.md - cross-agent context
-10. ../../knowledge.md - org knowledge base (shared facts all agents need)
-11. memory/YYYY-MM-DD.md - today's session state (check for WORKING ON: entries)
-12. config.json - cron schedule
+4. HEARTBEAT.md - your recurring checklist
+5. MEMORY.md - long-term learnings
+6. memory/YYYY-MM-DD.md - today's session state (check for WORKING ON: entries)
+7. TOOLS.md - available bus scripts
+8. SYSTEM.md - cross-agent context
+9. config.json - cron schedule
+10. USER.md - who your user is, their preferences and working style
+11. ../../knowledge.md - org knowledge base (shared facts all agents need)
 
 DO NOT start any work until all files are read. This is not optional.
 
@@ -104,19 +104,6 @@ cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_
 
 ### 9. Notify on Telegram
 Send a message to the user that you're online with your status.
-
-### Apply operational config
-
-After reading all bootstrap files, your operational settings are in `config.json`:
-- **Day/Night Mode:** `day_mode_start` to `day_mode_end` — run `date +%H:%M` and compare to these values to determine your current mode. In night mode: reduce proactive Telegram messaging and defer non-urgent work until day mode.
-- **Approval Required:** `approval_rules.always_ask` — before ANY action in this list, create an approval via `cortextos bus create-approval` and wait for a decision before proceeding.
-- **Communication Style:** `communication_style` — use this tone in ALL user-facing Telegram messages and briefings.
-
-If you receive an inbox message containing "config updated" or "settings updated":
-1. ACK the message
-2. Re-read `config.json` immediately
-3. Apply new values for the rest of this session
-4. Log: `cortextos bus log-event action config_applied info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
 
 ---
 

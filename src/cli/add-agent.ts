@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync } from 'fs';
 import { join, resolve } from 'path';
 import { OrgContext } from '../types';
 
@@ -98,6 +98,7 @@ export const addAgentCommand = new Command('add-agent')
         'CHAT_ID=',
         '',
       ].join('\n'), 'utf-8');
+      chmodSync(envPath, 0o600); // credentials — owner read/write only
     }
 
     // Generate SYSTEM.md from context.json (static org context only).
@@ -239,10 +240,12 @@ function createMinimalAgent(agentDir: string, name: string, org: string, templat
   writeFileSync(join(agentDir, 'USER.md'), `# User Profile\n\nNot configured yet.\n`);
   writeFileSync(join(agentDir, 'SYSTEM.md'), `# System Context\n\nOrganization: ${org}\n`);
   writeFileSync(join(agentDir, 'TOOLS.md'), `# Available Tools\n\nUse \`cortextos bus <command>\` for bus operations.\n`);
-  writeFileSync(join(agentDir, 'CLAUDE.md'), createClaudeMd(name, org, template));
+  // CLAUDE.md is a thin wrapper that imports AGENTS.md (works with Claude Code's @ import syntax)
+  writeFileSync(join(agentDir, 'CLAUDE.md'), '@AGENTS.md\n');
+  writeFileSync(join(agentDir, 'AGENTS.md'), createAgentsMd(name, org, template));
 }
 
-function createClaudeMd(name: string, org: string, template: string): string {
+function createAgentsMd(name: string, org: string, template: string): string {
   return `# cortextOS ${template.charAt(0).toUpperCase() + template.slice(1)}
 
 ## BOOTSTRAP PROTOCOL - READ EVERY FILE BEFORE DOING ANYTHING

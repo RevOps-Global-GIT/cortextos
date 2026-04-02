@@ -1,12 +1,14 @@
 ---
 name: m2c1-worker
-description: "Autonomous software development via worker agents. Spin up a dedicated Claude Code session, act as the 'human' in the M2C1 lifecycle, manage it through all 12 phases to completion. Use when: building new software, major features, or any project that benefits from structured autonomous development."
-triggers: ["build", "m2c1", "worker agent", "autonomous build", "spin up worker", "new project", "build from scratch"]
+description: "You need to build software autonomously — a new project, a major feature, or any structured development task. You will act as the 'human' supervisor for a dedicated M2C1 worker session, managing it through all 12 phases: provide the brain dump, answer discovery questions, configure tools and credentials, monitor progress via bus messages and git, validate the output, and clean up when done. Use when the work is large enough to warrant a dedicated isolated build session."
+triggers: ["build", "m2c1", "worker agent", "autonomous build", "spin up worker", "new project", "build from scratch", "create software", "develop a tool", "full build", "m2c1 worker"]
 ---
 
 # M2C1 Worker Agent Skill
 
 > Any cortextOS agent can autonomously build complete software by acting as the "human" in the M2C1 framework, managing a dedicated worker Claude Code session through the full 12-phase lifecycle.
+
+> ⚠️ **MIGRATION IN PROGRESS** — The mechanism for spawning and communicating with worker sessions in the Node.js daemon system has not yet been defined. The concepts and workflow in this skill are correct; the session spawn and real-time intervention commands are pending. See grandamenium/cortextos#37. Do not attempt to spawn workers until this is resolved.
 
 ---
 
@@ -26,7 +28,7 @@ You provide the brain dump, answer discovery questions, help with tool setup, mo
 - M2C1 skill files available (copy from grandamenium/paul-workspace if not local)
 - A clear project idea or brain dump
 - An isolated directory for the build
-- tmux access for send-keys communication
+- Worker session spawn mechanism available (see grandamenium/cortextos#37)
 
 ---
 
@@ -81,58 +83,36 @@ The worker needs the bus messaging skill to communicate with you:
 
 ```bash
 mkdir -p "$PROJECT_DIR/.claude/skills/comms"
-cp "$CTX_FRAMEWORK_ROOT/templates/agent/skills/comms/SKILL.md" "$PROJECT_DIR/.claude/skills/comms/SKILL.md" 2>/dev/null
-
-# Also set up the worker's inbox
-mkdir -p "$CTX_ROOT/inbox/<worker-name>"
-mkdir -p "$CTX_ROOT/state/<worker-name>"
+cp "$CTX_FRAMEWORK_ROOT/templates/agent/.claude/skills/comms/SKILL.md" "$PROJECT_DIR/.claude/skills/comms/SKILL.md" 2>/dev/null
 ```
 
-### 6. Set up .claude/ permission bypass (CRITICAL - do this BEFORE spawning)
+### 6. Set up .claude/ permission bypass
 
-`--dangerously-skip-permissions` does NOT bypass `.claude/` directory protections. Workers WILL get stuck on permission prompts without this step. Field-tested and verified: the auto-approve hook approach is the ONLY reliable method.
+Workers write to `.claude/orchestration-*/` extensively. Set up permissions BEFORE spawning:
 
 ```bash
-# Create auto-approve hook that approves ALL permissions
-mkdir -p "$PROJECT_DIR/.claude/hooks"
-cat > "$PROJECT_DIR/.claude/hooks/auto-approve.sh" << 'HOOKEOF'
-#!/usr/bin/env bash
-# Auto-approve all permissions for worker agents (no Telegram, fully autonomous)
-echo '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
-HOOKEOF
-chmod +x "$PROJECT_DIR/.claude/hooks/auto-approve.sh"
-
-# Create or update settings.json with the hook + permission allowances
-cat > "$PROJECT_DIR/.claude/settings.json" << 'SETTINGSEOF'
+mkdir -p "$PROJECT_DIR/.claude"
+cat > "$PROJECT_DIR/.claude/settings.json" << 'SETTINGS'
 {
   "permissions": {
-    "allow": ["Edit", "Write", "Bash", "Read", "Glob", "Grep"],
-    "allowedPaths": [".claude/"]
-  },
-  "hooks": {
-    "PermissionRequest": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash .claude/hooks/auto-approve.sh",
-            "timeout": 5
-          }
-        ]
-      }
+    "allow": [
+      "Edit",
+      "Write",
+      "Bash"
+    ],
+    "allowedPaths": [
+      ".claude/"
     ]
   }
 }
-SETTINGSEOF
+SETTINGS
 ```
 
-If .claude/settings.json already exists (e.g., with MCP config), merge the hooks and permissions keys into it rather than overwriting.
+If the file already exists (e.g., with MCP config), merge the permissions key into it rather than overwriting.
 
-**Why the hook approach?** Path patterns (Edit:.claude/**) are unreliable - they miss subdirectories and new file types. The PermissionRequest hook catches EVERYTHING and auto-approves. Verified working: Claude shows "Allowed by PermissionRequest hook" with zero prompts.
+### 7. Write AGENTS.md
 
-### 7. Write CLAUDE.md
-
-Write `$PROJECT_DIR/CLAUDE.md` with instructions for the worker:
+Write `$PROJECT_DIR/AGENTS.md` (and a `$PROJECT_DIR/CLAUDE.md` wrapper with `@AGENTS.md`) with instructions for the worker:
 
 ```markdown
 # <Project Name> - M2C1 Autonomous Build
@@ -160,7 +140,7 @@ export CTX_FRAMEWORK_ROOT="<path>"
 export CTX_ROOT="$HOME/.cortextos/default"
 ```
 
-When you have questions during Phase 3 (Discovery), send them via send-message.sh. Do NOT use AskUserQuestion.
+When you have questions during Phase 3 (Discovery), send them via send-message. Do NOT use AskUserQuestion.
 
 ## Start
 1. Read BRAINDUMP.md
@@ -174,61 +154,28 @@ When you have questions during Phase 3 (Discovery), send them via send-message.s
 
 ## Phase 1: Spawn the Worker
 
-### tmux Session (REQUIRED - full Claude Code session)
+> ⚠️ **Implementation pending** — The mechanism for spawning an isolated Claude Code worker session in the cortextOS Node.js daemon system is not yet defined. This section will be updated once grandamenium/cortextos#37 is resolved.
 
-```bash
-WORKER_SESSION="m2c1-<project-slug>"
-tmux new-session -d -s "$WORKER_SESSION" bash
-tmux send-keys -t "$WORKER_SESSION" "cd $PROJECT_DIR" Enter
-tmux send-keys -t "$WORKER_SESSION" "claude --dangerously-skip-permissions" Enter
-
-# Wait for Claude to boot
-sleep 10
-
-# Inject the initial prompt
-PROMPT="Read CLAUDE.md for your instructions, then read BRAINDUMP.md for the project spec. Begin the M2C1 workflow starting with Phase 0."
-tmux send-keys -t "$WORKER_SESSION" "$PROMPT" Enter
-```
-
-tmux sessions allow you to:
-- Monitor the worker: `tmux capture-pane -t $WORKER_SESSION -p | tail -20`
-- Inject follow-up context: `tmux send-keys -t $WORKER_SESSION "<text>" Enter`
-- Handle stuck states: `tmux send-keys -t $WORKER_SESSION Escape Enter`
-
----
-
-## Permission Bypass Reference
-
-The auto-approve hook in Step 6 above is the ONLY reliable method. Do NOT use path patterns (Edit:.claude/**) - they are unreliable and miss subdirectories.
-
-If a worker still hits a permission prompt despite the hook (e.g., hook not picked up yet):
-```bash
-# Select "always allow" option via tmux
-tmux send-keys -t "$WORKER_SESSION" "2" Enter
-
-# Or restart with --continue to pick up the hook
-tmux send-keys -t "$WORKER_SESSION" "/exit" Enter
-sleep 5
-tmux send-keys -t "$WORKER_SESSION" "claude --continue --dangerously-skip-permissions" Enter
-```
+When implemented, a worker spawn will:
+- Create an isolated session pointed at `$PROJECT_DIR`
+- Start Claude with `--dangerously-skip-permissions` (workers must never block on permission prompts)
+- Inject an initial prompt: "Read AGENTS.md for your instructions, then read BRAINDUMP.md for the project spec. Begin the M2C1 workflow starting with Phase 0."
+- Register the worker with the bus so it can send messages back to you
 
 ---
 
 ## Phase 2: Monitor and Communicate
 
 ### Communication Priority
-1. **Bus messages** (primary) - send-message.sh / check-inbox.sh. Worker sends you updates, you reply via bus.
-2. **tmux send-keys** (fallback) - only when the worker is stuck, unresponsive to bus, or needs CLI-level intervention.
-3. **tmux capture-pane** (monitoring) - check what the worker is doing without interrupting it.
+1. **Bus messages** (primary) — worker sends you updates, you reply via bus.
+2. **Direct session intervention** (fallback) — only when the worker is stuck or unresponsive to bus. **Implementation pending** (grandamenium/cortextos#37).
+3. **Git** (monitoring) — check commits to see what was built without interrupting the worker.
 
 ### Checking Progress
 
 ```bash
 # Via bus messages (worker sends updates)
 cortextos bus check-inbox
-
-# Via tmux (see what worker is doing)
-tmux capture-pane -t "$WORKER_SESSION" -p | tail -30
 
 # Via git (see what was built)
 cd $PROJECT_DIR && git log --oneline | head -10
@@ -239,7 +186,7 @@ ls $PROJECT_DIR/.claude/orchestration-*/
 
 ### Answering Discovery Questions (Phase 3)
 
-The worker will send you questions via send-message.sh. Answer them:
+The worker will send you questions via send-message. Answer them:
 
 ```bash
 cortextos bus send-message <worker-name> normal '<your answers>'
@@ -255,30 +202,18 @@ If you do not know the answer, make a reasonable decision and note it. Do not bl
 
 ### Handling Stuck States
 
-If the worker stops making progress:
+> ⚠️ **Real-time intervention pending** — Direct session injection (equivalent to tmux send-keys) is not yet implemented in the Node.js system. See grandamenium/cortextos#37.
 
-```bash
-# Check what it is doing
-tmux capture-pane -t "$WORKER_SESSION" -p | tail -20
-
-# If stuck at a prompt, send Enter or Escape
-tmux send-keys -t "$WORKER_SESSION" Enter
-
-# If stuck on permissions
-tmux send-keys -t "$WORKER_SESSION" Escape Enter
-
-# If stuck on AskUserQuestion (TUI)
-tmux send-keys -t "$WORKER_SESSION" Down Enter  # Select an option
-
-# If completely frozen, nudge it
-tmux send-keys -t "$WORKER_SESSION" "Continue with the M2C1 workflow. What phase are you on?" Enter
-```
+For now, if the worker appears stuck (no bus messages, no new git commits > 15 minutes):
+- Send a bus message nudging it: `cortextos bus send-message <worker-name> normal 'Continue with the M2C1 workflow. What phase are you on?'`
+- Check git for any recent commits
+- If bus message is not acknowledged after 5 minutes, the session may need manual restart
 
 ---
 
 ## Phase 3: Tool Setup Support (CRITICAL - Act Like a Human)
 
-This is one of the most important phases. You act exactly like a human developer setting up a project: installing tools, configuring MCPs, setting env variables, logging into services, testing that everything works. The worker cannot do this itself - it needs you to configure its environment.
+This is one of the most important phases. You act exactly like a human developer setting up a project: installing tools, configuring MCPs, setting env variables, logging into services, testing that everything works. The worker cannot do this itself — it needs you to configure its environment.
 
 ### Think Holistically About Tools
 
@@ -295,99 +230,46 @@ Before the worker starts building, ask yourself:
 ```bash
 # 1. Create or update the worker's MCP config
 mkdir -p "$PROJECT_DIR/.claude"
-cat > "$PROJECT_DIR/.claude/settings.json" << 'EOF'
-{
-  "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["@anthropic-ai/mcp-playwright"]
-    }
-  }
-}
-EOF
+node -e "
+const fs = require('fs');
+const path = '$PROJECT_DIR/.claude/settings.json';
+const cfg = fs.existsSync(path) ? JSON.parse(fs.readFileSync(path)) : {};
+cfg.mcpServers = cfg.mcpServers || {};
+cfg.mcpServers.playwright = { command: 'npx', args: ['@anthropic-ai/mcp-playwright'] };
+fs.writeFileSync(path, JSON.stringify(cfg, null, 2));
+console.log('MCP config updated');
+"
 
-# 2. Restart worker to pick up MCP config
-tmux send-keys -t "$WORKER_SESSION" "/exit" Enter
-sleep 5
-tmux send-keys -t "$WORKER_SESSION" "claude --continue --dangerously-skip-permissions" Enter
-sleep 10
-
-# 3. Verify MCP works by asking worker to test it
-tmux send-keys -t "$WORKER_SESSION" "Test that Playwright MCP is working by taking a screenshot of google.com" Enter
-
-# 4. If it does not work, debug and retry
-# Check capture-pane for errors, fix config, restart again
+# 2. Worker must restart to pick up MCP config
+# Send via bus message:
+cortextos bus send-message <worker-name> normal \
+  'MCP config updated at .claude/settings.json. Please restart your session with --continue to pick it up, then test Playwright by taking a screenshot of google.com.'
 ```
 
 ### Iterative Tool Verification
 
-Do NOT assume tools work after installation. Test each one:
-
-```
-FOR EACH TOOL:
-  1. Install/configure it
-  2. Restart worker if needed (--continue to preserve context)
-  3. Ask worker to USE the tool
-  4. Check capture-pane for success/failure
-  5. If failed: fix config, repeat from step 2
-  6. If succeeded: move to next tool
-```
+Do NOT assume tools work after installation. For each tool:
+1. Install/configure it in the project directory
+2. Tell the worker via bus to restart and test the tool
+3. Worker reports result via bus
+4. If failed: fix config, repeat
+5. If succeeded: move to next tool
 
 ### Environment Variables and Credentials
 
 ```bash
 # Check what is available
-cat $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/secrets.env | grep -v "^#" | cut -d= -f1
+grep -v "^#" "$CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/.env" | cut -d= -f1
 
-# Set env vars for the worker session
-tmux send-keys -t "$WORKER_SESSION" "export API_KEY=<value>" Enter
-
-# Or write a .env file the worker can source
+# Write a .env file the worker can source
 cat > "$PROJECT_DIR/.env" << 'EOF'
-ANTHROPIC_API_KEY=<from secrets.env>
-GEMINI_API_KEY=<from secrets.env>
+ANTHROPIC_API_KEY=<from org .env>
+GEMINI_API_KEY=<from org .env>
 EOF
-tmux send-keys -t "$WORKER_SESSION" "source .env" Enter
-```
+chmod 600 "$PROJECT_DIR/.env"
 
-### Account Logins (via Playwright or CLI)
-
-If the worker needs authenticated access to services:
-
-```bash
-# Option 1: Use Playwright MCP to log in via browser
-# Tell the worker to navigate and log in, or do it yourself via send-keys
-
-# Option 2: Use CLI tools
-tmux send-keys -t "$WORKER_SESSION" "expo login" Enter
-# Then inject credentials via send-keys
-
-# Option 3: Reuse existing auth
-# Copy auth tokens from your own environment
-```
-
-### System Dependencies
-
-```bash
-# npm packages (install in project dir)
-cd $PROJECT_DIR && npm install <package>
-
-# System tools
-brew install <tool>  # or apt-get on Linux
-
-# Python packages
-pip3 install <package>
-```
-
-### Integrate Tools into the Plan
-
-After all tools are set up and verified:
-
-```bash
-# Tell the worker to update its PHASES.md and task files
-# to USE the tools for testing and validation
-tmux send-keys -t "$WORKER_SESSION" \
-  "Update your PHASES.md and task files to integrate the tools we just set up. Use Playwright for E2E testing. Use the API keys for integration tests. Every task should have a testing step that uses real tools, not just assertions." Enter
+# Tell the worker via bus to source it
+cortextos bus send-message <worker-name> normal 'Source .env in your project dir before running any API calls.'
 ```
 
 ### Skills for the Worker
@@ -395,10 +277,7 @@ tmux send-keys -t "$WORKER_SESSION" \
 Copy relevant cortextOS skills to the worker's project:
 ```bash
 # If the worker needs browser automation knowledge
-cp -r $CTX_FRAMEWORK_ROOT/templates/agent/skills/peekaboo-automation "$PROJECT_DIR/.claude/skills/"
-
-# If it needs Google Workspace access
-cp -r $CTX_FRAMEWORK_ROOT/templates/agent/skills/google-workspace "$PROJECT_DIR/.claude/skills/"
+cp -r $CTX_FRAMEWORK_ROOT/templates/agent/.claude/skills/peekaboo-automation "$PROJECT_DIR/.claude/skills/"
 ```
 
 ---
@@ -419,8 +298,8 @@ cortextos bus send-message <worker-name> normal \
 
 Check in every 30-60 minutes:
 ```bash
-# Quick health check
-tmux capture-pane -t "$WORKER_SESSION" -p | tail -10
+# Check bus for worker updates
+cortextos bus check-inbox
 
 # Check git progress
 cd $PROJECT_DIR && git log --oneline | head -5
@@ -430,15 +309,13 @@ cat $PROJECT_DIR/.claude/orchestration-*/PROGRESS.md 2>/dev/null | tail -20
 ```
 
 ### When NOT to Intervene
-- Worker is actively coding (stdout flowing)
-- Worker is running tests
+- Worker sent a bus update and is actively building
 - Worker is in a research subagent phase
-- Worker sent you a message and is waiting (check inbox first)
+- Worker sent you a question and is waiting — check inbox first
 
 ### When to Intervene
-- Worker has been idle > 15 minutes
-- Worker is looping on the same error
-- Worker is asking AskUserQuestion (stuck at TUI)
+- No bus messages AND no new git commits > 15 minutes
+- Worker is looping on the same error (reported via bus)
 - Worker went off-scope (building wrong thing)
 
 ---
@@ -449,7 +326,7 @@ cat $PROJECT_DIR/.claude/orchestration-*/PROGRESS.md 2>/dev/null | tail -20
 Verify the worker's task files are coherent:
 ```bash
 ls $PROJECT_DIR/.claude/orchestration-*/tasks/
-# Read a few task files - do they reference each other correctly?
+# Read a few task files — do they reference each other correctly?
 # Are there gaps? Overlaps?
 ```
 
@@ -497,8 +374,7 @@ cortextos bus send-message paul normal \
 rm -rf "$CTX_ROOT/inbox/<worker-name>"
 rm -rf "$CTX_ROOT/state/<worker-name>"
 
-# Kill worker session (if tmux)
-tmux kill-session -t "$WORKER_SESSION" 2>/dev/null
+# Terminate worker session (mechanism TBD — grandamenium/cortextos#37)
 ```
 
 ### On Failure
@@ -519,11 +395,11 @@ cortextos bus send-message paul normal \
 
 1. **You are the human.** The worker treats you as the decision-maker. Answer questions decisively.
 2. **Do not micro-manage.** Let the worker run. Check in periodically, not constantly.
-3. **Intervene on stuck states.** If the worker is blocked > 15 minutes, help it.
+3. **Intervene on stuck states.** If the worker is blocked > 15 minutes, help it via bus message.
 4. **Validate at phase gates.** Check PRD, discovery, task plans, and final output.
 5. **The worker spawns its own subagents.** You do not manage them directly.
 6. **Keep the scope tight.** If the worker goes off-scope, redirect it immediately.
-7. **Testing is non-negotiable.** Do not accept "it should work" - verify it works.
+7. **Testing is non-negotiable.** Do not accept "it should work" — verify it works.
 8. **Log everything.** Tasks, events, milestones. Invisible work does not exist.
 
 ---

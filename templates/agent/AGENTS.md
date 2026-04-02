@@ -26,29 +26,18 @@ cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "Booting up... one moment"
 
 Then complete the following in order:
 
-1. Read all bootstrap files in this order: IDENTITY.md, SOUL.md, GUARDRAILS.md, GOALS.md, HEARTBEAT.md, MEMORY.md, USER.md, TOOLS.md, SYSTEM.md, `../../knowledge.md`, `memory/$(date -u +%Y-%m-%d).md`, `config.json`
-2. Discover available skills: `cortextos bus list-skills --format text`
-3. Discover active agents: `cortextos list-agents` (live roster from enabled-agents.json)
-4. Set up crons via `/loop` — **run CronList first**, compare against config.json crons, recreate any missing. Do NOT assume crons survived a restart.
-5. If resuming a task (from daily memory), query the knowledge base: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
-6. Check inbox: `cortextos bus check-inbox`
-7. Update heartbeat: `cortextos bus update-heartbeat "online"`
-8. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
-9. Write session start entry to daily memory (see Memory Protocol below)
-10. Send your online message to the user — **only AFTER crons are confirmed set**. Tell them your status: crons running, whether there are pending messages, and what you are picking up from last session.
-
-### Apply operational config
-
-After reading all bootstrap files, your operational settings are in `config.json`:
-- **Day/Night Mode:** `day_mode_start` to `day_mode_end` — run `date +%H:%M` and compare to these values to determine your current mode. In night mode: reduce proactive Telegram messaging and defer non-urgent work until day mode.
-- **Approval Required:** `approval_rules.always_ask` — before ANY action in this list, create an approval via `cortextos bus create-approval` and wait for a decision before proceeding.
-- **Communication Style:** `communication_style` — use this tone in ALL user-facing Telegram messages and briefings.
-
-If you receive an inbox message containing "config updated" or "settings updated":
-1. ACK the message
-2. Re-read `config.json` immediately
-3. Apply new values for the rest of this session
-4. Log: `cortextos bus log-event action config_applied info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
+1. Read all bootstrap files: IDENTITY.md, SOUL.md, GUARDRAILS.md, GOALS.md, HEARTBEAT.md, MEMORY.md, USER.md, TOOLS.md, SYSTEM.md
+2. Read org knowledge base: `../../knowledge.md` (shared facts all agents need)
+3. Discover available skills: `cortextos bus list-skills --format text`
+4. Discover active agents: `cortextos list-agents` (live roster from enabled-agents.json)
+5. Read `config.json` and set up crons via `/loop` — **run CronList first**, compare against config.json crons, recreate any missing. Do NOT assume crons survived a restart.
+6. Check today's memory file (`memory/$(date -u +%Y-%m-%d).md`) for any in-progress work
+7. If resuming a task, query the knowledge base: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
+8. Check inbox: `cortextos bus check-inbox`
+9. Update heartbeat: `cortextos bus update-heartbeat "online"`
+10. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
+11. Write session start entry to daily memory (see Memory Protocol below)
+12. Send your online message to the user — **only AFTER crons are confirmed set**. Tell them your status: crons running, whether there are pending messages, and what you are picking up from last session.
 
 ---
 
@@ -258,20 +247,6 @@ cortextos bus kb-setup --org $CTX_ORG
 ```
 
 **Requires:** `GEMINI_API_KEY` in `orgs/$CTX_ORG/.env`
-
-**Quick routing guide — when in doubt, write here:**
-
-| What happened | Write to |
-|---|---|
-| Session start, task start/complete, heartbeat notes | Layer 1 — daily memory |
-| User corrected your behaviour | Layer 2 — MEMORY.md |
-| Pattern or preference discovered that should persist | Layer 2 — MEMORY.md |
-| Research completed with findings | Layer 3 — `shared-{org}` |
-| Document, report, or output produced | Layer 3 — `private-{agent}` |
-| User shares a file with you | Layer 3 — `private-{agent}` |
-| Memory files updated | Layer 3 — `memory-{agent}` (auto at heartbeat) |
-
-When in doubt, write to both Layer 1 and Layer 2. Redundancy beats amnesia.
 
 CONSEQUENCE: Without querying, you repeat work the org already did. Without ingesting, the org permanently loses institutional memory.
 TARGET: Query before every task. Ingest every significant output. Memory collection updates itself at heartbeat.

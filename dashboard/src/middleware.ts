@@ -7,18 +7,34 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 import { jwtVerify } from 'jose';
 
+// Allowed CORS origins — localhost dev + configured deployment URL + mobile app
+function getAllowedOrigin(requestOrigin: string | null): string | null {
+  const allowed = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    process.env.NEXTAUTH_URL,
+    process.env.DASHBOARD_URL,
+    process.env.MOBILE_APP_ORIGIN,
+  ].filter(Boolean) as string[];
+  if (requestOrigin && allowed.includes(requestOrigin)) return requestOrigin;
+  return null;
+}
+
 export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
+  const requestOrigin = request.headers.get('origin');
+  const corsOrigin = getAllowedOrigin(requestOrigin) ?? 'null';
 
   // Handle CORS preflight requests
   if (request.method === 'OPTIONS') {
     return new NextResponse(null, {
       status: 204,
       headers: {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': corsOrigin,
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Authorization',
         'Access-Control-Max-Age': '86400',
+        'Vary': 'Origin',
       },
     });
   }
@@ -32,7 +48,8 @@ export async function middleware(request: NextRequest) {
     pathname === '/favicon.ico'
   ) {
     const response = NextResponse.next();
-    response.headers.set('Access-Control-Allow-Origin', '*');
+    response.headers.set('Access-Control-Allow-Origin', corsOrigin);
+    response.headers.set('Vary', 'Origin');
     return response;
   }
 
@@ -66,7 +83,8 @@ export async function middleware(request: NextRequest) {
     // For API routes, return 401 instead of redirect
     if (pathname.startsWith('/api/')) {
       const res = NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      res.headers.set('Access-Control-Allow-Origin', '*');
+      res.headers.set('Access-Control-Allow-Origin', corsOrigin);
+      res.headers.set('Vary', 'Origin');
       return res;
     }
     const loginUrl = new URL('/login', request.url);
@@ -75,7 +93,12 @@ export async function middleware(request: NextRequest) {
   }
 
   const response = NextResponse.next();
-  response.headers.set('Access-Control-Allow-Origin', '*');
+  response.headers.set('Access-Control-Allow-Origin', corsOrigin);
+  response.headers.set('Vary', 'Origin');
+  // Standard security headers
+  response.headers.set('X-Frame-Options', 'DENY');
+  response.headers.set('X-Content-Type-Options', 'nosniff');
+  response.headers.set('Referrer-Policy', 'no-referrer');
   return response;
 }
 

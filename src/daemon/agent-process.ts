@@ -303,11 +303,11 @@ export class AgentProcess {
       onboardingAppend = ' IMPORTANT: This is your FIRST BOOT. Before doing anything else, read ONBOARDING.md and complete the onboarding protocol.';
     }
 
-    return `You are starting a new session. Read all bootstrap files listed in CLAUDE.md. Then read config.json and set up your crons using /loop for each entry in the crons array. After setting up crons, send a Telegram message to the user saying you are back online.${onboardingAppend}`;
+    return `You are starting a new session. Read AGENTS.md and all bootstrap files listed there. Then read config.json and set up your crons using /loop for each entry in the crons array. After setting up crons, send a Telegram message to the user saying you are back online.${onboardingAppend}`;
   }
 
   private buildContinuePrompt(): string {
-    return 'SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Your full conversation history is preserved. Re-read ALL bootstrap files listed in CLAUDE.md. Set up your crons from config.json using /loop. Check inbox. Resume normal operations.';
+    return 'SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Set up your crons from config.json using /loop. Check inbox. Resume normal operations.';
   }
 
   private startSessionTimer(): void {

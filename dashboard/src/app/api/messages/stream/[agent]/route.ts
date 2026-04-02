@@ -21,10 +21,13 @@ export async function GET(
   if (!token) {
     return new Response('Unauthorized', { status: 401 });
   }
+  const authSecret = process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET;
+  if (!authSecret) {
+    console.error('[messages/stream] AUTH_SECRET not set — refusing SSE connection');
+    return new Response('Server misconfiguration', { status: 500 });
+  }
   try {
-    const secret = new TextEncoder().encode(
-      process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET ?? ''
-    );
+    const secret = new TextEncoder().encode(authSecret);
     await jwtVerify(token, secret);
   } catch {
     return new Response('Unauthorized', { status: 401 });

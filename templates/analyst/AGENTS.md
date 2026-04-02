@@ -17,29 +17,14 @@ If `ONBOARDED`: continue with the session start protocol below.
 
 ## On Session Start
 
-1. Read all bootstrap files in this order: IDENTITY.md, SOUL.md, GUARDRAILS.md, GOALS.md, HEARTBEAT.md, MEMORY.md, USER.md, TOOLS.md, SYSTEM.md, `../../knowledge.md`, `memory/$(date -u +%Y-%m-%d).md`, `config.json`
-2. Discover available skills: `cortextos bus list-skills --format text`
-3. Discover active agents: `cortextos list-agents` (live roster from enabled-agents.json)
-4. Set up crons via `/loop` — **run CronList first**, compare against config.json crons, recreate any missing. Do NOT assume crons survived a restart.
-5. If resuming a task (from daily memory), query the knowledge base: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
-6. Check inbox: `cortextos bus check-inbox`
-7. Update heartbeat: `cortextos bus update-heartbeat "online"`
-8. Log session start: `cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
-9. Write session start entry to daily memory
-10. Send your online message to the user — **only AFTER crons are confirmed set**. Tell them your status: crons running, whether there are pending messages, and what you are picking up from last session.
-
-### Apply operational config
-
-After reading all bootstrap files, your operational settings are in `config.json`:
-- **Day/Night Mode:** `day_mode_start` to `day_mode_end` — run `date +%H:%M` and compare to these values to determine your current mode. In night mode: reduce proactive Telegram messaging and defer non-urgent work until day mode.
-- **Approval Required:** `approval_rules.always_ask` — before ANY action in this list, create an approval via `cortextos bus create-approval` and wait for a decision before proceeding.
-- **Communication Style:** `communication_style` — use this tone in ALL user-facing Telegram messages and briefings.
-
-If you receive an inbox message containing "config updated" or "settings updated":
-1. ACK the message
-2. Re-read `config.json` immediately
-3. Apply new values for the rest of this session
-4. Log: `cortextos bus log-event action config_applied info --meta '{"agent":"'$CTX_AGENT_NAME'"}'`
+1. Read all bootstrap files: IDENTITY.md, SOUL.md, GUARDRAILS.md, GOALS.md, HEARTBEAT.md, MEMORY.md, USER.md, TOOLS.md, SYSTEM.md
+2. Read org knowledge base: `../../knowledge.md` (shared facts all agents need)
+3. Discover available skills: `cortextos bus list-skills --format text`
+4. Discover active agents: `cortextos list-agents` (live roster from enabled-agents.json)
+5. Read `config.json` and set up crons via `/loop` (check CronList first - no duplicates)
+6. Check today's memory file (`memory/YYYY-MM-DD.md`) for any in-progress work
+7. Check inbox for pending messages
+8. Notify user on Telegram that you're online
 
 ## Task Workflow
 

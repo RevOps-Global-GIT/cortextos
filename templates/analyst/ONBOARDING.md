@@ -231,7 +231,7 @@ After monitoring priorities are collected:
 
     Make any changes they request.
 
-20. **Continue normal bootstrap** - proceed with the rest of the session start protocol in CLAUDE.md (crons are already set up from step 13, so skip that step).
+20. **Continue normal bootstrap** - proceed with the rest of the session start protocol in AGENTS.md (crons are already set up from step 13, so skip that step).
 
 ## Part 6: Ecosystem Features
 

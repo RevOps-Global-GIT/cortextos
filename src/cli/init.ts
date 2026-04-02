@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { existsSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync } from 'fs';
+import { existsSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ensureDir } from '../utils/atomic.js';
@@ -106,6 +106,7 @@ export const initCommand = new Command('init')
         'ACTIVITY_CHAT_ID=',
         '',
       ].join('\n'), 'utf-8');
+      chmodSync(secretsPath, 0o600); // credentials — owner read/write only
       console.log('  Created secrets.env');
     }
 

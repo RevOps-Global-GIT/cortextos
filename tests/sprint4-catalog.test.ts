@@ -78,7 +78,8 @@ describe('Sprint 4: Community Catalog', () => {
 
     const agentDir = join(frameworkRoot, 'community', 'agents', 'research-agent');
     mkdirSync(agentDir, { recursive: true });
-    writeFileSync(join(agentDir, 'CLAUDE.md'), '# Research Agent', 'utf-8');
+    writeFileSync(join(agentDir, 'AGENTS.md'), '# Research Agent', 'utf-8');
+    writeFileSync(join(agentDir, 'CLAUDE.md'), '@AGENTS.md\n', 'utf-8');
   });
 
   afterEach(() => {

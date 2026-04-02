@@ -44,14 +44,8 @@ export async function GET(
     return new Response('Forbidden', { status: 403 });
   }
 
-  // Also allow absolute paths stored in log entries (e.g. /Users/.../.cortextos/...)
-  // by stripping the ctxRoot prefix if present
-  const resolvedFromAbs = path.resolve(relativePath);
-  const targetPath = fs.existsSync(fullPath)
-    ? fullPath
-    : fs.existsSync(resolvedFromAbs) && resolvedFromAbs.startsWith(path.resolve(ctxRoot))
-    ? resolvedFromAbs
-    : null;
+  // Only serve files strictly within CTX_ROOT — no absolute path fallback
+  const targetPath = fs.existsSync(fullPath) ? fullPath : null;
 
   if (!targetPath || !fs.existsSync(targetPath)) {
     return new Response('Not found', { status: 404 });

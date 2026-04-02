@@ -1,6 +1,7 @@
 ---
 name: comms
-description: "Handle incoming messages injected by the fast-checker daemon. Use when: you receive a message block starting with === TELEGRAM or === AGENT MESSAGE in your session."
+description: "A message has just arrived in your session from the fast-checker daemon — you see a block starting with === TELEGRAM or === AGENT MESSAGE. Read it, decide what action to take, and reply using the command shown in the message header. If it is from the user, they are waiting for your response right now. If it is from another agent, they may be blocked on your reply. Handle all messages before returning to other work."
+triggers: ["=== TELEGRAM", "=== AGENT MESSAGE", "message received", "incoming message", "reply to", "telegram from", "agent message from", "fast-checker", "message injected", "respond to message", "handle message", "incoming telegram", "message block"]
 ---
 
 # Handling Incoming Messages
@@ -29,7 +30,7 @@ Reply using: cortextos bus send-message <agent> normal '<your reply>' <msg_id>
 ## Priority
 
 - `urgent` priority inbox messages: handle immediately, save current work state first
-- Callback queries (inline button presses): process the callback_data and acknowledge via `send-telegram.sh`
+- Callback queries (inline button presses): process the callback_data and acknowledge via `send-telegram`
 - Photos: local file path is provided, use it directly
 
 ## Done
