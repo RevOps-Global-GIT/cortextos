@@ -393,6 +393,25 @@ cortextos bus check-upstream [--apply]
 
 ---
 
+## Goals
+
+### goals generate-md
+Regenerate GOALS.md from goals.json. Run this after manually editing goals.json or when GOALS.md falls out of sync.
+
+```bash
+cortextos goals generate-md --agent <name> --org <org>
+```
+
+- **--agent** (required): Agent name
+- **--org** (required): Org name
+
+Example:
+```bash
+cortextos goals generate-md --agent boris --org lifeos
+```
+
+---
+
 ## Community Ecosystem
 
 ### browse-catalog.sh
@@ -446,6 +465,7 @@ cortextos bus submit-community-item <item-name> <item-type> "<description>" [--d
 | Check fleet heartbeats            | `read-all-heartbeats`     |
 | Find stale tasks                  | `check-stale-tasks`       |
 | Find stale goals                  | `check-goal-staleness`    |
+| Rebuild GOALS.md from goals.json  | `goals generate-md`       |
 | Archive old tasks                 | `archive-tasks`           |
 | Run an experiment                 | `create-experiment`       |
 | Restart (keep history)            | `self-restart`            |
