@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
+import { validateAgentName } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
@@ -32,6 +33,14 @@ busCommand
       console.error(`Invalid priority '${priority}'. Must be one of: ${validPriorities.join(', ')}`);
       process.exit(1);
     }
+    // Security (H9): Validate agent name before any filesystem access.
+    try {
+      validateAgentName(to);
+    } catch (err) {
+      console.error(String(err));
+      process.exit(1);
+    }
+
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 

@@ -1,18 +1,13 @@
 import { NextRequest } from 'next/server';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { getTasks } from '@/lib/data/tasks';
 import { getFrameworkRoot, getCTXRoot, getOrgs } from '@/lib/config';
 import { syncAll } from '@/lib/sync';
 
 export const dynamic = 'force-dynamic';
 
-// ---------------------------------------------------------------------------
-// Shell escape helper - prevents injection in execSync calls
-// ---------------------------------------------------------------------------
-
-function shellEscape(str: string): string {
-  return str.replace(/'/g, "'\\''");
-}
+// Security (H4): frameworkRoot must match a safe path pattern — no shell metacharacters.
+const SAFE_PATH_REGEX = /^[/\w.-]+$/;
 
 // ---------------------------------------------------------------------------
 // Validation constants
@@ -89,6 +84,13 @@ export async function POST(request: NextRequest) {
   const org = (body.org as string) || getOrgs()[0] || '';
 
   const frameworkRoot = getFrameworkRoot();
+
+  // Security (H4): Validate frameworkRoot before using in execFileSync path.
+  if (!frameworkRoot || !SAFE_PATH_REGEX.test(frameworkRoot)) {
+    console.error('[api/tasks] Invalid CTX_FRAMEWORK_ROOT:', frameworkRoot);
+    return Response.json({ error: 'Internal error' }, { status: 500 });
+  }
+
   const env = {
     ...process.env,
     CTX_FRAMEWORK_ROOT: frameworkRoot,
@@ -97,19 +99,19 @@ export async function POST(request: NextRequest) {
     CTX_ORG: org,
   };
 
-  // Build the command arguments (positional: title, description, assignee, priority, project)
-  // Must pass empty strings for skipped args to keep positions aligned
-  const safeTitle = shellEscape(title.trim());
-  const safeDesc = shellEscape(description ? String(description).slice(0, 2000) : '');
-  const safeAssignee = shellEscape(assignee ? String(assignee) : '');
-  const safePriority = shellEscape(priority || 'normal');
-  const safeProject = shellEscape(project ? String(project) : '');
-
-  let cmd = `bash '${shellEscape(frameworkRoot)}/bus/create-task.sh' '${safeTitle}' '${safeDesc}' '${safeAssignee}' '${safePriority}' '${safeProject}'`;
-  if (needsApproval) cmd += ' --needs-approval';
+  // Security (H4): Use execFileSync with argument array — no shell interpolation.
+  const scriptPath = `${frameworkRoot}/bus/create-task.sh`;
+  const args = [
+    title.trim(),
+    description ? String(description).slice(0, 2000) : '',
+    assignee ? String(assignee) : '',
+    priority || 'normal',
+    project ? String(project) : '',
+  ];
+  if (needsApproval) args.push('--needs-approval');
 
   try {
-    const result = execSync(cmd, {
+    const result = execFileSync('bash', [scriptPath, ...args], {
       encoding: 'utf-8',
       timeout: 10000,
       env,
@@ -127,11 +129,7 @@ export async function POST(request: NextRequest) {
       { status: 201 },
     );
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error('[api/tasks] POST error:', message);
-    return Response.json(
-      { error: 'Failed to create task', details: message },
-      { status: 500 },
-    );
+    console.error('[api/tasks] POST error:', err);
+    return Response.json({ error: 'Failed to create task' }, { status: 500 });
   }
 }

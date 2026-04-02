@@ -22,6 +22,7 @@ export interface InboxMessage {
   timestamp: string; // ISO 8601
   text: string;
   reply_to: string | null;
+  sig?: string; // Security (H10): HMAC-SHA256 signature — optional for backwards compat
 }
 
 // Task Types

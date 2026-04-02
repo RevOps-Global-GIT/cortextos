@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { execSync } from 'child_process';
+import { randomBytes } from 'crypto';
 
 export const installCommand = new Command('install')
   .option('--instance <id>', 'Instance ID', 'default')
@@ -82,6 +83,15 @@ export const installCommand = new Command('install')
         '',
       ].join('\n'), 'utf-8');
       console.log('  Created .env');
+    }
+
+    // Security (H10): Generate bus signing key for HMAC message authentication.
+    const signingKeyPath = join(ctxRoot, 'config', 'bus-signing-key');
+    if (!existsSync(signingKeyPath)) {
+      const signingKey = randomBytes(32).toString('hex');
+      writeFileSync(signingKeyPath, signingKey, 'utf-8');
+      chmodSync(signingKeyPath, 0o600);
+      console.log('  Generated bus-signing-key (HMAC-SHA256)');
     }
 
     console.log('\n  Installation complete.');

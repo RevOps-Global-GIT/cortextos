@@ -14,8 +14,12 @@ export const dynamic = 'force-dynamic';
  * Returns: { token: string, user: { id: string, name: string } }
  */
 export async function POST(request: NextRequest) {
-  // Security (H11): Rate limit auth attempts per IP.
-  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+  // Security (H8): Only trust x-forwarded-for when behind a known proxy.
+  // Without TRUST_PROXY=true, x-forwarded-for is trivially spoofable.
+  const trustProxy = process.env.TRUST_PROXY === 'true';
+  const ip = trustProxy
+    ? (request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown')
+    : (request.headers.get('x-real-ip') ?? 'unknown');
   const { allowed, retryAfter } = checkRateLimit(ip);
   if (!allowed) {
     return Response.json({ error: 'Too many attempts' }, { status: 429, headers: { 'Retry-After': String(retryAfter) } } as any);
