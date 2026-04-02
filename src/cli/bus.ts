@@ -608,10 +608,9 @@ busCommand
 
       // Log outbound and cache last-sent for context injection
       const env = resolveEnv();
-      if (env.agentName && env.instanceId) {
-        const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
-        logOutboundMessage(ctxRoot, env.agentName, chatId, message, sentMessageId);
-        cacheLastSent(ctxRoot, env.agentName, chatId, message);
+      if (env.agentName && env.ctxRoot) {
+        logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId);
+        cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
       }
 
       console.log('Message sent');
