@@ -866,7 +866,6 @@ busCommand
   .action(async (opts: { org?: string; status?: string; format?: string }) => {
     const { existsSync, readdirSync, readFileSync } = require('fs');
     const { join } = require('path');
-    const { spawnSync: _spawnSync } = require('child_process');
     const env = resolveEnv();
     const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
     const frameworkRoot = env.frameworkRoot || process.cwd();
@@ -896,7 +895,7 @@ busCommand
       }
     }
 
-    // Determine running agents: prefer IPC daemon (cross-platform) over tmux (Unix-only bash fallback).
+    // Determine running agents via IPC daemon.
     const runningAgents = new Set<string>();
     const ipc = new IPCClient(env.instanceId);
     try {
@@ -907,17 +906,7 @@ busCommand
         }
       }
     } catch {
-      // Daemon not running — fall back to tmux check (bash daemon / Unix only)
-      if (process.platform !== 'win32') {
-        for (const name of Object.keys(agentMap)) {
-          const info = agentMap[name];
-          const tmuxName = info.org
-            ? `ctx-${env.instanceId}-${info.org}-${name}`
-            : `ctx-${env.instanceId}-${name}`;
-          const r = _spawnSync('tmux', ['has-session', '-t', tmuxName], { stdio: 'ignore' });
-          if (r.status === 0) runningAgents.add(name);
-        }
-      }
+      // Daemon not running — no running agent data available
     }
 
     const results = [];
@@ -1099,8 +1088,7 @@ busCommand
     writeFileSync(join(stateDir, '.user-restart'), reason);
     console.log(`Wrote .user-restart marker for ${targetAgent}: ${reason}`);
 
-    // Step 2: Try IPC first (cross-platform — named pipe on Windows, socket on Unix).
-    // Fall back to tmux only for backward compat with bash daemon on non-Windows.
+    // Step 2: Send restart via IPC daemon (cross-platform — named pipe on Windows, socket on Unix).
     const ipc = new IPCClient(env.instanceId);
     const daemonRunning = await ipc.isDaemonRunning();
 
@@ -1112,24 +1100,6 @@ busCommand
         console.error(`Daemon restart failed: ${resp.error}`);
         process.exit(1);
       }
-    } else if (process.platform !== 'win32') {
-      // Bash daemon fallback — tmux is Unix-only
-      const { execSync } = require('child_process');
-      const tmuxName = env.org
-        ? `ctx-${env.instanceId}-${env.org}-${targetAgent}`
-        : `ctx-${env.instanceId}-${targetAgent}`;
-      try {
-        execSync(`tmux has-session -t "${tmuxName}"`, { stdio: 'ignore' });
-      } catch {
-        console.error(`ERROR: No tmux session found for ${targetAgent} (tried ${tmuxName})`);
-        process.exit(1);
-      }
-      execSync(`tmux send-keys -t "${tmuxName}" Escape`, { stdio: 'ignore' });
-      setTimeout(() => {
-        execSync(`tmux send-keys -t "${tmuxName}" "/exit" Enter`, { stdio: 'ignore' });
-        console.log(`Sent /exit to ${targetAgent} (session: ${tmuxName})`);
-        console.log('Agent will restart via launchd/wrapper. crash-alert will categorize as user_initiated.');
-      }, 1000);
     } else {
       console.error('ERROR: Node daemon is not running. Start it with: cortextos start');
       process.exit(1);

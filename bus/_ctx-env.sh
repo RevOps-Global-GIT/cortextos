@@ -8,7 +8,7 @@
 # - Flat message bus paths
 # - .env sourcing helper
 
-# ── Source .cortextos-env if present (written by agent-wrapper.sh) ────────
+# ── Source .cortextos-env if present (written by the Node.js daemon) ─────
 # This is the most reliable fallback: a file in the agent's working dir
 # that contains the correct CTX_ vars, regardless of env var inheritance.
 if [[ -z "${CTX_ROOT:-}" ]]; then
@@ -35,7 +35,7 @@ CTX_ORG="${CTX_ORG:-}"
 
 # ── Canonical agent directory (never construct manually elsewhere) ──────
 if [[ -n "${CTX_AGENT_DIR:-}" ]]; then
-    : # already set explicitly (e.g. by agent-wrapper.sh)
+    : # already set explicitly (e.g. by the Node.js daemon)
 elif [[ -n "${CTX_ORG}" && -n "${CTX_PROJECT_ROOT}" ]]; then
     CTX_AGENT_DIR="${CTX_PROJECT_ROOT}/orgs/${CTX_ORG}/agents/${CTX_AGENT_NAME}"
 elif [[ -n "${CTX_PROJECT_ROOT}" ]]; then

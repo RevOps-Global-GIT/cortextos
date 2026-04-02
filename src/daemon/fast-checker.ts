@@ -153,7 +153,7 @@ export class FastChecker {
 \`\`\`
 ${msg.text}
 \`\`\`
-Reply using: bash $CTX_FRAMEWORK_ROOT/bus/send-message.sh ${msg.from} normal '<your reply>' ${msg.id}
+Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.id}
 
 `;
   }
@@ -184,7 +184,7 @@ Reply using: bash $CTX_FRAMEWORK_ROOT/bus/send-message.sh ${msg.from} normal '<y
 ${replyCx}\`\`\`
 ${text}
 \`\`\`
-${lastSentCtx}Reply using: bash ${frameworkRoot}/bus/send-telegram.sh ${chatId} "<your reply>"
+${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} "<your reply>"
 
 `;
   }

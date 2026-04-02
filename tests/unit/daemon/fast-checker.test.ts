@@ -175,7 +175,7 @@ describe('FastChecker', () => {
       expect(result).toContain('[Your last message: "My previous reply to you"]');
       expect(result).toContain('=== TELEGRAM from alice (chat_id:999) ===');
       expect(result).toContain('Hello there');
-      expect(result).toContain('bash /opt/cortextos/bus/send-telegram.sh 999');
+      expect(result).toContain('cortextos bus send-telegram 999');
     });
 
     it('works without last-sent context', () => {
