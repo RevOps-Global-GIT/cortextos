@@ -112,7 +112,7 @@ If the file already exists (e.g., with MCP config), merge the permissions key in
 
 ### 7. Write AGENTS.md
 
-Write `$PROJECT_DIR/AGENTS.md` (and a `$PROJECT_DIR/CLAUDE.md` wrapper with `@AGENTS.md`) with instructions for the worker:
+Write `$PROJECT_DIR/AGENTS.md` with instructions for the worker:
 
 ```markdown
 # <Project Name> - M2C1 Autonomous Build

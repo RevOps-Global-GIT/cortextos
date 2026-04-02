@@ -465,10 +465,10 @@ cortextos bus submit-community-item <item-name> <item-type> "<description>" [--d
 ### Peekaboo (macOS Desktop Automation)
 - **Binary**: `peekaboo`
 - **Use for**: Screenshot capture, UI clicking, typing, drag, window/app management, desktop automation
-- **Permissions**: Screen Recording + Accessibility granted to tmux binary (launchd agents inherit via tmux)
+- **Permissions**: Screen Recording + Accessibility granted to the process (permissions inherited from daemon)
 - **Usage**: `peekaboo image` (screenshot), `peekaboo list` (apps/windows), `peekaboo run <script>` (automation)
 - **Learn**: `peekaboo learn` for comprehensive AI agent usage guide
-- **Note**: Works in headful mode only (needs a display). All agents in tmux sessions have access.
+- **Note**: Works in headful mode only (needs a display). All agents running under the daemon have access.
 
 
 ### gogcli (Google Workspace CLI)

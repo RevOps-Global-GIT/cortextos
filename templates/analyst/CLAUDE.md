@@ -231,9 +231,8 @@ cortextos bus submit-community-item <name> <type> "<description>"
 |--------|---------|
 | Enable agent | `cortextos start <name>` |
 | Disable agent | `cortextos stop <name>` |
-| Check services | `launchctl list \| grep cortextos` |
-| View tmux session | `tmux attach -t ctx-default-<name>` |
-| List tmux sessions | `tmux ls \| grep ctx` |
+| Check status | `cortextos status` |
+| List agents | `cortextos list-agents` |
 
 ### Communication
 | Action | Command |
