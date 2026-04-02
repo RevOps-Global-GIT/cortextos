@@ -11,22 +11,27 @@ cortextos bus update-heartbeat "<1-sentence summary of current work>"
 
 If this fails, your agent shows as DEAD on the dashboard. Fix it before anything else.
 
-## Step 2: Check inbox
+## Step 2: Sweep inbox for un-ACK'd messages
+
+Messages arrive in real time via the fast-checker daemon — you don't need to poll for them. This step is a safety sweep for anything that wasn't ACK'd (e.g. a crash mid-processing).
+
+Full reference: `.claude/skills/comms/SKILL.md`
 
 ```bash
 cortextos bus check-inbox
 ```
 
-Process ALL messages. ACK every single one:
+For any messages returned: process and ACK each one:
 
 ```bash
 cortextos bus ack-inbox "<message_id>"
 ```
 
-Un-ACK'd messages are re-delivered in 5 minutes. Do not ignore them.
-Target: 0 un-ACK'd messages after this step.
+Un-ACK'd messages are re-delivered after 5 minutes. Target: 0 un-ACK'd after this sweep.
 
 ## Step 3: Check task queue + stale task detection
+
+Full reference: `.claude/skills/tasks/SKILL.md`
 
 ```bash
 cortextos bus list-tasks --agent $CTX_AGENT_NAME --status pending
@@ -35,17 +40,21 @@ cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 
 - If you have pending tasks: pick the highest priority one
 - If you have in_progress tasks older than 2 hours: either complete them NOW or update their status with a note
-- If you have NO tasks: check GOALS.md for objectives, then check with orchestrator
+- If you have NO tasks: check GOALS.md for objectives, then message the orchestrator
 
 Stale tasks are visible on the dashboard. They make you look broken.
 
 ## Step 4: Log heartbeat event
+
+Full reference: `.claude/skills/event-logging/SKILL.md`
 
 ```bash
 cortextos bus log-event heartbeat agent_heartbeat info --meta '{"agent":"'$CTX_AGENT_NAME'"}'
 ```
 
 ## Step 5: Write daily memory
+
+Full reference: `.claude/skills/memory/SKILL.md`
 
 ```bash
 TODAY=$(date -u +%Y-%m-%d)
@@ -65,11 +74,13 @@ MEMORY
 
 Read GOALS.md. Goals are refreshed daily by the orchestrator each morning.
 
-- If goals were updated today: you should already have tasks. If not, create them now.
-- If goals are stale (>24h without update): message the orchestrator to request fresh goals.
-- If you have no goals: check with orchestrator immediately. Don't idle.
+- If goals were updated today: you should already have tasks. If not, create them now — see `.claude/skills/tasks/SKILL.md`
+- If goals are stale (>24h without update): message the orchestrator to request fresh goals
+- If you have no goals: message the orchestrator immediately. Don't idle.
 
 ## Step 7: Resume work
+
+Full reference: `.claude/skills/tasks/SKILL.md`
 
 Pick your highest priority task and work on it. Tasks should trace back to your current goals.
 
@@ -83,7 +94,12 @@ When done:
 cortextos bus complete-task "<task_id>" --result "<summary of what was produced>"
 ```
 
+If you are blocked, see `.claude/skills/human-tasks/SKILL.md` for the human task and approval workflow.
+If you need an approval before acting, see `.claude/skills/approvals/SKILL.md`.
+
 ## Step 8: Guardrail self-check
+
+Full reference: `.claude/skills/guardrails-reference/SKILL.md`
 
 Ask yourself: did I skip any procedures this cycle? Did I rationalize not doing something I should have?
 
@@ -96,6 +112,8 @@ If you discovered a new pattern that should be a guardrail, add it to GUARDRAILS
 
 ## Step 9: Update long-term memory (if applicable)
 
+Full reference: `.claude/skills/memory/SKILL.md`
+
 If you learned something this cycle that should persist across sessions:
 - Patterns that work/don't work
 - User preferences discovered
@@ -103,6 +121,8 @@ If you learned something this cycle that should persist across sessions:
 - Append to MEMORY.md
 
 ## Step 10: Re-ingest memory to knowledge base
+
+Full reference: `.claude/skills/knowledge-base/SKILL.md`
 
 Keep your memory collection searchable and current:
 

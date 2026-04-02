@@ -7,16 +7,16 @@ This is your first time running. Before starting normal operations, complete thi
 ## Part 1: Identity
 
 1. **Introduce yourself** via Telegram:
-   > "Hey! I'm a new specialist agent that just came online. Before I start working, I need to get set up. Can you help me with a few questions?"
+   > "Hey! I'm your new orchestrator agent — I'm online and setting up. I coordinate your other agents, send daily briefings, and make sure your system is running. A few quick questions to get configured."
 
 2. **Confirm identity from system config** — your name is already set (do not re-ask):
-   > "I'm **{{CTX_AGENT_NAME}}** (set up via cortextos). Let me verify my config is right — can you confirm my role and personality? What's my vibe: formal, casual, technical, creative?"
+   > "I'm **{{CTX_AGENT_NAME}}** (your orchestrator). Let me verify my config — what's my vibe: formal, casual, direct? And what name should I use for myself in messages?"
 
-3. **Ask for role and responsibilities:**
-   > "What kind of work will I be doing? Be specific - the more context you give me, the better I can help. For example: writing code, managing content, doing research, handling operations, etc."
+3. **Ask for role scope:**
+   > "What domains are you working in right now? (e.g., software, content creation, business operations, research) I'll use this to know which specialist agents to spin up and how to prioritize work."
 
-4. **Ask for goals:**
-   > "What are my top 3-5 goals right now? What should I be focused on?"
+4. **Ask for north star:**
+   > "What's your north star — the single most important thing you're working toward right now? This guides every daily goal cascade I'll run."
 
 5. **Ask for Telegram communication style:**
    > "How should I communicate with you on Telegram?
@@ -210,22 +210,47 @@ After workflows and tools are configured:
 
     Make any changes they request.
 
-19. **Mark onboarding complete and signal orchestrator:**
+19. **Discover the current agent roster and map the team:**
+    ```bash
+    cortextos bus list-agents --format json
+    cortextos bus read-all-heartbeats
+    ```
+
+    Ask the user:
+    > "I can see these agents in the system: [list agents found]. Are there others you plan to add? And what's the plan for each one's role?"
+
+    Write the team structure to SYSTEM.md under a `## Team Roster` section:
+    ```markdown
+    ## Team Roster
+    <!-- Updated during onboarding -->
+    - **[agent]**: [role]
+    - **[agent]**: [role]
+    ```
+
+    For each agent that exists but has no goals written yet:
+    ```bash
+    # Write initial goals for each agent
+    cat > $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/agents/<agent>/goals.json << 'EOF'
+    {"focus":"initial focus","goals":["goal 1","goal 2"],"bottleneck":"","updated_at":"ISO_TIMESTAMP","updated_by":"$CTX_AGENT_NAME"}
+    EOF
+    cortextos goals generate-md --agent <agent> --org $CTX_ORG
+    ```
+
+20. **Write org goals.json with the north star:**
+    ```bash
+    jq --arg ns "the north star from step 4" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.north_star = $ns | .updated_at = $ts' \
+        $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/goals.json > /tmp/goals.tmp \
+      && mv /tmp/goals.tmp $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/goals.json
+    ```
+
+21. **Mark onboarding complete:**
     ```bash
     touch "${CTX_ROOT}/state/${CTX_AGENT_NAME}/.onboarded"
-    cortextos bus log-event action onboarding_complete info --meta '{"agent":"'$CTX_AGENT_NAME'","role":"specialist"}'
+    cortextos bus log-event action onboarding_complete info --meta '{"agent":"'$CTX_AGENT_NAME'","role":"orchestrator"}'
     ```
 
-    Signal the orchestrator that this specialist is fully configured and ready:
-    ```bash
-    # Find orchestrator from org context
-    ORCH_NAME=$(cat "${CTX_FRAMEWORK_ROOT}/orgs/${CTX_ORG}/context.json" 2>/dev/null | jq -r '.orchestrator // empty')
-    if [ -n "$ORCH_NAME" ]; then
-      cortextos bus send-message "${ORCH_NAME}" normal "Specialist agent ${CTX_AGENT_NAME} onboarding complete and ready to work."
-    fi
-    ```
-
-20. **Continue normal bootstrap** - proceed with the rest of the session start protocol in AGENTS.md (crons are already set up from step 9, so skip that step).
+22. **Continue normal bootstrap** - proceed with the rest of the session start protocol in AGENTS.md (crons are already set up from step 9, so skip that step).
 
 ## Part 5: Autoresearch (Experiments)
 

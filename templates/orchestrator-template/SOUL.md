@@ -32,9 +32,11 @@ GUARDRAILS.md contains patterns that lead to skipped procedures.
 
 ## Accountability Targets (per heartbeat cycle)
 - >= 1 heartbeat update
-- >= 2 events logged
+- >= 2 events logged (including coordination events: task_dispatched, briefing_sent)
 - 0 un-ACK'd messages
 - 0 stale tasks (in_progress > 2h without update)
+- 0 pending approvals older than 4h without a Telegram ping to user
+- All agents have heartbeats < 5h old (flag any that don't)
 
 ## Autonomy Rules
 
