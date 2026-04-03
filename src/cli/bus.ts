@@ -527,11 +527,15 @@ busCommand
   .argument('<type>', 'Item type (skill, agent, org)')
   .argument('<description>', 'Item description')
   .option('--dry-run', 'Show what would be submitted')
-  .action((name: string, type: string, description: string, opts: { dryRun?: boolean }) => {
+  .option('--author <author>', 'Author name or handle for attribution')
+  .option('--contribute', 'Create branch, push to origin, and open a PR against upstream')
+  .action((name: string, type: string, description: string, opts: { dryRun?: boolean; author?: string; contribute?: boolean }) => {
     const env = resolveEnv();
     const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
     const result = submitCommunityItem(frameworkRoot, env.ctxRoot, name, type, description, {
       dryRun: opts.dryRun,
+      author: opts.author,
+      contribute: opts.contribute,
     });
     console.log(JSON.stringify(result, null, 2));
   });

@@ -38,6 +38,13 @@ export interface UsageData {
   week_sonnet: { used_pct: number };
 }
 
+export interface CatalogAddition {
+  name: string;
+  type: string;
+  description?: string;
+  tags?: string[];
+}
+
 export interface UpstreamResult {
   status: string;
   commits?: number;
@@ -51,6 +58,7 @@ export interface UpstreamResult {
     community: string[];
     other: string[];
   };
+  catalog_additions?: CatalogAddition[];
   message?: string;
   error?: string;
   hint?: string;
@@ -363,16 +371,50 @@ export function checkUpstream(
     commitLog = execSync('git log HEAD..upstream/main --oneline', { ...execOpts, stdio: 'pipe' }).trim();
   } catch { /* ignore */ }
 
+  // Detect new catalog items in upstream vs local
+  function getCatalogItems(source: 'local' | 'upstream'): CatalogAddition[] {
+    try {
+      let raw: string;
+      if (source === 'upstream') {
+        raw = execSync('git show upstream/main:community/catalog.json', { ...execOpts, stdio: 'pipe' });
+      } else {
+        const localPath = join(frameworkRoot, 'community', 'catalog.json');
+        if (!existsSync(localPath)) return [];
+        raw = readFileSync(localPath, 'utf-8');
+      }
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed.items) ? parsed.items : [];
+    } catch {
+      return [];
+    }
+  }
+
   // If --apply: merge upstream
   if (options.apply) {
+    const localItems = getCatalogItems('local');
+    const localNames = new Set(localItems.map((i: CatalogAddition) => i.name));
     try {
       execSync('git merge upstream/main --no-edit', { ...execOpts, stdio: 'pipe' });
-      return { status: 'merged', commits: commitCount, message: 'Upstream changes applied successfully' };
+      // After merge, read updated catalog and surface new items
+      const mergedItems = getCatalogItems('local');
+      const catalog_additions = mergedItems.filter((i: CatalogAddition) => !localNames.has(i.name));
+      return {
+        status: 'merged',
+        commits: commitCount,
+        message: 'Upstream changes applied successfully',
+        ...(catalog_additions.length > 0 ? { catalog_additions } : {}),
+      };
     } catch {
       try { execSync('git merge --abort', { ...execOpts, stdio: 'pipe' }); } catch { /* ignore */ }
       return { status: 'conflict', message: 'Merge conflicts detected. Resolve conversationally with user.' };
     }
   }
+
+  // Dry-run: surface new catalog items in upstream vs local
+  const localItems = getCatalogItems('local');
+  const localNames = new Set(localItems.map((i: CatalogAddition) => i.name));
+  const upstreamItems = getCatalogItems('upstream');
+  const catalog_additions = upstreamItems.filter((i: CatalogAddition) => !localNames.has(i.name));
 
   return {
     status: 'updates_available',
@@ -380,6 +422,7 @@ export function checkUpstream(
     diff_stat: diffStat,
     commit_log: commitLog,
     changes,
+    ...(catalog_additions.length > 0 ? { catalog_additions } : {}),
   };
 }
 
