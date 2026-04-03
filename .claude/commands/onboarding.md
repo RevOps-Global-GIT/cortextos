@@ -294,7 +294,7 @@ If ORCH_CHAT_ID is empty after 3 retries, tell user to send another message and 
 ### 6b. Create Agent Directory
 
 ```bash
-node dist/cli.js add-agent "${ORCH_NAME}" --template orchestrator --org "${ORG_NAME}" --instance "${INSTANCE_ID}"
+node dist/cli.js add-agent "${ORCH_NAME}" --template orchestrator --org "${ORG_NAME}"
 ```
 
 Write `.env` with credentials:
