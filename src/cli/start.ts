@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir, platform } from 'os';
 import { execSync, spawn } from 'child_process';
@@ -131,6 +131,29 @@ export const startCommand = new Command('start')
 
     // Daemon already running
     if (agent) {
+      // Auto-register in enabled-agents.json if not already present
+      const ctxRoot = join(homedir(), '.cortextos', options.instance);
+      const enabledPath = join(ctxRoot, 'config', 'enabled-agents.json');
+      let enabledAgents: Record<string, any> = {};
+      try {
+        if (existsSync(enabledPath)) {
+          enabledAgents = JSON.parse(readFileSync(enabledPath, 'utf-8'));
+        }
+      } catch { /* ignore */ }
+
+      if (!enabledAgents[agent]) {
+        // Try to detect org from existing entries or project structure
+        const existingOrg = Object.values(enabledAgents as Record<string, any>).find((e: any) => e.org)?.org;
+        enabledAgents[agent] = {
+          enabled: true,
+          status: 'configured',
+          ...(existingOrg ? { org: existingOrg } : {}),
+        };
+        mkdirSync(join(ctxRoot, 'config'), { recursive: true });
+        writeFileSync(enabledPath, JSON.stringify(enabledAgents, null, 2) + '\n', 'utf-8');
+        console.log(`  Registered ${agent} in enabled-agents.json`);
+      }
+
       console.log(`Starting agent: ${agent}`);
       const response = await ipc.send({ type: 'start-agent', agent });
       if (response.success) {

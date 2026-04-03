@@ -51,6 +51,26 @@ export const enableAgentCommand = new Command('enable')
     // Without this, the agent starts, inherits parent-process credentials silently,
     // appears alive on the dashboard but cannot receive any Telegram messages.
     const projectRoot = process.env.CTX_FRAMEWORK_ROOT || process.env.CTX_PROJECT_ROOT || process.cwd();
+
+    // Auto-detect org if not specified by scanning orgs/ for this agent
+    if (!options.org) {
+      const orgsDir = join(projectRoot, 'orgs');
+      if (existsSync(orgsDir)) {
+        try {
+          const { readdirSync } = require('fs');
+          const orgs = readdirSync(orgsDir, { withFileTypes: true })
+            .filter((d: any) => d.isDirectory())
+            .map((d: any) => d.name);
+          for (const o of orgs) {
+            if (existsSync(join(orgsDir, o, 'agents', agent))) {
+              options.org = o;
+              break;
+            }
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
     const orgDir = options.org ? join(projectRoot, 'orgs', options.org) : null;
 
     // Locate agent dir — try org-scoped path first, then flat agents/ fallback

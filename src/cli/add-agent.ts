@@ -1,15 +1,17 @@
 import { Command } from 'commander';
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync } from 'fs';
 import { join, resolve } from 'path';
+import { homedir } from 'os';
 import { OrgContext } from '../types';
 
 export const addAgentCommand = new Command('add-agent')
   .argument('<name>', 'Agent name')
   .option('--template <type>', 'Agent template (orchestrator, analyst, agent)', 'agent')
   .option('--org <org>', 'Organization name')
+  .option('--instance <id>', 'Instance ID', 'default')
   .description('Add a new agent to the organization')
-  .action(async (name: string, options: { template: string; org?: string }) => {
-    const projectRoot = process.cwd();
+  .action(async (name: string, options: { template: string; org?: string; instance: string }) => {
+    const projectRoot = process.env.CTX_FRAMEWORK_ROOT || process.env.CTX_PROJECT_ROOT || process.cwd();
 
     // Auto-detect org if not specified
     let org = options.org;
@@ -183,6 +185,30 @@ export const addAgentCommand = new Command('add-agent')
       }
     }
 
+    // Register in enabled-agents.json
+    const instanceId = options.instance;
+    const ctxRoot = join(homedir(), '.cortextos', instanceId);
+    const enabledPath = join(ctxRoot, 'config', 'enabled-agents.json');
+    const configDir = join(ctxRoot, 'config');
+    mkdirSync(configDir, { recursive: true });
+
+    let enabledAgents: Record<string, any> = {};
+    try {
+      if (existsSync(enabledPath)) {
+        enabledAgents = JSON.parse(readFileSync(enabledPath, 'utf-8'));
+      }
+    } catch { /* start fresh */ }
+
+    if (!enabledAgents[name]) {
+      enabledAgents[name] = {
+        enabled: true,
+        status: 'configured',
+        ...(org ? { org } : {}),
+      };
+      writeFileSync(enabledPath, JSON.stringify(enabledAgents, null, 2) + '\n', 'utf-8');
+      console.log(`  Registered in enabled-agents.json`);
+    }
+
     console.log(`\n  Agent "${name}" created.`);
     console.log(`\n  Next steps:`);
     console.log(`    1. Edit ${join('orgs', org, 'agents', name, '.env')} with your Telegram settings`);
@@ -191,9 +217,10 @@ export const addAgentCommand = new Command('add-agent')
   });
 
 function findTemplateDir(projectRoot: string, template: string): string | null {
-  // Check for templates in the project
+  const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || projectRoot;
   const candidates = [
     join(projectRoot, 'templates', template),
+    join(frameworkRoot, 'templates', template),
     join(projectRoot, 'node_modules', 'cortextos', 'templates', template),
     // Relative to this file for development
     join(__dirname, '..', '..', 'templates', template),

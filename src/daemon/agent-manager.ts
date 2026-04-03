@@ -14,7 +14,7 @@ import { collectTelegramCommands, registerTelegramCommands } from '../bus/metric
  * Manages all agents in a cortextOS instance.
  */
 export class AgentManager {
-  private agents: Map<string, { process: AgentProcess; checker: FastChecker }> = new Map();
+  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller }> = new Map();
   private instanceId: string;
   private ctxRoot: string;
   private frameworkRoot: string;
@@ -178,6 +178,10 @@ export class AgentManager {
           lastSent ?? undefined,
         );
 
+        if (checker.isDuplicate(formatted)) {
+          log('Duplicate Telegram message suppressed');
+          return;
+        }
         checker.queueTelegramMessage(formatted);
       });
 
@@ -192,6 +196,11 @@ export class AgentManager {
       poller.start().catch(err => {
         log(`Telegram poller error: ${err}`);
       });
+
+      // Store poller reference so stopAgent() can clean it up
+      const entry = this.agents.get(name);
+      if (entry) entry.poller = poller;
+
       log('Telegram poller started');
     }
   }
@@ -206,6 +215,7 @@ export class AgentManager {
       return;
     }
 
+    if (entry.poller) entry.poller.stop();
     entry.checker.stop();
     await entry.process.stop();
     this.agents.delete(name);
