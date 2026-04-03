@@ -26,7 +26,10 @@ import {
 
 interface Cron {
   name: string;
-  interval: string;
+  type?: 'recurring' | 'once';
+  interval?: string;
+  cron?: string;        // raw crontab expression (e.g. "0 9 * * *")
+  fire_at?: string;     // ISO datetime for once-type crons
   prompt: string;
 }
 
@@ -42,7 +45,8 @@ interface AgentCrons {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function intervalToHuman(interval: string): string {
+function intervalToHuman(interval: string | undefined): string {
+  if (!interval) return '?';
   const match = interval.match(/^(\d+)([smhd])$/);
   if (!match) return interval;
   const n = parseInt(match[1]);
@@ -56,7 +60,8 @@ function intervalToHuman(interval: string): string {
   return `${n} ${units[unit]}`;
 }
 
-function validateInterval(interval: string): boolean {
+function validateInterval(interval: string | undefined): boolean {
+  if (!interval) return false;
   return /^\d+[smhd]$/.test(interval);
 }
 
@@ -416,7 +421,11 @@ export default function WorkflowsPage() {
                             <IconClock size={14} className="text-muted-foreground shrink-0" />
                             <span className="text-sm font-medium">{cron.name}</span>
                             <Badge variant="outline" className="text-[10px]">
-                              every {intervalToHuman(cron.interval)}
+                              {cron.fire_at
+                                ? `once at ${new Date(cron.fire_at).toLocaleString()}`
+                                : cron.cron
+                                  ? `cron: ${cron.cron}`
+                                  : `every ${intervalToHuman(cron.interval)}`}
                             </Badge>
                           </div>
                           <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
