@@ -718,10 +718,16 @@ busCommand
   .command('send-telegram')
   .description('Send a message to a Telegram chat')
   .argument('<chat-id>', 'Telegram chat ID')
-  .argument('<message>', 'Message text (supports Telegram Markdown)')
+  .argument('[message...]', 'Message text (supports Telegram Markdown)')
   .option('--image <path>', 'Send a photo with caption')
   .option('--file <path>', 'Send a document/file with caption (any file type)')
-  .action(async (chatId: string, message: string, opts: { image?: string; file?: string }) => {
+  .action(async (chatId: string, messageArgs: string[], opts: { image?: string; file?: string }) => {
+    // Handle both single arg and variadic args (for shell word-splitting)
+    const message = Array.isArray(messageArgs) ? messageArgs.join(' ') : messageArgs;
+    if (!message || message.trim() === '') {
+      console.error('Error: message is required');
+      process.exit(1);
+    }
     // Resolve bot token: agent .env first, then process.env
     const env = resolveEnv();
     let botToken = '';
