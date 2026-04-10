@@ -138,10 +138,10 @@ export class AgentPTY {
 
     // Spawn claude directly (no shell wrapper) — cross-platform, no shell escaping needed.
     // env is passed natively via node-pty options; no bash export commands required.
-    // On Windows, node-pty uses CreateProcess which does NOT resolve .exe extensions
-    // from bare command names. We must use 'claude.exe' explicitly.
+    // On Windows, npm global installs create .cmd wrappers, not .exe binaries.
+    // node-pty's CreateProcess requires the exact wrapper name to resolve correctly.
     const claudeArgs = this.buildClaudeArgs(mode, prompt);
-    const claudeCmd = platform() === 'win32' ? 'claude.exe' : 'claude';
+    const claudeCmd = platform() === 'win32' ? 'claude.cmd' : 'claude';
 
     this.pty = this.spawnFn!(claudeCmd, claudeArgs, {
       name: 'xterm-256color',
