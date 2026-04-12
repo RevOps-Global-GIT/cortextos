@@ -7,9 +7,12 @@
  * `recall-facts` — the context arrives before the agent's first turn.
  *
  * Design:
- * - Reads the last N fact entries written by hook-extract-facts (PreCompact).
+ * - Only fires when source === 'compact'. Skips startup, resume, and clear.
+ * - Reads the last N fact entries written by hook-extract-facts (PreCompact),
+ *   sorted by timestamp (most recent last) across up to two days of files.
  * - Formats the most recent summary as a compact context block.
- * - Returns `{"additionalContext": "..."}` so Claude Code injects it.
+ * - Returns Claude Code's SessionStart hookSpecificOutput shape so the
+ *   additionalContext is injected before the agent's first turn.
  * - Silent on any error — never blocks session start.
  *
  * Registered in settings.json under "SessionStart".
@@ -33,7 +36,7 @@ interface FactEntry {
 
 interface SessionStartPayload {
   session_id?: string;
-  source?: string; // 'startup' | 'resume' | 'compact'
+  source?: string; // 'startup' | 'resume' | 'compact' | 'clear'
 }
 
 const MAX_SUMMARY_CHARS = 3000;
@@ -49,8 +52,9 @@ async function main(): Promise<void> {
       // Non-JSON input — proceed with defaults
     }
 
-    // On fresh startup (not a resume/compact), no restore needed
-    if (payload.source === 'startup') {
+    // Only restore on compaction. Skip startup, resume (user --continue), and
+    // /clear (user explicitly cleared context — respect that intent).
+    if (payload.source !== 'compact') {
       process.exit(0);
     }
 
@@ -80,7 +84,10 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    // Use the most recent entry
+    // Sort all entries by timestamp and take the most recent.
+    // This is correct even across the day boundary where d=0 (today) and
+    // d=1 (yesterday) entries are interleaved in the array.
+    entries.sort((a, b) => a.ts.localeCompare(b.ts));
     const latest = entries[entries.length - 1];
 
     // Skip if the snapshot is too old (agent probably had a clean restart)
@@ -102,9 +109,15 @@ async function main(): Promise<void> {
       keywordsLine,
       ``,
       summary,
-    ].filter(line => line !== null).join('\n');
+    ].join('\n');
 
-    const output = { additionalContext };
+    // Claude Code SessionStart hook output shape
+    const output = {
+      hookSpecificOutput: {
+        hookEventName: 'SessionStart',
+        additionalContext,
+      },
+    };
     process.stdout.write(JSON.stringify(output) + '\n');
     process.exit(0);
 
