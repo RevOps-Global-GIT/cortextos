@@ -149,6 +149,17 @@ export interface AgentConfig {
   max_session_seconds?: number;
   max_crashes_per_day?: number;
   model?: string;
+  /**
+   * Cost tier for model routing: 'haiku' | 'sonnet' | 'opus'.
+   * Ignored when `model` is set (explicit model takes precedence).
+   * Resolved to a concrete model ID via model_tiers (or DEFAULT_MODEL_TIERS).
+   */
+  tier?: 'haiku' | 'sonnet' | 'opus';
+  /**
+   * Per-agent overrides for the tier→model ID mapping.
+   * Merges on top of DEFAULT_MODEL_TIERS — only specify the tiers you want to override.
+   */
+  model_tiers?: { haiku?: string; sonnet?: string; opus?: string };
   working_directory?: string;
   enabled?: boolean;
   crons?: CronEntry[];
