@@ -1673,6 +1673,16 @@ busCommand
   .description('Stop hook: writes last_idle.flag timestamp so fast-checker knows agent finished its turn')
   .action(() => runHook('hook-idle-flag'));
 
+busCommand
+  .command('hook-extract-facts')
+  .description('PreCompact hook: extracts and stores session summary as structured fact entry for cross-session memory')
+  .action(() => runHook('hook-extract-facts'));
+
+busCommand
+  .command('hook-session-restore')
+  .description('SessionStart hook: injects the most recent compaction snapshot as additionalContext to restore working state')
+  .action(() => runHook('hook-session-restore'));
+
 // --- OAuth token rotation commands ---
 
 busCommand
