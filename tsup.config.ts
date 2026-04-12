@@ -12,6 +12,7 @@ export default defineConfig({
     'hooks/hook-extract-facts': 'src/hooks/hook-extract-facts.ts',
     'hooks/hook-idle-flag': 'src/hooks/hook-idle-flag.ts',
     'hooks/hook-session-restore': 'src/hooks/hook-session-restore.ts',
+    'hooks/hook-loop-detector': 'src/hooks/hook-loop-detector.ts',
   },
   format: ['cjs'],
   target: 'node20',

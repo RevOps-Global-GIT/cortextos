@@ -1683,6 +1683,11 @@ busCommand
   .description('SessionStart hook: injects the most recent compaction snapshot as additionalContext to restore working state')
   .action(() => runHook('hook-session-restore'));
 
+busCommand
+  .command('hook-loop-detector')
+  .description('PreToolUse hook: detects and blocks repeated tool loops (repetition and ping-pong patterns)')
+  .action(() => runHook('hook-loop-detector'));
+
 // --- OAuth token rotation commands ---
 
 busCommand
