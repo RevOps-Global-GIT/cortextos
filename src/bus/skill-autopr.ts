@@ -219,18 +219,7 @@ export async function createSkillPr(skillName: string): Promise<void> {
   }
 }
 
-// CLI entry point when called directly
-if (require.main === module) {
-  const skillName = process.argv[2];
-  if (!skillName) {
-    console.error('Usage: cortextos bus create-skill-pr <skill-name>');
-    process.exit(1);
-  }
-
-  createSkillPr(skillName)
-    .then(() => process.exit(0))
-    .catch(err => {
-      console.error(`create-skill-pr failed: ${err.message}`);
-      process.exit(1);
-    });
-}
+// No require.main === module guard here — skill-autopr.ts is bundled into cli.js
+// by tsup (splitting: false) so that check would always be true and fire on every
+// CLI invocation. The CLI entry point is bus.ts, which registers create-skill-pr
+// as a Commander subcommand and calls createSkillPr() from there.
