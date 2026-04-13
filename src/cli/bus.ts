@@ -17,6 +17,7 @@ import { createReminder, listReminders, ackReminder, pruneReminders } from '../b
 import { updateCronFire } from '../bus/cron-state.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
+import { createSkillPr } from '../bus/skill-autopr.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
@@ -1687,6 +1688,29 @@ busCommand
   .command('hook-loop-detector')
   .description('PreToolUse hook: detects and blocks repeated tool loops (repetition and ping-pong patterns)')
   .action(() => runHook('hook-loop-detector'));
+
+busCommand
+  .command('hook-skill-autopr')
+  .description('PostToolUse hook: auto-stages community skill writes and opens a draft PR against grandamenium/cortextos')
+  .action(() => runHook('hook-skill-autopr'));
+
+busCommand
+  .command('create-skill-pr')
+  .description('Background worker: commits and draft-PRs a community skill (called by hook-skill-autopr)')
+  .argument('<skill-name>', 'Skill directory name under community/skills/')
+  .action(async (skillName: string) => {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(skillName)) {
+      console.error(`create-skill-pr: invalid skill name "${skillName}" — must be a lowercase alphanumeric slug`);
+      process.exit(1);
+    }
+    try {
+      await createSkillPr(skillName);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`create-skill-pr failed: ${msg}`);
+      process.exit(1);
+    }
+  });
 
 // --- OAuth token rotation commands ---
 
