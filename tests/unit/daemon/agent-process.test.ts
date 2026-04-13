@@ -9,6 +9,8 @@ const mockPty = {
   write: vi.fn(),
   getPid: vi.fn().mockReturnValue(12345),
   isAlive: vi.fn().mockReturnValue(true),
+  // Default: no rate-limit signature in output (safe for all existing tests)
+  getOutputBuffer: vi.fn().mockReturnValue({ hasRateLimitSignature: () => false }),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
   }),
@@ -98,6 +100,8 @@ beforeEach(() => {
   mockPty.write.mockClear();
   mockPty.isAlive.mockClear();
   mockPty.isAlive.mockReturnValue(true);
+  mockPty.getOutputBuffer.mockClear();
+  mockPty.getOutputBuffer.mockReturnValue({ hasRateLimitSignature: () => false });
   mockPty.onExit.mockClear();
   mockInjectMessage.mockClear();
   fsMocks.existsSync.mockReset().mockReturnValue(false);

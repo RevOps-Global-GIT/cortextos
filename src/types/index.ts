@@ -160,6 +160,13 @@ export interface AgentConfig {
    * Merges on top of DEFAULT_MODEL_TIERS — only specify the tiers you want to override.
    */
   model_tiers?: { haiku?: string; sonnet?: string; opus?: string };
+  /**
+   * How long to pause (seconds) when an Anthropic rate-limit exit is detected,
+   * before restarting the agent. Defaults to 18000 (5 hours) — the standard
+   * Anthropic rolling rate-limit window. Rate-limit pauses do NOT count toward
+   * max_crashes_per_day and do NOT trigger the git watchdog.
+   */
+  rate_limit_pause_seconds?: number;
   working_directory?: string;
   enabled?: boolean;
   crons?: CronEntry[];
@@ -398,7 +405,7 @@ export interface AgentInfo {
 
 export interface AgentStatus {
   name: string;
-  status: 'running' | 'stopped' | 'crashed' | 'starting' | 'halted';
+  status: 'running' | 'stopped' | 'crashed' | 'starting' | 'halted' | 'rate-limited';
   pid?: number;
   uptime?: number; // seconds
   lastHeartbeat?: string;
