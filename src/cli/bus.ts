@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { spawnSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
@@ -18,6 +18,7 @@ import { updateCronFire } from '../bus/cron-state.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
+import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
@@ -1708,6 +1709,36 @@ busCommand
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`create-skill-pr failed: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+// --- Brand name command ---
+
+busCommand
+  .command('set-brand-name')
+  .description('Set the business name shown in the dashboard sidebar (written to dashboard-settings.json)')
+  .argument('<name>', 'Business or team name to display (max 100 characters, use empty string "" to clear)')
+  .action((name: string) => {
+    const trimmed = name.trim().slice(0, 100);
+    const env = resolveEnv();
+    const settingsPath = join(env.ctxRoot, 'config', 'dashboard-settings.json');
+    try {
+      let current: Record<string, unknown> = {};
+      if (existsSync(settingsPath)) {
+        try { current = JSON.parse(readFileSync(settingsPath, 'utf-8')); } catch { /* ignore corrupt file */ }
+      }
+      if (trimmed) {
+        current.brand_name = trimmed;
+      } else {
+        delete current.brand_name;
+      }
+      // Atomic write — prevents corrupt file on crash or concurrent access
+      atomicWriteSync(settingsPath, JSON.stringify(current, null, 2));
+      console.log(trimmed ? `Brand name set to: ${trimmed}` : 'Brand name cleared');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`set-brand-name failed: ${msg}`);
       process.exit(1);
     }
   });

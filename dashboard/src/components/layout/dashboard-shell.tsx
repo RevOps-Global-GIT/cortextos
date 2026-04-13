@@ -12,10 +12,11 @@ import {
 
 interface DashboardShellProps {
   orgs: string[];
+  brandName?: string;
   children: React.ReactNode;
 }
 
-export function DashboardShell({ orgs, children }: DashboardShellProps) {
+export function DashboardShell({ orgs, brandName, children }: DashboardShellProps) {
   const [currentOrg, setCurrentOrg] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem('cortextos-org');
@@ -35,13 +36,13 @@ export function DashboardShell({ orgs, children }: DashboardShellProps) {
       <div className="flex h-screen">
         {/* Desktop sidebar */}
         <div className="hidden md:block">
-          <Sidebar onNavigate={() => {}} />
+          <Sidebar brandName={brandName} onNavigate={() => {}} />
         </div>
 
         {/* Mobile sidebar sheet */}
         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
           <SheetContent side="left" className="w-60 p-0" showCloseButton={false}>
-            <Sidebar onNavigate={() => setSidebarOpen(false)} />
+            <Sidebar brandName={brandName} onNavigate={() => setSidebarOpen(false)} />
           </SheetContent>
         </Sheet>
 

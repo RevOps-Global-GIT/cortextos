@@ -174,6 +174,12 @@ export interface AgentConfig {
   day_mode_start?: string;
   day_mode_end?: string;
   communication_style?: string;
+  /**
+   * Display name for the business or team operating this agent.
+   * When set, the dashboard sidebar and title show this name instead of "cortextOS".
+   * Typically set by the onboarding wizard from the user's company name.
+   */
+  brand_name?: string;
   approval_rules?: {
     always_ask: string[];
     never_ask: string[];
