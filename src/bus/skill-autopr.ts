@@ -160,6 +160,12 @@ export async function createSkillPr(skillName: string): Promise<void> {
   const ts = Math.floor(Date.now() / 1000);
   const branch = `community/skill/${skillName}-${ts}`;
 
+  // Save the skill file content now, before any branch switching.
+  // `git checkout -` at the end returns to the original branch, which resets
+  // tracked files to their committed state — losing uncommitted changes written
+  // by the hook that triggered us. We restore the file after switching back.
+  const skillFileContentBeforeBranch = readFileSync(skillFile, 'utf-8');
+
   let bodyFile: string | null = null;
 
   try {
@@ -167,6 +173,10 @@ export async function createSkillPr(skillName: string): Promise<void> {
     // Failing to fetch is non-fatal — we'll still branch from whatever origin/main is cached
     run('git fetch origin main 2>/dev/null || git fetch upstream main 2>/dev/null || true', frameworkRoot);
     run(`git checkout -b ${branch} origin/main`, frameworkRoot);
+
+    // Restore the skill file on the new branch — git checkout from origin/main
+    // would have reset it to the committed version, losing our uncommitted write.
+    writeFileSync(skillFile, skillFileContentBeforeBranch, 'utf-8');
 
     // Stage only the skill directory
     run(`git add community/skills/${skillName}/`, frameworkRoot);
@@ -205,11 +215,16 @@ export async function createSkillPr(skillName: string): Promise<void> {
 
     console.log(`Draft PR created for skill "${skillName}": ${prUrl}`);
 
-    // Return to original branch
+    // Return to original branch, then restore the skill file so the working
+    // tree reflects the content that was written before we branched.
     run('git checkout -', frameworkRoot);
+    writeFileSync(skillFile, skillFileContentBeforeBranch, 'utf-8');
   } catch (err) {
-    // Attempt cleanup: return to original branch
-    try { run('git checkout -', frameworkRoot); } catch { /* ignore */ }
+    // Attempt cleanup: return to original branch and restore file
+    try {
+      run('git checkout -', frameworkRoot);
+      writeFileSync(skillFile, skillFileContentBeforeBranch, 'utf-8');
+    } catch { /* ignore */ }
     throw err;
   } finally {
     // Clean up temp body file
