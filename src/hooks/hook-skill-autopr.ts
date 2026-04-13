@@ -25,7 +25,7 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { spawn } from 'child_process';
 import { readStdin, parseHookInput } from './index.js';
 
@@ -218,17 +218,25 @@ async function main(): Promise<void> {
   const raw = await readStdin();
   const { tool_name, tool_input } = parseHookInput(raw);
 
-  // Only act on file write/edit tools
+  // Pre-filtered to Write/Edit by settings.json matcher — guard here too in case
+  // hook is invoked manually or registration changes.
   if (tool_name !== 'Write' && tool_name !== 'Edit') return;
 
   const filePath = (tool_input.file_path as string | undefined) || '';
   if (!filePath) return;
 
-  const frameworkRoot = process.env.CTX_FRAMEWORK_ROOT || process.cwd();
+  const frameworkRoot = resolve(process.env.CTX_FRAMEWORK_ROOT || process.cwd());
+  const communitySkillsRoot = join(frameworkRoot, 'community', 'skills');
 
-  // Match community/skills/<name>/SKILL.md
-  const rel = filePath.replace(frameworkRoot + '/', '');
-  const skillMatch = rel.match(/^community\/skills\/([a-z0-9_-]+)\/SKILL\.md$/);
+  // Resolve both paths to avoid relative-path or symlink confusion, then check:
+  //  1. The resolved file path must sit inside community/skills/
+  //  2. The filename must be exactly SKILL.md (case-sensitive)
+  //  3. The directory depth must be exactly one level below community/skills/
+  const resolvedFile = resolve(filePath);
+  if (!resolvedFile.startsWith(communitySkillsRoot + '/')) return;
+
+  const rel = resolvedFile.slice(communitySkillsRoot.length + 1); // strip prefix + slash
+  const skillMatch = rel.match(/^([a-z0-9][a-z0-9_-]{0,63})\/SKILL\.md$/);
   if (!skillMatch) return;
 
   const skillName = skillMatch[1];
