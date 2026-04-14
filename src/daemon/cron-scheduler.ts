@@ -31,7 +31,8 @@
  *     stampede missed fires after a long outage)
  */
 
-import { readFileSync, watch, type FSWatcher } from 'fs';
+import { readFileSync } from 'fs';
+import { watch as chokidarWatch, type FSWatcher as ChokidarFSWatcher } from 'chokidar';
 import { CronExpressionParser } from 'cron-parser';
 import type { AgentConfig, CronEntry } from '../types/index.js';
 import { readCronState, updateCronFire, parseDurationMs } from '../bus/cron-state.js';
@@ -71,7 +72,7 @@ interface ScheduledCron {
 interface AgentSchedule {
   agent: ManagedAgent;
   crons: ScheduledCron[];
-  watcher: FSWatcher | null;
+  watcher: ChokidarFSWatcher | null;
   attachedGeneration: number;
 }
 
@@ -138,15 +139,22 @@ export class CronScheduler {
     const config = this.loadConfig(agent.configPath);
     const crons = this.buildSchedule(agent, config);
 
-    let watcher: FSWatcher | null = null;
+    // chokidar with polling avoids the inotify max_user_instances cap that
+    // fs.watch was hitting on this host. Config.json changes are rare so a
+    // 5s poll is more than fast enough.
+    let watcher: ChokidarFSWatcher | null = null;
     try {
-      watcher = watch(agent.configPath, { persistent: false }, (eventType) => {
-        if (eventType === 'change' || eventType === 'rename') {
-          this.reload(agent.name);
-        }
+      watcher = chokidarWatch(agent.configPath, {
+        persistent: false,
+        usePolling: true,
+        interval: 5_000,
+        awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
       });
+      watcher.on('change', () => this.reload(agent.name));
+      watcher.on('error', (err) => this.log(`[${agent.name}] config watch error: ${err}`));
     } catch (err) {
       this.log(`[${agent.name}] config.json watch failed: ${err}`);
+      watcher = null;
     }
 
     this.agents.set(agent.name, {
