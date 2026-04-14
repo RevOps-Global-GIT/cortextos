@@ -3,7 +3,7 @@ import { execFile } from 'child_process';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
-import { checkInbox, ackInbox } from '../bus/message.js';
+import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval } from '../bus/approval.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
@@ -47,6 +47,22 @@ export class FastChecker {
   // Idle-session heartbeat watchdog
   private heartbeatTimer: NodeJS.Timeout | null = null;
 
+  // Usage rate-limit guard state
+  private usageLastCheckedAt: number = 0;
+  private usageTier: 0 | 1 | 2 = 0; // 0=normal, 1=high(≥85%), 2=critical(≥95%)
+  private usageTierFile: string = '';
+  private readonly USAGE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
+  // Context-exhaustion + frozen-stdout watchdog state
+  private bootstrappedAt: number = 0;
+  private lastHardRestartAt: number = 0;
+  private stdoutLastSize: number = 0;
+  private stdoutLastChangeAt: number = 0;
+  private watchdogTriggered: boolean = false;
+  private readonly BOOTSTRAP_GRACE_MS = 10 * 60 * 1000;
+  private readonly HARD_RESTART_COOLDOWN_MS = 15 * 60 * 1000;
+  private readonly STDOUT_FROZEN_MS = 30 * 60 * 1000;
+
   constructor(
     agent: AgentProcess,
     paths: BusPaths,
@@ -65,6 +81,10 @@ export class FastChecker {
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
     this.loadDedupHashes();
+
+    // Initialize usage tier state
+    this.usageTierFile = join(paths.stateDir, 'usage-tier.json');
+    this.loadUsageTier();
   }
 
   /**
@@ -191,6 +211,180 @@ export class FastChecker {
     // Typing indicator: send while Claude is actively working
     if (this.chatId && this.telegramApi && this.isAgentActive()) {
       await this.sendTyping(this.telegramApi, this.chatId);
+    }
+
+    // Watchdog: detect ctx-exhaustion survey + frozen stdout
+    this.watchdogCheck();
+
+    // Usage rate-limit guard: check every 15 min
+    await this.checkUsageTier();
+  }
+
+  /**
+   * Detect stuck agent and trigger hard-restart.
+   * Ported from CRM fast-checker.sh (FROZEN_RESTART + context-threshold logic).
+   *
+   * Two signals:
+   *   1. Claude Code's "How is Claude doing this session?" survey prompt — fires
+   *      when context is exhausted and the session needs to end. If it appears
+   *      in stdout, the agent is cooked.
+   *   2. stdout log unchanged for 30+ min while the agent is "active" (has a
+   *      pending message and no idle flag) — passively frozen.
+   */
+  private watchdogCheck(): void {
+    if (this.watchdogTriggered) return;
+    const now = Date.now();
+    if (this.bootstrappedAt === 0 || now - this.bootstrappedAt < this.BOOTSTRAP_GRACE_MS) return;
+    if (this.lastHardRestartAt > 0 && now - this.lastHardRestartAt < this.HARD_RESTART_COOLDOWN_MS) return;
+
+    const stdoutPath = join(this.paths.logDir, 'stdout.log');
+    if (!existsSync(stdoutPath)) return;
+
+    let size: number;
+    try { size = statSync(stdoutPath).size; } catch { return; }
+
+    if (size !== this.stdoutLastSize) {
+      this.stdoutLastSize = size;
+      this.stdoutLastChangeAt = now;
+    }
+
+    // Signal 1: scan last 20KB of stdout for the session-survey prompt.
+    // Claude Code emits this when context is full ("How is Claude doing this session?").
+    try {
+      const tailBytes = Math.min(20000, size);
+      if (tailBytes > 0) {
+        const fd = openSync(stdoutPath, 'r');
+        const buf = Buffer.alloc(tailBytes);
+        readSync(fd, buf, 0, tailBytes, size - tailBytes);
+        closeSync(fd);
+        const tail = buf.toString('utf-8');
+        if (/How is Claude doing this session\?/.test(tail)) {
+          this.log('WATCHDOG: ctx-exhaustion survey prompt detected — hard-restarting');
+          this.triggerHardRestart('ctx exhaustion: session survey prompt in stdout');
+          return;
+        }
+      }
+    } catch { /* non-critical */ }
+
+    // Signal 2: stdout frozen for 30+ min while agent is active.
+    if (
+      this.lastMessageInjectedAt > 0 &&
+      now - this.stdoutLastChangeAt > this.STDOUT_FROZEN_MS &&
+      this.isAgentActive()
+    ) {
+      const stalledSec = Math.round((now - this.stdoutLastChangeAt) / 1000);
+      this.log(`WATCHDOG: stdout frozen for ${stalledSec}s while active — hard-restarting`);
+      this.triggerHardRestart(`frozen: stdout unchanged ${stalledSec}s while active`);
+    }
+  }
+
+  private triggerHardRestart(reason: string): void {
+    this.watchdogTriggered = true;
+    this.lastHardRestartAt = Date.now();
+    if (this.telegramApi && this.chatId) {
+      this.telegramApi
+        .sendMessage(this.chatId, `Got stuck (${reason}). Hard-restarting now.`)
+        .catch(() => { /* non-critical */ });
+    }
+    this.agent.hardRestartSelf(reason).catch(e => this.log(`hardRestartSelf failed: ${e}`));
+  }
+
+  /**
+   * Check Claude Max API utilization and send tier-transition alerts.
+   *
+   * Runs every 15 minutes. Calls `cortextos bus check-usage-api` and reads
+   * the JSON output. Computes tier (0=normal, 1=high≥85%, 2=critical≥95%).
+   * On tier change: sends a Telegram alert directly (no Claude wake) and
+   * writes an inbox message so Claude acts on it next time it is awake.
+   * Tier state persists across restarts in usage-tier.json.
+   */
+  private async checkUsageTier(): Promise<void> {
+    const now = Date.now();
+    if (now - this.usageLastCheckedAt < this.USAGE_CHECK_INTERVAL_MS) return;
+    this.usageLastCheckedAt = now;
+
+    let rawJson = '';
+    try {
+      rawJson = await new Promise<string>((resolve, reject) => {
+        // Pass high warn thresholds to suppress the script's own Telegram alerts —
+        // we handle alerting ourselves on tier transitions only.
+        execFile('cortextos', ['bus', 'check-usage-api', '--warn-7day', '999', '--warn-5h', '999'], (err, stdout) => {
+          if (err) { reject(err); return; }
+          resolve(stdout);
+        });
+      });
+    } catch (err) {
+      this.log(`Usage check failed: ${err}`);
+      return;
+    }
+
+    let utilization = -1;
+    try {
+      const data = JSON.parse(rawJson);
+      const fiveH = typeof data?.five_hour?.utilization === 'number' ? data.five_hour.utilization : -1;
+      const sevenD = typeof data?.seven_day?.utilization === 'number' ? data.seven_day.utilization : -1;
+      utilization = Math.max(fiveH, sevenD);
+    } catch {
+      this.log('Usage check: could not parse response');
+      return;
+    }
+
+    if (utilization < 0) return;
+
+    const newTier: 0 | 1 | 2 = utilization >= 95 ? 2 : utilization >= 85 ? 1 : 0;
+    const prevTier = this.usageTier;
+
+    if (newTier === prevTier) return; // no transition — stay quiet
+
+    this.usageTier = newTier;
+    this.saveUsageTier();
+
+    const pct = Math.round(utilization);
+    const msg = newTier === 0
+      ? `Rate limit recovered. Utilization at ${pct}%. Resuming normal operations.`
+      : newTier === 1
+        ? `Rate limit at ${pct}%. Tier 1 wind-down: finish current task, no new autonomous work.`
+        : `Rate limit at ${pct}%. Critical threshold reached. Going dark — do not start new work. Will notify on reset.`;
+
+    this.log(`Usage tier transition: ${prevTier} → ${newTier} (${pct}%)`);
+
+    // 1. Send Telegram alert directly (no Claude wake needed)
+    if (this.telegramApi && this.chatId) {
+      this.telegramApi.sendMessage(this.chatId, msg).catch(() => { /* non-critical */ });
+    }
+
+    // 2. Write inbox message so Claude acts on it next time it is awake
+    try {
+      sendMessage(this.paths, 'fast-checker', this.agent.name, 'urgent', msg);
+    } catch (err) {
+      this.log(`Usage tier inbox write failed: ${err}`);
+    }
+  }
+
+  /**
+   * Load usage tier from persistent file.
+   */
+  private loadUsageTier(): void {
+    try {
+      if (existsSync(this.usageTierFile)) {
+        const data = JSON.parse(readFileSync(this.usageTierFile, 'utf-8'));
+        if (data.tier === 0 || data.tier === 1 || data.tier === 2) {
+          this.usageTier = data.tier;
+        }
+      }
+    } catch {
+      this.usageTier = 0;
+    }
+  }
+
+  /**
+   * Persist current usage tier to file.
+   */
+  private saveUsageTier(): void {
+    try {
+      writeFileSync(this.usageTierFile, JSON.stringify({ tier: this.usageTier, checkedAt: Date.now() }) + '\n', 'utf-8');
+    } catch {
+      // Non-critical
     }
   }
 
