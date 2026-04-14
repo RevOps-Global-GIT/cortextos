@@ -64,11 +64,16 @@ export class AgentProcess implements ManagedAgent {
   // stop(). The scheduler owns all recurring + once-type cron timing so the
   // agent never has to rebuild CronCreate state after a hard-restart.
   private cronScheduler: CronScheduler | null = null;
-  // Timestamp of the last "activity" event (start or injected cron). Used by
+  // Timestamp (ms) of the last "activity" event — a scheduler inject. Used by
   // isIdle() to decide whether the agent has finished processing whatever the
   // scheduler last handed it: if last_idle.flag has a newer timestamp than
-  // lastActivityTs, the agent has gone idle since.
+  // lastActivityTs, the agent has gone idle since. Reset to 0 on stop.
   private lastActivityTs: number = 0;
+  // Timestamp (ms) when the current lifecycle booted. isIdle() returns false
+  // during a 60s grace window after bootTs so the scheduler never fires on
+  // top of the bootstrap prompt, even if the idle-flag infrastructure isn't
+  // wired (Stop hook not registered → last_idle.flag never written).
+  private bootTs: number = 0;
 
   constructor(
     name: string,
@@ -116,18 +121,36 @@ export class AgentProcess implements ManagedAgent {
   }
 
   /**
-   * True when the agent has gone idle since the last activity event (startup
-   * or a cron we injected). The idle flag is written by the Stop hook after
-   * every agent turn; comparing its timestamp to lastActivityTs tells us
-   * whether the agent has finished processing whatever we last handed it.
+   * True when it is safe for the cron scheduler to inject a new prompt.
+   *
+   * Three layers, in order:
+   *   1. Startup grace: return false for STARTUP_GRACE_MS after bootTs so the
+   *      scheduler never fires on top of the bootstrap prompt.
+   *   2. Flag present: Claude Code's Stop hook (hook-idle-flag.ts) writes
+   *      `last_idle.flag` as unix seconds after every agent turn. If the flag's
+   *      timestamp is newer than lastActivityTs (i.e. the agent finished
+   *      processing the last thing we injected), the agent is idle.
+   *   3. Flag absent: in deployments where the Stop hook isn't registered, the
+   *      flag never gets written. Rather than indefinitely stalling every cron
+   *      in the max-defer window, default to "idle" once past the grace period
+   *      — Claude Code's own message queue handles back-pressure when busy.
    */
   isIdle(): boolean {
+    const STARTUP_GRACE_MS = 60_000;
+    const now = Date.now();
+    if (this.bootTs > 0 && now - this.bootTs < STARTUP_GRACE_MS) {
+      return false;
+    }
     const flagPath = join(this.stateDir, 'last_idle.flag');
-    if (!existsSync(flagPath)) return false;
+    if (!existsSync(flagPath)) {
+      // Stop hook not wired → treat as idle once past grace window.
+      return true;
+    }
     try {
-      const ts = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
-      if (isNaN(ts)) return false;
-      return ts > this.lastActivityTs;
+      const tsSec = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
+      if (isNaN(tsSec)) return false;
+      // hook-idle-flag.ts writes unix seconds; lastActivityTs is ms.
+      return tsSec * 1000 > this.lastActivityTs;
     } catch {
       return false;
     }
@@ -234,11 +257,11 @@ export class AgentProcess implements ManagedAgent {
       // Delete rate-limit marker only after spawn succeeds.
       if (hadRateLimit) this.deleteRateLimitMarker(stateDir);
 
-      // Reset idle baseline for this lifecycle. isIdle() compares the last
-      // idle flag timestamp to this value; setting it to now means the agent
-      // is not considered idle until the Stop hook writes a newer flag
-      // (i.e. the agent has finished its first turn after boot).
-      this.lastActivityTs = Date.now();
+      // Reset idle baseline for this lifecycle. isIdle() uses bootTs for the
+      // startup grace window and lastActivityTs for per-inject back-pressure.
+      const bootNow = Date.now();
+      this.bootTs = bootNow;
+      this.lastActivityTs = bootNow;
 
       // Start session timer
       this.startSessionTimer();
