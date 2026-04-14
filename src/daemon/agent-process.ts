@@ -134,15 +134,20 @@ export class AgentProcess implements ManagedAgent {
   }
 
   /**
-   * Inject a prompt via the daemon-owned scheduler path. Wraps injectMessage
-   * and bumps lastActivityTs so isIdle() reports false until the agent
-   * finishes processing this prompt and the Stop hook writes a newer idle
-   * flag.
+   * Inject a prompt via the daemon-owned scheduler path. Bypasses MessageDedup
+   * because cron prompts are identical every fire by design — going through
+   * injectMessage(content) would dedup the second and later fires of every
+   * recurring cron and silently skip them. Bumps lastActivityTs so isIdle()
+   * reports false until the agent finishes processing this prompt and the
+   * Stop hook writes a newer idle flag.
    */
   inject(message: string): boolean {
-    const ok = this.injectMessage(message);
-    if (ok) this.lastActivityTs = Date.now();
-    return ok;
+    if (!this.pty || this.status !== 'running') {
+      return false;
+    }
+    injectMessage((data) => this.pty!.write(data), message);
+    this.lastActivityTs = Date.now();
+    return true;
   }
 
   /**
