@@ -304,6 +304,39 @@ export class AgentProcess {
     return this.pty?.getOutputBuffer();
   }
 
+  /**
+   * Resolve the agent's working directory (cwd where Claude Code runs).
+   * Used by the watchdog to locate the transcript jsonl under ~/.claude/projects/.
+   */
+  getWorkingDirectory(): string {
+    return this.config.working_directory || this.env.agentDir || '';
+  }
+
+  /**
+   * Hard-restart (fresh session, no --continue).
+   * Writes the force-fresh marker, then stop()+start(). shouldContinue() sees
+   * the marker on next start and boots fresh.
+   */
+  async hardRestartSelf(reason: string): Promise<void> {
+    try {
+      const stateDir = join(this.env.ctxRoot, 'state', this.name);
+      ensureDir(stateDir);
+      writeFileSync(join(stateDir, '.force-fresh'), reason + '\n', 'utf-8');
+      writeFileSync(join(stateDir, '.restart-planned'), reason + '\n', 'utf-8');
+      const logDir = join(this.env.ctxRoot, 'logs', this.name);
+      ensureDir(logDir);
+      appendFileSync(
+        join(logDir, 'restarts.log'),
+        `[${new Date().toISOString()}] WATCHDOG-HARD-RESTART: ${reason}\n`,
+      );
+    } catch (e) {
+      this.log(`Failed to write restart markers: ${e}`);
+    }
+    this.log(`Hard-restart initiated: ${reason}`);
+    await this.stop();
+    await this.start();
+  }
+
   // --- Private methods ---
 
   private handleExit(exitCode: number): void {
