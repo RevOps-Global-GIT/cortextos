@@ -1,3 +1,4 @@
+import { killOrphanedClaude } from "./orphan-cleanup.js";
 import { AgentManager } from './agent-manager.js';
 import { IPCServer } from './ipc-server.js';
 import { writeFileSync, existsSync, chmodSync } from 'fs';
@@ -54,6 +55,12 @@ class Daemon {
     // Start IPC server
     this.ipcServer = new IPCServer(this.agentManager, this.instanceId);
     await this.ipcServer.start();
+
+    // Kill orphaned Claude processes from prior daemon run (BUG: typing forever)
+    const orphansKilled = killOrphanedClaude();
+    if (orphansKilled > 0) {
+      console.log(`[daemon] Cleaned up ${orphansKilled} orphaned Claude process(es)`);
+    }
 
     // Discover and start agents
     await this.agentManager.discoverAndStart();

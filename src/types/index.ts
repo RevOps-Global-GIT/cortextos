@@ -221,6 +221,7 @@ export interface OrgContext {
   value_prop?: string;
   timezone?: string;
   orchestrator?: string;
+  workingDir?: string;
   day_mode_start?: string;
   day_mode_end?: string;
   default_approval_categories?: string[];
@@ -336,6 +337,7 @@ export interface CtxEnv {
   projectRoot: string;
   timezone?: string;
   orchestrator?: string;
+  workingDir?: string;
 }
 
 // Bus Path Types
