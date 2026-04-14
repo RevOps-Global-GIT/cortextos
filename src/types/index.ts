@@ -185,6 +185,18 @@ export interface AgentConfig {
     never_ask: string[];
   };
   ecosystem?: EcosystemConfig;
+  /**
+   * Gmail watch: when present, the fast-checker daemon polls Gmail every
+   * `interval_ms` (default 15 min) using the `gws` CLI and writes an inbox
+   * message to wake Claude if unread messages match the query.
+   * Requires `gws` to be authenticated (see ~/.config/gws/).
+   */
+  gmail_watch?: {
+    /** Gmail API query string (e.g. "from:example.com is:unread") */
+    query: string;
+    /** Poll interval in milliseconds. Default: 900000 (15 minutes) */
+    interval_ms?: number;
+  };
 }
 
 export interface CronEntry {

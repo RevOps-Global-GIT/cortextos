@@ -238,11 +238,18 @@ export class AgentManager {
     }
 
     const agentProcess = new AgentProcess(name, env, config, log);
+
+    // Build gmail_watch option if configured
+    const gmailWatchOption = config.gmail_watch?.query
+      ? { query: config.gmail_watch.query, intervalMs: config.gmail_watch.interval_ms ?? 15 * 60 * 1000 }
+      : undefined;
+
     const checker = new FastChecker(agentProcess, paths, this.frameworkRoot, {
       log,
       telegramApi,
       chatId,
       allowedUserId: allowedUserId ? parseInt(allowedUserId, 10) : undefined,
+      gmailWatch: gmailWatchOption,
     });
 
     // Send Telegram notification on crashes and session refreshes
