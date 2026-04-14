@@ -415,13 +415,16 @@ export class FastChecker {
       rawJson = await new Promise<string>((resolve, reject) => {
         // Pass high warn thresholds to suppress the script's own Telegram alerts —
         // we handle alerting ourselves on tier transitions only.
-        execFile('cortextos', ['bus', 'check-usage-api', '--warn-7day', '999', '--warn-5h', '999'], (err, stdout) => {
+        execFile('cortextos', ['bus', 'check-usage-api', '--json'], (err, stdout) => {
           if (err) { reject(err); return; }
           resolve(stdout);
         });
       });
     } catch (err) {
-      this.log(`Usage check failed: ${err}`);
+      const errMsg = String(err);
+      if (!errMsg.includes('No OAuth token') && !errMsg.includes('accounts.json')) {
+        this.log(`Usage check failed: ${errMsg}`);
+      }
       return;
     }
 

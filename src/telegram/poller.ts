@@ -20,6 +20,7 @@ export class TelegramPoller {
   private messageHandlers: MessageHandler[] = [];
   private callbackHandlers: CallbackHandler[] = [];
   private pollInterval: number;
+  private label: string;
 
   /**
    * @param api Telegram API client scoped to a single bot token.
@@ -35,13 +36,14 @@ export class TelegramPoller {
    *   write to `.telegram-offset` and lose track of which bot each
    *   offset belonged to.
    */
-  constructor(api: TelegramAPI, stateDir: string, pollInterval: number = 1000, offsetFileSuffix?: string) {
+  constructor(api: TelegramAPI, stateDir: string, pollInterval: number = 1000, offsetFileSuffix?: string, label?: string) {
     this.api = api;
     this.stateDir = stateDir;
     this.pollInterval = pollInterval;
     this.offsetFileName = offsetFileSuffix
       ? `.telegram-offset-${offsetFileSuffix}`
       : '.telegram-offset';
+    this.label = label || 'telegram-poller';
     this.loadOffset();
   }
 
@@ -69,7 +71,7 @@ export class TelegramPoller {
         await this.pollOnce();
       } catch (err) {
         // Log error but continue polling
-        console.error('[telegram-poller] Poll error:', err);
+        console.error(`[${this.label}] Poll error:`, err);
       }
       await sleep(this.pollInterval);
     }
@@ -99,7 +101,7 @@ export class TelegramPoller {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('Conflict') || msg.includes('terminated by other getUpdates')) {
-        console.error('[telegram-poller] Conflict detected (another poller active), backing off 10s');
+        console.error(`[${this.label}] Conflict detected (another poller active), backing off 10s`);
         await sleep(10_000);
         return;
       }
@@ -116,7 +118,7 @@ export class TelegramPoller {
           try {
             handler(update.message);
           } catch (err) {
-            console.error('[telegram-poller] Message handler error:', err);
+            console.error(`[${this.label}] Message handler error:`, err);
             handlerFailed = true;
             break;
           }
@@ -128,7 +130,7 @@ export class TelegramPoller {
           try {
             handler(update.callback_query);
           } catch (err) {
-            console.error('[telegram-poller] Callback handler error:', err);
+            console.error(`[${this.label}] Callback handler error:`, err);
             handlerFailed = true;
             break;
           }

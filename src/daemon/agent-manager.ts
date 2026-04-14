@@ -305,7 +305,7 @@ export class AgentManager {
     // Start Telegram poller if credentials are available
     if (telegramApi && chatId) {
       const stateDir = join(this.ctxRoot, 'state', name);
-      const poller = new TelegramPoller(telegramApi, stateDir);
+      const poller = new TelegramPoller(telegramApi, stateDir, 1000, undefined, name);
 
       poller.onMessage((msg) => {
         // ALLOWED_USER gate: if configured, ignore messages from other users.
@@ -415,9 +415,14 @@ export class AgentManager {
         });
       });
 
-      poller.start().catch(err => {
-        log(`Telegram poller error: ${err}`);
-      });
+      // Stagger poller start to avoid simultaneous getUpdates race conditions.
+      // Each agent waits (N * 2s) where N is its position in the registry.
+      const pollerDelay = this.agents.size * 2000;
+      setTimeout(() => {
+        poller.start().catch(err => {
+          log(`Telegram poller error: ${err}`);
+        });
+      }, pollerDelay);
 
       // Store poller reference so stopAgent() can clean it up
       const entry = this.agents.get(name);
