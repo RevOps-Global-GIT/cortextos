@@ -271,6 +271,10 @@ export class AgentManager {
     // matches config.json. Handles both fresh and --continue restarts safely.
     agentProcess.scheduleCronVerification();
 
+    // Schedule background cron gap detection: polls cron-state.json every 10 min
+    // and nudges the agent if any cron has been silent >2x its expected interval.
+    agentProcess.scheduleGapDetection();
+
     // Start fast checker in background
     checker.start().catch(err => {
       console.error(`[${name}] Fast checker error:`, err);
