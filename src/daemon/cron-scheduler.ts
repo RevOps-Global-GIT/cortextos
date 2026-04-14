@@ -58,8 +58,6 @@ export interface ManagedAgent {
   isIdle(): boolean;
   /** Inject a prompt. Returns false if the write failed. */
   inject(message: string): boolean;
-  /** Route a message through the agent's logger. */
-  log(msg: string): void;
 }
 
 interface ScheduledCron {
@@ -148,7 +146,7 @@ export class CronScheduler {
         }
       });
     } catch (err) {
-      agent.log(`cron-scheduler: config.json watch failed: ${err}`);
+      this.log(`[${agent.name}] config.json watch failed: ${err}`);
     }
 
     this.agents.set(agent.name, {
@@ -158,7 +156,7 @@ export class CronScheduler {
       attachedGeneration: agent.generation,
     });
 
-    agent.log(`cron-scheduler: attached (${crons.length} crons, gen=${agent.generation})`);
+    this.log(`[${agent.name}] attached (${crons.length} crons, gen=${agent.generation})`);
   }
 
   /** Unregister an agent (on AgentProcess.stop()). Safe to call on unknown names. */
@@ -180,7 +178,7 @@ export class CronScheduler {
     if (!sched) return;
     const config = this.loadConfig(sched.agent.configPath);
     sched.crons = this.buildSchedule(sched.agent, config);
-    sched.agent.log(`cron-scheduler: schedule reloaded (${sched.crons.length} crons)`);
+    this.log(`[${name}] schedule reloaded (${sched.crons.length} crons)`);
   }
 
   /**
@@ -204,18 +202,20 @@ export class CronScheduler {
       for (const cron of sched.crons) {
         if (now < cron.nextFireAt) continue;
 
+        const agentName = sched.agent.name;
+
         // Idle-aware injection with bounded deferral.
         if (!sched.agent.isIdle()) {
           if (cron.deferStart === null) {
             cron.deferStart = now;
-            sched.agent.log(`cron "${cron.entry.name}": deferring (agent busy)`);
+            this.log(`[${agentName}] cron "${cron.entry.name}": deferring (agent busy)`);
             continue;
           }
           if (now - cron.deferStart < this.maxDeferMs) {
             continue;
           }
-          sched.agent.log(
-            `cron "${cron.entry.name}": force-injecting after ${Math.round((now - cron.deferStart) / 60_000)}m busy defer`,
+          this.log(
+            `[${agentName}] cron "${cron.entry.name}": force-injecting after ${Math.round((now - cron.deferStart) / 60_000)}m busy defer`,
           );
         }
 
@@ -223,16 +223,16 @@ export class CronScheduler {
         // on the next tick instead of silently skipping a fire.
         const ok = sched.agent.inject(cron.entry.prompt);
         if (!ok) {
-          sched.agent.log(`cron "${cron.entry.name}": inject failed, retrying next tick`);
+          this.log(`[${agentName}] cron "${cron.entry.name}": inject failed, retrying next tick`);
           continue;
         }
 
         try {
           updateCronFire(sched.agent.stateDir, cron.entry.name, cron.entry.interval);
         } catch (err) {
-          sched.agent.log(`cron "${cron.entry.name}": updateCronFire failed: ${err}`);
+          this.log(`[${agentName}] cron "${cron.entry.name}": updateCronFire failed: ${err}`);
         }
-        sched.agent.log(`cron "${cron.entry.name}": fired`);
+        this.log(`[${agentName}] cron "${cron.entry.name}": fired`);
 
         cron.deferStart = null;
         if (cron.entry.type === 'once') {
@@ -240,7 +240,7 @@ export class CronScheduler {
         } else {
           const next = this.computeNextFire(cron.entry, now, sched.agent.timezone);
           if (isNaN(next)) {
-            sched.agent.log(`cron "${cron.entry.name}": next-fire computation failed, removing from schedule`);
+            this.log(`[${agentName}] cron "${cron.entry.name}": next-fire computation failed, removing from schedule`);
             toRemove.push(cron);
           } else {
             cron.nextFireAt = next;
@@ -283,19 +283,19 @@ export class CronScheduler {
     const valid: CronEntry[] = [];
     for (const e of entries) {
       if (!e.name) {
-        agent.log(`cron-scheduler: skipping entry with missing name`);
+        this.log(`[${agent.name}] skipping entry with missing name`);
         continue;
       }
       if (seen.has(e.name)) {
-        agent.log(`cron-scheduler: skipping duplicate cron name "${e.name}"`);
+        this.log(`[${agent.name}] skipping duplicate cron name "${e.name}"`);
         continue;
       }
       if (!e.prompt) {
-        agent.log(`cron-scheduler: skipping cron "${e.name}" with empty prompt`);
+        this.log(`[${agent.name}] skipping cron "${e.name}" with empty prompt`);
         continue;
       }
       if (!e.interval && !e.cron && !e.fire_at) {
-        agent.log(`cron-scheduler: skipping cron "${e.name}" with no interval/cron/fire_at`);
+        this.log(`[${agent.name}] skipping cron "${e.name}" with no interval/cron/fire_at`);
         continue;
       }
       seen.add(e.name);
@@ -311,16 +311,16 @@ export class CronScheduler {
       // the schedule; config.json cleanup is the caller's responsibility.
       if (entry.type === 'once' || entry.fire_at) {
         if (!entry.fire_at) {
-          agent.log(`cron-scheduler: skipping once cron "${entry.name}" without fire_at`);
+          this.log(`[${agent.name}] skipping once cron "${entry.name}" without fire_at`);
           continue;
         }
         const fireAt = Date.parse(entry.fire_at);
         if (isNaN(fireAt)) {
-          agent.log(`cron-scheduler: skipping once cron "${entry.name}" with invalid fire_at`);
+          this.log(`[${agent.name}] skipping once cron "${entry.name}" with invalid fire_at`);
           continue;
         }
         if (fireAt < now) {
-          agent.log(`cron-scheduler: once cron "${entry.name}" expired (${entry.fire_at}), dropping`);
+          this.log(`[${agent.name}] once cron "${entry.name}" expired (${entry.fire_at}), dropping`);
           continue;
         }
         scheduled.push({ entry, nextFireAt: fireAt, deferStart: null });
@@ -336,7 +336,7 @@ export class CronScheduler {
         agent.timezone,
       );
       if (isNaN(nextFireAt)) {
-        agent.log(`cron-scheduler: cron "${entry.name}" has no valid interval/cron, skipping`);
+        this.log(`[${agent.name}] cron "${entry.name}" has no valid interval/cron, skipping`);
         continue;
       }
       scheduled.push({ entry, nextFireAt, deferStart: null });

@@ -23,7 +23,6 @@ class FakeAgent implements ManagedAgent {
   idle = true;
   injects: string[] = [];
   injectReturns = true;
-  logs: string[] = [];
 
   constructor(name: string, stateDir: string, configPath: string, timezone?: string) {
     this.name = name;
@@ -43,9 +42,6 @@ class FakeAgent implements ManagedAgent {
     if (!this.injectReturns) return false;
     this.injects.push(message);
     return true;
-  }
-  log(msg: string): void {
-    this.logs.push(msg);
   }
 }
 
