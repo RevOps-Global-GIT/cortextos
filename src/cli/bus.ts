@@ -113,6 +113,9 @@ busCommand
     }
 
     const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo);
+    try {
+      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
+    } catch { /* non-fatal */ }
     console.log(msgId);
   });
 
@@ -132,6 +135,9 @@ busCommand
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     ackInbox(paths, id);
+    try {
+      logEvent(paths, env.agentName, env.org, 'message', 'inbox_ack', 'info', JSON.stringify({ msg_id: id }));
+    } catch { /* non-fatal */ }
     console.log(`ACK'd ${id}`);
   });
 
@@ -365,6 +371,14 @@ busCommand
       currentTask: opts.task,
       displayName,
     });
+    // Auto-emit a heartbeat event so the activity feed surfaces any live agent
+    // even if the agent itself forgets to call log-event. This makes the
+    // dashboard "agents" list derive from heartbeats, not just explicit events.
+    try {
+      logEvent(paths, env.agentName, env.org, 'heartbeat', 'heartbeat', 'info', JSON.stringify({ status, task: opts.task ?? '' }));
+    } catch {
+      // Non-fatal: heartbeat write already succeeded
+    }
     console.log(`Heartbeat updated: ${env.agentName}`);
   });
 
@@ -878,6 +892,13 @@ busCommand
           parseFallbackReason: parseFallbackReason ?? undefined,
         });
         cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
+        // Auto-emit activity event so dashboard sees every Telegram send,
+        // even from agents that never call log-event directly.
+        try {
+          const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+          const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
+          logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
+        } catch { /* non-fatal */ }
       }
 
       console.log('Message sent');
