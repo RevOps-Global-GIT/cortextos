@@ -4,6 +4,7 @@ import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, Telegram
 import { AgentProcess } from './agent-process.js';
 import { WorkerProcess } from './worker-process.js';
 import { FastChecker } from './fast-checker.js';
+import { CronScheduler } from './cron-scheduler.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -28,12 +29,20 @@ export class AgentManager {
   private ctxRoot: string;
   private frameworkRoot: string;
   private org: string;
+  // Daemon-wide cron scheduler. Each AgentProcess gets the same instance and
+  // calls attachAgent()/detachAgent() on start/stop. The scheduler owns all
+  // recurring cron timing so agents never rebuild CronCreate state on restart.
+  private cronScheduler: CronScheduler;
 
   constructor(instanceId: string, ctxRoot: string, frameworkRoot: string, org: string) {
     this.instanceId = instanceId;
     this.ctxRoot = ctxRoot;
     this.frameworkRoot = frameworkRoot;
     this.org = org;
+    this.cronScheduler = new CronScheduler({
+      log: (msg) => console.log(`[cron-sched] ${msg}`),
+    });
+    this.cronScheduler.start();
   }
 
   /**
@@ -237,7 +246,7 @@ export class AgentManager {
       }
     }
 
-    const agentProcess = new AgentProcess(name, env, config, log);
+    const agentProcess = new AgentProcess(name, env, config, log, this.cronScheduler);
 
     // Build gmail_watch option if configured
     const gmailWatchOption = config.gmail_watch?.query
@@ -272,17 +281,10 @@ export class AgentManager {
 
     this.agents.set(name, { process: agentProcess, checker });
 
-    // Start agent
+    // Start agent. AgentProcess.start() attaches itself to the daemon-side
+    // CronScheduler after a successful spawn, so no further cron wiring is
+    // needed here — the scheduler ticks and injects cron prompts on its own.
     await agentProcess.start();
-
-    // Schedule background cron verification: waits for the agent to finish
-    // its startup turn (idle flag), then injects a prompt to verify CronList
-    // matches config.json. Handles both fresh and --continue restarts safely.
-    agentProcess.scheduleCronVerification();
-
-    // Schedule background cron gap detection: polls cron-state.json every 10 min
-    // and nudges the agent if any cron has been silent >2x its expected interval.
-    agentProcess.scheduleGapDetection();
 
     // Start fast checker in background
     checker.start().catch(err => {
@@ -613,6 +615,9 @@ export class AgentManager {
         console.error(`[agent-manager] Error stopping ${name}:`, err);
       }
     }
+
+    // Tear down the daemon-wide cron scheduler after every agent is stopped.
+    this.cronScheduler.stop();
   }
 
   /**

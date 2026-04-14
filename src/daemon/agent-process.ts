@@ -7,16 +7,20 @@ import { MessageDedup, injectMessage } from '../pty/inject.js';
 import { ensureDir } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
-import { readCronState, parseDurationMs } from '../bus/cron-state.js';
 import { resolvePaths } from '../utils/paths.js';
+import type { CronScheduler, ManagedAgent } from './cron-scheduler.js';
 
 type LogFn = (msg: string) => void;
 
 /**
  * Manages a single agent's lifecycle.
  * Replaces agent-wrapper.sh for one agent.
+ *
+ * Implements ManagedAgent so the daemon-side CronScheduler can attach to it
+ * on start() and inject scheduled cron prompts without requiring Claude Code
+ * to rebuild CronCreate state on every hard-restart.
  */
-export class AgentProcess {
+export class AgentProcess implements ManagedAgent {
   readonly name: string;
   private env: CtxEnv;
   private config: AgentConfig;
@@ -56,8 +60,23 @@ export class AgentProcess {
   // if a second rate-limit exit fires before the first timer elapses (preventing
   // two overlapping timers from racing and triggering a premature restart).
   private rateLimitTimer: ReturnType<typeof setTimeout> | null = null;
+  // Daemon-side cron scheduler. Attached on successful start() and detached on
+  // stop(). The scheduler owns all recurring + once-type cron timing so the
+  // agent never has to rebuild CronCreate state after a hard-restart.
+  private cronScheduler: CronScheduler | null = null;
+  // Timestamp of the last "activity" event (start or injected cron). Used by
+  // isIdle() to decide whether the agent has finished processing whatever the
+  // scheduler last handed it: if last_idle.flag has a newer timestamp than
+  // lastActivityTs, the agent has gone idle since.
+  private lastActivityTs: number = 0;
 
-  constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn) {
+  constructor(
+    name: string,
+    env: CtxEnv,
+    config: AgentConfig,
+    log?: LogFn,
+    cronScheduler?: CronScheduler,
+  ) {
     this.name = name;
     this.env = env;
     this.config = config;
@@ -66,6 +85,64 @@ export class AgentProcess {
     }
     this.dedup = new MessageDedup();
     this.log = log || ((msg) => console.log(`[${name}] ${msg}`));
+    this.cronScheduler = cronScheduler ?? null;
+  }
+
+  // ---------- ManagedAgent implementation ----------
+
+  /** Absolute path to this agent's state directory (state/<name>/). */
+  get stateDir(): string {
+    return join(this.env.ctxRoot, 'state', this.name);
+  }
+
+  /** Absolute path to this agent's config.json. */
+  get configPath(): string {
+    return join(this.env.agentDir, 'config.json');
+  }
+
+  /** IANA timezone used for cron expression evaluation (undefined → UTC). */
+  get timezone(): string | undefined {
+    return this.config.timezone;
+  }
+
+  /** Current lifecycle generation. Bumped on each successful start(). */
+  get generation(): number {
+    return this.lifecycleGeneration;
+  }
+
+  /** True when the PTY is spawned and status is 'running'. */
+  isRunning(): boolean {
+    return this.status === 'running' && this.pty !== null;
+  }
+
+  /**
+   * True when the agent has gone idle since the last activity event (startup
+   * or a cron we injected). The idle flag is written by the Stop hook after
+   * every agent turn; comparing its timestamp to lastActivityTs tells us
+   * whether the agent has finished processing whatever we last handed it.
+   */
+  isIdle(): boolean {
+    const flagPath = join(this.stateDir, 'last_idle.flag');
+    if (!existsSync(flagPath)) return false;
+    try {
+      const ts = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
+      if (isNaN(ts)) return false;
+      return ts > this.lastActivityTs;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Inject a prompt via the daemon-owned scheduler path. Wraps injectMessage
+   * and bumps lastActivityTs so isIdle() reports false until the agent
+   * finishes processing this prompt and the Stop hook writes a newer idle
+   * flag.
+   */
+  inject(message: string): boolean {
+    const ok = this.injectMessage(message);
+    if (ok) this.lastActivityTs = Date.now();
+    return ok;
   }
 
   /**
@@ -152,8 +229,19 @@ export class AgentProcess {
       // Delete rate-limit marker only after spawn succeeds.
       if (hadRateLimit) this.deleteRateLimitMarker(stateDir);
 
+      // Reset idle baseline for this lifecycle. isIdle() compares the last
+      // idle flag timestamp to this value; setting it to now means the agent
+      // is not considered idle until the Stop hook writes a newer flag
+      // (i.e. the agent has finished its first turn after boot).
+      this.lastActivityTs = Date.now();
+
       // Start session timer
       this.startSessionTimer();
+
+      // Attach the cron scheduler if the daemon provided one. Attach AFTER
+      // spawn+status=running so scheduler.isRunning() is immediately true.
+      this.cronScheduler?.attachAgent(this);
+
 
       this.notifyStatusChange();
     } catch (err) {
@@ -175,6 +263,9 @@ export class AgentProcess {
     this.stopRequested = true;
     this.log('Stopping...');
     this.clearSessionTimer();
+    // Detach from the cron scheduler — subsequent ticks will skip this agent
+    // until a fresh start() re-attaches with a new lifecycle generation.
+    this.cronScheduler?.detachAgent(this.name);
 
     // Capture and null out pty BEFORE any awaits so handleExit() during graceful
     // shutdown doesn't race with us and trigger crash recovery or a double-kill.
@@ -678,175 +769,6 @@ export class AgentProcess {
   private notifyStatusChange(): void {
     if (this.onStatusChange) {
       this.onStatusChange(this.getStatus());
-    }
-  }
-
-  /**
-   * Schedule a background cron verification check.
-   *
-   * Waits for the agent to finish its startup sequence (detected via the
-   * last_idle.flag written by the Stop hook after the agent's first turn
-   * completes), then injects a lightweight prompt asking the agent to
-   * verify its crons match config.json and restore any that are missing.
-   *
-   * Safe for both fresh starts and --continue restarts: the idle-wait
-   * ensures we never inject mid-conversation.
-   *
-   * Fire-and-forget: errors are logged but never propagated.
-   */
-  scheduleCronVerification(): void {
-    const crons = this.config.crons;
-    if (!crons || crons.length === 0) return;
-
-    const recurringNames = crons
-      .filter(c => c.type !== 'once')
-      .map(c => c.name);
-    if (recurringNames.length === 0) return;
-
-    const generation = this.lifecycleGeneration;
-
-    // Run in background — don't block startup
-    this.verifyCronsAfterIdle(recurringNames, generation).catch(err => {
-      this.log(`Cron verification failed (non-fatal): ${err}`);
-    });
-  }
-
-  /**
-   * Starts a background gap-detection loop for recurring interval-based crons.
-   * Reads cron-state.json every 10 minutes; injects a nudge if any cron has
-   * been silent for >2x its expected interval.
-   *
-   * Fire-and-forget: errors are logged but never propagated.
-   */
-  scheduleGapDetection(): void {
-    const crons = this.config.crons;
-    if (!crons || crons.length === 0) return;
-
-    // Only monitor recurring crons with a parseable interval (skip cron expressions)
-    const monitorable = crons.filter(
-      c => c.type !== 'once' && c.interval && !isNaN(parseDurationMs(c.interval)),
-    );
-    if (monitorable.length === 0) return;
-
-    const generation = this.lifecycleGeneration;
-
-    this.runGapDetectionLoop(monitorable, generation).catch(err => {
-      this.log(`Cron gap detection failed (non-fatal): ${err}`);
-    });
-  }
-
-  private async runGapDetectionLoop(
-    crons: Array<{ name: string; interval?: string }>,
-    generation: number,
-  ): Promise<void> {
-    const GAP_POLL_MS = 10 * 60 * 1000;   // poll every 10 minutes
-    const GAP_MULTIPLIER = 2.0;            // nudge when gap > 2x expected interval
-
-    const stateDir = join(this.env.ctxRoot, 'state', this.name);
-
-    // Initial wait — give the agent time to boot and register crons before first check
-    await sleep(GAP_POLL_MS);
-
-    while (true) {
-      if (generation !== this.lifecycleGeneration || this.status !== 'running') return;
-
-      const now = Date.now();
-      const state = readCronState(stateDir);
-
-      for (const cronDef of crons) {
-        const intervalMs = parseDurationMs(cronDef.interval!);
-
-        const record = state.crons.find(r => r.name === cronDef.name);
-        if (!record) {
-          // No fire record yet — cron may not have fired once. Skip to avoid
-          // false positives on freshly started agents.
-          continue;
-        }
-
-        const lastFireMs = Date.parse(record.last_fire);
-        if (isNaN(lastFireMs)) continue;
-
-        const gapMs = now - lastFireMs;
-        const threshold = intervalMs * GAP_MULTIPLIER;
-
-        if (gapMs > threshold) {
-          const gapMin = Math.round(gapMs / 60_000);
-          const expectedMin = Math.round(intervalMs / 60_000);
-          const nudge = `[SYSTEM] Cron gap detected for "${cronDef.name}": last fired ${gapMin} minutes ago (expected every ${expectedMin} minutes). Run CronList to verify the cron is still active. If missing, restore it from config.json: /loop ${cronDef.interval} <cron prompt>.`;
-
-          this.log(`Gap nudge: ${cronDef.name} silent ${gapMin}min (threshold: ${Math.round(threshold / 60_000)}min)`);
-          if (this.pty && this.status === 'running') {
-            injectMessage((data) => this.pty!.write(data), nudge);
-          }
-        }
-      }
-
-      await sleep(GAP_POLL_MS);
-    }
-  }
-
-  private async verifyCronsAfterIdle(
-    expectedCrons: string[],
-    generation: number,
-  ): Promise<void> {
-    const stateDir = join(this.env.ctxRoot, 'state', this.name);
-    const flagPath = join(stateDir, 'last_idle.flag');
-
-    // Record the idle flag timestamp at boot so we can detect the NEXT idle
-    // (i.e. after the agent has finished processing its startup prompt).
-    let bootIdleTs = 0;
-    try {
-      if (existsSync(flagPath)) {
-        bootIdleTs = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
-      }
-    } catch { /* ignore */ }
-
-    // Wait up to 10 minutes for the agent to finish its startup turn.
-    // Poll every 15s. Bail if the agent stopped or a new lifecycle started.
-    const maxWaitMs = 10 * 60 * 1000;
-    const pollMs = 15_000;
-    const startTime = Date.now();
-    let foundIdle = false;
-
-    while (Date.now() - startTime < maxWaitMs) {
-      // Bail if this lifecycle is stale (agent restarted or stopped)
-      if (generation !== this.lifecycleGeneration || this.status !== 'running') {
-        return;
-      }
-
-      await sleep(pollMs);
-
-      try {
-        if (existsSync(flagPath)) {
-          const currentIdleTs = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
-          if (currentIdleTs > bootIdleTs) {
-            // Agent has gone idle after boot — safe to inject
-            foundIdle = true;
-            break;
-          }
-        }
-      } catch { /* ignore read errors, keep polling */ }
-    }
-
-    // If the loop timed out without detecting an idle transition, do not inject:
-    // the agent never finished its startup turn (e.g. stuck on a very long boot).
-    if (!foundIdle) {
-      this.log('Cron verification: timed out waiting for idle flag, skipping injection');
-      return;
-    }
-
-    // Final stale check
-    if (generation !== this.lifecycleGeneration || this.status !== 'running') {
-      return;
-    }
-
-    // Inject the verification prompt
-    const cronList = expectedCrons.join(', ');
-    const verifyPrompt = `[SYSTEM] Cron verification: your config.json defines these recurring crons: ${cronList}. Run CronList now. If any are missing, restore them from config.json using /loop. This is an automated safety check.`;
-
-    this.log(`Injecting cron verification (expecting: ${cronList})`);
-    if (this.pty) {
-      injectMessage((data) => this.pty!.write(data), verifyPrompt);
     }
   }
 }
