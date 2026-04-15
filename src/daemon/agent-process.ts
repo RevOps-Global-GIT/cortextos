@@ -365,6 +365,17 @@ export class AgentProcess implements ManagedAgent {
    */
   async sessionRefresh(): Promise<void> {
     this.log('Session refresh (--continue restart)');
+    try {
+      const stateDir = join(this.env.ctxRoot, 'state', this.name);
+      ensureDir(stateDir);
+      writeFileSync(
+        join(stateDir, '.session-refresh'),
+        'session timer reached limit\n',
+        'utf-8',
+      );
+    } catch (e) {
+      this.log(`Failed to write session-refresh marker: ${e}`);
+    }
     await this.stop();
     await this.start();
     this.log('Session refreshed');

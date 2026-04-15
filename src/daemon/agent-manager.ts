@@ -415,18 +415,23 @@ export class AgentManager {
         });
       });
 
-      // Stagger poller start to avoid simultaneous getUpdates race conditions.
-      // Each agent waits (N * 2s) where N is its position in the registry.
-      const pollerDelay = this.agents.size * 2000;
-      setTimeout(() => {
-        poller.start().catch(err => {
-          log(`Telegram poller error: ${err}`);
-        });
-      }, pollerDelay);
-
-      // Store poller reference so stopAgent() can clean it up
+      // Store poller reference so stopAgent() can clean it up BEFORE we fire
+      // start(). Previously this came AFTER scheduling via setTimeout, which
+      // was fine for the synchronous `entry.poller = poller` assignment but
+      // is tidier this way: the agent-manager has a handle on the poller
+      // before the poll loop has any chance to run.
       const entry = this.agents.get(name);
       if (entry) entry.poller = poller;
+
+      // Stagger poller start to avoid simultaneous getUpdates race conditions.
+      // Each agent waits (N * 2s) where N is its position in the registry.
+      // The delay is handled inside poller.start() rather than via setTimeout
+      // so a stop() issued during the stagger window is honored instead of
+      // leaking an orphaned poll loop. See BUG-POLLER-RACE note in poller.ts.
+      const pollerDelay = this.agents.size * 2000;
+      poller.start(pollerDelay).catch(err => {
+        log(`Telegram poller error: ${err}`);
+      });
 
       log('Telegram poller started');
 
