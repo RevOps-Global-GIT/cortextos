@@ -54,3 +54,17 @@ Analyst's `upstream-sync` cron references `bash /home/cortextos/cortextos/script
 **Files touched:** `src/telegram/poller.ts`, `src/daemon/agent-manager.ts`.
 
 **Status:** Local only. No upstream PR. The upstream BUG-011 fix (PR #11) addressed PTY restart races but did not touch the TelegramPoller start-stop race.
+
+## agent-manager IPC stop+start race, BUG-011 false alarm (2026-04-15)
+
+`src/daemon/agent-manager.ts` — fixes a long-standing false-positive "BUG-011 REGRESSION CHECK" warning that fired every time a user issued rapid stop+start IPC calls for the same agent (a routine workflow for `cortextos stop X && cortextos start X`).
+
+**Mechanism:** The IPC server (`ipc-server.ts`) dispatches `stop-agent` and `start-agent` handlers fire-and-forget, responding `success: true` to the client before the daemon has finished executing. `stopAgent()` awaits the PTY exit (6-15s via Ctrl-C + `/exit` + wait + optional kill). If `start-agent` arrives during that window, `startAgent()` saw `this.agents.has(name) === true`, logged "BUG-011 REGRESSION CHECK: ... This should not happen with PR #11 in place", queued via `pendingRestarts`, and eventually ran after `stopAgent` finished. The `pendingRestarts` fallback was working correctly — the warning text was just misleading, and the warning was noisy. PR #11 only fixed the PTY-level race, not the IPC-level fire-and-forget race.
+
+**Fix:** Added `inFlightStops: Map<string, Promise<void>>` to `AgentManager`. `stopAgent()` is now a thin wrapper that registers its promise in `inFlightStops` before awaiting `_doStopAgent()`, then clears the entry in a `finally`. `startAgent()` checks `inFlightStops.get(name)` at entry and, if present, awaits the in-flight stop before proceeding past the `agents.has(name)` guard. The `pendingRestarts` safety net and guard are kept in case any future code path mutates `this.agents` without going through `stopAgent`, but the comment and log level are updated to reflect that the branch is now only a safety net — not a regression indicator.
+
+Verified by the same rapid stop+start pattern that previously produced the warning: the log now shows `[agent-manager] startAgent(name) waiting for in-flight stopAgent to complete` followed by a clean handoff, no warning.
+
+**Files touched:** `src/daemon/agent-manager.ts`.
+
+**Status:** Local only. No upstream PR. Worth proposing upstream — this removes a persistent false-positive that the cortextos codebase has been living with since PR #11.
