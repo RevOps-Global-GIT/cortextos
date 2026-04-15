@@ -306,3 +306,39 @@ describe('AgentProcess - BUG-048 fix (session timer re-reads config)', () => {
     expect(refreshSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('AgentProcess - sessionRefresh writes .session-refresh marker', () => {
+  it('sessionRefresh writes the marker synchronously before stop() can resolve', async () => {
+    // hook-crash-alert.ts (SessionEnd hook) looks for a .session-refresh
+    // file in the agent's stateDir to classify an exit as a planned session
+    // rotation and post ♻️ instead of 🚨 CRASH. Before the fix, nothing in
+    // the codebase wrote this marker — every 4h rotation fell through to
+    // the default crash classification. sessionRefresh must write the
+    // marker BEFORE awaiting this.stop(), so the hook sees it regardless
+    // of how fast the PTY tears down.
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    // Kick off sessionRefresh. The marker write is synchronous (happens
+    // before the first await inside sessionRefresh) so it MUST have
+    // completed by the time the caller gets the returned promise back —
+    // there is no need to await anything here.
+    const refreshPromise = ap.sessionRefresh();
+
+    const markerWrite = fsMocks.writeFileSync.mock.calls.find((call: unknown[]) => {
+      const path = call[0];
+      return typeof path === 'string' && path.endsWith('/.session-refresh');
+    });
+    expect(markerWrite).toBeDefined();
+    // Second arg is the marker contents — "session timer reached limit"
+    // is what hook-crash-alert reads into the `reason` field.
+    expect(String(markerWrite?.[1])).toContain('session timer reached limit');
+
+    // Clean up: fire the PTY exit so stop() can resolve, and let
+    // sessionRefresh finish without leaving a dangling promise. Any
+    // subsequent failure inside the mock re-spawn path is irrelevant —
+    // the assertion above already fired.
+    if (capturedOnExit) capturedOnExit(129, 0);
+    refreshPromise.catch(() => { /* test done */ });
+  }, 10000);
+});

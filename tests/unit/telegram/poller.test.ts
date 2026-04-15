@@ -169,3 +169,70 @@ describe('TelegramPoller — offset-after-handler', () => {
     }
   });
 });
+
+describe('TelegramPoller — stop-before-start race', () => {
+  let stateDir: string;
+
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), 'cortextos-poller-stopstart-'));
+  });
+
+  afterEach(() => {
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it('stop() called before start() prevents the poll loop from running', async () => {
+    // This is the race that used to leak orphaned pollers inside the daemon:
+    // agent-manager scheduled poller.start() via setTimeout, and if stopAgent
+    // ran during the stagger window, poller.stop() set running=false on a
+    // poller whose while-loop had not yet started. The deferred start() then
+    // unconditionally set running=true and ran forever, with no agent-manager
+    // entry holding a reference — producing a phantom getUpdates caller that
+    // raced the real poller on the same bot token.
+    const { api, calls } = makeStubApi([makeMessageUpdate(10, 'should-never-be-seen')]);
+    const poller = new TelegramPoller(api, stateDir);
+
+    poller.stop();
+    await poller.start();
+
+    expect(calls).toEqual([]);
+    expect(api.getUpdates).not.toHaveBeenCalled();
+  });
+
+  it('stop() during the initial stagger delay prevents the poll loop', async () => {
+    // agent-manager passes a non-zero initialDelayMs so multiple agents
+    // stagger their first getUpdates calls. A stop() issued during that
+    // pre-loop sleep must be honored — the re-check after the sleep is
+    // what catches it.
+    const { api, calls } = makeStubApi([makeMessageUpdate(20, 'also-never')]);
+    const poller = new TelegramPoller(api, stateDir);
+
+    const startPromise = poller.start(100);
+    // Give start() a microtask to enter its initial sleep, then stop.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    poller.stop();
+    await startPromise;
+
+    expect(calls).toEqual([]);
+    expect(api.getUpdates).not.toHaveBeenCalled();
+  });
+
+  it('start() is idempotent — a second call is a no-op', async () => {
+    // Defense-in-depth: if start() is accidentally called twice on the same
+    // instance, the second call must not spin up a second concurrent poll
+    // loop. The `started` flag guards this.
+    const { api } = makeStubApi([makeMessageUpdate(30, 'only-once')]);
+    const poller = new TelegramPoller(api, stateDir);
+
+    // Fire start() with a long initial delay so the first call is still
+    // sleeping when the second arrives. Calling stop() then await resolves
+    // both — but getUpdates must not have been called more than zero times
+    // (both starts were cut short by stop).
+    const firstStart = poller.start(500);
+    const secondStart = poller.start(500);
+    poller.stop();
+    await Promise.all([firstStart, secondStart]);
+
+    expect(api.getUpdates).not.toHaveBeenCalled();
+  });
+});
