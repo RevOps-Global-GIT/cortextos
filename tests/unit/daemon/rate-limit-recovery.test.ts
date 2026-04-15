@@ -8,6 +8,10 @@ let mockHasRateLimitSignature = false;
 
 const mockOutputBuffer = {
   hasRateLimitSignature: vi.fn(() => mockHasRateLimitSignature),
+  // Returns null so the rate-limit handler falls back to the configured
+  // pause (rate_limit_pause_seconds ?? 18000). These tests exercise the
+  // fallback path, not the parsed-reset-time path added in b3da7f1.
+  getRateLimitResetSeconds: vi.fn(() => null),
   isBootstrapped: vi.fn().mockReturnValue(false),
 };
 
