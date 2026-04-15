@@ -492,8 +492,12 @@ export class AgentProcess implements ManagedAgent {
     // trigger the git watchdog — they are expected operational events tied to
     // Anthropic's 5-hour rolling rate-limit window.
     if (outputBuffer?.hasRateLimitSignature()) {
-      const pauseSeconds = this.config.rate_limit_pause_seconds ?? 18000;
-      this.log(`Rate-limit detected — pausing ${pauseSeconds}s before restart (not counted as crash)`);
+      // Prefer the reset time parsed from the CLI status bar (e.g. "resets 10pm")
+      // over the fixed 5-hour default. Weekly limits need a much longer pause.
+      const parsedReset = outputBuffer.getRateLimitResetSeconds();
+      const configured = this.config.rate_limit_pause_seconds ?? 18000;
+      const pauseSeconds = parsedReset ?? configured;
+      this.log(`Rate-limit detected — pausing ${pauseSeconds}s before restart ${parsedReset ? '(parsed reset)' : '(default)'} (not counted as crash)`);
       this.status = 'rate-limited';
       this.notifyStatusChange();
       // Write a marker so the next boot prompt informs the agent it's recovering

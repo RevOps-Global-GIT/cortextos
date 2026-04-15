@@ -133,9 +133,59 @@ export class OutputBuffer {
       text.includes('too many requests') ||
       text.includes('quota exceeded') ||
       text.includes('usage limit') ||
+      // Claude Code CLI status bar: "used N% of your weekly limit · resets Xpm"
+      // and "used N% of your 5-hour limit · resets Xpm"
+      text.includes('weekly limit') ||
+      text.includes('5-hour limit') ||
+      text.includes('5h limit') ||
+      /used \d+% of your/.test(text) ||
       // HTTP 529 status line or JSON error code
       (text.includes('529') && (text.includes('overload') || text.includes('error')))
     );
+  }
+
+  /**
+   * Parse the reset time from a Claude Code CLI rate-limit message and return
+   * the number of seconds until that reset. Returns null if no reset time is
+   * found. Handles formats like:
+   *   "resets 10pm (America/Los_Angeles)"
+   *   "resets 3am"
+   * Returns a minimum of 300s (5min) and a maximum of 7 days.
+   */
+  getRateLimitResetSeconds(): number | null {
+    const text = this.chunks.slice(-200).join('').replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').toLowerCase();
+    // Match "resets <hour><am|pm>" optionally followed by a tz in parens
+    const m = text.match(/resets\s+(\d{1,2})\s*(am|pm)/);
+    if (!m) return null;
+    const hour12 = parseInt(m[1], 10);
+    const ampm = m[2];
+    let hour24 = hour12 % 12;
+    if (ampm === 'pm') hour24 += 12;
+
+    // Build a Date in America/Los_Angeles for the reset hour. Use Intl to
+    // compute the LA offset without depending on the machine tz.
+    const now = new Date();
+    const laString = now.toLocaleString('en-US', {
+      timeZone: 'America/Los_Angeles',
+      hour12: false,
+    });
+    // "4/15/2026, 01:00:00"  → parse to extract the LA wall clock
+    const laMatch = laString.match(/(\d+)\/(\d+)\/(\d+),?\s+(\d+):(\d+):(\d+)/);
+    if (!laMatch) return null;
+    const laHour = parseInt(laMatch[4], 10);
+    const laMin = parseInt(laMatch[5], 10);
+    const laSec = parseInt(laMatch[6], 10);
+
+    // Seconds from LA "now" to LA "hour24:00:00". If the reset hour has
+    // already passed today, roll to tomorrow.
+    let delta = (hour24 - laHour) * 3600 - laMin * 60 - laSec;
+    if (delta <= 0) delta += 24 * 3600;
+
+    // Weekly limits wait until the LA reset time, then add extra 5min of
+    // safety so we do not re-enter the loop right at the boundary.
+    const MIN = 300;          // 5 minutes
+    const MAX = 7 * 24 * 3600; // 7 days
+    return Math.max(MIN, Math.min(MAX, delta + 300));
   }
 
   /**
