@@ -25,42 +25,115 @@ export class TelegramAPI {
 
   /**
    * Send a text message. Splits long messages at 4096 chars.
+   *
+   * Markdown parse behavior:
+   *
+   * - By default, each chunk is sent with `parse_mode: "Markdown"` (Telegram
+   *   v1 Markdown). If the Telegram API rejects the chunk with a
+   *   "can't parse entities" error — usually because the text contains an
+   *   unescaped `_`, `*`, backtick, or `[` that Telegram interprets as the
+   *   start of an entity it cannot close — sendMessage catches the error,
+   *   logs a one-line stderr warning, and automatically RETRIES that chunk
+   *   ONCE with `parse_mode` omitted (plain text). This is the safety net
+   *   for agents generating natural prose that happens to look like bad
+   *   markdown. If the retry also fails, the error is rethrown so callers
+   *   still see real failures.
+   *
+   * - Callers who KNOW their message contains unescaped special characters
+   *   can opt out of parsing entirely by passing `{ parseMode: null }`.
+   *   This skips the first Markdown attempt, avoids the retry roundtrip,
+   *   and suppresses the warning. Useful for `cortextos bus send-telegram
+   *   --plain-text` and any agent message known to carry literal code,
+   *   error output, or user-supplied text.
+   *
+   * - Other error classes (401 bad_token, 400 chat_not_found, 403
+   *   bot_recipient, network failures) do NOT trigger the retry. Only
+   *   parse-entity failures are recoverable here — everything else is a
+   *   real config problem that callers need to see.
    */
   async sendMessage(
     chatId: string | number,
     text: string,
     replyMarkup?: object,
+    opts?: {
+      parseMode?: 'Markdown' | null;
+      onParseFallback?: (reason: string) => void;
+    },
   ): Promise<any> {
     const sanitized = this.sanitizeMarkdown(text);
     // Rate limit: 1 message per second per chat
     await this.rateLimit(String(chatId));
 
-    // Split long messages
+    const requestedParseMode: 'Markdown' | null = opts?.parseMode === null ? null : 'Markdown';
+
+    // Split long messages. Always produces at least one chunk (even if the
+    // input is empty, which preserves the old behavior of POSTing once).
     const maxLen = 4096;
-    if (sanitized.length <= maxLen) {
-      return this.post('sendMessage', {
-        chat_id: chatId,
-        text: sanitized,
-        parse_mode: 'Markdown',
-        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-      });
-    }
-
-    // Split into chunks
     const chunks: string[] = [];
-    for (let i = 0; i < sanitized.length; i += maxLen) {
-      chunks.push(sanitized.slice(i, i + maxLen));
+    if (sanitized.length <= maxLen) {
+      chunks.push(sanitized);
+    } else {
+      for (let i = 0; i < sanitized.length; i += maxLen) {
+        chunks.push(sanitized.slice(i, i + maxLen));
+      }
     }
 
-    let result: any;
-    for (const chunk of chunks) {
-      result = await this.post('sendMessage', {
-        chat_id: chatId,
-        text: chunk,
-        parse_mode: 'Markdown',
-      });
+    let lastResult: any;
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const isLastChunk = i === chunks.length - 1;
+      lastResult = await this.sendChunk(
+        chatId,
+        chunk,
+        requestedParseMode,
+        isLastChunk ? replyMarkup : undefined,
+        (reason) => {
+          // Default observability: one-line stderr warning, plus forward to
+          // the caller's hook if they supplied one (outbound log augmentation
+          // uses this path).
+          console.warn(`[telegram] parse-mode fallback for chat ${chatId}: ${reason}`);
+          opts?.onParseFallback?.(reason);
+        },
+      );
     }
-    return result;
+    return lastResult;
+  }
+
+  /**
+   * Send a single chunk with the given parse mode, with a one-shot retry
+   * on parse-entity failures. Extracted so the multi-chunk path can reuse
+   * the same retry logic without duplicating the try/catch.
+   */
+  private async sendChunk(
+    chatId: string | number,
+    text: string,
+    parseMode: 'Markdown' | null,
+    replyMarkup: object | undefined,
+    onFallback: (reason: string) => void,
+  ): Promise<any> {
+    const basePayload: Record<string, unknown> = {
+      chat_id: chatId,
+      text,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+    };
+
+    // First attempt: honor the caller's requested parse mode.
+    const firstPayload =
+      parseMode === null ? basePayload : { ...basePayload, parse_mode: parseMode };
+
+    try {
+      return await this.post('sendMessage', firstPayload);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Only retry for Telegram parse-entity errors. Any other failure
+      // (401, 400, 403, network) must surface to the caller unchanged.
+      if (parseMode !== null && /can'?t parse entities|parse entit/i.test(msg)) {
+        onFallback(msg);
+        // Retry with parse_mode omitted (plain text).
+        return await this.post('sendMessage', basePayload);
+      }
+      throw err;
+    }
   }
 
   /**

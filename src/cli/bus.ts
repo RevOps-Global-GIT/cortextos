@@ -809,10 +809,11 @@ busCommand
   .command('send-telegram')
   .description('Send a message to a Telegram chat')
   .argument('<chat-id>', 'Telegram chat ID')
-  .argument('<message>', 'Message text (supports Telegram Markdown)')
+  .argument('<message>', 'Message text (supports Telegram Markdown unless --plain-text is set)')
   .option('--image <path>', 'Send a photo with caption')
   .option('--file <path>', 'Send a document/file with caption (any file type)')
-  .action(async (chatId: string, message: string, opts: { image?: string; file?: string }) => {
+  .option('--plain-text', 'Skip Telegram Markdown parsing entirely. Use this when the message contains unescaped _, *, backtick, or [ that would otherwise trip the Markdown parser. Without this flag, sendMessage still retries once with parse_mode disabled on a parse-entity error — so it is purely an opt-in to save the retry roundtrip.', false)
+  .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean }) => {
     // Resolve bot token: agent .env first, then process.env
     const env = resolveEnv();
     let botToken = '';
@@ -842,6 +843,7 @@ busCommand
     const api = new TelegramAPI(botToken);
     try {
       let sentMessageId = 0;
+      let parseFallbackReason: string | null = null;
       if (opts.image) {
         const result = await api.sendPhoto(chatId, opts.image, message);
         sentMessageId = result?.result?.message_id ?? 0;
@@ -849,14 +851,23 @@ busCommand
         const result = await api.sendDocument(chatId, opts.file, message);
         sentMessageId = result?.result?.message_id ?? 0;
       } else {
-        const result = await api.sendMessage(chatId, message);
+        const result = await api.sendMessage(chatId, message, undefined, {
+          parseMode: opts.plainText ? null : 'Markdown',
+          onParseFallback: (reason) => {
+            parseFallbackReason = reason;
+          },
+        });
         sentMessageId = result?.result?.message_id ?? 0;
       }
 
       // Log outbound and cache last-sent for context injection
       const env = resolveEnv();
       if (env.agentName && env.ctxRoot) {
-        logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId);
+        logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId, {
+          parseMode: opts.plainText ? 'none' : 'markdown',
+          parseFallback: parseFallbackReason !== null,
+          parseFallbackReason: parseFallbackReason ?? undefined,
+        });
         cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
       }
 
