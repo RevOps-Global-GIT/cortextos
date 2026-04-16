@@ -50,9 +50,14 @@ describe('normalizeOrgName', () => {
   });
 
   it('exact case match wins over case-insensitive match on case-sensitive filesystems', () => {
-    // Simulate a case-sensitive fs hosting both casings as distinct orgs.
+    // macOS/Windows are case-insensitive — both dirs map to the same inode,
+    // so this scenario cannot be simulated there. Skip gracefully.
     mkdirSync(join(fwRoot, 'orgs', 'AcmeCorp'));
-    mkdirSync(join(fwRoot, 'orgs', 'acmecorp'));
+    try {
+      mkdirSync(join(fwRoot, 'orgs', 'acmecorp'));
+    } catch {
+      return; // case-insensitive filesystem — test not applicable on this OS
+    }
     // Exact match path: return whichever casing the caller asked for.
     expect(normalizeOrgName(fwRoot, 'AcmeCorp')).toBe('AcmeCorp');
     expect(normalizeOrgName(fwRoot, 'acmecorp')).toBe('acmecorp');

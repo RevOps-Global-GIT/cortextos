@@ -39,18 +39,10 @@ export function normalizeOrgName(frameworkRoot: string, org: string): string {
   if (!org) return org;
 
   const orgsDir = join(frameworkRoot, 'orgs');
-  const exactPath = join(orgsDir, org);
 
-  // Fast path: exact case match on disk.
-  try {
-    if (existsSync(exactPath) && statSync(exactPath).isDirectory()) {
-      return org;
-    }
-  } catch {
-    return org;
-  }
-
-  // Slow path: case-insensitive scan of the orgs dir.
+  // Read the directory once. Using readdirSync for both paths avoids the
+  // case-insensitive filesystem trap where existsSync('orgs/acmecorp')
+  // returns true on macOS/Windows even when the dir was created as 'AcmeCorp'.
   let entries: string[];
   try {
     entries = readdirSync(orgsDir);
@@ -58,16 +50,20 @@ export function normalizeOrgName(frameworkRoot: string, org: string): string {
     return org;
   }
 
+  // Fast path: exact case match in the listing.
+  if (entries.includes(org)) {
+    try {
+      if (statSync(join(orgsDir, org)).isDirectory()) return org;
+    } catch { /* fall through */ }
+  }
+
+  // Slow path: case-insensitive scan — return the on-disk canonical casing.
   const orgLower = org.toLowerCase();
   for (const entry of entries) {
     if (entry.toLowerCase() === orgLower) {
       try {
-        if (statSync(join(orgsDir, entry)).isDirectory()) {
-          return entry;
-        }
-      } catch {
-        // Skip unreadable entry
-      }
+        if (statSync(join(orgsDir, entry)).isDirectory()) return entry;
+      } catch { /* skip unreadable entry */ }
     }
   }
 
