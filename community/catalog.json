@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "updated_at": "2026-04-06T00:00:00Z",
+  "updated_at": "2026-04-16T00:00:00Z",
   "items": [
     {
       "name": "orchestrator",
@@ -313,6 +313,18 @@
       "dependencies": [],
       "install_path": "community/skills/nighttime-mode",
       "submitted_at": "2026-04-06T00:00:00Z"
+    },
+    {
+      "name": "agentcard-purchase",
+      "description": "Approval-gated virtual Visa card issuance for autonomous agent purchases via AgentCard.sh",
+      "author": "revops-global",
+      "type": "skill",
+      "version": "1.0.0",
+      "tags": ["payments", "purchasing", "agentcard", "financial", "approvals", "virtual-card"],
+      "review_status": "pending",
+      "dependencies": ["approvals"],
+      "install_path": "community/skills/agentcard-purchase",
+      "submitted_at": "2026-04-16T00:00:00Z"
     }
   ]
 }
