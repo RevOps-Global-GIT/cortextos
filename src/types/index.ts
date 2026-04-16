@@ -59,6 +59,15 @@ export interface Task {
   result?: string;
   /** Linked deliverables (files saved via `cortextos bus save-output`). */
   outputs?: TaskOutput[];
+  /**
+   * Dependency DAG edges (beads-inspired). Optional so existing task
+   * files remain valid with these fields absent. `blocked_by` lists
+   * task IDs that must reach `completed` before this task can
+   * progress; `blocks` is the reverse view, maintained symmetrically
+   * at create-time so queries in either direction are cheap.
+   */
+  blocks?: string[];
+  blocked_by?: string[];
 }
 
 // Event Types

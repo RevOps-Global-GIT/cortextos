@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName } from '../utils/validate.js';
-import { createTask, updateTask, completeTask, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
+import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
@@ -149,15 +149,20 @@ busCommand
   .option('--priority <p>', 'Priority (urgent, high, normal, low)', 'normal')
   .option('--project <name>', 'Project name')
   .option('--needs-approval', 'Require human approval before execution')
-  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean }) => {
+  .option('--blocked-by <ids>', 'Comma-separated task IDs that must complete before this task can progress')
+  .option('--blocks <ids>', 'Comma-separated task IDs that this new task will block (symmetric reverse edge)')
+  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
       assignee: opts.assignee,
       priority: opts.priority as Priority,
       project: opts.project,
       needsApproval: opts.needsApproval ?? false,
+      blockedBy: parseList(opts.blockedBy),
+      blocks: parseList(opts.blocks),
     });
     console.log(taskId);
     // Auto-notify assignee so the task is visible immediately (issue #78)
@@ -195,6 +200,93 @@ busCommand
 
     updateTask(paths, id, status as TaskStatus);
     console.log(`Updated ${id} -> ${status}`);
+  });
+
+busCommand
+  .command('compact-tasks')
+  .description('Archive completed tasks older than N days into a per-month archive-YYYY-MM.jsonl and remove them from the active list — preserves audit logs, skips tasks still needed as blockers')
+  .option('--older-than <days>', 'Cutoff in days (default: 30)', '30')
+  .option('--dry-run', 'Report what would be compacted without modifying anything')
+  .action((opts: { olderThan: string; dryRun?: boolean }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const olderThanDays = parseInt(opts.olderThan, 10);
+    if (isNaN(olderThanDays) || olderThanDays < 0) {
+      console.error('--older-than must be a non-negative integer');
+      process.exit(1);
+    }
+    const report = compactTasks(paths, { olderThanDays, dryRun: opts.dryRun });
+    const verb = report.dry_run ? 'would compact' : 'compacted';
+    console.log(`${verb} ${report.archived.length} task${report.archived.length === 1 ? '' : 's'}, skipped ${report.skipped.length}`);
+    for (const a of report.archived) console.log(`  ✓ ${a.id}  ->  ${a.archive_file}`);
+    if (report.skipped.length > 0) {
+      console.log(`\nSkipped (common reasons: within cutoff, still needed as blocker):`);
+      for (const s of report.skipped) console.log(`  - ${s.id}  (${s.reason})`);
+    }
+  });
+
+busCommand
+  .command('check-deps')
+  .description('Show open dependencies blocking a task — lists blocked_by entries that are not yet completed')
+  .argument('<id>', 'Task ID')
+  .action((id: string) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const open = checkTaskDependencies(paths, id);
+    if (open.length === 0) {
+      console.log(`${id}: no open dependencies — ready to work`);
+      return;
+    }
+    console.log(`${id} blocked by ${open.length} dependency${open.length === 1 ? '' : 's'}:`);
+    for (const d of open) console.log(`  ${d.id}  [${d.status}]`);
+  });
+
+busCommand
+  .command('task-history')
+  .description("Show a task's append-only audit log (every status change, claim, and completion)")
+  .argument('<id>', 'Task ID')
+  .option('--json', 'Emit raw JSONL instead of formatted text')
+  .action((id: string, opts: { json?: boolean }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const entries = readTaskAudit(paths, id);
+    if (entries.length === 0) {
+      console.log(`No audit log for task ${id}`);
+      return;
+    }
+    if (opts.json) {
+      for (const e of entries) console.log(JSON.stringify(e));
+      return;
+    }
+    console.log(`Audit log for ${id} (${entries.length} entries):`);
+    for (const e of entries) {
+      const transition = e.from && e.to ? `${e.from} -> ${e.to}` : e.to || '';
+      const note = e.note ? ` | ${e.note}` : '';
+      console.log(`  ${e.ts}  ${e.event.padEnd(8)}  ${e.agent.padEnd(16)}  ${transition}${note}`);
+    }
+  });
+
+busCommand
+  .command('claim-task')
+  .description('Atomically claim a pending task — marks in_progress + sets assignee in one shot, rejecting if another agent already owns it')
+  .argument('<id>', 'Task ID')
+  .option('--agent <name>', 'Agent claiming the task (defaults to CTX_AGENT_NAME)')
+  .action((id: string, opts: { agent?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const agent = opts.agent || env.agentName;
+    if (!agent) {
+      console.error('ERROR: --agent or CTX_AGENT_NAME required');
+      process.exit(1);
+    }
+    try {
+      const task = claimTask(paths, id, agent);
+      console.log(`Claimed ${id} -> in_progress (assigned to ${agent})`);
+      console.log(`  Title: ${task.title}`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
   });
 
 busCommand
@@ -256,12 +348,14 @@ busCommand
   .option('--agent <name>', 'Filter by agent')
   .option('--status <s>', 'Filter by status')
   .option('--format <fmt>', 'Output format: json or text', 'text')
-  .action((opts: { agent?: string; status?: string; format?: string }) => {
+  .option('--respect-deps', 'Sort DAG-aware: unblocked tasks first, blocked tasks last')
+  .action((opts: { agent?: string; status?: string; format?: string; respectDeps?: boolean }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const tasks = listTasks(paths, {
       agent: opts.agent,
       status: opts.status as TaskStatus,
+      respectDeps: opts.respectDeps ?? false,
     });
 
     if (opts.format === 'json') {
