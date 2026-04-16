@@ -83,6 +83,9 @@ export function formatValidateError(result: Extract<ValidateCredentialsResult, {
 export class TelegramAPI {
   private baseUrl: string;
   private lastSendTime: Map<string, number> = new Map();
+  // Chat IDs already warned for the self_chat trap. Keeps the runtime
+  // diagnostic emitted at most once per chat_id per process lifetime.
+  private warnedSelfChat: Set<string> = new Set();
 
   constructor(token: string) {
     this.baseUrl = `https://api.telegram.org/bot${token}`;
@@ -205,6 +208,23 @@ export class TelegramAPI {
         onFallback(msg);
         // Retry with parse_mode omitted (plain text).
         return await this.post('sendMessage', basePayload);
+      }
+      // self_chat safety net: a 403 "bots can't send messages to bots" at
+      // sendMessage time means CHAT_ID likely equals the bot's own user id
+      // (pasted from the BOT_TOKEN prefix during setup). Emit a one-time
+      // diagnostic per chat_id per process so operators see a clear pointer
+      // even when the agent was provisioned before the config-time probe
+      // (validateCredentials) landed. Does NOT change throw behavior.
+      if (/bots can'?t send messages to bots/i.test(msg)) {
+        const key = String(chatId);
+        if (!this.warnedSelfChat.has(key)) {
+          this.warnedSelfChat.add(key);
+          console.warn(
+            `[telegram] self_chat trap likely: chat_id=${key} resolved to another bot. ` +
+            `Check .env — CHAT_ID must be YOUR Telegram user id, not the BOT_TOKEN prefix. ` +
+            `Fix by sending /start to the bot from your own account and reading the chat id via getUpdates.`,
+          );
+        }
       }
       throw err;
     }
