@@ -382,7 +382,13 @@ export class AgentManager {
         // Build reply context from the replied-to message.
         const replyToText = buildReplyContext(msg.reply_to_message);
 
-        const recentHistory = buildRecentHistory(this.ctxRoot, name, effectiveChatId, 6) ?? undefined;
+        // Only inject conversation history when the user is replying to a
+        // prior message — the scenario where multi-sender context matters.
+        // Skipping the injection on every inbound avoids ~1.2KB of extra
+        // tokens on every message for high-volume agents.
+        const recentHistory = msg.reply_to_message
+          ? (buildRecentHistory(this.ctxRoot, name, effectiveChatId, 6) ?? undefined)
+          : undefined;
         const formatted = FastChecker.formatTelegramTextMessage(
           from,
           effectiveChatId,
