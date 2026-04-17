@@ -340,7 +340,7 @@ export class TelegramAPI {
     return this.post('getUpdates', {
       offset,
       timeout,
-      allowed_updates: ['message', 'callback_query'],
+      allowed_updates: ['message', 'callback_query', 'message_reaction'],
     });
   }
 

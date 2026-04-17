@@ -441,11 +441,38 @@ export class AgentManager {
         });
       });
 
-      // Store poller reference so stopAgent() can clean it up BEFORE we fire
-      // start(). Previously this came AFTER scheduling via setTimeout, which
-      // was fine for the synchronous `entry.poller = poller` assignment but
-      // is tidier this way: the agent-manager has a handle on the poller
-      // before the poll loop has any chance to run.
+      poller.onReaction((reaction) => {
+        // ALLOWED_USER gate: same rule as message handler. If configured,
+        // ignore reactions from other users.
+        if (allowedUserId) {
+          const allowedId = parseInt(allowedUserId, 10);
+          if (reaction.user?.id !== allowedId) {
+            log('Ignoring reaction from unauthorized user (allowed_user gate)');
+            return;
+          }
+        }
+
+        const from = stripControlChars(reaction.user?.first_name || reaction.user?.username || 'Unknown');
+        const reactionChatId = reaction.chat?.id ?? chatId ?? '';
+        const formatted = FastChecker.formatTelegramReaction(
+          from,
+          reactionChatId,
+          reaction.message_id,
+          reaction.old_reaction ?? [],
+          reaction.new_reaction ?? [],
+        );
+        if (checker.isDuplicate(formatted)) {
+          log('Duplicate Telegram reaction suppressed');
+          return;
+        }
+        checker.queueTelegramMessage(formatted);
+      });
+
+      poller.start().catch(err => {
+        log(`Telegram poller error: ${err}`);
+      });
+
+      // Store poller reference so stopAgent() can clean it up
       const entry = this.agents.get(name);
       if (entry) entry.poller = poller;
 
