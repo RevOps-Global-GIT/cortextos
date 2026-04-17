@@ -953,7 +953,7 @@ busCommand
     }
 
     if (!botToken) {
-      console.error('Error: BOT_TOKEN not set. Set it in your agent .env file or as an environment variable.');
+      console.error('Error: BOT_TOKEN not configured. Set it in your agent .env file or as an environment variable to enable Telegram.');
       process.exit(1);
     }
 
@@ -1237,7 +1237,10 @@ busCommand
       }
     }
     if (!botToken) botToken = process.env.BOT_TOKEN || '';
-    if (!botToken) { console.error('Error: BOT_TOKEN not set'); process.exit(1); }
+    if (!botToken) {
+      console.error('Error: BOT_TOKEN not configured. Set it in your agent .env file or as an environment variable to enable Telegram.');
+      process.exit(1);
+    }
 
     const api = new TelegramAPI(botToken);
     let markup: object | undefined;
@@ -1273,7 +1276,10 @@ busCommand
       }
     }
     if (!botToken) botToken = process.env.BOT_TOKEN || '';
-    if (!botToken) { console.error('Error: BOT_TOKEN not set'); process.exit(1); }
+    if (!botToken) {
+      console.error('Error: BOT_TOKEN not configured. Set it in your agent .env file or as an environment variable to enable Telegram.');
+      process.exit(1);
+    }
 
     const api = new TelegramAPI(botToken);
     try {
