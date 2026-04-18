@@ -7,9 +7,11 @@ import {
   REPETITION_BLOCK,
   PINGPONG_WINDOW,
   PINGPONG_BLOCK,
+  ESSENTIAL_COMMANDS,
   hashArgs,
   countRepetitions,
   detectPingPong,
+  checkEssential,
   loadState,
   type ToolCallRecord,
 } from '../../../src/hooks/hook-loop-detector';
@@ -201,10 +203,52 @@ describe('threshold constants', () => {
   });
 
   it('PINGPONG_BLOCK > PINGPONG_WINDOW (alternations counted across full history)', () => {
-    // The block threshold is checked against the FULL history alternation count,
-    // not just the PINGPONG_WINDOW, so it can exceed the window size. This is
-    // intentional — without this, the max reachable alternation count in a
-    // 12-call window is only 11, making a threshold of 14 unreachable.
     expect(PINGPONG_BLOCK).toBeGreaterThan(PINGPONG_WINDOW);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkEssential
+// ---------------------------------------------------------------------------
+
+describe('checkEssential', () => {
+  it('allows Bash calls with essential bus commands', () => {
+    for (const cmd of ESSENTIAL_COMMANDS) {
+      expect(checkEssential('Bash', { command: `node dist/cli.js bus ${cmd} active` })).toBe(true);
+    }
+  });
+
+  it('blocks Bash calls with non-essential bus commands', () => {
+    expect(checkEssential('Bash', { command: 'node dist/cli.js bus list-tasks --agent analyst' })).toBe(false);
+  });
+
+  it('blocks Bash calls with no command', () => {
+    expect(checkEssential('Bash', {})).toBe(false);
+    expect(checkEssential('Bash', null)).toBe(false);
+  });
+
+  it('allows Read of HEARTBEAT.md', () => {
+    expect(checkEssential('Read', { file_path: '/home/user/agents/analyst/HEARTBEAT.md' })).toBe(true);
+  });
+
+  it('allows Read of GOALS.md', () => {
+    expect(checkEssential('Read', { file_path: '/home/user/agents/analyst/GOALS.md' })).toBe(true);
+  });
+
+  it('blocks Read of other files', () => {
+    expect(checkEssential('Read', { file_path: '/home/user/agents/analyst/config.json' })).toBe(false);
+  });
+
+  it('allows MCP list_tasks calls', () => {
+    expect(checkEssential('mcp__rgos__cortex_list_tasks', { assigned_to: 'analyst' })).toBe(true);
+  });
+
+  it('blocks other MCP calls', () => {
+    expect(checkEssential('mcp__rgos__cortex_create_task', { title: 'test' })).toBe(false);
+  });
+
+  it('blocks non-Bash tool calls without special handling', () => {
+    expect(checkEssential('Edit', { file_path: '/tmp/foo' })).toBe(false);
+    expect(checkEssential('Write', { file_path: '/tmp/foo' })).toBe(false);
   });
 });

@@ -42,6 +42,21 @@ export const PINGPONG_BLOCK = 14;
 /** Fraction of PINGPONG_WINDOW the two dominant tools must occupy to trigger. */
 export const PINGPONG_DOMINANCE = 0.8;
 
+/**
+ * Essential bus commands that must never be blocked by loop detection.
+ * These are lifecycle operations (heartbeat, inbox, messaging) that agents
+ * need to function even during idle polling periods.
+ */
+export const ESSENTIAL_COMMANDS: readonly string[] = [
+  'update-heartbeat',
+  'check-inbox',
+  'ack-inbox',
+  'send-message',
+  'send-telegram',
+  'log-event',
+  'read-all-heartbeats',
+];
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -204,6 +219,45 @@ export function detectPingPong(history: ToolCallRecord[]): {
 }
 
 // ---------------------------------------------------------------------------
+// Essential operation bypass
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if a tool call is an essential operation that should never be blocked.
+ * Essential ops: bus lifecycle commands (heartbeat, inbox, messaging) and
+ * reads of lifecycle files (HEARTBEAT.md, GOALS.md).
+ */
+export function checkEssential(toolName: string, toolInput: unknown): boolean {
+  if (toolInput === null || toolInput === undefined || typeof toolInput !== 'object') {
+    return false;
+  }
+  const input = toolInput as Record<string, unknown>;
+
+  // Bash calls running essential bus commands
+  if (toolName === 'Bash') {
+    const cmd = input.command;
+    if (typeof cmd === 'string') {
+      return ESSENTIAL_COMMANDS.some(ec => cmd.includes(`bus ${ec}`));
+    }
+  }
+
+  // Read/Glob of essential lifecycle files
+  if (toolName === 'Read' || toolName === 'Glob') {
+    const filePath = String(input.file_path ?? input.pattern ?? '');
+    if (filePath.includes('HEARTBEAT.md') || filePath.includes('GOALS.md')) {
+      return true;
+    }
+  }
+
+  // MCP tools for task listing (polling is expected)
+  if (toolName.startsWith('mcp__') && toolName.includes('list_tasks')) {
+    return true;
+  }
+
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Hook output
 // ---------------------------------------------------------------------------
 
@@ -236,6 +290,16 @@ async function main(): Promise<void> {
     state.history = state.history.slice(-HISTORY_SIZE);
   }
   saveState(stateDir, state);
+
+  // --- Essential command bypass ---
+  // Essential operations are never blocked. They are still recorded in history
+  // so they contribute to pattern detection of non-essential calls, but the
+  // block decision is skipped for them.
+  const isEssential = checkEssential(tool_name, tool_input);
+  if (isEssential) {
+    process.exit(0);
+    return;
+  }
 
   // --- Strategy 1: Repetition ---
   const reps = countRepetitions(state.history, tool_name, argsHash);

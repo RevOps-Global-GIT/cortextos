@@ -177,7 +177,7 @@ describe('CronScheduler: cron expression math', () => {
     });
 
     const scheduler = makeScheduler({ now: clock.now });
-    scheduler.attachAgent(makeAgent());
+    scheduler.attachAgent(makeAgent({}, 'UTC'));
 
     const sched = scheduler.getSchedule('testagent')!;
     expect(sched[0].nextFireAt).toBe(Date.parse('2026-04-14T18:00:00Z'));
@@ -191,7 +191,7 @@ describe('CronScheduler: cron expression math', () => {
     });
 
     const scheduler = makeScheduler({ now: clock.now });
-    scheduler.attachAgent(makeAgent());
+    scheduler.attachAgent(makeAgent({}, 'UTC'));
 
     expect(scheduler.getSchedule('testagent')![0].nextFireAt).toBe(
       Date.parse('2026-04-15T18:00:00Z'),
@@ -239,7 +239,7 @@ describe('CronScheduler: cron expression math', () => {
     });
 
     const scheduler = makeScheduler({ now: clock.now });
-    scheduler.attachAgent(makeAgent());
+    scheduler.attachAgent(makeAgent({}, 'UTC'));
 
     expect(scheduler.getSchedule('testagent')![0].nextFireAt).toBe(
       Date.parse('2026-04-14T18:00:00Z'),

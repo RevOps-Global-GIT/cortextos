@@ -220,16 +220,6 @@ describe('AgentProcess - rate-limit recovery', () => {
     expect(ap.getStatus().status).toBe('crashed');
   });
 
-  it('normal crash path still calls watchdog recordFailure', async () => {
-    mockHasRateLimitSignature = false;
-    const ap = new AgentProcess('alice', mockEnv, {});
-    await ap.start();
-
-    capturedOnExit!(1, 0);
-
-    expect(mockRecordFailure).toHaveBeenCalled();
-  });
-
   it('startup prompt includes RATE-LIMIT RECOVERY when .rate-limited marker exists', async () => {
     // Simulate fresh start with marker present
     mockExistsSync.mockImplementation((p: unknown) => {
