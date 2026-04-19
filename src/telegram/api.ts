@@ -281,7 +281,22 @@ export class TelegramAPI {
     // sentence > word > hard cut). splitForTelegram guarantees at least
     // one chunk — even for empty input — preserving the old behavior of
     // POSTing once for a short message.
-    const chunks = sanitized.length === 0 ? [''] : splitForTelegram(sanitized, TELEGRAM_MAX_LEN);
+    //
+    // Counter suffix budget: when a message splits into multiple chunks,
+    // each chunk gets "\n\n(N/M)" appended (Clint standard 2026-04-19 —
+    // makes multi-part messages visually obvious to the recipient). Worst
+    // case for M ≤ 99 is 9 chars ("\n\n(99/99)"); reserve 10 for padding.
+    // Reduce the split window by that amount up-front so every chunk +
+    // its counter still fits inside TELEGRAM_MAX_LEN. Single-chunk
+    // messages get no counter, so they use the full window.
+    const COUNTER_RESERVED = 10;
+    const effectiveMax = TELEGRAM_MAX_LEN - COUNTER_RESERVED;
+    const rawChunks = sanitized.length === 0
+      ? ['']
+      : splitForTelegram(sanitized, effectiveMax);
+    const chunks = rawChunks.length > 1
+      ? rawChunks.map((c, i) => `${c}\n\n(${i + 1}/${rawChunks.length})`)
+      : rawChunks;
 
     let lastResult: any;
     for (let i = 0; i < chunks.length; i++) {
