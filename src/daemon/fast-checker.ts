@@ -1146,6 +1146,178 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
   }
 
   /**
+   * Read ctx thresholds from config.json with mtime-based caching (BUG-048 pattern).
+   * Re-reads from disk only when the file has changed so dashboard updates take effect
+   * within one poll cycle without a daemon restart.
+   */
+  private getCtxThresholds(): { warn: number; handoff: number } {
+    try {
+      const configPath = join(this.agent.getAgentDir(), 'config.json');
+      const mtime = statSync(configPath).mtimeMs;
+      if (mtime !== this.ctxConfigMtime) {
+        const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
+        const config = this.agent.getConfig();
+        config.ctx_warning_threshold = cfg.ctx_warning_threshold;
+        config.ctx_handoff_threshold = cfg.ctx_handoff_threshold;
+        this.ctxConfigMtime = mtime;
+      }
+    } catch { /* keep stale values */ }
+    const config = this.agent.getConfig();
+    return {
+      warn: config.ctx_warning_threshold ?? 70,
+      handoff: config.ctx_handoff_threshold ?? 80,
+    };
+  }
+
+  /**
+   * Context monitor — called on every poll cycle.
+   * Reads context_status.json written by the statusLine bridge hook and takes
+   * action when thresholds are crossed.
+   */
+  private async checkContextStatus(): Promise<void> {
+    const now = Date.now();
+
+    // Circuit breaker: check if we should pause auto-restarts
+    if (this.ctxCircuitBrokenAt !== null) {
+      if (now - this.ctxCircuitBrokenAt >= 30 * 60_000) {
+        this.ctxCircuitBrokenAt = null;
+        this.ctxCircuitRestarts = [];
+        this.saveCtxCircuit();
+        this.log('Context circuit breaker reset after 30min pause');
+      } else {
+        return; // still paused
+      }
+    }
+
+    // Read the bridge file written by hook-context-status
+    const statusPath = join(this.paths.stateDir, 'context_status.json');
+    if (!existsSync(statusPath)) return;
+
+    let pct: number | null = null;
+    let exceeds200k = false;
+    try {
+      const raw = readFileSync(statusPath, 'utf-8');
+      const data = JSON.parse(raw);
+      const age = now - new Date(data.written_at || 0).getTime();
+      if (age > 10 * 60_000) return; // stale file — skip
+      pct = typeof data.used_percentage === 'number' ? data.used_percentage : null;
+      exceeds200k = Boolean(data.exceeds_200k_tokens);
+
+      // Detect new session: if session_id changed, clear stale per-session ctx state.
+      // This handles the case where the agent self-restarts (voluntary handoff) and the
+      // 5-min deadline timer would otherwise fire on the fresh low-context session.
+      const incomingSessionId = typeof data.session_id === 'string' ? data.session_id : null;
+      if (incomingSessionId && incomingSessionId !== this.ctxLastSessionId) {
+        if (this.ctxLastSessionId !== null) {
+          this.ctxHandoffFiredAt = 0;
+          this.ctxHandoffDeadlineAt = 0;
+          this.ctxWarningFiredAt = 0;
+          this.log(`New session detected (${incomingSessionId.slice(0, 8)}…) — per-session ctx state reset`);
+        }
+        this.ctxLastSessionId = incomingSessionId;
+      }
+    } catch { return; }
+
+    // Check PTY output for hard API overflow errors (always act regardless of threshold config)
+    const recentOutput = this.agent.getOutputBuffer()?.getRecent(8000) ?? '';
+    if (/extra usage.*?1[Mm] context|conversation too long.*?compaction/i.test(recentOutput)) {
+      this.log('Context overflow error detected in PTY output — force restarting');
+      this.forceContextRestart('API overflow error in PTY output');
+      return;
+    }
+
+    const { warn, handoff } = this.getCtxThresholds();
+
+    // No threshold configured — observe-only mode (log but don't act)
+    if (this.agent.getConfig().ctx_handoff_threshold === undefined) return;
+
+    const effectivePct = pct ?? (exceeds200k ? 101 : null);
+    if (effectivePct === null) return;
+
+    // Tier 3: deadline exceeded — force restart if agent ignored handoff prompt
+    if (this.ctxHandoffDeadlineAt > 0 && now > this.ctxHandoffDeadlineAt) {
+      this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
+      this.ctxHandoffDeadlineAt = 0;
+      this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within 5min`);
+      return;
+    }
+
+    // Tier 1: warning — PTY injection only, no Telegram ping (context management is internal)
+    if (effectivePct >= warn && now - this.ctxWarningFiredAt > 15 * 60_000) {
+      this.ctxWarningFiredAt = now;
+      const pctRound = Math.round(effectivePct);
+      const statusSuffix = effectivePct >= handoff ? 'Handoff in progress.' : `Handoff triggers at ${handoff}%.`;
+      this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. ${statusSuffix}`);
+      this.log(`Context warning fired at ${pctRound}%`);
+    }
+
+    // Tier 2: handoff (fires once per session lifecycle)
+    if (effectivePct >= handoff && this.ctxHandoffFiredAt === 0) {
+      this.ctxHandoffFiredAt = now;
+      this.ctxHandoffDeadlineAt = now + 5 * 60_000; // 5min grace for agent to cooperate
+      // Reset context_status.json so the new session doesn't re-trigger immediately
+      const statusPath = join(this.paths.stateDir, 'context_status.json');
+      try {
+        writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
+      } catch { /* non-fatal */ }
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z';
+      const handoffPrompt = `[CONTEXT HANDOFF REQUIRED] Context is at ${Math.round(effectivePct)}%. Write a handoff document to memory/handoffs/handoff-${ts}.md with these sections: ## Current Tasks, ## Next Actions, ## Active Crons, ## Key Context, ## Files Modified This Session. Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(effectivePct)}%" --handoff-doc <absolute path to the handoff doc you just wrote>. Do this NOW before the context window is exhausted.`;
+      this.agent.injectMessage(handoffPrompt);
+      this.log(`Handoff prompt injected at ${Math.round(effectivePct)}%`);
+      // Pre-arm .force-fresh so the next restart is always a clean fresh session.
+      // If the agent cooperates and calls hard-restart, it also writes .force-fresh — no-op.
+      // If context exhausts naturally before the agent acts, .force-fresh is already set,
+      // preventing a --continue restart that would loop at the same high context level.
+      try {
+        writeFileSync(join(this.paths.stateDir, '.force-fresh'), '');
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  /**
+   * Force a fresh hard restart for context exhaustion reasons.
+   * Writes .force-fresh + .restart-planned, then triggers sessionRefresh().
+   * The circuit breaker prevents runaway restart loops.
+   */
+  private forceContextRestart(reason: string): void {
+    const now = Date.now();
+
+    // Update and check circuit breaker window (persisted to disk — survives --continue restarts)
+    this.ctxCircuitRestarts = this.ctxCircuitRestarts.filter(t => now - t < 15 * 60_000);
+    if (this.ctxCircuitRestarts.length >= 3) {
+      this.ctxCircuitBrokenAt = now;
+      this.saveCtxCircuit();
+      const msg = `Context circuit breaker TRIPPED for ${this.agent.name}: 3 restarts in 15min. Watchdog paused 30min. Check logs/${this.agent.name}/restarts.log for details.`;
+      this.log(msg);
+      if (this.telegramApi && this.chatId) {
+        this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
+      }
+      return;
+    }
+    this.ctxCircuitRestarts.push(now);
+    this.saveCtxCircuit();
+
+    // Reset per-session context state for the new session
+    this.ctxHandoffFiredAt = 0;
+    this.ctxHandoffDeadlineAt = 0;
+    this.ctxWarningFiredAt = 0;
+
+    // Write .force-fresh + .restart-planned (hardRestart from src/bus/system.ts)
+    hardRestart(this.paths, this.agent.name, `CONTEXT-FORCE-RESTART: ${reason}`);
+
+    // Reset context_status.json so the new session's FastChecker doesn't re-trigger
+    // Tier 2 immediately by reading the stale high-% value from the previous session.
+    const statusPath = join(this.paths.stateDir, 'context_status.json');
+    try {
+      writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
+    } catch { /* non-fatal */ }
+
+    // sessionRefresh() does stop() + start(); shouldContinue() will return false
+    // because .force-fresh was just written, giving us a clean fresh session.
+    this.agent.sessionRefresh().catch(err => this.log(`Context restart failed: ${err}`));
+  }
+
+  /**
    * Compute a hash for message dedup. Uses SHA-256 to avoid collision attacks.
    */
   private hashMessage(text: string): string {
