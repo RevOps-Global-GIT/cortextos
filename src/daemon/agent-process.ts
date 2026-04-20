@@ -3,24 +3,21 @@ import { join, sep } from 'path';
 import { homedir } from 'os';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
+import { HermesPTY, hermesDbExists } from '../pty/hermes-pty.js';
 import { MessageDedup, injectMessage } from '../pty/inject.js';
 import { ensureDir } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
+import { readCronState, parseDurationMs } from '../bus/cron-state.js';
 import { resolvePaths } from '../utils/paths.js';
-import type { CronScheduler, ManagedAgent } from './cron-scheduler.js';
 
 type LogFn = (msg: string) => void;
 
 /**
  * Manages a single agent's lifecycle.
  * Replaces agent-wrapper.sh for one agent.
- *
- * Implements ManagedAgent so the daemon-side CronScheduler can attach to it
- * on start() and inject scheduled cron prompts without requiring Claude Code
- * to rebuild CronCreate state on every hard-restart.
  */
-export class AgentProcess implements ManagedAgent {
+export class AgentProcess {
   readonly name: string;
   private env: CtxEnv;
   private config: AgentConfig;
@@ -47,6 +44,9 @@ export class AgentProcess implements ManagedAgent {
   // from an old PTY can race past stopRequested and trigger crash recovery on
   // the new agent.
   private lifecycleGeneration: number = 0;
+  // Guard: only one cron verification waiter in-flight per agent at a time.
+  // Rapid --continue restarts must not stack duplicate waiters. (Issue #182)
+  private cronVerificationPending: boolean = false;
   // BUG-011 fix: stop() awaits this promise (resolved by the onExit handler in start())
   // to guarantee the PTY exit has fired before stopping=false is reset. Without
   // this, the exit handler can fire after stopping=false and trigger spurious
@@ -56,32 +56,8 @@ export class AgentProcess implements ManagedAgent {
   private dedup: MessageDedup;
   private log: LogFn;
   private onStatusChange: ((status: AgentStatus) => void) | null = null;
-  // Rate-limit recovery: pending restart timer. Stored so it can be cancelled
-  // if a second rate-limit exit fires before the first timer elapses (preventing
-  // two overlapping timers from racing and triggering a premature restart).
-  private rateLimitTimer: ReturnType<typeof setTimeout> | null = null;
-  // Daemon-side cron scheduler. Attached on successful start() and detached on
-  // stop(). The scheduler owns all recurring + once-type cron timing so the
-  // agent never has to rebuild CronCreate state after a hard-restart.
-  private cronScheduler: CronScheduler | null = null;
-  // Timestamp (ms) of the last "activity" event — a scheduler inject. Used by
-  // isIdle() to decide whether the agent has finished processing whatever the
-  // scheduler last handed it: if last_idle.flag has a newer timestamp than
-  // lastActivityTs, the agent has gone idle since. Reset to 0 on stop.
-  private lastActivityTs: number = 0;
-  // Timestamp (ms) when the current lifecycle booted. isIdle() returns false
-  // during a 60s grace window after bootTs so the scheduler never fires on
-  // top of the bootstrap prompt, even if the idle-flag infrastructure isn't
-  // wired (Stop hook not registered → last_idle.flag never written).
-  private bootTs: number = 0;
 
-  constructor(
-    name: string,
-    env: CtxEnv,
-    config: AgentConfig,
-    log?: LogFn,
-    cronScheduler?: CronScheduler,
-  ) {
+  constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn) {
     this.name = name;
     this.env = env;
     this.config = config;
@@ -90,87 +66,6 @@ export class AgentProcess implements ManagedAgent {
     }
     this.dedup = new MessageDedup();
     this.log = log || ((msg) => console.log(`[${name}] ${msg}`));
-    this.cronScheduler = cronScheduler ?? null;
-  }
-
-  // ---------- ManagedAgent implementation ----------
-
-  /** Absolute path to this agent's state directory (state/<name>/). */
-  get stateDir(): string {
-    return join(this.env.ctxRoot, 'state', this.name);
-  }
-
-  /** Absolute path to this agent's config.json. */
-  get configPath(): string {
-    return join(this.env.agentDir, 'config.json');
-  }
-
-  /** IANA timezone used for cron expression evaluation (undefined → UTC). */
-  get timezone(): string | undefined {
-    return this.config.timezone;
-  }
-
-  /** Current lifecycle generation. Bumped on each successful start(). */
-  get generation(): number {
-    return this.lifecycleGeneration;
-  }
-
-  /** True when the PTY is spawned and status is 'running'. */
-  isRunning(): boolean {
-    return this.status === 'running' && this.pty !== null;
-  }
-
-  /**
-   * True when it is safe for the cron scheduler to inject a new prompt.
-   *
-   * Three layers, in order:
-   *   1. Startup grace: return false for STARTUP_GRACE_MS after bootTs so the
-   *      scheduler never fires on top of the bootstrap prompt.
-   *   2. Flag present: Claude Code's Stop hook (hook-idle-flag.ts) writes
-   *      `last_idle.flag` as unix seconds after every agent turn. If the flag's
-   *      timestamp is newer than lastActivityTs (i.e. the agent finished
-   *      processing the last thing we injected), the agent is idle.
-   *   3. Flag absent: in deployments where the Stop hook isn't registered, the
-   *      flag never gets written. Rather than indefinitely stalling every cron
-   *      in the max-defer window, default to "idle" once past the grace period
-   *      — Claude Code's own message queue handles back-pressure when busy.
-   */
-  isIdle(): boolean {
-    const STARTUP_GRACE_MS = 60_000;
-    const now = Date.now();
-    if (this.bootTs > 0 && now - this.bootTs < STARTUP_GRACE_MS) {
-      return false;
-    }
-    const flagPath = join(this.stateDir, 'last_idle.flag');
-    if (!existsSync(flagPath)) {
-      // Stop hook not wired → treat as idle once past grace window.
-      return true;
-    }
-    try {
-      const tsSec = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
-      if (isNaN(tsSec)) return false;
-      // hook-idle-flag.ts writes unix seconds; lastActivityTs is ms.
-      return tsSec * 1000 > this.lastActivityTs;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Inject a prompt via the daemon-owned scheduler path. Bypasses MessageDedup
-   * because cron prompts are identical every fire by design — going through
-   * injectMessage(content) would dedup the second and later fires of every
-   * recurring cron and silently skip them. Bumps lastActivityTs so isIdle()
-   * reports false until the agent finishes processing this prompt and the
-   * Stop hook writes a newer idle flag.
-   */
-  inject(message: string): boolean {
-    if (!this.pty || this.status !== 'running') {
-      return false;
-    }
-    injectMessage((data) => this.pty!.write(data), message);
-    this.lastActivityTs = Date.now();
-    return true;
   }
 
   /**
@@ -196,11 +91,6 @@ export class AgentProcess implements ManagedAgent {
 
     // Determine start mode
     const mode = this.shouldContinue() ? 'continue' : 'fresh';
-    // Read the rate-limit marker before building the prompt
-    // but do NOT delete it yet. Deleted only after pty.spawn() succeeds
-    // so that a spawn failure doesn't permanently swallow the recovery context.
-    const stateDir = join(this.env.ctxRoot, 'state', this.name);
-    const hadRateLimit = this.hasRateLimitMarker(stateDir);
     const prompt = mode === 'fresh'
       ? this.buildStartupPrompt()
       : this.buildContinuePrompt();
@@ -218,11 +108,13 @@ export class AgentProcess implements ManagedAgent {
     // handleExit, preventing spurious crash recovery on the new agent.
     const myGeneration = ++this.lifecycleGeneration;
 
-    // Create PTY
+    // Create PTY — runtime-specific subclass handles binary, args, bootstrap detection
     const logPath = join(this.env.ctxRoot, 'logs', this.name, 'stdout.log');
     ensureDir(join(this.env.ctxRoot, 'logs', this.name));
     this.log(`Log path: ${logPath}`);
-    this.pty = new AgentPTY(this.env, this.config, logPath);
+    this.pty = this.config.runtime === 'hermes'
+      ? new HermesPTY(this.env, this.config, logPath)
+      : new AgentPTY(this.env, this.config, logPath);
 
     // BUG-011 fix: create a fresh exit signal for this run. resolveExit is
     // called from the onExit handler below; stop() awaits exitPromise to
@@ -254,22 +146,8 @@ export class AgentProcess implements ManagedAgent {
       this.sessionStart = new Date();
       this.log(`Running (pid: ${this.pty.getPid()})`);
 
-      // Delete rate-limit marker only after spawn succeeds.
-      if (hadRateLimit) this.deleteRateLimitMarker(stateDir);
-
-      // Reset idle baseline for this lifecycle. isIdle() uses bootTs for the
-      // startup grace window and lastActivityTs for per-inject back-pressure.
-      const bootNow = Date.now();
-      this.bootTs = bootNow;
-      this.lastActivityTs = bootNow;
-
       // Start session timer
       this.startSessionTimer();
-
-      // Attach the cron scheduler if the daemon provided one. Attach AFTER
-      // spawn+status=running so scheduler.isRunning() is immediately true.
-      this.cronScheduler?.attachAgent(this);
-
 
       this.notifyStatusChange();
     } catch (err) {
@@ -291,9 +169,6 @@ export class AgentProcess implements ManagedAgent {
     this.stopRequested = true;
     this.log('Stopping...');
     this.clearSessionTimer();
-    // Detach from the cron scheduler — subsequent ticks will skip this agent
-    // until a fresh start() re-attaches with a new lifecycle generation.
-    this.cronScheduler?.detachAgent(this.name);
 
     // Capture and null out pty BEFORE any awaits so handleExit() during graceful
     // shutdown doesn't race with us and trigger crash recovery or a double-kill.
@@ -305,18 +180,26 @@ export class AgentProcess implements ManagedAgent {
 
     if (pty) {
       try {
-        // BUG-032 fix: use CRLF (not lone CR) so Claude Code's REPL actually
-        // recognizes the /exit line as a complete command, AND wait long
-        // enough (5s, was 3s) for the child to flush + exit cleanly. Without
-        // these the child often dies from SIGHUP (exit code 129) when the
-        // PTY is torn down before /exit has been processed. PR #11's
-        // BUG-011 fix already ensured the daemon doesn't misinterpret 129
-        // as a real crash, but the underlying graceful-shutdown sequence
-        // still wasn't graceful — this PR makes it so.
-        pty.write('\x03'); // Ctrl-C
-        await sleep(1000);
-        pty.write('/exit\r\n');
-        await sleep(5000);
+        if (this.config.runtime === 'hermes') {
+          // Hermes REPL exit: Ctrl+D is the clean exit signal.
+          // Hermes has a double-tap guard on Ctrl+C (accidental exit protection),
+          // so we use Ctrl+D which exits cleanly on the first press.
+          pty.write('\x04'); // Ctrl+D
+          await sleep(3000);
+        } else {
+          // BUG-032 fix: use CRLF (not lone CR) so Claude Code's REPL actually
+          // recognizes the /exit line as a complete command, AND wait long
+          // enough (5s, was 3s) for the child to flush + exit cleanly. Without
+          // these the child often dies from SIGHUP (exit code 129) when the
+          // PTY is torn down before /exit has been processed. PR #11's
+          // BUG-011 fix already ensured the daemon doesn't misinterpret 129
+          // as a real crash, but the underlying graceful-shutdown sequence
+          // still wasn't graceful — this PR makes it so.
+          pty.write('\x03'); // Ctrl-C
+          await sleep(1000);
+          pty.write('/exit\r\n');
+          await sleep(5000);
+        }
       } catch {
         // Ignore write errors during shutdown
       }
@@ -365,17 +248,6 @@ export class AgentProcess implements ManagedAgent {
    */
   async sessionRefresh(): Promise<void> {
     this.log('Session refresh (--continue restart)');
-    try {
-      const stateDir = join(this.env.ctxRoot, 'state', this.name);
-      ensureDir(stateDir);
-      writeFileSync(
-        join(stateDir, '.session-refresh'),
-        'session timer reached limit\n',
-        'utf-8',
-      );
-    } catch (e) {
-      this.log(`Failed to write session-refresh marker: ${e}`);
-    }
     await this.stop();
     await this.start();
     this.log('Session refreshed');
@@ -394,7 +266,7 @@ export class AgentProcess implements ManagedAgent {
       return false;
     }
 
-    injectMessage((data) => this.pty!.write(data), content);
+    injectMessage((data) => this.pty?.write(data), content);
     return true;
   }
 
@@ -446,37 +318,25 @@ export class AgentProcess implements ManagedAgent {
     return this.pty?.getOutputBuffer();
   }
 
+  /**
+   * Get the agent directory (where config.json and .env live).
+   */
+  getAgentDir(): string {
+    return this.env.agentDir;
+  }
+
+  /**
+   * Get the current agent config (live reference — fields may be updated in-place).
+   */
+  getConfig(): AgentConfig {
+    return this.config;
+  }
+
   // --- Private methods ---
 
   private handleExit(exitCode: number): void {
-    // Capture the output buffer BEFORE nulling this.pty — needed for rate-limit
-    // detection below (hasRateLimitSignature reads from the buffer).
-    const outputBuffer = this.pty?.getOutputBuffer();
     this.pty = null;
     this.clearSessionTimer();
-
-    // When the cortextos daemon is shut down by PM2, SIGTERM propagates to
-    // the whole process group and reaches each PTY's Claude Code child
-    // BEFORE the daemon's stopAll() loop has a chance to call stopAgent() on
-    // it. Those children exit cleanly (code 0) but arrive at handleExit with
-    // stopRequested=false, which used to classify the exit as a crash and
-    // inflate .crash_count_today by one per agent, per PM2 restart.
-    //
-    // agent-manager.ts:stopAll() already writes a `.daemon-stop` marker in
-    // every agent's state dir at the START of its shutdown loop for an
-    // unrelated reason (SessionEnd crash-alert hook). We reuse that marker
-    // here as the authoritative "the daemon is going down" signal. If the
-    // marker exists AND is recent (written within the last 60s), any PTY
-    // exit is a shutdown casualty, not a real crash — swallow it.
-    //
-    // The 60s window guards against a stale marker from a previous shutdown
-    // that wasn't cleaned up: we do NOT want an old marker to silently mask
-    // a genuine crash days later. handleExit does NOT delete the marker —
-    // cleanup stays with agent-manager / hook-crash-alert per the existing
-    // separation of concerns.
-    if (this.isDaemonShuttingDown()) {
-      return;
-    }
 
     // When the cortextos daemon is shut down by PM2, SIGTERM propagates to
     // the whole process group and reaches each PTY's Claude Code child
@@ -518,43 +378,6 @@ export class AgentProcess implements ManagedAgent {
       return;
     }
 
-    const stateDir = join(this.env.ctxRoot, 'state', this.name);
-
-    // Rate-limit detection: if the PTY output contains Anthropic rate-limit or
-    // overload signatures, treat this as a planned pause rather than a crash.
-    // Rate-limit pauses do NOT count toward max_crashes_per_day and do NOT
-    // trigger the git watchdog — they are expected operational events tied to
-    // Anthropic's 5-hour rolling rate-limit window.
-    if (outputBuffer?.hasRateLimitSignature()) {
-      // Prefer the reset time parsed from the CLI status bar (e.g. "resets 10pm")
-      // over the fixed 5-hour default. Weekly limits need a much longer pause.
-      const parsedReset = outputBuffer.getRateLimitResetSeconds();
-      const configured = this.config.rate_limit_pause_seconds ?? 18000;
-      const pauseSeconds = parsedReset ?? configured;
-      this.log(`Rate-limit detected — pausing ${pauseSeconds}s before restart ${parsedReset ? '(parsed reset)' : '(default)'} (not counted as crash)`);
-      this.status = 'rate-limited';
-      this.notifyStatusChange();
-      // Write a marker so the next boot prompt informs the agent it's recovering
-      // from a rate-limit pause rather than a normal crash.
-      try {
-        writeFileSync(join(stateDir, '.rate-limited'), pauseSeconds.toString(), 'utf-8');
-      } catch { /* ignore write errors */ }
-      // Cancel any prior rate-limit timer before scheduling a new one (Bug-1 fix).
-      // Without this, two sequential rate-limit exits leave two timers running;
-      // the first fires into the second pause window and triggers an early restart.
-      if (this.rateLimitTimer) {
-        clearTimeout(this.rateLimitTimer);
-        this.rateLimitTimer = null;
-      }
-      this.rateLimitTimer = setTimeout(() => {
-        this.rateLimitTimer = null;
-        if (this.status === 'rate-limited') {
-          this.start().catch(err => this.log(`Rate-limit restart failed: ${err}`));
-        }
-      }, pauseSeconds * 1000);
-      return;
-    }
-
     // Check crash limit
     this.crashCount++;
     const today = new Date().toISOString().split('T')[0];
@@ -586,28 +409,14 @@ export class AgentProcess implements ManagedAgent {
     }, backoff);
   }
 
-  /**
-   * Check whether the rate-limit recovery marker exists (read-only).
-   * The caller is responsible for deleting it after a successful spawn via
-   * deleteRateLimitMarker(), so a failed spawn doesn't permanently swallow
-   * the recovery context.
-   */
-  private hasRateLimitMarker(stateDir: string): boolean {
-    return existsSync(join(stateDir, '.rate-limited'));
-  }
-
-  /**
-   * Delete the rate-limit recovery marker.
-   * Call only after pty.spawn() succeeds.
-   */
-  private deleteRateLimitMarker(stateDir: string): void {
-    try {
-      const { unlinkSync } = require('fs');
-      unlinkSync(join(stateDir, '.rate-limited'));
-    } catch { /* ignore */ }
-  }
-
   private shouldContinue(): boolean {
+    // Hermes: session continuity is determined by whether the SQLite DB exists.
+    // HERMES_HOME env var overrides the default ~/.hermes path.
+    if (this.config.runtime === 'hermes') {
+      const hermesHome = process.env['HERMES_HOME'];
+      return hermesDbExists(hermesHome);
+    }
+
     // Check for force-fresh marker
     const forceFreshPath = join(this.env.ctxRoot, 'state', this.name, '.force-fresh');
     if (existsSync(forceFreshPath)) {
@@ -641,10 +450,9 @@ export class AgentProcess implements ManagedAgent {
   }
 
   private buildStartupPrompt(): string {
-    const stateDir = join(this.env.ctxRoot, 'state', this.name);
-    const onboardedPath = join(stateDir, '.onboarded');
+    const onboardedPath = join(this.env.ctxRoot, 'state', this.name, '.onboarded');
     const onboardingPath = join(this.env.agentDir, 'ONBOARDING.md');
-    const heartbeatPath = join(stateDir, 'heartbeat.json');
+    const heartbeatPath = join(this.env.ctxRoot, 'state', this.name, 'heartbeat.json');
     let onboardingAppend = '';
 
     // If agent has a heartbeat but no .onboarded marker, they completed onboarding but
@@ -663,21 +471,22 @@ export class AgentProcess implements ManagedAgent {
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
-    const rateLimitBlock = this.hasRateLimitMarker(stateDir)
-      ? ' RATE-LIMIT RECOVERY: Your previous session was paused by the daemon due to an Anthropic rate-limit or overload response. You have been restarted after the configured recovery window. Resume normal operations — this was not a crash.'
+    const handoffBlock = this.consumeHandoffBlock();
+    const isHandoffRestart = handoffBlock.length > 0;
+    const handoffUxOverride = isHandoffRestart
+      ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely). After restoring crons and reading the handoff, send ONE brief conversational message that picks up naturally — e.g. "back — [what you were just working on]". No cron IDs, no status report, no cold-boot phrasing.'
       : '';
-    return `You are starting a new session. Current UTC time: ${nowUtc}. Your working directory is your agent dir (CTX_AGENT_DIR). For cortextOS commands use: node $CTX_FRAMEWORK_ROOT/dist/cli.js bus ... (not node dist/cli.js). Read AGENTS.md and all bootstrap files listed there. Your recurring and one-shot crons are scheduled by the daemon from config.json — do NOT call CronCreate or /loop for cron entries. If any old in-session crons remain from a previous version, run CronList and CronDelete them. Use ScheduleWakeup only for ad-hoc one-shot deferrals within the current session.${reminderBlock}${deliverablesBlock} Check inbox. Do NOT send a Telegram "back online" message — the daemon handles startup notifications automatically.${onboardingAppend}${rateLimitBlock}`;
+    const onlineMessage = isHandoffRestart
+      ? ''
+      : ' After setting up crons, send a Telegram message to the user saying you are back online.';
+    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. Then restore your crons from config.json: for each entry with type "recurring" (or no type field), call /loop {interval} {prompt}; for each entry with type "once", compare fire_at against the current UTC time above — if fire_at is still in the future recreate the CronCreate, if fire_at is in the past delete that entry from config.json. CRITICAL DEDUP: Always call CronList BEFORE creating any cron. For each config.json entry, search the CronList output for its prompt text — if the prompt already appears, SKIP that cron entirely. Only call /loop or CronCreate for entries whose prompt text is NOT already listed. This prevents rapid --continue restarts from accumulating duplicate schedules.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
   }
 
   private buildContinuePrompt(): string {
-    const stateDir = join(this.env.ctxRoot, 'state', this.name);
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
-    const rateLimitBlock = this.hasRateLimitMarker(stateDir)
-      ? ' RATE-LIMIT RECOVERY: Your previous session was paused by the daemon due to an Anthropic rate-limit or overload response. You have been restarted after the configured recovery window. Resume normal operations — this was not a crash.'
-      : '';
-    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your working directory is your agent dir (CTX_AGENT_DIR). For cortextOS commands use: node $CTX_FRAMEWORK_ROOT/dist/cli.js bus ... (not node dist/cli.js). Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Your recurring and one-shot crons are scheduled by the daemon from config.json — do NOT call CronCreate or /loop for cron entries. If any old in-session crons remain from a previous version, run CronList and CronDelete them.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. Do NOT send a Telegram notification — --continue restarts are silent by design.${rateLimitBlock}`;
+    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Restore your crons from config.json ONLY if missing. CRITICAL DEDUP: Call CronList FIRST. For each config.json entry, search the CronList output for its prompt text — if the prompt already appears, SKIP that cron. Only call /loop (recurring) or CronCreate (once, if fire_at is in the future) for entries whose prompt text is NOT already listed. Rapid --continue restarts must not accumulate duplicates.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. After restoring crons and checking inbox, send a Telegram message to the user saying you are back online.`;
   }
 
   /**
@@ -714,6 +523,27 @@ export class AgentProcess implements ManagedAgent {
       const ctx = JSON.parse(readFileSync(contextPath, 'utf-8'));
       if (!ctx.require_deliverables) return '';
       return ' DELIVERABLE STANDARD: Every task you submit for review MUST have at least one file deliverable attached via the save-output bus command. A task with zero file deliverables will be sent back. Attach files with: cortextos bus save-output <task-id> <file-path> --label "<descriptive label>". Labels must be human-readable at a glance: describe WHAT it is plus enough context to understand at a glance. Good: "Traffic Growth Plan — 10 channels, 30-day launch sequence". Bad: "traffic-growth-plan.md" or "output-1". Notes are for context only, never file paths or URLs.';
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Consume the .handoff-doc-path marker (written by the context watchdog or the
+   * agent itself via `cortextos bus hard-restart --handoff-doc <path>`).
+   * Returns a boot-prompt fragment pointing the new session at the handoff doc,
+   * or an empty string if no marker exists.
+   * The marker is unlinked after reading so it fires only once per restart.
+   */
+  private consumeHandoffBlock(): string {
+    const markerPath = join(this.env.ctxRoot, 'state', this.name, '.handoff-doc-path');
+    if (!existsSync(markerPath)) return '';
+    try {
+      const { unlinkSync } = require('fs');
+      const docPath = readFileSync(markerPath, 'utf-8').trim();
+      unlinkSync(markerPath);
+      if (!docPath || !existsSync(docPath)) return '';
+      return ` CONTEXT HANDOFF: Before restoring crons or checking inbox, read the handoff document at ${docPath} to resume your prior session state.`;
     } catch {
       return '';
     }
@@ -835,6 +665,198 @@ export class AgentProcess implements ManagedAgent {
   private notifyStatusChange(): void {
     if (this.onStatusChange) {
       this.onStatusChange(this.getStatus());
+    }
+  }
+
+  /**
+   * Schedule a background cron verification check.
+   *
+   * Waits for the agent to finish its startup sequence (detected via the
+   * last_idle.flag written by the Stop hook after the agent's first turn
+   * completes), then injects a lightweight prompt asking the agent to
+   * verify its crons match config.json and restore any that are missing.
+   *
+   * Safe for both fresh starts and --continue restarts: the idle-wait
+   * ensures we never inject mid-conversation.
+   *
+   * Fire-and-forget: errors are logged but never propagated.
+   */
+  scheduleCronVerification(): void {
+    // Hermes owns its cron scheduler natively — no CronList / /loop needed.
+    // Verification via injected prompts would interfere with Hermes's own cron system.
+    if (this.config.runtime === 'hermes') return;
+
+    const crons = this.config.crons;
+    if (!crons || crons.length === 0) return;
+
+    const recurringNames = crons
+      .filter(c => c.type !== 'once' && c.type !== 'disabled')
+      .map(c => c.name);
+    if (recurringNames.length === 0) return;
+
+    // Dedup: only one waiter in-flight per agent. Rapid --continue restarts
+    // would otherwise stack multiple concurrent waiters. (Issue #182)
+    if (this.cronVerificationPending) {
+      this.log('Cron verification already pending — skipping duplicate');
+      return;
+    }
+
+    const generation = this.lifecycleGeneration;
+
+    // Run in background — don't block startup
+    this.cronVerificationPending = true;
+    this.verifyCronsAfterIdle(recurringNames, generation)
+      .catch(err => { this.log(`Cron verification failed (non-fatal): ${err}`); })
+      .finally(() => { this.cronVerificationPending = false; });
+  }
+
+  /**
+   * Starts a background gap-detection loop for recurring interval-based crons.
+   * Reads cron-state.json every 10 minutes; injects a nudge if any cron has
+   * been silent for >2x its expected interval.
+   *
+   * Fire-and-forget: errors are logged but never propagated.
+   */
+  scheduleGapDetection(): void {
+    const crons = this.config.crons;
+    if (!crons || crons.length === 0) return;
+
+    // Only monitor recurring crons with a parseable interval (skip cron expressions)
+    const monitorable = crons.filter(
+      c => c.type !== 'once' && c.type !== 'disabled' && c.interval && !isNaN(parseDurationMs(c.interval)),
+    );
+    if (monitorable.length === 0) return;
+
+    const generation = this.lifecycleGeneration;
+    const loopStartedAt = Date.now();
+
+    this.runGapDetectionLoop(monitorable, generation, loopStartedAt).catch(err => {
+      this.log(`Cron gap detection failed (non-fatal): ${err}`);
+    });
+  }
+
+  private async runGapDetectionLoop(
+    crons: Array<{ name: string; interval?: string }>,
+    generation: number,
+    loopStartedAt: number,
+  ): Promise<void> {
+    const GAP_POLL_MS = 10 * 60 * 1000;   // poll every 10 minutes
+    const GAP_MULTIPLIER = 2.0;            // nudge when gap > 2x expected interval
+
+    const stateDir = join(this.env.ctxRoot, 'state', this.name);
+
+    // Initial wait — give the agent time to boot and register crons before first check
+    await sleep(GAP_POLL_MS);
+
+    while (true) {
+      if (generation !== this.lifecycleGeneration || this.status !== 'running') return;
+
+      const now = Date.now();
+      const state = readCronState(stateDir);
+
+      for (const cronDef of crons) {
+        const intervalMs = parseDurationMs(cronDef.interval!);
+
+        const record = state.crons.find(r => r.name === cronDef.name);
+        let lastFireMs: number;
+        if (!record) {
+          // No fire record yet (cold start or daemon restart before first cron fire).
+          // Treat the loop start time as the implicit last fire. This means gap
+          // detection will nudge if the cron hasn't fired within 2x its interval
+          // AFTER the daemon restarted — preventing dead zones on cold starts.
+          lastFireMs = loopStartedAt;
+        } else {
+          lastFireMs = Date.parse(record.last_fire);
+          if (isNaN(lastFireMs)) continue;
+        }
+
+        const gapMs = now - lastFireMs;
+        const threshold = intervalMs * GAP_MULTIPLIER;
+
+        if (gapMs > threshold) {
+          const gapMin = Math.round(gapMs / 60_000);
+          const expectedMin = Math.round(intervalMs / 60_000);
+          const nudge = `[SYSTEM] Cron gap detected for "${cronDef.name}": last fired ${gapMin} minutes ago (expected every ${expectedMin} minutes). Run CronList to verify the cron is still active. If missing, restore it from config.json: /loop ${cronDef.interval} <cron prompt>.`;
+
+          this.log(`Gap nudge: ${cronDef.name} silent ${gapMin}min (threshold: ${Math.round(threshold / 60_000)}min)`);
+          if (this.pty && this.status === 'running') {
+            injectMessage((data) => this.pty?.write(data), nudge);
+            // Stagger: wait between nudges so the agent can process each one
+            // before the next arrives. Without this, N simultaneous stale crons
+            // fire N back-to-back injections, spiking context and triggering
+            // ctx-watchdog restarts. (Issue #182)
+            await sleep(30_000);
+          }
+        }
+      }
+
+      await sleep(GAP_POLL_MS);
+    }
+  }
+
+  private async verifyCronsAfterIdle(
+    expectedCrons: string[],
+    generation: number,
+  ): Promise<void> {
+    const stateDir = join(this.env.ctxRoot, 'state', this.name);
+    const flagPath = join(stateDir, 'last_idle.flag');
+
+    // Record the idle flag timestamp at boot so we can detect the NEXT idle
+    // (i.e. after the agent has finished processing its startup prompt).
+    let bootIdleTs = 0;
+    try {
+      if (existsSync(flagPath)) {
+        bootIdleTs = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
+      }
+    } catch { /* ignore */ }
+
+    // Wait up to 30 minutes for the agent to finish its startup turn.
+    // 10 min was too short — agents busy processing gap nudge bursts would
+    // never go idle in time and the verification would silently drop. (Issue #182)
+    const maxWaitMs = 30 * 60 * 1000;
+    const pollMs = 15_000;
+    const startTime = Date.now();
+    let foundIdle = false;
+
+    while (Date.now() - startTime < maxWaitMs) {
+      // Bail if this lifecycle is stale (agent restarted or stopped)
+      if (generation !== this.lifecycleGeneration || this.status !== 'running') {
+        return;
+      }
+
+      await sleep(pollMs);
+
+      try {
+        if (existsSync(flagPath)) {
+          const currentIdleTs = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
+          if (currentIdleTs > bootIdleTs) {
+            // Agent has gone idle after boot — safe to inject
+            foundIdle = true;
+            break;
+          }
+        }
+      } catch { /* ignore read errors, keep polling */ }
+    }
+
+    // If the loop timed out without detecting an idle transition, do not inject:
+    // the agent never finished its startup turn (e.g. stuck on a very long boot).
+    if (!foundIdle) {
+      this.log('Cron verification: timed out waiting for idle flag, skipping injection');
+      return;
+    }
+
+    // Final stale check
+    if (generation !== this.lifecycleGeneration || this.status !== 'running') {
+      return;
+    }
+
+    // Inject the verification prompt
+    const cronList = expectedCrons.join(', ');
+    const verifyPrompt = `[SYSTEM] Cron verification: your config.json defines these recurring crons: ${cronList}. Run CronList now. If any are missing, restore them from config.json using /loop. This is an automated safety check.`;
+
+    this.log(`Injecting cron verification (expecting: ${cronList})`);
+    if (this.pty) {
+      injectMessage((data) => this.pty?.write(data), verifyPrompt);
     }
   }
 }
