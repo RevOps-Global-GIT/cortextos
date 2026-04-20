@@ -18,6 +18,8 @@ import { updateCronFire } from '../bus/cron-state.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
+import { sendSlack } from '../bus/send-slack.js';
+
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
@@ -2092,6 +2094,28 @@ busCommand
 
       await sleepMs(pollMs);
     }
+  });
+
+
+busCommand
+  .command('send-slack')
+  .description('Post a Slack reply as the current agent')
+  .argument('<channel>', 'Slack channel ID (C..., D..., G...) or user ID')
+  .argument('<text>', 'Reply text')
+  .option('--thread-ts <ts>', 'Thread anchor ts; set to keep the reply in the original thread')
+  .option('--inbox-id <id>', 'agent_slack_inbox.id — marks the row processed + records response_ts')
+  .option('--agent <title>', 'Override agent title (default: derived from CORTEXTOS_AGENT_NAME)')
+  .action(async (channel: string, text: string, opts: { threadTs?: string; inboxId?: string; agent?: string }) => {
+    const result = await sendSlack(channel, text, {
+      threadTs: opts.threadTs,
+      inboxId: opts.inboxId,
+      agent: opts.agent,
+    });
+    if (!result.ok) {
+      console.error(`send-slack failed: ${result.error}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(result));
   });
 
 function sleepMs(ms: number): Promise<void> {

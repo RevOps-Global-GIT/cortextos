@@ -7,6 +7,8 @@ import { FastChecker } from './fast-checker.js';
 import { CronScheduler } from './cron-scheduler.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
+import { SlackPoller } from '../slack/poller.js';
+import { attachSlackToAgent } from '../slack/attach.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
 import { logInboundMessage, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
@@ -20,7 +22,7 @@ type LogFn = (msg: string) => void;
  * Manages all agents in a cortextOS instance.
  */
 export class AgentManager {
-  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller }> = new Map();
+  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; slackPoller?: SlackPoller }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
   // Tracks agents that received a start request while still stopping.
   // stopAgent() honors these after cleanup completes so restart-all is race-free.
@@ -488,6 +490,23 @@ export class AgentManager {
 
       log('Telegram poller started');
 
+      // Slack poller — inject Slack DMs/@mentions for this agent into the
+      // same FastChecker queue. Uses agent_slack_inbox via Supabase REST.
+      attachSlackToAgent({
+        agentName: name,
+        agentDir,
+        checker,
+        log,
+        staggerMs: this.agents.size * 2000,
+      }).then((slackPoller) => {
+        if (!slackPoller) return;
+        const e2 = this.agents.get(name);
+        if (e2) e2.slackPoller = slackPoller;
+      }).catch((err) => {
+        log(`[slack] attach failed: ${err}`);
+      });
+
+
       // Orchestrator-only: start a second poller for the org's activity
       // channel bot so Telegram inline-button callbacks (currently just
       // appr_allow_*/appr_deny_* from createApproval posts) route to
@@ -619,6 +638,7 @@ export class AgentManager {
 
     if (entry.poller) entry.poller.stop();
     if (entry.activityPoller) entry.activityPoller.stop();
+    if (entry.slackPoller) entry.slackPoller.stop();
     entry.checker.stop();
     await entry.process.stop();
     this.agents.delete(name);
