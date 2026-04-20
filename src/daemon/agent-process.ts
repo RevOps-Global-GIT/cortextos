@@ -3,6 +3,7 @@ import { join, sep } from 'path';
 import { homedir } from 'os';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
+import { HermesPTY, hermesDbExists } from '../pty/hermes-pty.js';
 import { MessageDedup, injectMessage } from '../pty/inject.js';
 import { ensureDir } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
@@ -107,11 +108,13 @@ export class AgentProcess {
     // handleExit, preventing spurious crash recovery on the new agent.
     const myGeneration = ++this.lifecycleGeneration;
 
-    // Create PTY
+    // Create PTY — runtime-specific subclass handles binary, args, bootstrap detection
     const logPath = join(this.env.ctxRoot, 'logs', this.name, 'stdout.log');
     ensureDir(join(this.env.ctxRoot, 'logs', this.name));
     this.log(`Log path: ${logPath}`);
-    this.pty = new AgentPTY(this.env, this.config, logPath);
+    this.pty = this.config.runtime === 'hermes'
+      ? new HermesPTY(this.env, this.config, logPath)
+      : new AgentPTY(this.env, this.config, logPath);
 
     // BUG-011 fix: create a fresh exit signal for this run. resolveExit is
     // called from the onExit handler below; stop() awaits exitPromise to
@@ -177,18 +180,26 @@ export class AgentProcess {
 
     if (pty) {
       try {
-        // BUG-032 fix: use CRLF (not lone CR) so Claude Code's REPL actually
-        // recognizes the /exit line as a complete command, AND wait long
-        // enough (5s, was 3s) for the child to flush + exit cleanly. Without
-        // these the child often dies from SIGHUP (exit code 129) when the
-        // PTY is torn down before /exit has been processed. PR #11's
-        // BUG-011 fix already ensured the daemon doesn't misinterpret 129
-        // as a real crash, but the underlying graceful-shutdown sequence
-        // still wasn't graceful — this PR makes it so.
-        pty.write('\x03'); // Ctrl-C
-        await sleep(1000);
-        pty.write('/exit\r\n');
-        await sleep(5000);
+        if (this.config.runtime === 'hermes') {
+          // Hermes REPL exit: Ctrl+D is the clean exit signal.
+          // Hermes has a double-tap guard on Ctrl+C (accidental exit protection),
+          // so we use Ctrl+D which exits cleanly on the first press.
+          pty.write('\x04'); // Ctrl+D
+          await sleep(3000);
+        } else {
+          // BUG-032 fix: use CRLF (not lone CR) so Claude Code's REPL actually
+          // recognizes the /exit line as a complete command, AND wait long
+          // enough (5s, was 3s) for the child to flush + exit cleanly. Without
+          // these the child often dies from SIGHUP (exit code 129) when the
+          // PTY is torn down before /exit has been processed. PR #11's
+          // BUG-011 fix already ensured the daemon doesn't misinterpret 129
+          // as a real crash, but the underlying graceful-shutdown sequence
+          // still wasn't graceful — this PR makes it so.
+          pty.write('\x03'); // Ctrl-C
+          await sleep(1000);
+          pty.write('/exit\r\n');
+          await sleep(5000);
+        }
       } catch {
         // Ignore write errors during shutdown
       }
@@ -399,6 +410,13 @@ export class AgentProcess {
   }
 
   private shouldContinue(): boolean {
+    // Hermes: session continuity is determined by whether the SQLite DB exists.
+    // HERMES_HOME env var overrides the default ~/.hermes path.
+    if (this.config.runtime === 'hermes') {
+      const hermesHome = process.env['HERMES_HOME'];
+      return hermesDbExists(hermesHome);
+    }
+
     // Check for force-fresh marker
     const forceFreshPath = join(this.env.ctxRoot, 'state', this.name, '.force-fresh');
     if (existsSync(forceFreshPath)) {
@@ -454,7 +472,14 @@ export class AgentProcess {
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
     const handoffBlock = this.consumeHandoffBlock();
-    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. Then restore your crons from config.json: for each entry with type "recurring" (or no type field), call /loop {interval} {prompt}; for each entry with type "once", compare fire_at against the current UTC time above — if fire_at is still in the future recreate the CronCreate, if fire_at is in the past delete that entry from config.json. CRITICAL DEDUP: Always call CronList BEFORE creating any cron. For each config.json entry, search the CronList output for its prompt text — if the prompt already appears, SKIP that cron entirely. Only call /loop or CronCreate for entries whose prompt text is NOT already listed. This prevents rapid --continue restarts from accumulating duplicate schedules.${reminderBlock}${deliverablesBlock}${handoffBlock} After setting up crons, send a Telegram message to the user saying you are back online.${onboardingAppend}`;
+    const isHandoffRestart = handoffBlock.length > 0;
+    const handoffUxOverride = isHandoffRestart
+      ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely). After restoring crons and reading the handoff, send ONE brief conversational message that picks up naturally — e.g. "back — [what you were just working on]". No cron IDs, no status report, no cold-boot phrasing.'
+      : '';
+    const onlineMessage = isHandoffRestart
+      ? ''
+      : ' After setting up crons, send a Telegram message to the user saying you are back online.';
+    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. Then restore your crons from config.json: for each entry with type "recurring" (or no type field), call /loop {interval} {prompt}; for each entry with type "once", compare fire_at against the current UTC time above — if fire_at is still in the future recreate the CronCreate, if fire_at is in the past delete that entry from config.json. CRITICAL DEDUP: Always call CronList BEFORE creating any cron. For each config.json entry, search the CronList output for its prompt text — if the prompt already appears, SKIP that cron entirely. Only call /loop or CronCreate for entries whose prompt text is NOT already listed. This prevents rapid --continue restarts from accumulating duplicate schedules.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
   }
 
   private buildContinuePrompt(): string {
@@ -657,6 +682,10 @@ export class AgentProcess {
    * Fire-and-forget: errors are logged but never propagated.
    */
   scheduleCronVerification(): void {
+    // Hermes owns its cron scheduler natively — no CronList / /loop needed.
+    // Verification via injected prompts would interfere with Hermes's own cron system.
+    if (this.config.runtime === 'hermes') return;
+
     const crons = this.config.crons;
     if (!crons || crons.length === 0) return;
 
