@@ -10,6 +10,7 @@ import { writeCortextosEnv } from '../utils/env.js';
 import { getOverdueReminders } from '../bus/reminders.js';
 import { readCronState, parseDurationMs } from '../bus/cron-state.js';
 import { resolvePaths } from '../utils/paths.js';
+import type { CronScheduler, ManagedAgent } from './cron-scheduler.js';
 
 type LogFn = (msg: string) => void;
 
@@ -17,7 +18,7 @@ type LogFn = (msg: string) => void;
  * Manages a single agent's lifecycle.
  * Replaces agent-wrapper.sh for one agent.
  */
-export class AgentProcess {
+export class AgentProcess implements ManagedAgent {
   readonly name: string;
   private env: CtxEnv;
   private config: AgentConfig;
@@ -28,6 +29,10 @@ export class AgentProcess {
   private sessionStart: Date | null = null;
   private status: AgentStatus['status'] = 'stopped';
   private stopping: boolean = false;
+  // Timestamp (epoch ms) of the last successful inject — used by isIdle() to
+  // tell the daemon-side CronScheduler whether the agent is still processing
+  // a previously-injected message. Cleared when we observe a fresh idle flag.
+  private lastInjectedAt: number = 0;
   // BUG-040 fix: persists across stop() return until handleExit clears it.
   // Required because BUG-032's CRLF + 5s wait can cause graceful shutdown to
   // exceed the 5s Promise.race timeout in stop(), which would otherwise reset
@@ -56,8 +61,9 @@ export class AgentProcess {
   private dedup: MessageDedup;
   private log: LogFn;
   private onStatusChange: ((status: AgentStatus) => void) | null = null;
+  private cronScheduler: CronScheduler | null;
 
-  constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn) {
+  constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn, cronScheduler?: CronScheduler | null) {
     this.name = name;
     this.env = env;
     this.config = config;
@@ -66,6 +72,54 @@ export class AgentProcess {
     }
     this.dedup = new MessageDedup();
     this.log = log || ((msg) => console.log(`[${name}] ${msg}`));
+    this.cronScheduler = cronScheduler ?? null;
+  }
+
+  // --- ManagedAgent interface (daemon-side CronScheduler) ---
+
+  get stateDir(): string {
+    return join(this.env.ctxRoot, 'state', this.name);
+  }
+
+  get configPath(): string {
+    return join(this.env.agentDir, 'config.json');
+  }
+
+  get timezone(): string | undefined {
+    return this.config.timezone || undefined;
+  }
+
+  get generation(): number {
+    return this.lifecycleGeneration;
+  }
+
+  isRunning(): boolean {
+    return this.status === 'running' && this.pty !== null;
+  }
+
+  /**
+   * Idle iff the Stop hook's last_idle.flag timestamp is newer than the most
+   * recent inject. Returns true when we have never injected yet (safe to fire).
+   * Returns false when we can't read the flag (conservative — defer fires and
+   * let maxDeferMs force-inject).
+   */
+  isIdle(): boolean {
+    if (this.lastInjectedAt === 0) return true;
+    const flagPath = join(this.stateDir, 'last_idle.flag');
+    try {
+      if (!existsSync(flagPath)) return false;
+      const idleMs = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10) * 1000;
+      return idleMs > this.lastInjectedAt;
+    } catch {
+      return false;
+    }
+  }
+
+  /** CronScheduler.inject(). Delegates to injectMessage and tracks timestamp. */
+  inject(message: string): boolean {
+    const ok = this.injectMessage(message);
+    if (ok) this.lastInjectedAt = Date.now();
+    return ok;
   }
 
   /**
@@ -144,10 +198,22 @@ export class AgentProcess {
       await this.pty.spawn(mode, prompt);
       this.status = 'running';
       this.sessionStart = new Date();
+      this.lastInjectedAt = 0;
       this.log(`Running (pid: ${this.pty.getPid()})`);
 
       // Start session timer
       this.startSessionTimer();
+
+      // Attach to the daemon-side CronScheduler so config.json crons fire
+      // via PTY injection regardless of in-session CronCreate state. This is
+      // the reliable path that survives --continue restarts and ctx handoffs;
+      // the in-session /loop setup remains as a redundant backup (MessageDedup
+      // in injectMessage prevents double-firing when both paths are active).
+      try {
+        this.cronScheduler?.attachAgent(this);
+      } catch (err) {
+        this.log(`CronScheduler attach failed (non-fatal): ${err}`);
+      }
 
       this.notifyStatusChange();
     } catch (err) {
@@ -337,6 +403,13 @@ export class AgentProcess {
   private handleExit(exitCode: number): void {
     this.pty = null;
     this.clearSessionTimer();
+    // Detach from CronScheduler so no fires race a dead PTY. A subsequent
+    // start() (crash recovery, session refresh) re-attaches with the new
+    // generation; detaching here also ensures the scheduler doesn't hold a
+    // stale ManagedAgent reference if the agent HALTs.
+    try {
+      this.cronScheduler?.detachAgent(this.name);
+    } catch { /* non-fatal */ }
 
     // When the cortextos daemon is shut down by PM2, SIGTERM propagates to
     // the whole process group and reaches each PTY's Claude Code child
