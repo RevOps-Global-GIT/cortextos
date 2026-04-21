@@ -6,6 +6,214 @@
 import { existsSync, readFileSync } from 'fs';
 import { basename } from 'path';
 
+/**
+ * Result of TelegramAPI.validateCredentials. Tagged union so callers can
+ * key targeted error messages off the `reason` discriminant.
+ *
+ * ok=false reasons:
+ *  - bad_token: 401 from getMe; BOT_TOKEN is invalid or revoked
+ *  - chat_not_found: 400 from getChat; CHAT_ID is not reachable by this bot
+ *    (most commonly: the user never sent /start to the bot)
+ *  - bot_recipient: getChat succeeded but the recipient is a bot (type=private
+ *    && is_bot=true), or Telegram returned the 403 "bots can't send messages
+ *    to bots" error at probe time. Bots cannot message bots.
+ *  - self_chat: CHAT_ID matches the bot's OWN user id (getMe.id). This is the
+ *    self-chat trap: someone pasted the BOT_TOKEN prefix into CHAT_ID. Caught without
+ *    needing a sendMessage probe — getMe alone is enough.
+ *  - network_error: fetch() threw — DNS, timeout, or offline. Callers should
+ *    treat as WARNING, not hard-fail.
+ *  - rate_limited: 429 from the Telegram API. Callers should treat as WARNING,
+ *    not hard-fail (retry later).
+ */
+export type ValidateCredentialsResult =
+  | {
+      ok: true;
+      botUsername: string;
+      botId: number;
+      chatType: string;
+      chatTitle?: string;
+    }
+  | {
+      ok: false;
+      reason:
+        | 'bad_token'
+        | 'chat_not_found'
+        | 'bot_recipient'
+        | 'self_chat'
+        | 'network_error'
+        | 'rate_limited';
+      detail: string;
+    };
+
+/**
+ * Format a human-readable error message for a failed ValidateCredentialsResult.
+ * Single source of truth for the CLI-facing error strings so setup.ts and
+ * enable-agent.ts stay in sync. Never leaks BOT_TOKEN (not even a prefix).
+ */
+export function formatValidateError(result: Extract<ValidateCredentialsResult, { ok: false }>): string {
+  switch (result.reason) {
+    case 'bad_token':
+      return 'BOT_TOKEN is invalid or revoked. Telegram returned 401 Unauthorized. Check the token in your .env against @BotFather.';
+    case 'chat_not_found':
+      return (
+        `CHAT_ID ${result.detail} was not found by the bot. ` +
+        'The most common cause: the user has never sent /start to the bot. ' +
+        'Open Telegram, send /start to your bot, then retry.'
+      );
+    case 'bot_recipient':
+      return (
+        `CHAT_ID ${result.detail} resolves to a bot, not a user. ` +
+        'A Telegram bot cannot message another bot. ' +
+        'Confirm this is a real user chat_id, not a bot user id.'
+      );
+    case 'self_chat':
+      return (
+        `CHAT_ID (${result.detail}) matches the bot's own user ID. ` +
+        'You likely pasted the BOT_TOKEN prefix instead of your real chat_id. ' +
+        'To get your real chat_id: send /start to the bot in Telegram, then visit ' +
+        'https://api.telegram.org/bot<TOKEN>/getUpdates and look for result[-1].message.chat.id.'
+      );
+    case 'network_error':
+      return `Could not reach the Telegram API: ${result.detail}. Check connectivity and retry.`;
+    case 'rate_limited':
+      return `Telegram API rate-limited the validation probe (${result.detail}). Retry in a few seconds.`;
+  }
+}
+
+/**
+ * Telegram message size limit in UTF-16 code units. Telegram counts in
+ * code units, so we do too — this matches what the API rejects at.
+ */
+export const TELEGRAM_MAX_LEN = 4096;
+
+/**
+ * Split `text` into chunks no longer than `maxLen` characters, preferring
+ * natural boundaries in this order:
+ *
+ *   1. Paragraph break (\n\n)
+ *   2. Single newline (\n)
+ *   3. Sentence end (. ! ? followed by whitespace)
+ *   4. Word boundary (whitespace)
+ *   5. Hard cut at maxLen
+ *
+ * Never splits inside an unbalanced Markdown v1 entity (*, _, backtick,
+ * or a [ without its matching ]). If the best boundary lands on an
+ * unbalanced split, it keeps walking back to the next candidate. Only
+ * when every candidate is unbalanced does it fall back to a hard cut at
+ * maxLen — the old behavior, preserved for pathological inputs.
+ */
+export function splitForTelegram(text: string, maxLen: number = TELEGRAM_MAX_LEN): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const remaining = text.length - i;
+    if (remaining <= maxLen) {
+      chunks.push(text.slice(i));
+      break;
+    }
+
+    const windowEnd = i + maxLen;
+    // Back half of the window — keeps chunks from collapsing to tiny fragments.
+    const minSplit = i + Math.floor(maxLen / 2);
+
+    const candidates: number[] = [];
+
+    // Paragraph break — split lands AFTER the "\n\n" so both newlines
+    // stay with the prior chunk.
+    const paraIdx = text.lastIndexOf('\n\n', windowEnd - 1);
+    if (paraIdx >= minSplit) candidates.push(paraIdx + 2);
+
+    // Single newline.
+    const nlIdx = text.lastIndexOf('\n', windowEnd - 1);
+    if (nlIdx >= minSplit) candidates.push(nlIdx + 1);
+
+    // Sentence end — scan the window for "[.!?] " and take the last match.
+    let sentSplit = -1;
+    for (let j = windowEnd - 2; j >= minSplit; j--) {
+      const c = text.charCodeAt(j);
+      const n = text.charCodeAt(j + 1);
+      if ((c === 46 || c === 33 || c === 63) && (n === 32 || n === 9 || n === 10)) {
+        sentSplit = j + 2;
+        break;
+      }
+    }
+    if (sentSplit >= minSplit) candidates.push(sentSplit);
+
+    // Word boundary — last whitespace in the window.
+    let wsSplit = -1;
+    for (let j = windowEnd - 1; j >= minSplit; j--) {
+      const c = text.charCodeAt(j);
+      if (c === 32 || c === 9 || c === 10) { wsSplit = j + 1; break; }
+    }
+    if (wsSplit >= minSplit) candidates.push(wsSplit);
+
+    // Pick the best candidate (earliest in the preference order) whose
+    // resulting chunk has balanced markdown entities.
+    let splitAt = -1;
+    for (const c of candidates) {
+      if (isMarkdownBalanced(text.slice(i, c))) { splitAt = c; break; }
+    }
+
+    // Fallback: no natural-boundary candidate was balanced. Scan the
+    // window with a running delimiter tally and remember the latest
+    // position inside [minSplit, windowEnd] at which all entities are
+    // balanced. One O(maxLen) pass — cheap compared to the network
+    // round-trip. If no balanced position exists (pathological input
+    // whose entity spans more than maxLen), fall through to a hard cut
+    // at windowEnd — no worse than the pre-patch behavior.
+    if (splitAt < 0) {
+      let asterisk = 0, underscore = 0, backtick = 0, bracket = 0;
+      let bestBalanced = -1;
+      for (let j = i; j < windowEnd; j++) {
+        const c = text.charCodeAt(j);
+        if (c === 42) asterisk++;
+        else if (c === 95) underscore++;
+        else if (c === 96) backtick++;
+        else if (c === 91) bracket++;
+        else if (c === 93 && bracket > 0) bracket--;
+        if (
+          j + 1 >= minSplit &&
+          asterisk % 2 === 0 &&
+          underscore % 2 === 0 &&
+          backtick % 2 === 0 &&
+          bracket === 0
+        ) {
+          bestBalanced = j + 1;
+        }
+      }
+      splitAt = bestBalanced >= 0 ? bestBalanced : windowEnd;
+    }
+
+    chunks.push(text.slice(i, splitAt));
+    i = splitAt;
+  }
+  return chunks;
+}
+
+/**
+ * Returns true iff every `*`, `_`, backtick, and `[` in `text` has a
+ * closing match. Used by splitForTelegram to reject candidate split
+ * points that would leave half a bold/italic/code span dangling in one
+ * chunk. Conservative — a backslash-escaped delimiter is still counted
+ * here; sanitizeMarkdown strips most of those before we see the text,
+ * so this is safe in practice. Cost of being conservative: a few inputs
+ * fall through to the hard-cut fallback.
+ */
+function isMarkdownBalanced(text: string): boolean {
+  let asterisk = 0, underscore = 0, backtick = 0, bracket = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c === 42) asterisk++;              // *
+    else if (c === 95) underscore++;       // _
+    else if (c === 96) backtick++;         // `
+    else if (c === 91) bracket++;          // [
+    else if (c === 93 && bracket > 0) bracket--; // ]
+  }
+  return asterisk % 2 === 0 && underscore % 2 === 0 && backtick % 2 === 0 && bracket === 0;
+}
+
 export class TelegramAPI {
   private baseUrl: string;
   private lastSendTime: Map<string, number> = new Map();
@@ -69,17 +277,26 @@ export class TelegramAPI {
 
     const requestedParseMode: 'Markdown' | null = opts?.parseMode === null ? null : 'Markdown';
 
-    // Split long messages. Always produces at least one chunk (even if the
-    // input is empty, which preserves the old behavior of POSTing once).
-    const maxLen = 4096;
-    const chunks: string[] = [];
-    if (sanitized.length <= maxLen) {
-      chunks.push(sanitized);
-    } else {
-      for (let i = 0; i < sanitized.length; i += maxLen) {
-        chunks.push(sanitized.slice(i, i + maxLen));
-      }
-    }
+    // Split long messages at natural boundaries (paragraph > newline >
+    // sentence > word > hard cut). splitForTelegram guarantees at least
+    // one chunk — even for empty input — preserving the old behavior of
+    // POSTing once for a short message.
+    //
+    // Counter suffix budget: when a message splits into multiple chunks,
+    // each chunk gets "\n\n(N/M)" appended (Clint standard 2026-04-19 —
+    // makes multi-part messages visually obvious to the recipient). Worst
+    // case for M ≤ 99 is 9 chars ("\n\n(99/99)"); reserve 10 for padding.
+    // Reduce the split window by that amount up-front so every chunk +
+    // its counter still fits inside TELEGRAM_MAX_LEN. Single-chunk
+    // messages get no counter, so they use the full window.
+    const COUNTER_RESERVED = 10;
+    const effectiveMax = TELEGRAM_MAX_LEN - COUNTER_RESERVED;
+    const rawChunks = sanitized.length === 0
+      ? ['']
+      : splitForTelegram(sanitized, effectiveMax);
+    const chunks = rawChunks.length > 1
+      ? rawChunks.map((c, i) => `${c}\n\n(${i + 1}/${rawChunks.length})`)
+      : rawChunks;
 
     let lastResult: any;
     for (let i = 0; i < chunks.length; i++) {
@@ -268,6 +485,147 @@ export class TelegramAPI {
       timeout,
       allowed_updates: ['message', 'callback_query', 'message_reaction'],
     });
+  }
+
+  /**
+   * Get info about the bot itself (getMe). Throws on Telegram API error.
+   * Primarily used by validateCredentials() to confirm the BOT_TOKEN is
+   * valid and to look up the bot's own user id for the self_chat check.
+   */
+  async getMe(): Promise<any> {
+    return this.post('getMe', {});
+  }
+
+  /**
+   * Get info about a chat (getChat). Throws on Telegram API error.
+   * Used by validateCredentials() to confirm the chat_id is reachable
+   * and to inspect the chat type + is_bot flag.
+   */
+  async getChat(chatId: string | number): Promise<any> {
+    return this.post('getChat', { chat_id: chatId });
+  }
+
+  /**
+   * Race a promise against a timeout. Used by validateCredentials() so a
+   * network partition cannot hang `cortextos enable` or `cortextos setup`
+   * indefinitely. The underlying fetch keeps running in the background
+   * after the timeout, but that is acceptable for a one-off probe.
+   */
+  private async withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)),
+        ms,
+      );
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Probe whether this bot + chat_id combination is actually usable for
+   * sending messages, without attempting a send. Catches the classes of
+   * silent-broken-config that used to surface only at first real send:
+   *
+   *   1. bad_token — BOT_TOKEN is invalid or revoked (401 from getMe)
+   *   2. chat_not_found — CHAT_ID was never opened with this bot (400)
+   *   3. bot_recipient — CHAT_ID resolves to another bot (403 at send time,
+   *      or getChat returns type=private is_bot=true)
+   *   4. self_chat — CHAT_ID equals getMe.id, meaning someone pasted the
+   *      BOT_TOKEN prefix into CHAT_ID (the "self_chat trap")
+   *   5. network_error — fetch itself failed; caller should treat as WARN
+   *   6. rate_limited — 429 from Telegram; caller should treat as WARN
+   *
+   * Never sends a real message. Only two API calls: getMe and getChat.
+   * Both are free operations on the Telegram side.
+   */
+  async validateCredentials(chatId: string | number): Promise<ValidateCredentialsResult> {
+    // Normalize chatId to a string for comparisons; Telegram accepts either.
+    const chatIdStr = String(chatId).trim();
+    if (!chatIdStr) {
+      return { ok: false, reason: 'chat_not_found', detail: '(empty)' };
+    }
+
+    // Validation probes are bounded at 10s per call so a network partition
+    // cannot hang `cortextos enable` or `cortextos setup` indefinitely.
+    const TIMEOUT_MS = 10_000;
+
+    // Step 1: getMe — validates the token AND gives us the bot's user id
+    // for the self_chat check.
+    let me: any;
+    try {
+      me = await this.withTimeout(this.getMe(), TIMEOUT_MS, 'Telegram API request');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/Unauthorized|401/i.test(msg)) {
+        return { ok: false, reason: 'bad_token', detail: msg };
+      }
+      if (/Too Many Requests|429/i.test(msg)) {
+        return { ok: false, reason: 'rate_limited', detail: msg };
+      }
+      // Any other error at the getMe step is a network-level failure
+      // (fetch threw, DNS died, etc.) rather than a credential problem.
+      if (/Telegram API error/.test(msg)) {
+        // The API replied but with an unrecognized error shape. Treat as
+        // bad_token conservatively — it's the most common cause.
+        return { ok: false, reason: 'bad_token', detail: msg };
+      }
+      return { ok: false, reason: 'network_error', detail: msg };
+    }
+
+    const botId: number | undefined = me?.result?.id;
+    const botUsername: string = me?.result?.username ?? '(unknown)';
+
+    // Step 2: the self_chat check. If CHAT_ID matches the bot's own user id,
+    // no further probing is needed — the config is broken no matter what
+    // getChat would return. This catches the self-chat trap before any additional
+    // API calls.
+    if (botId !== undefined && String(botId) === chatIdStr) {
+      return { ok: false, reason: 'self_chat', detail: chatIdStr };
+    }
+
+    // Step 3: getChat — confirms the chat is reachable by this bot and
+    // lets us inspect type + is_bot.
+    let chat: any;
+    try {
+      chat = await this.withTimeout(this.getChat(chatIdStr), TIMEOUT_MS, 'Telegram API request');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/chat not found|Bad Request/i.test(msg)) {
+        return { ok: false, reason: 'chat_not_found', detail: chatIdStr };
+      }
+      if (/bots can.?t send messages to bots|Forbidden/i.test(msg)) {
+        return { ok: false, reason: 'bot_recipient', detail: chatIdStr };
+      }
+      if (/Too Many Requests|429/i.test(msg)) {
+        return { ok: false, reason: 'rate_limited', detail: msg };
+      }
+      if (/Telegram API error/.test(msg)) {
+        return { ok: false, reason: 'chat_not_found', detail: chatIdStr };
+      }
+      return { ok: false, reason: 'network_error', detail: msg };
+    }
+
+    const chatType: string = chat?.result?.type ?? '(unknown)';
+    const chatIsBot: boolean = chatType === 'private' && chat?.result?.is_bot === true;
+    const chatTitle: string | undefined =
+      chat?.result?.title ?? chat?.result?.first_name ?? chat?.result?.username;
+
+    if (chatIsBot) {
+      return { ok: false, reason: 'bot_recipient', detail: chatIdStr };
+    }
+
+    return {
+      ok: true,
+      botUsername,
+      botId: botId ?? 0,
+      chatType,
+      chatTitle,
+    };
   }
 
   /**

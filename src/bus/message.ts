@@ -7,6 +7,8 @@ import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomString } from '../utils/random.js';
 import { validateAgentName, validatePriority } from '../utils/validate.js';
+import { mirrorAgentBusToSlack } from './slack-mirror.js';
+
 
 // ---------------------------------------------------------------------------
 // Security (H10): HMAC-SHA256 message signing
@@ -83,6 +85,13 @@ export function sendMessage(
   const inboxDir = join(paths.ctxRoot, 'inbox', to);
   ensureDir(inboxDir);
   atomicWriteSync(join(inboxDir, filename), JSON.stringify(message));
+
+
+  // Auto-mirror to Slack #agents (fire-and-forget). See slack-mirror.ts.
+  // Skip during tests - fixture names would pollute the real #agents channel.
+  if (!process.env.VITEST && process.env.NODE_ENV !== "test") {
+    mirrorAgentBusToSlack(from, to, text, { priority, replyTo: replyTo || null }).catch(() => undefined);
+  }
 
   return msgId;
 }

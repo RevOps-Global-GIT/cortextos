@@ -68,6 +68,13 @@ export interface Task {
    */
   blocks?: string[];
   blocked_by?: string[];
+  /**
+   * Free-form correlation metadata. Set at create-time via `--meta '<json>'`
+   * so callers can attach context (e.g. originating cron name, source msg_id,
+   * upstream request id) without polluting the strict schema. Opaque to the
+   * bus — the dashboard surfaces it as-is.
+   */
+  meta?: Record<string, unknown>;
 }
 
 // Event Types
@@ -158,6 +165,24 @@ export interface AgentConfig {
   max_session_seconds?: number;
   max_crashes_per_day?: number;
   model?: string;
+  /**
+   * Cost tier for model routing: 'haiku' | 'sonnet' | 'opus'.
+   * Ignored when `model` is set (explicit model takes precedence).
+   * Resolved to a concrete model ID via model_tiers (or DEFAULT_MODEL_TIERS).
+   */
+  tier?: 'haiku' | 'sonnet' | 'opus';
+  /**
+   * Per-agent overrides for the tier→model ID mapping.
+   * Merges on top of DEFAULT_MODEL_TIERS — only specify the tiers you want to override.
+   */
+  model_tiers?: { haiku?: string; sonnet?: string; opus?: string };
+  /**
+   * How long to pause (seconds) when an Anthropic rate-limit exit is detected,
+   * before restarting the agent. Defaults to 18000 (5 hours) — the standard
+   * Anthropic rolling rate-limit window. Rate-limit pauses do NOT count toward
+   * max_crashes_per_day and do NOT trigger the git watchdog.
+   */
+  rate_limit_pause_seconds?: number;
   working_directory?: string;
   enabled?: boolean;
   crons?: CronEntry[];
@@ -165,11 +190,29 @@ export interface AgentConfig {
   day_mode_start?: string;
   day_mode_end?: string;
   communication_style?: string;
+  /**
+   * Display name for the business or team operating this agent.
+   * When set, the dashboard sidebar and title show this name instead of "cortextOS".
+   * Typically set by the onboarding wizard from the user's company name.
+   */
+  brand_name?: string;
   approval_rules?: {
     always_ask: string[];
     never_ask: string[];
   };
   ecosystem?: EcosystemConfig;
+  /**
+   * Gmail watch: when present, the fast-checker daemon polls Gmail every
+   * `interval_ms` (default 15 min) using the `gws` CLI and writes an inbox
+   * message to wake Claude if unread messages match the query.
+   * Requires `gws` to be authenticated (see ~/.config/gws/).
+   */
+  gmail_watch?: {
+    /** Gmail API query string (e.g. "from:example.com is:unread") */
+    query: string;
+    /** Poll interval in milliseconds. Default: 900000 (15 minutes) */
+    interval_ms?: number;
+  };
 }
 
 export interface CronEntry {
@@ -183,7 +226,7 @@ export interface CronEntry {
   prompt: string;
   /** "recurring" (default) restores on every session start.
    *  "once" restores only if fire_at is still in the future; deleted after firing. */
-  type?: 'recurring' | 'once' | 'disabled';
+  type?: 'recurring' | 'once';
 }
 
 export interface OrgContext {
@@ -194,6 +237,7 @@ export interface OrgContext {
   value_prop?: string;
   timezone?: string;
   orchestrator?: string;
+  workingDir?: string;
   day_mode_start?: string;
   day_mode_end?: string;
   default_approval_categories?: string[];
@@ -337,6 +381,7 @@ export interface CtxEnv {
   projectRoot: string;
   timezone?: string;
   orchestrator?: string;
+  workingDir?: string;
 }
 
 // Bus Path Types
@@ -424,7 +469,7 @@ export interface AgentInfo {
 
 export interface AgentStatus {
   name: string;
-  status: 'running' | 'stopped' | 'crashed' | 'starting' | 'halted';
+  status: 'running' | 'stopped' | 'crashed' | 'starting' | 'halted' | 'rate-limited';
   pid?: number;
   uptime?: number; // seconds
   lastHeartbeat?: string;

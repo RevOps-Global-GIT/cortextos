@@ -9,6 +9,8 @@ const mockPty = {
   write: vi.fn(),
   getPid: vi.fn().mockReturnValue(12345),
   isAlive: vi.fn().mockReturnValue(true),
+  // Default: no rate-limit signature in output (safe for all existing tests)
+  getOutputBuffer: vi.fn().mockReturnValue({ hasRateLimitSignature: () => false }),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
   }),
@@ -98,6 +100,8 @@ beforeEach(() => {
   mockPty.write.mockClear();
   mockPty.isAlive.mockClear();
   mockPty.isAlive.mockReturnValue(true);
+  mockPty.getOutputBuffer.mockClear();
+  mockPty.getOutputBuffer.mockReturnValue({ hasRateLimitSignature: () => false });
   mockPty.onExit.mockClear();
   mockInjectMessage.mockClear();
   fsMocks.existsSync.mockReset().mockReturnValue(false);
@@ -250,113 +254,6 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
   });
 });
 
-describe('AgentProcess - cron auto-verification', () => {
-  it('scheduleCronVerification() is a no-op when config has no crons', async () => {
-    const ap = new AgentProcess('alice', mockEnv, {});
-    await ap.start();
-    // Should not throw, should not schedule anything
-    ap.scheduleCronVerification();
-    // No inject calls expected (beyond any from start)
-    expect(mockInjectMessage).not.toHaveBeenCalled();
-  });
-
-  it('scheduleCronVerification() is a no-op when config has only once crons', async () => {
-    const ap = new AgentProcess('alice', mockEnv, {
-      crons: [{ name: 'reminder', type: 'once' as const, fire_at: '2099-01-01T00:00:00Z', prompt: 'test' }],
-    });
-    await ap.start();
-    ap.scheduleCronVerification();
-    // Wait briefly to confirm nothing fires
-    await new Promise(r => setTimeout(r, 100));
-    expect(mockInjectMessage).not.toHaveBeenCalled();
-  });
-
-  it('scheduleCronVerification() is a no-op when config has only disabled crons', async () => {
-    const ap = new AgentProcess('alice', mockEnv, {
-      crons: [{ name: 'paused-job', type: 'disabled' as const, interval: '1h', prompt: 'test' }],
-    });
-    await ap.start();
-    ap.scheduleCronVerification();
-    await new Promise(r => setTimeout(r, 100));
-    expect(mockInjectMessage).not.toHaveBeenCalled();
-  });
-
-  it('scheduleGapDetection() is a no-op when config has only disabled crons', async () => {
-    const ap = new AgentProcess('alice', mockEnv, {
-      crons: [{ name: 'paused-job', type: 'disabled' as const, interval: '1h', prompt: 'test' }],
-    });
-    await ap.start();
-    ap.scheduleGapDetection();
-    await new Promise(r => setTimeout(r, 100));
-    expect(mockInjectMessage).not.toHaveBeenCalled();
-  });
-
-  it('scheduleCronVerification() schedules verification when config has recurring crons', async () => {
-    const ap = new AgentProcess('alice', mockEnv, {
-      crons: [
-        { name: 'heartbeat', interval: '4h', prompt: 'check in' },
-        { name: 'research', type: 'recurring' as const, interval: '24h', prompt: 'research' },
-      ],
-    });
-    await ap.start();
-    // This should not throw — verification runs in background
-    ap.scheduleCronVerification();
-    // Verification is waiting for idle flag — no immediate injection
-    expect(mockInjectMessage).not.toHaveBeenCalled();
-  });
-
-  it('verifyCronsAfterIdle: injects prompt containing cron names once idle flag appears newer than boot', async () => {
-    const fs = await import('fs');
-    const mockExistsSync = vi.mocked(fs.existsSync);
-    const mockReadFileSync = vi.mocked(fs.readFileSync);
-
-    const bootTs = 1000;
-    const idleTs = 2000;
-
-    // Track calls so the first read (boot snapshot) returns bootTs,
-    // subsequent reads (poll) return idleTs (agent went idle)
-    let readCount = 0;
-    mockExistsSync.mockImplementation((p) => {
-      if (typeof p === 'string' && p.endsWith('last_idle.flag')) return true;
-      return false;
-    });
-    mockReadFileSync.mockImplementation((p) => {
-      if (typeof p === 'string' && p.endsWith('last_idle.flag')) {
-        readCount++;
-        return readCount === 1 ? String(bootTs) : String(idleTs);
-      }
-      return '';
-    });
-
-    vi.useFakeTimers();
-    try {
-      const ap = new AgentProcess('alice', mockEnv, {
-        crons: [
-          { name: 'heartbeat', interval: '4h', prompt: 'check in' },
-          { name: 'daily-report', interval: '24h', prompt: 'report' },
-        ],
-      });
-      await ap.start();
-
-      ap.scheduleCronVerification();
-
-      // Advance past the 15s poll interval so the background loop wakes,
-      // reads the newer flag timestamp, and injects the verification prompt
-      await vi.advanceTimersByTimeAsync(16_000);
-    } finally {
-      vi.useRealTimers();
-      // Restore default fs mock behaviour for other tests
-      mockExistsSync.mockReturnValue(false);
-      mockReadFileSync.mockReset();
-    }
-
-    expect(mockInjectMessage).toHaveBeenCalledOnce();
-    const promptArg: string = mockInjectMessage.mock.calls[0][1] as string;
-    expect(promptArg).toContain('heartbeat');
-    expect(promptArg).toContain('daily-report');
-  });
-});
-
 describe('AgentProcess - BUG-048 fix (session timer re-reads config)', () => {
   it('fires sessionRefresh when config on disk still matches original short duration', async () => {
     const refreshSpy = vi.fn().mockResolvedValue(undefined);
@@ -408,4 +305,40 @@ describe('AgentProcess - BUG-048 fix (session timer re-reads config)', () => {
     // sessionRefresh must NOT have been called — config said 1h, not 1s
     expect(refreshSpy).not.toHaveBeenCalled();
   });
+});
+
+describe('AgentProcess - sessionRefresh writes .session-refresh marker', () => {
+  it('sessionRefresh writes the marker synchronously before stop() can resolve', async () => {
+    // hook-crash-alert.ts (SessionEnd hook) looks for a .session-refresh
+    // file in the agent's stateDir to classify an exit as a planned session
+    // rotation and post ♻️ instead of 🚨 CRASH. Before the fix, nothing in
+    // the codebase wrote this marker — every 4h rotation fell through to
+    // the default crash classification. sessionRefresh must write the
+    // marker BEFORE awaiting this.stop(), so the hook sees it regardless
+    // of how fast the PTY tears down.
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    // Kick off sessionRefresh. The marker write is synchronous (happens
+    // before the first await inside sessionRefresh) so it MUST have
+    // completed by the time the caller gets the returned promise back —
+    // there is no need to await anything here.
+    const refreshPromise = ap.sessionRefresh();
+
+    const markerWrite = fsMocks.writeFileSync.mock.calls.find((call: unknown[]) => {
+      const path = call[0];
+      return typeof path === 'string' && path.endsWith('/.session-refresh');
+    });
+    expect(markerWrite).toBeDefined();
+    // Second arg is the marker contents — "session timer reached limit"
+    // is what hook-crash-alert reads into the `reason` field.
+    expect(String(markerWrite?.[1])).toContain('session timer reached limit');
+
+    // Clean up: fire the PTY exit so stop() can resolve, and let
+    // sessionRefresh finish without leaving a dangling promise. Any
+    // subsequent failure inside the mock re-spawn path is irrelevant —
+    // the assertion above already fired.
+    if (capturedOnExit) capturedOnExit(129, 0);
+    refreshPromise.catch(() => { /* test done */ });
+  }, 10000);
 });

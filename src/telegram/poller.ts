@@ -16,12 +16,24 @@ export class TelegramPoller {
   private api: TelegramAPI;
   private offset: number = 0;
   private running: boolean = false;
+  // BUG-POLLER-RACE fix: track whether start() has been called and whether
+  // stop() was requested before start() had a chance to run. Without this,
+  // a stop() call issued before the deferred setTimeout-start() fired would
+  // be silently lost — the while-loop would unconditionally set running=true
+  // and begin polling, producing an orphaned poller that no entry in the
+  // agent-manager holds a reference to. A subsequent startAgent() would then
+  // create a second live poller for the same bot token, and the two would
+  // race on getUpdates and log "Conflict detected (another poller active)"
+  // forever.
+  private started: boolean = false;
+  private stopRequested: boolean = false;
   private stateDir: string;
   private offsetFileName: string;
   private messageHandlers: MessageHandler[] = [];
   private callbackHandlers: CallbackHandler[] = [];
   private reactionHandlers: ReactionHandler[] = [];
   private pollInterval: number;
+  private label: string;
 
   /**
    * @param api Telegram API client scoped to a single bot token.
@@ -37,13 +49,14 @@ export class TelegramPoller {
    *   write to `.telegram-offset` and lose track of which bot each
    *   offset belonged to.
    */
-  constructor(api: TelegramAPI, stateDir: string, pollInterval: number = 1000, offsetFileSuffix?: string) {
+  constructor(api: TelegramAPI, stateDir: string, pollInterval: number = 1000, offsetFileSuffix?: string, label?: string) {
     this.api = api;
     this.stateDir = stateDir;
     this.pollInterval = pollInterval;
     this.offsetFileName = offsetFileSuffix
       ? `.telegram-offset-${offsetFileSuffix}`
       : '.telegram-offset';
+    this.label = label || 'telegram-poller';
     this.loadOffset();
   }
 
@@ -73,24 +86,51 @@ export class TelegramPoller {
 
   /**
    * Start the polling loop.
+   *
+   * @param initialDelayMs Optional delay before the first getUpdates call.
+   *   Used by agent-manager to stagger multiple agents' pollers so they do
+   *   not all call the Telegram API simultaneously at daemon boot. Previously
+   *   this was implemented via `setTimeout(() => poller.start(), delay)` in
+   *   agent-manager, which created a race: if stopAgent() ran before the
+   *   setTimeout fired, poller.stop() would set running=false on a poller
+   *   that had not yet entered its while-loop, start() would then fire and
+   *   unconditionally set running=true, and the result was an orphaned
+   *   poller with no reference held by agent-manager. Moving the delay
+   *   inside start() fixes that race by making stop() effective regardless
+   *   of whether start() has run yet.
    */
-  async start(): Promise<void> {
+  async start(initialDelayMs: number = 0): Promise<void> {
+    // Respect a stop() that was issued before start() had a chance to run.
+    if (this.stopRequested) return;
+    // Idempotent — a second start() call on the same instance is a no-op.
+    if (this.started) return;
+    this.started = true;
+
+    if (initialDelayMs > 0) {
+      await sleep(initialDelayMs);
+      // Re-check stopRequested after the delay — a stop() during the stagger
+      // window must prevent the poll loop from ever starting.
+      if (this.stopRequested) return;
+    }
+
     this.running = true;
     while (this.running) {
       try {
         await this.pollOnce();
       } catch (err) {
         // Log error but continue polling
-        console.error('[telegram-poller] Poll error:', err);
+        console.error(`[${this.label}] Poll error:`, err);
       }
       await sleep(this.pollInterval);
     }
   }
 
   /**
-   * Stop the polling loop.
+   * Stop the polling loop. Safe to call before start() — the subsequent
+   * start() will observe stopRequested and return without entering the loop.
    */
   stop(): void {
+    this.stopRequested = true;
     this.running = false;
   }
 
@@ -105,7 +145,18 @@ export class TelegramPoller {
    * update so a crash mid-batch does not drop confirmed state.
    */
   async pollOnce(): Promise<void> {
-    const result = await this.api.getUpdates(this.offset, 1);
+    let result;
+    try {
+      result = await this.api.getUpdates(this.offset, 1);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('Conflict') || msg.includes('terminated by other getUpdates')) {
+        console.error(`[${this.label}] Conflict detected (another poller active), backing off 10s`);
+        await sleep(10_000);
+        return;
+      }
+      throw err;
+    }
     if (!result?.result?.length) return;
 
     for (const update of result.result as TelegramUpdate[]) {
@@ -117,7 +168,7 @@ export class TelegramPoller {
           try {
             handler(update.message);
           } catch (err) {
-            console.error('[telegram-poller] Message handler error:', err);
+            console.error(`[${this.label}] Message handler error:`, err);
             handlerFailed = true;
             break;
           }
@@ -129,7 +180,7 @@ export class TelegramPoller {
           try {
             handler(update.callback_query);
           } catch (err) {
-            console.error('[telegram-poller] Callback handler error:', err);
+            console.error(`[${this.label}] Callback handler error:`, err);
             handlerFailed = true;
             break;
           }

@@ -348,3 +348,103 @@ describe('buildReplyContext - Telegram reply context (BUG fix: media replies los
     expect(result).not.toContain('\x00');
   });
 });
+
+describe('AgentManager - stopAgent/startAgent IPC race', () => {
+  let testDir: string;
+  let ctxRoot: string;
+  let frameworkRoot: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-am-inflightstops-'));
+    ctxRoot = join(testDir, 'instance');
+    frameworkRoot = join(testDir, 'framework');
+    mkdirSync(join(ctxRoot, 'config'), { recursive: true });
+    mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice'), { recursive: true });
+    writeFileSync(
+      join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice', 'config.json'),
+      JSON.stringify({ agent_name: 'alice', enabled: true }),
+    );
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('startAgent awaits in-flight stopAgent for the same name', async () => {
+    // Regression test for the fire-and-forget IPC race that produced the
+    // misleading "BUG-011 REGRESSION CHECK" warning on every rapid
+    // `cortextos stop X && cortextos start X`. The IPC server dispatches
+    // start-agent and stop-agent handlers without awaiting, so both run in
+    // parallel on the daemon side. Before the inFlightStops fix,
+    // startAgent hit `this.agents.has(name) === true` while stopAgent was
+    // still awaiting PTY exit, logged "BUG-011 REGRESSION CHECK", and
+    // queued into pendingRestarts. After the fix, startAgent awaits the
+    // in-flight stop and takes the normal path once it completes.
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+
+    // Inject a fake entry with a controllable slow stop() so we can pause
+    // stopAgent mid-flight and fire startAgent in parallel.
+    let releaseStop: () => void = () => {};
+    const slowStop = new Promise<void>((resolve) => { releaseStop = resolve; });
+    const fakeEntry = {
+      process: {
+        stop: vi.fn(async () => { await slowStop; }),
+      },
+      checker: { stop: vi.fn() },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (am as any).agents.set('alice', fakeEntry);
+
+    // Capture console output so we can assert on the log paths taken.
+    const logs: string[] = [];
+    const origLog = console.log;
+    const origWarn = console.warn;
+    console.log = (...args: unknown[]) => logs.push(args.map(String).join(' '));
+    console.warn = (...args: unknown[]) => logs.push('WARN ' + args.map(String).join(' '));
+
+    try {
+      // Kick off stopAgent — it will block inside slowStop.
+      const stopPromise = am.stopAgent('alice');
+      // Concurrent startAgent — before the fix, this hit the BUG-011
+      // warning branch. After the fix, it must log "waiting for in-flight
+      // stopAgent" and suspend on the in-flight promise.
+      const startPromise = am.startAgent('alice', '').catch(() => { /* post-race failures are fine */ });
+
+      // Give the microtask queue a tick so both methods reach their awaits.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(logs.some((l) => l.includes('waiting for in-flight stopAgent'))).toBe(true);
+      expect(logs.some((l) => l.includes('BUG-011 REGRESSION'))).toBe(false);
+      expect(logs.some((l) => l.includes('still in registry'))).toBe(false);
+
+      // Release the stop and let everything settle.
+      releaseStop();
+      await stopPromise;
+      await startPromise;
+    } finally {
+      console.log = origLog;
+      console.warn = origWarn;
+    }
+  });
+
+  it('stopAgent is idempotent under concurrent calls', async () => {
+    // Two concurrent stopAgent() calls for the same name should coalesce
+    // onto the same in-flight promise rather than racing each other.
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+
+    const stopFn = vi.fn(async () => { /* instant */ });
+    const fakeEntry = {
+      process: { stop: stopFn },
+      checker: { stop: vi.fn() },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (am as any).agents.set('alice', fakeEntry);
+
+    await Promise.all([am.stopAgent('alice'), am.stopAgent('alice'), am.stopAgent('alice')]);
+
+    // The underlying process.stop() must only run ONCE even though three
+    // concurrent stopAgent() calls fired — the later two should return the
+    // in-flight promise from inFlightStops.
+    expect(stopFn).toHaveBeenCalledTimes(1);
+  });
+});

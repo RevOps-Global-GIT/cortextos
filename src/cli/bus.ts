@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { spawnSync, execFileSync } from 'child_process';
 import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName } from '../utils/validate.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
@@ -17,6 +17,10 @@ import { createReminder, listReminders, ackReminder, pruneReminders } from '../b
 import { updateCronFire } from '../bus/cron-state.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
+import { createSkillPr } from '../bus/skill-autopr.js';
+import { sendSlack } from '../bus/send-slack.js';
+
+import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
@@ -149,10 +153,25 @@ busCommand
   .option('--needs-approval', 'Require human approval before execution')
   .option('--blocked-by <ids>', 'Comma-separated task IDs that must complete before this task can progress')
   .option('--blocks <ids>', 'Comma-separated task IDs that this new task will block (symmetric reverse edge)')
-  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string }) => {
+  .option('--meta <json>', 'Free-form correlation metadata as JSON object (e.g. \'{"cron":"poll-codex-outbox"}\')')
+  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string; meta?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
+    let meta: Record<string, unknown> | undefined;
+    if (opts.meta) {
+      try {
+        const parsed = JSON.parse(opts.meta);
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          console.error('--meta must be a JSON object (e.g. \'{"key":"value"}\')');
+          process.exit(1);
+        }
+        meta = parsed as Record<string, unknown>;
+      } catch (err) {
+        console.error(`--meta is not valid JSON: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    }
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
       assignee: opts.assignee,
@@ -161,6 +180,7 @@ busCommand
       needsApproval: opts.needsApproval ?? false,
       blockedBy: parseList(opts.blockedBy),
       blocks: parseList(opts.blocks),
+      meta,
     });
     console.log(taskId);
     // Auto-notify assignee so the task is visible immediately (issue #78)
@@ -1794,6 +1814,74 @@ busCommand
   .description('Stop hook: writes last_idle.flag timestamp so fast-checker knows agent finished its turn')
   .action(() => runHook('hook-idle-flag'));
 
+busCommand
+  .command('hook-extract-facts')
+  .description('PreCompact hook: extracts and stores session summary as structured fact entry for cross-session memory')
+  .action(() => runHook('hook-extract-facts'));
+
+busCommand
+  .command('hook-session-restore')
+  .description('SessionStart hook: injects the most recent compaction snapshot as additionalContext to restore working state')
+  .action(() => runHook('hook-session-restore'));
+
+busCommand
+  .command('hook-loop-detector')
+  .description('PreToolUse hook: detects and blocks repeated tool loops (repetition and ping-pong patterns)')
+  .action(() => runHook('hook-loop-detector'));
+
+busCommand
+  .command('hook-skill-autopr')
+  .description('PostToolUse hook: auto-stages community skill writes and opens a draft PR against grandamenium/cortextos')
+  .action(() => runHook('hook-skill-autopr'));
+
+busCommand
+  .command('create-skill-pr')
+  .description('Background worker: commits and draft-PRs a community skill (called by hook-skill-autopr)')
+  .argument('<skill-name>', 'Skill directory name under community/skills/')
+  .action(async (skillName: string) => {
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(skillName)) {
+      console.error(`create-skill-pr: invalid skill name "${skillName}" — must be a lowercase alphanumeric slug`);
+      process.exit(1);
+    }
+    try {
+      await createSkillPr(skillName);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`create-skill-pr failed: ${msg}`);
+      process.exit(1);
+    }
+  });
+
+// --- Brand name command ---
+
+busCommand
+  .command('set-brand-name')
+  .description('Set the business name shown in the dashboard sidebar (written to dashboard-settings.json)')
+  .argument('<name>', 'Business or team name to display (max 100 characters, use empty string "" to clear)')
+  .action((name: string) => {
+    const trimmed = name.trim().slice(0, 100);
+    const env = resolveEnv();
+    const settingsPath = join(env.ctxRoot, 'config', 'dashboard-settings.json');
+    try {
+      let current: Record<string, unknown> = {};
+      if (existsSync(settingsPath)) {
+        try { current = JSON.parse(readFileSync(settingsPath, 'utf-8')); } catch { /* ignore corrupt file */ }
+      }
+      if (trimmed) {
+        current.brand_name = trimmed;
+      } else {
+        delete current.brand_name;
+      }
+      // Atomic write — prevents corrupt file on crash or concurrent access
+      atomicWriteSync(settingsPath, JSON.stringify(current, null, 2));
+      console.log(trimmed ? `Brand name set to: ${trimmed}` : 'Brand name cleared');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`set-brand-name failed: ${msg}`);
+      process.exit(1);
+    }
+  });
+
 // --- OAuth token rotation commands ---
 
 busCommand
@@ -2022,6 +2110,28 @@ busCommand
 
       await sleepMs(pollMs);
     }
+  });
+
+
+busCommand
+  .command('send-slack')
+  .description('Post a Slack reply as the current agent')
+  .argument('<channel>', 'Slack channel ID (C..., D..., G...) or user ID')
+  .argument('<text>', 'Reply text')
+  .option('--thread-ts <ts>', 'Thread anchor ts; set to keep the reply in the original thread')
+  .option('--inbox-id <id>', 'agent_slack_inbox.id — marks the row processed + records response_ts')
+  .option('--agent <title>', 'Override agent title (default: derived from CORTEXTOS_AGENT_NAME)')
+  .action(async (channel: string, text: string, opts: { threadTs?: string; inboxId?: string; agent?: string }) => {
+    const result = await sendSlack(channel, text, {
+      threadTs: opts.threadTs,
+      inboxId: opts.inboxId,
+      agent: opts.agent,
+    });
+    if (!result.ok) {
+      console.error(`send-slack failed: ${result.error}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(result));
   });
 
 function sleepMs(ms: number): Promise<void> {

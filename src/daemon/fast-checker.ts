@@ -3,7 +3,7 @@ import { execFile } from 'child_process';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
-import { checkInbox, ackInbox } from '../bus/message.js';
+import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval } from '../bus/approval.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
@@ -47,11 +47,38 @@ export class FastChecker {
   // Idle-session heartbeat watchdog
   private heartbeatTimer: NodeJS.Timeout | null = null;
 
+  // Gmail watch state
+  private gmailWatch?: { query: string; intervalMs: number };
+  private gmailLastCheckedAt: number = 0;
+
+  // Usage rate-limit guard state
+  private usageLastCheckedAt: number = 0;
+  private usageTier: 0 | 1 | 2 = 0; // 0=normal, 1=high(≥85%), 2=critical(≥95%)
+  private usageTierFile: string = '';
+  private readonly USAGE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
+  // Context-exhaustion + frozen-stdout watchdog state
+  private bootstrappedAt: number = 0;
+  private lastHardRestartAt: number = 0;
+  private stdoutLastSize: number = 0;
+  private stdoutLastChangeAt: number = 0;
+  private watchdogTriggered: boolean = false;
+  private readonly BOOTSTRAP_GRACE_MS = 10 * 60 * 1000;
+  private readonly HARD_RESTART_COOLDOWN_MS = 15 * 60 * 1000;
+  private readonly STDOUT_FROZEN_MS = 30 * 60 * 1000;
+
   constructor(
     agent: AgentProcess,
     paths: BusPaths,
     frameworkRoot: string,
-    options: { pollInterval?: number; log?: LogFn; telegramApi?: TelegramAPI; chatId?: string; allowedUserId?: number } = {},
+    options: {
+      pollInterval?: number;
+      log?: LogFn;
+      telegramApi?: TelegramAPI;
+      chatId?: string;
+      allowedUserId?: number;
+      gmailWatch?: { query: string; intervalMs: number };
+    } = {},
   ) {
     this.agent = agent;
     this.paths = paths;
@@ -65,6 +92,15 @@ export class FastChecker {
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
     this.loadDedupHashes();
+
+    // Initialize Gmail watch
+    if (options.gmailWatch) {
+      this.gmailWatch = options.gmailWatch;
+    }
+
+    // Initialize usage tier state
+    this.usageTierFile = join(paths.stateDir, 'usage-tier.json');
+    this.loadUsageTier();
   }
 
   /**
@@ -191,6 +227,274 @@ export class FastChecker {
     // Typing indicator: send while Claude is actively working
     if (this.chatId && this.telegramApi && this.isAgentActive()) {
       await this.sendTyping(this.telegramApi, this.chatId);
+    }
+
+    // Watchdog: detect ctx-exhaustion survey + frozen stdout
+    this.watchdogCheck();
+
+    // Gmail watch: check on configured interval (default 15 min)
+    await this.checkGmailWatch();
+
+    // Usage rate-limit guard: check every 15 min
+    await this.checkUsageTier();
+  }
+
+  /**
+   * Detect stuck agent and trigger hard-restart.
+   * Ported from CRM fast-checker.sh (FROZEN_RESTART + context-threshold logic).
+   *
+   * Two signals:
+   *   1. Claude Code's "How is Claude doing this session?" survey prompt — fires
+   *      when context is exhausted and the session needs to end. If it appears
+   *      in stdout, the agent is cooked.
+   *   2. stdout log unchanged for 30+ min while the agent is "active" (has a
+   *      pending message and no idle flag) — passively frozen.
+   */
+  private watchdogCheck(): void {
+    if (this.watchdogTriggered) return;
+    const now = Date.now();
+    if (this.bootstrappedAt === 0 || now - this.bootstrappedAt < this.BOOTSTRAP_GRACE_MS) return;
+    if (this.lastHardRestartAt > 0 && now - this.lastHardRestartAt < this.HARD_RESTART_COOLDOWN_MS) return;
+
+    const stdoutPath = join(this.paths.logDir, 'stdout.log');
+    if (!existsSync(stdoutPath)) return;
+
+    let size: number;
+    try { size = statSync(stdoutPath).size; } catch { return; }
+
+    if (size !== this.stdoutLastSize) {
+      this.stdoutLastSize = size;
+      this.stdoutLastChangeAt = now;
+    }
+
+    // Signal 1: scan last 20KB of stdout for the session-survey prompt.
+    // Claude Code emits this when context is full ("How is Claude doing this session?").
+    try {
+      const tailBytes = Math.min(20000, size);
+      if (tailBytes > 0) {
+        const fd = openSync(stdoutPath, 'r');
+        const buf = Buffer.alloc(tailBytes);
+        readSync(fd, buf, 0, tailBytes, size - tailBytes);
+        closeSync(fd);
+        const tail = buf.toString('utf-8');
+        if (/How is Claude doing this session\?/.test(tail)) {
+          this.log('WATCHDOG: ctx-exhaustion survey prompt detected — hard-restarting');
+          this.triggerHardRestart('ctx exhaustion: session survey prompt in stdout');
+          return;
+        }
+      }
+    } catch { /* non-critical */ }
+
+    // Signal 2: stdout frozen for 30+ min while agent is active.
+    if (
+      this.lastMessageInjectedAt > 0 &&
+      now - this.stdoutLastChangeAt > this.STDOUT_FROZEN_MS &&
+      this.isAgentActive()
+    ) {
+      const stalledSec = Math.round((now - this.stdoutLastChangeAt) / 1000);
+      this.log(`WATCHDOG: stdout frozen for ${stalledSec}s while active — hard-restarting`);
+      this.triggerHardRestart(`frozen: stdout unchanged ${stalledSec}s while active`);
+    }
+  }
+
+  private triggerHardRestart(reason: string): void {
+    this.watchdogTriggered = true;
+    this.lastHardRestartAt = Date.now();
+    if (this.telegramApi && this.chatId) {
+      this.telegramApi
+        .sendMessage(this.chatId, `Got stuck (${reason}). Hard-restarting now.`)
+        .catch(() => { /* non-critical */ });
+    }
+    this.agent.hardRestartSelf(reason).catch(e => this.log(`hardRestartSelf failed: ${e}`));
+  }
+
+  /**
+   * Poll Gmail for unread messages matching the configured query.
+   *
+   * Runs on the configured interval (default 15 min). Uses the `gws` CLI
+   * (https://github.com/google-workspace-utilities/gws) which reads OAuth
+   * credentials from ~/.config/gws/. Requires `gws` to be authenticated.
+   *
+   * If unread messages are found: writes an inbox message so Claude wakes
+   * and processes them. If nothing matches: does nothing (zero Claude cost).
+   * Claude is responsible for marking messages read after processing.
+   */
+  private async checkGmailWatch(): Promise<void> {
+    if (!this.gmailWatch) return;
+    const now = Date.now();
+    if (now - this.gmailLastCheckedAt < this.gmailWatch.intervalMs) return;
+    this.gmailLastCheckedAt = now;
+
+    // Fetch unread message list
+    let listOutput = '';
+    try {
+      listOutput = await new Promise<string>((resolve, reject) => {
+        execFile('gws', ['gmail', 'users', 'messages', 'list',
+          '--params', JSON.stringify({ userId: 'me', q: this.gmailWatch!.query }),
+          '--format', 'json',
+        ], (err, stdout) => {
+          if (err) { reject(err); return; }
+          resolve(stdout);
+        });
+      });
+    } catch (err) {
+      this.log(`Gmail watch list failed: ${err}`);
+      return;
+    }
+
+    let messageIds: string[] = [];
+    try {
+      const data = JSON.parse(listOutput);
+      messageIds = (data?.messages ?? []).map((m: { id: string }) => m.id).filter(Boolean);
+    } catch {
+      this.log('Gmail watch: could not parse list response');
+      return;
+    }
+
+    if (messageIds.length === 0) return; // nothing to do
+
+    // Fetch snippet + subject for each message (metadata format only)
+    const summaries: string[] = [];
+    for (const id of messageIds.slice(0, 20)) { // cap at 20 to avoid runaway fetches
+      try {
+        const getOutput = await new Promise<string>((resolve, reject) => {
+          execFile('gws', ['gmail', 'users', 'messages', 'get',
+            '--params', JSON.stringify({ userId: 'me', id, format: 'metadata', metadataHeaders: ['Subject', 'From'] }),
+            '--format', 'json',
+          ], (err, stdout) => {
+            if (err) { reject(err); return; }
+            resolve(stdout);
+          });
+        });
+        const msg = JSON.parse(getOutput);
+        const headers: Array<{ name: string; value: string }> = msg?.payload?.headers ?? [];
+        const subject = headers.find(h => h.name === 'Subject')?.value ?? '(no subject)';
+        const from = headers.find(h => h.name === 'From')?.value ?? '(unknown)';
+        const snippet = msg?.snippet ?? '';
+        summaries.push(`ID: ${id}\n   Subject: ${subject}\n   From: ${from}\n   Snippet: ${snippet.slice(0, 200)}`);
+      } catch {
+        summaries.push(`ID: ${id} (could not fetch details)`);
+      }
+    }
+
+    const total = messageIds.length;
+    const shown = summaries.length;
+    const header = `=== GMAIL WATCH: ${total} unread message${total !== 1 ? 's' : ''} ===\n` +
+      `Query: ${this.gmailWatch.query}\n\n`;
+    const body = summaries.map((s, i) => `${i + 1}. ${s}`).join('\n\n');
+    const footer = total > shown ? `\n\n(${total - shown} more not shown)` : '';
+    const hint = `\n\nProcess: gws gmail users messages get --params '{"userId":"me","id":"<ID>","format":"full"}' --format json` +
+      `\nMark read: gws gmail users messages modify --params '{"userId":"me","id":"<ID>"}' --body '{"removeLabelIds":["UNREAD"]}' --format json`;
+
+    const inboxText = header + body + footer + hint;
+    this.log(`Gmail watch: ${total} unread message(s) — writing inbox`);
+
+    try {
+      sendMessage(this.paths, 'fast-checker', this.agent.name, 'normal', inboxText);
+    } catch (err) {
+      this.log(`Gmail watch inbox write failed: ${err}`);
+    }
+  }
+
+  /**
+   * Check Claude Max API utilization and send tier-transition alerts.
+   *
+   * Runs every 15 minutes. Calls `cortextos bus check-usage-api` and reads
+   * the JSON output. Computes tier (0=normal, 1=high≥85%, 2=critical≥95%).
+   * On tier change: sends a Telegram alert directly (no Claude wake) and
+   * writes an inbox message so Claude acts on it next time it is awake.
+   * Tier state persists across restarts in usage-tier.json.
+   */
+  private async checkUsageTier(): Promise<void> {
+    const now = Date.now();
+    if (now - this.usageLastCheckedAt < this.USAGE_CHECK_INTERVAL_MS) return;
+    this.usageLastCheckedAt = now;
+
+    let rawJson = '';
+    try {
+      rawJson = await new Promise<string>((resolve, reject) => {
+        // Pass high warn thresholds to suppress the script's own Telegram alerts —
+        // we handle alerting ourselves on tier transitions only.
+        execFile('cortextos', ['bus', 'check-usage-api', '--json'], (err, stdout) => {
+          if (err) { reject(err); return; }
+          resolve(stdout);
+        });
+      });
+    } catch (err) {
+      const errMsg = String(err);
+      if (!errMsg.includes('No OAuth token') && !errMsg.includes('accounts.json')) {
+        this.log(`Usage check failed: ${errMsg}`);
+      }
+      return;
+    }
+
+    let utilization = -1;
+    try {
+      const data = JSON.parse(rawJson);
+      const fiveH = typeof data?.five_hour?.utilization === 'number' ? data.five_hour.utilization : -1;
+      const sevenD = typeof data?.seven_day?.utilization === 'number' ? data.seven_day.utilization : -1;
+      utilization = Math.max(fiveH, sevenD);
+    } catch {
+      this.log('Usage check: could not parse response');
+      return;
+    }
+
+    if (utilization < 0) return;
+
+    const newTier: 0 | 1 | 2 = utilization >= 95 ? 2 : utilization >= 85 ? 1 : 0;
+    const prevTier = this.usageTier;
+
+    if (newTier === prevTier) return; // no transition — stay quiet
+
+    this.usageTier = newTier;
+    this.saveUsageTier();
+
+    const pct = Math.round(utilization);
+    const msg = newTier === 0
+      ? `Rate limit recovered. Utilization at ${pct}%. Resuming normal operations.`
+      : newTier === 1
+        ? `Rate limit at ${pct}%. Tier 1 wind-down: finish current task, no new autonomous work.`
+        : `Rate limit at ${pct}%. Critical threshold reached. Going dark — do not start new work. Will notify on reset.`;
+
+    this.log(`Usage tier transition: ${prevTier} → ${newTier} (${pct}%)`);
+
+    // 1. Send Telegram alert directly (no Claude wake needed)
+    if (this.telegramApi && this.chatId) {
+      this.telegramApi.sendMessage(this.chatId, msg).catch(() => { /* non-critical */ });
+    }
+
+    // 2. Write inbox message so Claude acts on it next time it is awake
+    try {
+      sendMessage(this.paths, 'fast-checker', this.agent.name, 'urgent', msg);
+    } catch (err) {
+      this.log(`Usage tier inbox write failed: ${err}`);
+    }
+  }
+
+  /**
+   * Load usage tier from persistent file.
+   */
+  private loadUsageTier(): void {
+    try {
+      if (existsSync(this.usageTierFile)) {
+        const data = JSON.parse(readFileSync(this.usageTierFile, 'utf-8'));
+        if (data.tier === 0 || data.tier === 1 || data.tier === 2) {
+          this.usageTier = data.tier;
+        }
+      }
+    } catch {
+      this.usageTier = 0;
+    }
+  }
+
+  /**
+   * Persist current usage tier to file.
+   */
+  private saveUsageTier(): void {
+    try {
+      writeFileSync(this.usageTierFile, JSON.stringify({ tier: this.usageTier, checkedAt: Date.now() }) + '\n', 'utf-8');
+    } catch {
+      // Non-critical
     }
   }
 
@@ -839,6 +1143,178 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         this.log(`Error processing urgent signal: ${err}`);
       }
     }
+  }
+
+  /**
+   * Read ctx thresholds from config.json with mtime-based caching (BUG-048 pattern).
+   * Re-reads from disk only when the file has changed so dashboard updates take effect
+   * within one poll cycle without a daemon restart.
+   */
+  private getCtxThresholds(): { warn: number; handoff: number } {
+    try {
+      const configPath = join(this.agent.getAgentDir(), 'config.json');
+      const mtime = statSync(configPath).mtimeMs;
+      if (mtime !== this.ctxConfigMtime) {
+        const cfg = JSON.parse(readFileSync(configPath, 'utf-8'));
+        const config = this.agent.getConfig();
+        config.ctx_warning_threshold = cfg.ctx_warning_threshold;
+        config.ctx_handoff_threshold = cfg.ctx_handoff_threshold;
+        this.ctxConfigMtime = mtime;
+      }
+    } catch { /* keep stale values */ }
+    const config = this.agent.getConfig();
+    return {
+      warn: config.ctx_warning_threshold ?? 70,
+      handoff: config.ctx_handoff_threshold ?? 80,
+    };
+  }
+
+  /**
+   * Context monitor — called on every poll cycle.
+   * Reads context_status.json written by the statusLine bridge hook and takes
+   * action when thresholds are crossed.
+   */
+  private async checkContextStatus(): Promise<void> {
+    const now = Date.now();
+
+    // Circuit breaker: check if we should pause auto-restarts
+    if (this.ctxCircuitBrokenAt !== null) {
+      if (now - this.ctxCircuitBrokenAt >= 30 * 60_000) {
+        this.ctxCircuitBrokenAt = null;
+        this.ctxCircuitRestarts = [];
+        this.saveCtxCircuit();
+        this.log('Context circuit breaker reset after 30min pause');
+      } else {
+        return; // still paused
+      }
+    }
+
+    // Read the bridge file written by hook-context-status
+    const statusPath = join(this.paths.stateDir, 'context_status.json');
+    if (!existsSync(statusPath)) return;
+
+    let pct: number | null = null;
+    let exceeds200k = false;
+    try {
+      const raw = readFileSync(statusPath, 'utf-8');
+      const data = JSON.parse(raw);
+      const age = now - new Date(data.written_at || 0).getTime();
+      if (age > 10 * 60_000) return; // stale file — skip
+      pct = typeof data.used_percentage === 'number' ? data.used_percentage : null;
+      exceeds200k = Boolean(data.exceeds_200k_tokens);
+
+      // Detect new session: if session_id changed, clear stale per-session ctx state.
+      // This handles the case where the agent self-restarts (voluntary handoff) and the
+      // 5-min deadline timer would otherwise fire on the fresh low-context session.
+      const incomingSessionId = typeof data.session_id === 'string' ? data.session_id : null;
+      if (incomingSessionId && incomingSessionId !== this.ctxLastSessionId) {
+        if (this.ctxLastSessionId !== null) {
+          this.ctxHandoffFiredAt = 0;
+          this.ctxHandoffDeadlineAt = 0;
+          this.ctxWarningFiredAt = 0;
+          this.log(`New session detected (${incomingSessionId.slice(0, 8)}…) — per-session ctx state reset`);
+        }
+        this.ctxLastSessionId = incomingSessionId;
+      }
+    } catch { return; }
+
+    // Check PTY output for hard API overflow errors (always act regardless of threshold config)
+    const recentOutput = this.agent.getOutputBuffer()?.getRecent(8000) ?? '';
+    if (/extra usage.*?1[Mm] context|conversation too long.*?compaction/i.test(recentOutput)) {
+      this.log('Context overflow error detected in PTY output — force restarting');
+      this.forceContextRestart('API overflow error in PTY output');
+      return;
+    }
+
+    const { warn, handoff } = this.getCtxThresholds();
+
+    // No threshold configured — observe-only mode (log but don't act)
+    if (this.agent.getConfig().ctx_handoff_threshold === undefined) return;
+
+    const effectivePct = pct ?? (exceeds200k ? 101 : null);
+    if (effectivePct === null) return;
+
+    // Tier 3: deadline exceeded — force restart if agent ignored handoff prompt
+    if (this.ctxHandoffDeadlineAt > 0 && now > this.ctxHandoffDeadlineAt) {
+      this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
+      this.ctxHandoffDeadlineAt = 0;
+      this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within 5min`);
+      return;
+    }
+
+    // Tier 1: warning — PTY injection only, no Telegram ping (context management is internal)
+    if (effectivePct >= warn && now - this.ctxWarningFiredAt > 15 * 60_000) {
+      this.ctxWarningFiredAt = now;
+      const pctRound = Math.round(effectivePct);
+      const statusSuffix = effectivePct >= handoff ? 'Handoff in progress.' : `Handoff triggers at ${handoff}%.`;
+      this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. ${statusSuffix}`);
+      this.log(`Context warning fired at ${pctRound}%`);
+    }
+
+    // Tier 2: handoff (fires once per session lifecycle)
+    if (effectivePct >= handoff && this.ctxHandoffFiredAt === 0) {
+      this.ctxHandoffFiredAt = now;
+      this.ctxHandoffDeadlineAt = now + 5 * 60_000; // 5min grace for agent to cooperate
+      // Reset context_status.json so the new session doesn't re-trigger immediately
+      const statusPath = join(this.paths.stateDir, 'context_status.json');
+      try {
+        writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
+      } catch { /* non-fatal */ }
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z';
+      const handoffPrompt = `[CONTEXT HANDOFF REQUIRED] Context is at ${Math.round(effectivePct)}%. Write a handoff document to memory/handoffs/handoff-${ts}.md with these sections: ## Current Tasks, ## Next Actions, ## Active Crons, ## Key Context, ## Files Modified This Session. Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(effectivePct)}%" --handoff-doc <absolute path to the handoff doc you just wrote>. Do this NOW before the context window is exhausted.`;
+      this.agent.injectMessage(handoffPrompt);
+      this.log(`Handoff prompt injected at ${Math.round(effectivePct)}%`);
+      // Pre-arm .force-fresh so the next restart is always a clean fresh session.
+      // If the agent cooperates and calls hard-restart, it also writes .force-fresh — no-op.
+      // If context exhausts naturally before the agent acts, .force-fresh is already set,
+      // preventing a --continue restart that would loop at the same high context level.
+      try {
+        writeFileSync(join(this.paths.stateDir, '.force-fresh'), '');
+      } catch { /* non-fatal */ }
+    }
+  }
+
+  /**
+   * Force a fresh hard restart for context exhaustion reasons.
+   * Writes .force-fresh + .restart-planned, then triggers sessionRefresh().
+   * The circuit breaker prevents runaway restart loops.
+   */
+  private forceContextRestart(reason: string): void {
+    const now = Date.now();
+
+    // Update and check circuit breaker window (persisted to disk — survives --continue restarts)
+    this.ctxCircuitRestarts = this.ctxCircuitRestarts.filter(t => now - t < 15 * 60_000);
+    if (this.ctxCircuitRestarts.length >= 3) {
+      this.ctxCircuitBrokenAt = now;
+      this.saveCtxCircuit();
+      const msg = `Context circuit breaker TRIPPED for ${this.agent.name}: 3 restarts in 15min. Watchdog paused 30min. Check logs/${this.agent.name}/restarts.log for details.`;
+      this.log(msg);
+      if (this.telegramApi && this.chatId) {
+        this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
+      }
+      return;
+    }
+    this.ctxCircuitRestarts.push(now);
+    this.saveCtxCircuit();
+
+    // Reset per-session context state for the new session
+    this.ctxHandoffFiredAt = 0;
+    this.ctxHandoffDeadlineAt = 0;
+    this.ctxWarningFiredAt = 0;
+
+    // Write .force-fresh + .restart-planned (hardRestart from src/bus/system.ts)
+    hardRestart(this.paths, this.agent.name, `CONTEXT-FORCE-RESTART: ${reason}`);
+
+    // Reset context_status.json so the new session's FastChecker doesn't re-trigger
+    // Tier 2 immediately by reading the stale high-% value from the previous session.
+    const statusPath = join(this.paths.stateDir, 'context_status.json');
+    try {
+      writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
+    } catch { /* non-fatal */ }
+
+    // sessionRefresh() does stop() + start(); shouldContinue() will return false
+    // because .force-fresh was just written, giving us a clean fresh session.
+    this.agent.sessionRefresh().catch(err => this.log(`Context restart failed: ${err}`));
   }
 
   /**
