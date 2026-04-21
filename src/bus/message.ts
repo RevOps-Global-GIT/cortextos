@@ -88,7 +88,10 @@ export function sendMessage(
 
 
   // Auto-mirror to Slack #agents (fire-and-forget). See slack-mirror.ts.
-  mirrorAgentBusToSlack(from, to, text, { priority, replyTo: replyTo || null }).catch(() => undefined);
+  // Skip during tests - fixture names would pollute the real #agents channel.
+  if (!process.env.VITEST && process.env.NODE_ENV !== "test") {
+    mirrorAgentBusToSlack(from, to, text, { priority, replyTo: replyTo || null }).catch(() => undefined);
+  }
 
   return msgId;
 }
