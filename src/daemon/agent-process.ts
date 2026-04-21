@@ -314,6 +314,15 @@ export class AgentProcess implements ManagedAgent {
    */
   async sessionRefresh(): Promise<void> {
     this.log('Session refresh (--continue restart)');
+
+    // Write .session-refresh marker BEFORE stop() so hook-crash-alert can
+    // classify this exit as a planned session rotation (not a crash).
+    const markerPath = join(this.env.ctxRoot, 'state', this.name, '.session-refresh');
+    try {
+      ensureDir(join(this.env.ctxRoot, 'state', this.name));
+      writeFileSync(markerPath, 'session timer reached limit', 'utf-8');
+    } catch { /* non-fatal */ }
+
     await this.stop();
     await this.start();
     this.log('Session refreshed');
@@ -401,6 +410,13 @@ export class AgentProcess implements ManagedAgent {
   // --- Private methods ---
 
   private handleExit(exitCode: number): void {
+    // Capture rate-limit state from the output buffer BEFORE nulling the PTY.
+    // Once this.pty = null, we lose access to the buffer.
+    const isRateLimited = this.pty?.getOutputBuffer()?.hasRateLimitSignature() ?? false;
+    const rateLimitResetSeconds = isRateLimited
+      ? (this.pty?.getOutputBuffer()?.getRateLimitResetSeconds() ?? null)
+      : null;
+
     this.pty = null;
     this.clearSessionTimer();
     // Detach from CronScheduler so no fires race a dead PTY. A subsequent
@@ -448,6 +464,37 @@ export class AgentProcess implements ManagedAgent {
     // awaiting. Either flag short-circuits crash recovery.
     if (this.stopRequested || this.stopping) {
       this.stopRequested = false;
+      return;
+    }
+
+    // Rate-limit recovery: if the output buffer detected a rate-limit signature,
+    // treat this as a controlled pause rather than a crash. Do NOT increment
+    // crashCount or call watchdog recordFailure. Write a marker file so the next
+    // startup can include RATE-LIMIT RECOVERY context, then schedule a restart
+    // after the configured (or default) pause duration.
+    if (isRateLimited) {
+      this.status = 'rate-limited';
+      this.notifyStatusChange();
+
+      // Write .rate-limited marker so the next boot knows this was a rate-limit pause
+      const markerPath = join(this.env.ctxRoot, 'state', this.name, '.rate-limited');
+      try {
+        ensureDir(join(this.env.ctxRoot, 'state', this.name));
+        writeFileSync(markerPath, new Date().toISOString(), 'utf-8');
+      } catch { /* non-fatal */ }
+
+      // Schedule restart after pause
+      const pauseSeconds = rateLimitResetSeconds
+        ?? (this.config as Record<string, unknown>).rate_limit_pause_seconds as number | undefined
+        ?? 18000;
+      this.log(`Rate-limited: pausing ${pauseSeconds}s before restart`);
+
+      setTimeout(() => {
+        if (this.status === 'rate-limited') {
+          this.start().catch(err => this.log(`Rate-limit restart failed: ${err}`));
+        }
+      }, pauseSeconds * 1000);
+
       return;
     }
 
@@ -541,6 +588,17 @@ export class AgentProcess implements ManagedAgent {
       onboardingAppend = ' IMPORTANT: This is your FIRST BOOT. Before doing anything else, read ONBOARDING.md and complete the onboarding protocol.';
     }
 
+    // Rate-limit recovery: if .rate-limited marker exists, prepend context
+    const rateLimitMarker = join(this.env.ctxRoot, 'state', this.name, '.rate-limited');
+    let rateLimitBlock = '';
+    if (existsSync(rateLimitMarker)) {
+      rateLimitBlock = ' RATE-LIMIT RECOVERY: Your previous session was paused due to API rate limiting. Resume normal operations but be mindful of request volume.';
+      try {
+        const { unlinkSync } = require('fs');
+        unlinkSync(rateLimitMarker);
+      } catch { /* ignore */ }
+    }
+
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
@@ -552,7 +610,7 @@ export class AgentProcess implements ManagedAgent {
     const onlineMessage = isHandoffRestart
       ? ''
       : ' After setting up crons, send a Telegram message to the user saying you are back online.';
-    return `You are starting a new session. Current UTC time: ${nowUtc}. Read AGENTS.md and all bootstrap files listed there. Then restore your crons from config.json: for each entry with type "recurring" (or no type field), call /loop {interval} {prompt}; for each entry with type "once", compare fire_at against the current UTC time above — if fire_at is still in the future recreate the CronCreate, if fire_at is in the past delete that entry from config.json. CRITICAL DEDUP: Always call CronList BEFORE creating any cron. For each config.json entry, search the CronList output for its prompt text — if the prompt already appears, SKIP that cron entirely. Only call /loop or CronCreate for entries whose prompt text is NOT already listed. This prevents rapid --continue restarts from accumulating duplicate schedules.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
+    return `You are starting a new session. Current UTC time: ${nowUtc}.${rateLimitBlock} Read AGENTS.md and all bootstrap files listed there. Then restore your crons from config.json: for each entry with type "recurring" (or no type field), call /loop {interval} {prompt}; for each entry with type "once", compare fire_at against the current UTC time above — if fire_at is still in the future recreate the CronCreate, if fire_at is in the past delete that entry from config.json. CRITICAL DEDUP: Always call CronList BEFORE creating any cron. For each config.json entry, search the CronList output for its prompt text — if the prompt already appears, SKIP that cron entirely. Only call /loop or CronCreate for entries whose prompt text is NOT already listed. This prevents rapid --continue restarts from accumulating duplicate schedules.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${onlineMessage}${onboardingAppend}`;
   }
 
   private buildContinuePrompt(): string {
