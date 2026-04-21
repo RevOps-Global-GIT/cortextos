@@ -16,35 +16,73 @@ export const KEYS = {
 } as const;
 
 /**
- * Message deduplication via MD5 hash.
- * Prevents double-injection on crash recovery.
- * Matches bash fast-checker.sh dedup pattern.
+ * Message deduplication via MD5 hash, time-bounded.
+ *
+ * Purpose: prevent double-injection on crash recovery — where the supervisor
+ * replays a message within milliseconds of the first attempt. This is a
+ * narrow, short-lived concern.
+ *
+ * Bug fix (2026-04-22): the original implementation had no TTL, which meant
+ * any content injected once (e.g., a cron-scheduled nudge with a static
+ * prompt) would be rejected on every subsequent fire forever, up to the
+ * 100-entry cache depth. Agents would appear idle while their scheduled
+ * prompts silently dropped. The fix here uses a short TTL (10s default) so
+ * crash-recovery replays still dedupe, but legitimate periodic re-fires pass
+ * through.
+ *
+ * Mirrors the bash fast-checker.sh hash pattern, just with an expiry.
  */
 export class MessageDedup {
-  private hashes: string[] = [];
+  // hash -> last-seen epoch ms
+  private hashes: Map<string, number> = new Map();
   private maxEntries: number;
+  private ttlMs: number;
 
-  constructor(maxEntries: number = 100) {
+  /**
+   * @param maxEntries hard cap on the cache size regardless of TTL
+   * @param ttlMs      how long a hash is considered a "duplicate" after first
+   *                   injection. Default 10s: long enough to catch crash-
+   *                   recovery double-injects, short enough that a cron firing
+   *                   the same prompt every N minutes is never dropped.
+   */
+  constructor(maxEntries: number = 100, ttlMs: number = 10_000) {
     this.maxEntries = maxEntries;
+    this.ttlMs = ttlMs;
   }
 
   /**
-   * Returns true if this content has been seen before (duplicate).
+   * Returns true if this content was seen within the TTL window.
+   * Advances the timestamp on a hit so rapid repeats stay suppressed.
    */
   isDuplicate(content: string): boolean {
     const hash = createHash('md5').update(content).digest('hex');
-    if (this.hashes.includes(hash)) {
+    const now = Date.now();
+
+    const prior = this.hashes.get(hash);
+    if (prior !== undefined && now - prior < this.ttlMs) {
+      this.hashes.set(hash, now);
       return true;
     }
-    this.hashes.push(hash);
-    if (this.hashes.length > this.maxEntries) {
-      this.hashes.shift();
+
+    // Opportunistic prune of expired entries (cheap; map stays small).
+    for (const [h, ts] of this.hashes) {
+      if (now - ts >= this.ttlMs) this.hashes.delete(h);
     }
+
+    // Re-insert so insertion order reflects recency for the LRU-size bound.
+    this.hashes.delete(hash);
+    this.hashes.set(hash, now);
+
+    if (this.hashes.size > this.maxEntries) {
+      const oldest = this.hashes.keys().next().value;
+      if (oldest !== undefined) this.hashes.delete(oldest);
+    }
+
     return false;
   }
 
   clear(): void {
-    this.hashes = [];
+    this.hashes.clear();
   }
 }
 
