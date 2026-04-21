@@ -86,54 +86,24 @@ For each mismatch, mark completed:
 cortextos bus complete-task "$TASK_ID" --result "<what was produced>"
 ```
 
----
+### 0E: CI health snapshot
 
-## Phase 0E: Services Health Check
+Fetch the last 24h from `ci_health_snapshots` (populated by the `ci-watcher` edge function every 15 min — see rgos issue #592 / PR #603). This feeds the optional "CI & Deploys" section in Message 1.
 
-Probe each configured external service BEFORE the briefing. Auth failures discovered here get into the briefing as actionable items — not discovered hours later when the user needs the service.
-
-**For each service, run the probe. If it fails, create a [HUMAN] task immediately.**
-
-### Google Calendar
 ```bash
-# Try listing 1 event via MCP. If the tool errors or returns auth failure:
-gcal_list_events (limit 1)
+SINCE=$(date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+CI_SNAPSHOTS=$(curl -s \
+  "https://yyizocyaehmqrottmnaz.supabase.co/rest/v1/ci_health_snapshots?select=status_context,commit_sha,state,description,target_url,observed_at,first_seen_at&observed_at=gte.${SINCE}&order=observed_at.desc" \
+  -H "apikey: $SUPABASE_RGOS_SERVICE_KEY" \
+  -H "Authorization: Bearer $SUPABASE_RGOS_SERVICE_KEY")
 ```
-- **OK**: note "GCal OK" for the briefing
-- **FAIL**: create a human task:
-  ```bash
-  cortextos bus create-task "[HUMAN] Google Calendar reauth needed — OAuth token expired or revoked" \
-    --desc "GCal probe failed during morning review. Reauth at https://accounts.google.com. Agents cannot create/read calendar events until fixed." \
-    --priority high --assignee human
-  ```
 
-### Notion
-```bash
-# Try a trivial search via MCP
-notion-search (query: "test", page_size: 1)
-```
-- **OK**: note "Notion OK"
-- **FAIL**: create human task with reauth instructions
+Classify (compute these before Phase 3):
+- `main_red`: Any `status_context` whose most-recent observation on the HEAD commit of main has `state` = `failure` or `error`. List the contexts + descriptions.
+- `sustained_failures_24h`: For each `status_context`, count non-success observations in the last 24h. Flag if `>= 3`.
+- `preview_stale`: `preview-test` context in `failure` state on a commit older than 24h (i.e., `first_seen_at < now - 24h` and still non-green).
 
-### Knowledge Base
-```bash
-cortextos bus kb-query "health check" --org $CTX_ORG
-```
-- **OK or empty results**: note "KB configured"
-- **Not configured warning**: note "KB not configured" (informational, not a failure)
-
-### Telegram
-Already implicitly validated by the boot message. If it failed, the agent would not have reached this phase.
-
-### Briefing integration
-Include a **Services** line in Message 1:
-```
-Services: GCal OK | Notion OK | KB configured
-```
-Or if any failed:
-```
-Services: GCal FAILED (reauth needed — task created) | Notion OK | KB not configured
-```
+If all three are empty, skip the "CI & Deploys" section entirely in Phase 3.
 
 ---
 
@@ -243,8 +213,18 @@ Overnight Work
 System Health
 [Agent heartbeat status — any stale agents flagged]
 
+CI & Deploys                                ← OMIT this section entirely if 0E found nothing
+[one bullet per main_red context: "- [context]: red on <sha[0:7]> for <minutes>m — <description>"]
+[if sustained_failures_24h has entries: "- [context]: <N> failures in 24h (flaky/regressed)"]
+[if preview_stale non-empty: "- preview-test: red on PR <#> for <hours>h"]
+
 Today's Focus: [daily_focus from goals.json]
 ```
+
+The "CI & Deploys" section rules:
+- Omit the heading AND body if all three classifications from 0E are empty (no empty section).
+- Prefer the most concrete detail: sha prefix, duration, description from GitHub status payload.
+- P0 interrupts (main red >60 min AND streak >=3) already paged Greg in real time via `orch-task-notify`; the digest is the retrospective, not the interrupt.
 
 **Message 2: Task Plan**
 ```

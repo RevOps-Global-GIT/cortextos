@@ -49,6 +49,13 @@ cat memory/${TODAY}.md 2>/dev/null
 
 # Inbox for agent reports
 cortextos bus check-inbox
+
+# CI health for today (rgos issue #592 / ci-watcher)
+SINCE=$(date -u -v-24H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+CI_SNAPSHOTS=$(curl -s \
+  "https://yyizocyaehmqrottmnaz.supabase.co/rest/v1/ci_health_snapshots?select=status_context,commit_sha,state,description,target_url,observed_at,first_seen_at&observed_at=gte.${SINCE}&order=observed_at.desc" \
+  -H "apikey: $SUPABASE_RGOS_SERVICE_KEY" \
+  -H "Authorization: Bearer $SUPABASE_RGOS_SERVICE_KEY")
 ```
 
 ### Summary Structure
@@ -57,6 +64,11 @@ For each agent, collect:
 - Tasks completed (count + key deliverables)
 - Tasks still pending or blocked
 - Any blockers encountered
+
+Classify CI state (same rules as morning-review 0E):
+- `main_red`: contexts failing on HEAD commit of main
+- `sustained_failures_24h`: any context with >=3 non-success observations in 24h
+- `preview_stale`: preview-test failing on a PR commit > 24h old
 
 Format:
 ```
@@ -72,6 +84,11 @@ Still Pending:
 
 Blockers:
 - [blocker] -- [current state]
+
+CI & Deploys                                ← OMIT entirely if all three classifications are empty
+- [context]: red on <sha[0:7]> for <minutes>m — <description>
+- [context]: <N> failures in 24h (flaky/regressed)
+- preview-test: red on PR <#> for <hours>h
 ```
 
 ---
