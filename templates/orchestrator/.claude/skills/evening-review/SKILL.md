@@ -56,6 +56,12 @@ CI_SNAPSHOTS=$(curl -s \
   "https://yyizocyaehmqrottmnaz.supabase.co/rest/v1/ci_health_snapshots?select=status_context,commit_sha,state,description,target_url,observed_at,first_seen_at&observed_at=gte.${SINCE}&order=observed_at.desc" \
   -H "apikey: $SUPABASE_RGOS_SERVICE_KEY" \
   -H "Authorization: Bearer $SUPABASE_RGOS_SERVICE_KEY")
+
+# Nightly review deltas (rgos issue #597)
+NIGHTLY=$(curl -s \
+  "https://yyizocyaehmqrottmnaz.supabase.co/rest/v1/nightly_review_snapshots?select=run_date,branch_total,branch_stale,branch_merge_conflicts,eslint_errors,ts_errors,vulns_critical,vulns_high,vulns_total,outdated_packages,open_prs,stalled_prs,severity&order=run_date.desc&limit=7" \
+  -H "apikey: $SUPABASE_RGOS_SERVICE_KEY" \
+  -H "Authorization: Bearer $SUPABASE_RGOS_SERVICE_KEY")
 ```
 
 ### Summary Structure
@@ -69,6 +75,9 @@ Classify CI state (same rules as morning-review 0E):
 - `main_red`: contexts failing on HEAD commit of main
 - `sustained_failures_24h`: any context with >=3 non-success observations in 24h
 - `preview_stale`: preview-test failing on a PR commit > 24h old
+
+Classify nightly-review deltas (same rules as morning-review 0F, comparing today vs 6-prior-day median):
+- `severity_escalated`, `stale_surge`, `new_vulns`, `eslint_regression`, `build_broken`, `stalled_pr_surge`
 
 Format:
 ```
@@ -85,10 +94,18 @@ Still Pending:
 Blockers:
 - [blocker] -- [current state]
 
-CI & Deploys                                ← OMIT entirely if all three classifications are empty
+CI & Deploys                                ← OMIT entirely if all three CI classifications are empty
 - [context]: red on <sha[0:7]> for <minutes>m — <description>
 - [context]: <N> failures in 24h (flaky/regressed)
 - preview-test: red on PR <#> for <hours>h
+
+Nightly Review                              ← OMIT entirely if no nightly deltas fired
+- Severity: <yesterday> -> <today>
+- Build: <status> (investigate)
+- Vulns: +<N> high, +<M> critical since yesterday
+- Stale branches: <today> (up <delta> vs 7d median)
+- ESLint: <today> errors (up <delta> vs 7d median)
+- Stalled PRs: +<delta> since yesterday
 ```
 
 ---

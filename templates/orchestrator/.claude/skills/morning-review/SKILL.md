@@ -105,6 +105,27 @@ Classify (compute these before Phase 3):
 
 If all three are empty, skip the "CI & Deploys" section entirely in Phase 3.
 
+### 0F: Nightly review deltas
+
+Fetch the last 7 snapshots from `nightly_review_snapshots` (populated by `.github/workflows/nightly-branch-review.yml` each night — see rgos issue #597). Compare today's row against the 7-day median to surface *changes*, not absolutes. Absolutes barely move night-to-night; alarm-fatigue was the original problem.
+
+```bash
+NIGHTLY=$(curl -s \
+  "https://yyizocyaehmqrottmnaz.supabase.co/rest/v1/nightly_review_snapshots?select=run_date,branch_total,branch_stale,branch_merge_conflicts,eslint_errors,ts_errors,vulns_critical,vulns_high,vulns_total,outdated_packages,open_prs,stalled_prs,severity&order=run_date.desc&limit=7" \
+  -H "apikey: $SUPABASE_RGOS_SERVICE_KEY" \
+  -H "Authorization: Bearer $SUPABASE_RGOS_SERVICE_KEY")
+```
+
+Classify (compute before Phase 3):
+- `severity_escalated`: today's `severity` is worse than yesterday's (`ok → warning`, `warning → critical`).
+- `stale_surge`: today's `branch_stale` exceeds the 6-prior-day median by ≥ 5. Report the absolute + delta.
+- `new_vulns`: today's `vulns_critical` > yesterday's OR `vulns_high` increased by ≥ 1. Report the delta.
+- `eslint_regression`: today's `eslint_errors` exceeds the 6-prior-day median by ≥ 10.
+- `build_broken`: today's `build_status` != "pass".
+- `stalled_pr_surge`: today's `stalled_prs` exceeds yesterday's by ≥ 1.
+
+If none fire, omit the "Nightly Review" section in Phase 3.
+
 ---
 
 ## Phase 1: Goals Cascade (MANDATORY — before task scheduling)
@@ -218,6 +239,14 @@ CI & Deploys                                ← OMIT this section entirely if 0E
 [if sustained_failures_24h has entries: "- [context]: <N> failures in 24h (flaky/regressed)"]
 [if preview_stale non-empty: "- preview-test: red on PR <#> for <hours>h"]
 
+Nightly Review                              ← OMIT entirely if 0F found nothing
+[if severity_escalated: "- Severity: <yesterday> -> <today>"]
+[if build_broken: "- Build: <status> (investigate)"]
+[if new_vulns: "- Vulns: +<N> high, +<M> critical since yesterday"]
+[if stale_surge: "- Stale branches: <today> (up <delta> vs 7d median)"]
+[if eslint_regression: "- ESLint: <today> errors (up <delta> vs 7d median)"]
+[if stalled_pr_surge: "- Stalled PRs: +<delta> since yesterday"]
+
 Today's Focus: [daily_focus from goals.json]
 ```
 
@@ -225,6 +254,11 @@ The "CI & Deploys" section rules:
 - Omit the heading AND body if all three classifications from 0E are empty (no empty section).
 - Prefer the most concrete detail: sha prefix, duration, description from GitHub status payload.
 - P0 interrupts (main red >60 min AND streak >=3) already paged Greg in real time via `orch-task-notify`; the digest is the retrospective, not the interrupt.
+
+The "Nightly Review" section rules:
+- Omit the heading AND body if 0F found no qualifying deltas.
+- Report deltas, not absolutes: "stale branches 142 (up 7 vs median)" beats "142 stale branches" because 142 has been roughly-stable for weeks.
+- Never restate numbers that didn't move — that's what caused alarm fatigue in the old auto-issue workflow.
 
 **Message 2: Task Plan**
 ```
