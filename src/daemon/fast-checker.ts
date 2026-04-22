@@ -1299,8 +1299,15 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
     const { warn, handoff, autoreset } = this.getCtxThresholds();
 
-    // No threshold configured — observe-only mode (log but don't act)
-    if (this.agent.getConfig().ctx_handoff_threshold === undefined) return;
+    // No threshold configured — observe-only mode (log but don't act). Any of
+    // the three thresholds being explicitly set arms the monitor; an agent
+    // that sets only ctx_autoreset_threshold still gets Tier 0.
+    const cfg = this.agent.getConfig();
+    const anyThresholdSet =
+      cfg.ctx_handoff_threshold !== undefined ||
+      cfg.ctx_warning_threshold !== undefined ||
+      (typeof cfg.ctx_autoreset_threshold === 'number' && cfg.ctx_autoreset_threshold > 0);
+    if (!anyThresholdSet) return;
 
     const effectivePct = pct ?? (exceeds200k ? 101 : null);
     if (effectivePct === null) return;
@@ -1355,6 +1362,13 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       // FastChecker does not immediately re-fire Tier 0 off the stale value.
       try {
         writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
+      } catch { /* non-fatal */ }
+      // Arm silent-restart marker so the post-restart session suppresses the
+      // boot "online" Telegram messages. Without this, every Tier 0 trip leaks
+      // a user-visible "back online" notification, violating the silent
+      // contract of auto-reset.
+      try {
+        writeFileSync(join(this.paths.stateDir, '.silent-restart'), `tier-0-autoreset-${pctRound}%`, 'utf-8');
       } catch { /* non-fatal */ }
       // forceContextRestart handles circuit breaker + hardRestart + sessionRefresh.
       this.forceContextRestart(`ctx auto-reset at ${pctRound}% (tier 0)`);

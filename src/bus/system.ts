@@ -135,20 +135,48 @@ export function autoCompactAgent(
   }
 
   // 1. Snapshot (best-effort — we still restart if this fails).
+  // Pass a scrubbed env: an agent running this command for ANOTHER agent would
+  // otherwise leak its own CTX_AGENT_DIR / CTX_AGENT_NAME / CTX_ORG, and
+  // snapshot-agent.sh prefers those env vars over the positional argument —
+  // the memory marker and Telegram notification would be sent to the CALLER
+  // instead of the target agent.
   let snapshotOk = false;
   try {
     const scriptPath = join(frameworkRoot, 'scripts', 'snapshot-agent.sh');
     if (existsSync(scriptPath)) {
       const args = [scriptPath, agentName, '--reason', reason];
       if (silent) args.splice(2, 0, '--silent');
-      execFileSync('bash', args, { stdio: 'ignore', timeout: 10_000 });
+      const callerEnv = { ...process.env };
+      delete callerEnv.CTX_AGENT_DIR;
+      delete callerEnv.CTX_AGENT_NAME;
+      execFileSync('bash', args, {
+        stdio: 'ignore',
+        timeout: 10_000,
+        env: {
+          ...callerEnv,
+          CTX_AGENT_NAME: agentName,
+          CTX_FRAMEWORK_ROOT: frameworkRoot,
+          // CTX_AGENT_DIR intentionally omitted; the script falls back to
+          // $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/agents/$AGENT using the
+          // positional argument and inherited $CTX_ORG (correct for fleet-wide).
+        },
+      });
       snapshotOk = true;
     }
   } catch {
     // Snapshot failure is non-fatal; fall through to restart.
   }
 
-  // 2. Arm force-fresh + restart-planned. The daemon's next tick picks these up.
+  // 2. Arm .silent-restart so the post-restart session does not page the user.
+  // Same contract as the daemon Tier 0 path.
+  try {
+    writeFileSync(join(paths.stateDir, '.silent-restart'), `manual-auto-compact: ${reason}`, 'utf-8');
+  } catch { /* non-fatal */ }
+
+  // 3. Arm force-fresh + restart-planned. The daemon consumes .force-fresh
+  // on the next start() and the crash-alert hook unlinks .restart-planned
+  // when the existing session exits. The caller is expected to trigger the
+  // actual restart (CLI does this via IPC restart-agent).
   hardRestart(paths, agentName, `AUTO-COMPACT: ${reason}`);
 
   return {

@@ -299,7 +299,7 @@ describe('Bus System', () => {
       scriptPath = join(frameworkRoot, 'scripts', 'snapshot-agent.sh');
 
       // Build a stub snapshot-agent.sh that:
-      //  - Writes a sentinel recording the args it was invoked with
+      //  - Writes a sentinel recording the args AND env it was invoked with
       //  - Honors --silent (sentinel records whether --silent appeared)
       //  - Exits 0 so the chain proceeds (real script matches this guarantee)
       //  - Reads sentinel path from $SNAPSHOT_SENTINEL (tests set this in process.env)
@@ -318,7 +318,7 @@ describe('Bus System', () => {
         '  esac',
         'done',
         'if [[ -z "${SNAPSHOT_SENTINEL:-}" ]]; then exit 0; fi',
-        'printf \'{"agent":"%s","silent":%d,"reason":"%s"}\' "$AGENT" "$SILENT" "$REASON" > "$SNAPSHOT_SENTINEL"',
+        'printf \'{"agent":"%s","silent":%d,"reason":"%s","env_agent_name":"%s","env_agent_dir":"%s","env_framework_root":"%s"}\' "$AGENT" "$SILENT" "$REASON" "${CTX_AGENT_NAME:-}" "${CTX_AGENT_DIR:-}" "${CTX_FRAMEWORK_ROOT:-}" > "$SNAPSHOT_SENTINEL"',
         'exit 0',
         '',
       ].join('\n');
@@ -354,9 +354,30 @@ describe('Bus System', () => {
       expect(sentinel.silent).toBe(1);
       expect(sentinel.reason).toBe('unit test');
 
-      // hardRestart wrote .force-fresh + .restart-planned
+      // hardRestart wrote .force-fresh + .restart-planned AND .silent-restart
       expect(existsSync(join(paths.stateDir, '.force-fresh'))).toBe(true);
       expect(existsSync(join(paths.stateDir, '.restart-planned'))).toBe(true);
+      expect(existsSync(join(paths.stateDir, '.silent-restart'))).toBe(true);
+    });
+
+    it('env scrubbing: caller CTX_AGENT_DIR / CTX_AGENT_NAME do not leak to snapshot', () => {
+      process.env.SNAPSHOT_SENTINEL = sentinelPath;
+      // Simulate a CALLER agent running auto-compact for a DIFFERENT agent.
+      process.env.CTX_AGENT_NAME = 'caller-agent';
+      process.env.CTX_AGENT_DIR = '/fake/caller/dir';
+
+      try {
+        const paths = makePaths(testDir, 'target-agent');
+        autoCompactAgent(paths, 'target-agent', frameworkRoot, { reason: 'cross-agent', silent: true });
+
+        const sentinel = JSON.parse(readFileSync(sentinelPath, 'utf-8'));
+        expect(sentinel.env_agent_name).toBe('target-agent');       // overridden
+        expect(sentinel.env_agent_dir).toBe('');                     // scrubbed
+        expect(sentinel.env_framework_root).toBe(frameworkRoot);
+      } finally {
+        delete process.env.CTX_AGENT_NAME;
+        delete process.env.CTX_AGENT_DIR;
+      }
     });
 
     it('notify mode drops --silent flag so user-facing notification can fire', () => {

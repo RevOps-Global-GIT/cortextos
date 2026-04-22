@@ -686,11 +686,12 @@ busCommand
 
 busCommand
   .command('auto-compact-agent')
-  .description('Silently snapshot an agent and plan a hard restart (manual ops hatch; daemon fires the same chain at ctx_autoreset_threshold)')
+  .description('Silently snapshot an agent and trigger a fresh restart (manual ops hatch; daemon fires the same chain at ctx_autoreset_threshold)')
   .argument('[agent]', 'Agent name (defaults to $CTX_AGENT_NAME)')
   .option('--reason <why>', 'Reason recorded in the snapshot + restart log', 'manual auto-compact')
   .option('--notify', 'Send Telegram notification (default is silent)')
-  .action((agentArg: string | undefined, opts: { reason: string; notify?: boolean }) => {
+  .option('--no-ipc', 'Arm markers only; skip the daemon IPC restart signal (markers still consume on the next restart triggered elsewhere)')
+  .action(async (agentArg: string | undefined, opts: { reason: string; notify?: boolean; ipc?: boolean }) => {
     const env = resolveEnv();
     const target = agentArg || env.agentName;
     if (!target) {
@@ -704,10 +705,26 @@ busCommand
       reason: opts.reason,
       silent: !opts.notify,
     });
-    console.log(JSON.stringify(report));
-    if (report.already_in_flight) {
-      process.exit(0);
+    // Trigger the actual restart unless --no-ipc was passed. Without this,
+    // markers are written but the agent keeps running until someone else
+    // restarts it — which defeats the point of the manual hatch.
+    let restartTriggered = false;
+    let ipcError: string | undefined;
+    if (opts.ipc !== false && !report.already_in_flight) {
+      const ipc = new IPCClient(env.instanceId);
+      if (await ipc.isDaemonRunning()) {
+        const resp = await ipc.send({ type: 'restart-agent', agent: target, source: 'cortextos bus auto-compact-agent' });
+        if (resp.success) {
+          restartTriggered = true;
+        } else {
+          ipcError = resp.error || 'restart-agent IPC call failed';
+        }
+      } else {
+        ipcError = 'daemon is not running — markers armed but no restart fired';
+      }
     }
+    console.log(JSON.stringify({ ...report, restart_triggered: restartTriggered, ipc_error: ipcError }));
+    if (ipcError) process.exit(1);
   });
 
 busCommand
