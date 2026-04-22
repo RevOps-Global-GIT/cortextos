@@ -820,16 +820,24 @@ busCommand
 
 busCommand
   .command('evaluate-experiment')
-  .description('Evaluate a running experiment with a measured value')
+  .description('Evaluate a running experiment with a measured value, a 1-10 score, or both')
   .argument('<id>', 'Experiment ID')
-  .argument('<value>', 'Measured value')
-  .option('--score <n>', 'Score 1-10')
+  .argument('[value]', 'Measured value (quantitative metrics); omit for pure qualitative --score evals')
+  .option('--score <n>', 'Score rubric 1-10 (stored in its own field; doubles as the result value when no positional value is provided)')
   .option('--justification <text>', 'Justification text')
-  .action(async (id: string, value: string, opts: { score?: string; justification?: string }) => {
+  .action(async (id: string, value: string | undefined, opts: { score?: string; justification?: string }) => {
     const env = resolveEnv();
     const agentDir = env.agentDir || process.cwd();
-    const experiment = evaluateExperiment(agentDir, id, parseFloat(value), {
-      score: opts.score ? parseInt(opts.score, 10) : undefined,
+    const measuredValue = value !== undefined ? parseFloat(value) : undefined;
+    if (measuredValue !== undefined && Number.isNaN(measuredValue)) {
+      throw new Error(`Measured value '${value}' is not a number`);
+    }
+    const score = opts.score !== undefined ? parseInt(opts.score, 10) : undefined;
+    if (score !== undefined && (Number.isNaN(score) || score < 1 || score > 10)) {
+      throw new Error(`--score must be an integer 1-10 (got '${opts.score}')`);
+    }
+    const experiment = evaluateExperiment(agentDir, id, measuredValue, {
+      score,
       justification: opts.justification,
     });
     console.log(JSON.stringify(experiment, null, 2));
