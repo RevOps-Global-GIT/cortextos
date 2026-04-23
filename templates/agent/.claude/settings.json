@@ -95,6 +95,18 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cortextos bus hook-skill-telemetry",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
