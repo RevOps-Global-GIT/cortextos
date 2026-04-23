@@ -95,8 +95,33 @@ Built-in crons expire after 7 days. Since your session restarts via the daemon, 
 
 ---
 
+## Wake Gates (optional, saves context burn)
+
+Add a `wake_gate` shell command to a cron entry to skip firing when there is nothing actionable. The daemon evaluates the gate before each fire:
+
+- **Exit code 1** → skip this fire (last_fire is NOT updated; retries next tick)
+- **Exit code 0 + stdout contains `{"wake":false}`** → skip
+- **Any other outcome / timeout (5s)** → fire normally (fail-open)
+
+Skipped fires are logged to the activity feed as `cron_skipped` events.
+
+```json
+{
+  "name": "check-inbox",
+  "type": "recurring",
+  "interval": "5m",
+  "prompt": "Check inbox for new messages and act on anything urgent.",
+  "wake_gate": "cortextos bus check-inbox --count-only | grep -q '^0$' && echo '{\"wake\":false}' || echo '{\"wake\":true}'"
+}
+```
+
+Use wake gates on high-frequency crons that would burn context even when idle (inbox checks, signal scans, queue monitors). Do NOT use them on heartbeat or memory-write crons that must fire regardless.
+
+---
+
 ## Troubleshooting
 
 - Cron not firing after restart: check config.json — the entry may be missing or have an expired fire_at
 - Duplicate crons: always run CronList before recreating; if a cron is already active, skip it
 - One-shot that already fired: if fire_at is in the past and the entry is still in config.json, the reminder was likely missed during a restart — delete the entry, notify the user
+- Cron skipping unexpectedly: check if `wake_gate` is defined — run the gate command manually to see what it outputs

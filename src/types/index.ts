@@ -227,6 +227,18 @@ export interface CronEntry {
   /** "recurring" (default) restores on every session start.
    *  "once" restores only if fire_at is still in the future; deleted after firing. */
   type?: 'recurring' | 'once';
+  /**
+   * Optional shell command evaluated before each fire. If the command exits
+   * with code 1, or exits 0 with stdout containing {"wake":false}, the cron
+   * is skipped for this tick (last_fire is NOT updated so it retries next
+   * tick). On error or timeout the gate is ignored and the cron fires
+   * normally (fail-open). Useful for skipping context burn when there is
+   * nothing actionable (e.g. inbox is empty).
+   *
+   * Example:
+   *   "cortextos bus check-inbox --count-only | grep -q '^0$' && echo '{\"wake\":false}' || echo '{\"wake\":true}'"
+   */
+  wake_gate?: string;
 }
 
 export interface OrgContext {

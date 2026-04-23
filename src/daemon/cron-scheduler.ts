@@ -32,6 +32,7 @@
  */
 
 import { readFileSync } from 'fs';
+import { spawnSync } from 'child_process';
 import { watch as chokidarWatch, type FSWatcher as ChokidarFSWatcher } from 'chokidar';
 import { CronExpressionParser } from 'cron-parser';
 import type { AgentConfig, CronEntry } from '../types/index.js';
@@ -227,6 +228,13 @@ export class CronScheduler {
           );
         }
 
+        // Wake gate: if defined, evaluate before firing. Skip this tick
+        // (without advancing last_fire) if the gate says wake:false.
+        if (cron.entry.wake_gate && !this.evaluateWakeGate(agentName, cron.entry)) {
+          cron.deferStart = null;
+          continue;
+        }
+
         // Attempt the inject. A failed write keeps nextFireAt so we retry
         // on the next tick instead of silently skipping a fire.
         const ok = sched.agent.inject(cron.entry.prompt);
@@ -351,6 +359,56 @@ export class CronScheduler {
     }
 
     return scheduled;
+  }
+
+  /**
+   * Evaluate a wake_gate shell command. Returns true if the cron should fire,
+   * false if it should be skipped this tick.
+   *
+   * Skip conditions (fail-open on any unexpected behaviour):
+   *   - exit code 1 (explicit gate-closed signal)
+   *   - exit code 0 AND stdout contains {"wake":false}
+   *
+   * On timeout (5s), error, or any other outcome: returns true (fire normally).
+   */
+  private evaluateWakeGate(agentName: string, entry: CronEntry): boolean {
+    const gate = entry.wake_gate;
+    if (!gate) return true;
+
+    try {
+      const result = spawnSync('sh', ['-c', gate], {
+        timeout: 5_000,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      // Timeout or signal: fail-open
+      if (result.signal || result.error) {
+        this.log(`[${agentName}] cron "${entry.name}": wake_gate error/timeout, firing anyway`);
+        return true;
+      }
+
+      const stdout = (result.stdout ?? '').trim();
+      const shouldSkip =
+        result.status === 1 ||
+        (result.status === 0 && stdout.includes('"wake":false'));
+
+      if (shouldSkip) {
+        this.log(`[${agentName}] cron "${entry.name}": wake_gate blocked fire`);
+        // Best-effort activity log (non-blocking, ignore errors)
+        spawnSync('cortextos', [
+          'bus', 'log-event', 'cron', 'cron_skipped', 'info',
+          '--meta', JSON.stringify({ name: entry.name, reason: 'wake_gate', agent: agentName }),
+        ], { timeout: 3_000, stdio: 'ignore' });
+        return false;
+      }
+
+      return true;
+    } catch {
+      // Any unexpected error: fail-open
+      this.log(`[${agentName}] cron "${entry.name}": wake_gate evaluation threw, firing anyway`);
+      return true;
+    }
   }
 
   /**
