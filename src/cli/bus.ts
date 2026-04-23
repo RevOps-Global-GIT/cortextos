@@ -21,6 +21,7 @@ import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { generateSkill } from '../bus/generate-skill.js';
 import { syncSkills } from '../bus/sync-skills.js';
+import { runWorkflow } from '../bus/run-workflow.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -2122,6 +2123,28 @@ busCommand
     }
   });
 
+
+busCommand
+  .command('run-workflow')
+  .description('Execute a declarative workflow YAML file (sequential multi-agent orchestration)')
+  .argument('<file>', 'Path to workflow YAML file')
+  .option('--dry-run', 'Print steps without sending any messages')
+  .option('--timeout <seconds>', 'Override default step timeout', (v) => parseInt(v, 10))
+  .action(async (file: string, opts: { dryRun?: boolean; timeout?: number }) => {
+    try {
+      const result = await runWorkflow({
+        workflowPath: file,
+        dryRun: opts.dryRun,
+        timeout: opts.timeout,
+        log: (msg) => console.error(msg), // progress to stderr, result to stdout
+      });
+      console.log(JSON.stringify(result, null, 2));
+      if (result.failed > 0 && !opts.dryRun) process.exit(1);
+    } catch (err) {
+      console.error(`run-workflow failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
 
 busCommand
   .command('sync-skills')

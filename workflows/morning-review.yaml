@@ -1,0 +1,39 @@
+# Morning Review Workflow
+# Runs the daily morning briefing across orchestrator and analyst agents.
+#
+# Trigger: cortextos bus run-workflow workflows/morning-review.yaml
+# Scheduled: morning-review cron in orchestrator's config.json
+#
+# Steps run sequentially. Orchestrator drives the full review after analyst
+# prepares overnight metrics and market signals.
+
+name: morning-review
+type: sequential
+description: Daily morning briefing — overnight summary, goals cascade, task scheduling, and briefing delivery
+
+steps:
+  - label: analyst-pull-overnight
+    agent: analyst
+    prompt: |
+      Morning review time. Pull overnight metrics for the orchestrator briefing:
+      1. Fetch last night's nightly_review_snapshots from Supabase and compute deltas vs 7-day median
+      2. Check ci_health_snapshots for the last 24h (main red, sustained failures, preview stale)
+      3. Summarize any signals from the pipeline and market intel feeds
+      4. Reply with a structured summary: CI health, nightly review deltas, any pipeline signals
+      Keep it concise — this feeds directly into the morning briefing message.
+    wait_for_reply: true
+    timeout: 300
+    inject_context: false
+
+  - label: orchestrator-briefing
+    agent: orchestrator
+    prompt: |
+      Run the morning review now. The analyst has been asked to pull overnight metrics and will
+      reply with CI health, nightly review deltas, and pipeline signals — incorporate their reply
+      into your briefing when it arrives.
+      Follow morning-review SKILL.md: Phase 0 (overnight summary), Phase 1 (goals cascade),
+      Phase 2 (task scheduling), Phase 3 (briefing delivery).
+      This is the daily entry point — execute all phases now.
+    wait_for_reply: false
+    timeout: 600
+    inject_context: false
