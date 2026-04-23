@@ -704,16 +704,41 @@ export class AgentProcess implements ManagedAgent {
    * Returns a boot-prompt fragment pointing the new session at the handoff doc,
    * or an empty string if no marker exists.
    * The marker is unlinked after reading so it fires only once per restart.
+   *
+   * Fallback: if no marker exists, scan the agent's memory/handoffs/ directory
+   * for any handoff doc written within the last hour and inject the most recent.
    */
   private consumeHandoffBlock(): string {
     const markerPath = join(this.env.ctxRoot, 'state', this.name, '.handoff-doc-path');
-    if (!existsSync(markerPath)) return '';
+
+    // Primary path: explicit marker written by hard-restart or watchdog
+    if (existsSync(markerPath)) {
+      try {
+        const { unlinkSync } = require('fs');
+        const docPath = readFileSync(markerPath, 'utf-8').trim();
+        unlinkSync(markerPath);
+        if (docPath && existsSync(docPath)) {
+          return ` CONTEXT HANDOFF: Before restoring crons or checking inbox, read the handoff document at ${docPath} to resume your prior session state.`;
+        }
+      } catch {
+        // fall through to auto-scan
+      }
+    }
+
+    // Fallback: auto-scan memory/handoffs/ for a recent (< 1 hour old) handoff doc
     try {
-      const { unlinkSync } = require('fs');
-      const docPath = readFileSync(markerPath, 'utf-8').trim();
-      unlinkSync(markerPath);
-      if (!docPath || !existsSync(docPath)) return '';
-      return ` CONTEXT HANDOFF: Before restoring crons or checking inbox, read the handoff document at ${docPath} to resume your prior session state.`;
+      const { readdirSync, statSync } = require('fs');
+      const handoffsDir = join(this.env.agentDir, 'memory', 'handoffs');
+      if (!existsSync(handoffsDir)) return '';
+      const oneHourAgo = Date.now() - 60 * 60_000;
+      const candidates = readdirSync(handoffsDir)
+        .filter((f: string) => f.startsWith('handoff-') && f.endsWith('.md'))
+        .map((f: string) => ({ name: f, path: join(handoffsDir, f), mtime: statSync(join(handoffsDir, f)).mtimeMs }))
+        .filter((f: { name: string; path: string; mtime: number }) => f.mtime >= oneHourAgo)
+        .sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime);
+      if (candidates.length === 0) return '';
+      const docPath = candidates[0].path;
+      return ` CONTEXT HANDOFF (auto-detected): Before restoring crons or checking inbox, read the handoff document at ${docPath} to resume your prior session state.`;
     } catch {
       return '';
     }
