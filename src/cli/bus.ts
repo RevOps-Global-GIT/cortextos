@@ -19,6 +19,7 @@ import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/kn
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
+import { generateSkill } from '../bus/generate-skill.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -2112,6 +2113,32 @@ busCommand
     }
   });
 
+
+busCommand
+  .command('generate-skill')
+  .description('Generate a SKILL.md from a completed task so agents improve over time')
+  .requiredOption('--from-task <id>', 'Task ID. Prefix "cortex:" to query RGOS kanban (e.g. cortex:abc-123).')
+  .option('--agent <dir>', 'Absolute path to agent root (default: CTX_AGENT_DIR env)')
+  .option('--dry-run', 'Print the generated skill without writing to disk')
+  .action(async (opts: { fromTask: string; agent?: string; dryRun?: boolean }) => {
+    const env = resolveEnv();
+    const busPaths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      const result = await generateSkill(
+        { taskId: opts.fromTask, agentDir: opts.agent, dryRun: opts.dryRun },
+        { taskDir: busPaths.taskDir, frameworkRoot: env.frameworkRoot },
+      );
+      if (opts.dryRun) {
+        console.log(`--- dry-run: would ${result.action === 'dry-run' ? 'write' : 'refine'} ${result.skillPath} ---`);
+        console.log(result.content);
+      } else {
+        console.log(JSON.stringify({ action: result.action, path: result.skillPath, slug: result.slug }));
+      }
+    } catch (err) {
+      console.error(`generate-skill failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
 
 busCommand
   .command('send-slack')
