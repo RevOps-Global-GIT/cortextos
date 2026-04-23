@@ -324,6 +324,12 @@ export class AgentProcess implements ManagedAgent {
       writeFileSync(markerPath, 'session timer reached limit', 'utf-8');
     } catch { /* non-fatal */ }
 
+    // Detect context-handoff: fast-checker writes .force-fresh before calling
+    // sessionRefresh() for context-exhaustion restarts.
+    const forceFreshExists = existsSync(join(this.env.ctxRoot, 'state', this.name, '.force-fresh'));
+    const rotationType = forceFreshExists ? 'context-handoff' : 'soft';
+    this.writeRotationEvent(rotationType, 'session timer reached limit').catch(() => {});
+
     await this.stop();
     await this.start();
     this.log('Session refreshed');
@@ -515,6 +521,7 @@ export class AgentProcess implements ManagedAgent {
     // Exponential backoff restart
     const backoff = Math.min(5000 * Math.pow(2, this.crashCount - 1), 300000);
     this.log(`Crash recovery: restart in ${backoff / 1000}s (crash #${this.crashCount})`);
+    this.writeRotationEvent('crash', `exit_code=${exitCode}`).catch(() => {});
     // Persist the crash to restarts.log so operators have a durable audit
     // trail. Previously only planned SELF-RESTART / HARD-RESTART from
     // bus/system.ts wrote here, which left daemon-classified crashes
@@ -807,6 +814,73 @@ export class AgentProcess implements ManagedAgent {
       return ageMs < 60_000;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Write a rotation event to the orch_rotation_events Supabase table.
+   *
+   * Fail-open: all errors are swallowed. This must NEVER block a restart.
+   * Called fire-and-forget from sessionRefresh() and handleExit().
+   */
+  private async writeRotationEvent(rotationType: string, reason: string): Promise<void> {
+    try {
+      // Read Supabase credentials from agent's .env (not in daemon process.env)
+      const envFile = join(this.env.agentDir, '.env');
+      if (!existsSync(envFile)) return;
+      const envContent = readFileSync(envFile, 'utf-8');
+      const url = envContent.match(/^SUPABASE_RGOS_URL=(.+)$/m)?.[1]?.trim();
+      const key = envContent.match(/^SUPABASE_RGOS_SERVICE_KEY=(.+)$/m)?.[1]?.trim();
+      if (!url || !key) return;
+
+      // Look up agent UUID from orch_agents
+      const lookupRes = await fetch(
+        `${url}/rest/v1/orch_agents?select=id&title=ilike.${encodeURIComponent(this.name)}&limit=1`,
+        { headers: { apikey: key, Authorization: `Bearer ${key}` } },
+      );
+      if (!lookupRes.ok) return;
+      const rows = (await lookupRes.json()) as Array<{ id: string }>;
+      const agentId = rows[0]?.id;
+      if (!agentId) return;
+
+      // Compute session duration
+      const sessionDurationMs = this.sessionStart
+        ? Date.now() - this.sessionStart.getTime()
+        : null;
+
+      // Read context usage % from context_status.json if available
+      let contextUsagePct: number | null = null;
+      try {
+        const statusPath = join(this.env.ctxRoot, 'state', this.name, 'context_status.json');
+        if (existsSync(statusPath)) {
+          const data = JSON.parse(readFileSync(statusPath, 'utf-8'));
+          if (typeof data.used_percentage === 'number') {
+            contextUsagePct = data.used_percentage;
+          }
+        }
+      } catch { /* non-fatal */ }
+
+      // Write to orch_rotation_events
+      await fetch(`${url}/rest/v1/orch_rotation_events`, {
+        method: 'POST',
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({
+          agent_id: agentId,
+          notes: JSON.stringify({
+            rotation_type: rotationType,
+            reason,
+            session_duration_ms: sessionDurationMs,
+            context_usage_pct: contextUsagePct,
+          }),
+        }),
+      });
+    } catch {
+      /* swallow — must never break crash recovery */
     }
   }
 
