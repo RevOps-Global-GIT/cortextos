@@ -57,6 +57,7 @@ export function sendMessage(
   priority: Priority,
   text: string,
   replyTo?: string,
+  traceId?: string,
 ): string {
   validateAgentName(from);
   validateAgentName(to);
@@ -78,6 +79,7 @@ export function sendMessage(
     timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, '.000Z'),
     text,
     reply_to: replyTo || null,
+    ...(traceId ? { trace_id: traceId } : {}),
     ...(signingKey ? { sig: hmacSign(signingKey, signPayload(msgId, from, to, text)) } : {}),
   };
 

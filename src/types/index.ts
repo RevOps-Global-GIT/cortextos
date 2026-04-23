@@ -22,6 +22,8 @@ export interface InboxMessage {
   timestamp: string; // ISO 8601
   text: string;
   reply_to: string | null;
+  /** OTel-style trace ID for correlating messages across a multi-agent workflow. */
+  trace_id?: string;
   sig?: string; // Security (H10): HMAC-SHA256 signature — optional for backwards compat
 }
 

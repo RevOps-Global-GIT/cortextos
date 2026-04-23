@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName } from '../utils/validate.js';
+import { randomString } from '../utils/random.js';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
@@ -77,7 +78,8 @@ busCommand
   .argument('<text>', 'Message text')
   .argument('[reply-to]', 'Reply to message ID (optional positional form)')
   .option('--reply-to <id>', 'Reply to message ID')
-  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string }) => {
+  .option('--trace-id <id>', 'OTel-style trace ID to correlate this message with a workflow or task')
+  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string; traceId?: string }) => {
     // Accept reply-to as either positional arg or --reply-to flag (P2 fix #9)
     const effectiveReplyTo = opts.replyTo ?? replyToArg;
     const validPriorities: Priority[] = ['urgent', 'high', 'normal', 'low'];
@@ -117,9 +119,9 @@ busCommand
       console.error(`Warning: agent '${to}' not found in project. Message will be queued but may never be read.`);
     }
 
-    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo);
+    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo, opts.traceId);
     try {
-      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
+      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null, trace_id: opts.traceId ?? null }));
     } catch { /* non-fatal */ }
     console.log(msgId);
   });
@@ -175,6 +177,10 @@ busCommand
         process.exit(1);
       }
     }
+    // Pre-generate trace_id so it's stored with the task from creation.
+    // The task ID itself serves as the trace root — agents use it as `--trace-id $TASK_ID`
+    // on downstream send-message calls to correlate the full workflow chain.
+    const autoTraceId = randomString(12);
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
       assignee: opts.assignee,
@@ -183,7 +189,7 @@ busCommand
       needsApproval: opts.needsApproval ?? false,
       blockedBy: parseList(opts.blockedBy),
       blocks: parseList(opts.blocks),
-      meta,
+      meta: { trace_id: autoTraceId, ...(meta ?? {}) },
     });
     console.log(taskId);
     // Auto-notify assignee so the task is visible immediately (issue #78)
