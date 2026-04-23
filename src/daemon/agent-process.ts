@@ -650,8 +650,11 @@ export class AgentProcess implements ManagedAgent {
     const deliverablesBlock = this.buildDeliverablesBlock();
     const handoffBlock = this.consumeHandoffBlock();
     const isHandoffRestart = handoffBlock.length > 0;
+    // HANDOFF UX: the pickup message MUST be the first action after reading the handoff doc —
+    // before cron restoration, before heartbeat, before anything else. Placing this instruction
+    // immediately after the handoffBlock in the prompt ensures it is not buried.
     const handoffUxOverride = isHandoffRestart
-      ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely). After restoring crons and reading the handoff, send ONE brief conversational message that picks up naturally — e.g. "back — [what you were just working on]". No cron IDs, no status report, no cold-boot phrasing.'
+      ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. CRITICAL: After reading the handoff document, your VERY FIRST tool call MUST be a Bash call running: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \'back — [what you were just working on]\' — replace the brackets with one brief plain-English sentence about your current state. Do this BEFORE restoring crons, BEFORE running heartbeat, BEFORE any other tool call. No cron IDs, no status report, no cold-boot phrasing. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely).'
       : '';
     const onlineMessage = isHandoffRestart
       ? ''

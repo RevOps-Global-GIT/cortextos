@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, existsSync, writeFileSync, unlinkSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, writeFileSync, unlinkSync, statSync } from 'fs';
 import { execFile } from 'child_process';
 import { join } from 'path';
 import { createHash } from 'crypto';
+import { hardRestart } from '../bus/system.js';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval } from '../bus/approval.js';
@@ -67,6 +68,17 @@ export class FastChecker {
   private readonly HARD_RESTART_COOLDOWN_MS = 15 * 60 * 1000;
   private readonly STDOUT_FROZEN_MS = 30 * 60 * 1000;
 
+  // Context monitor state
+  private ctxConfigMtime: number = 0;
+  private ctxWarningFiredAt: number = 0;    // dedup: 15min cooldown between warnings
+  private ctxHandoffFiredAt: number = 0;    // fires once per session (0 = not yet)
+  private ctxHandoffDeadlineAt: number = 0; // timestamp after which force-restart fires
+  private ctxLastSessionId: string | null = null; // detects new session → clears stale deadline
+  private ctxCircuitRestarts: number[] = []; // timestamps of recent context-triggered restarts
+  private ctxCircuitBrokenAt: number | null = null; // when circuit tripped (null = healthy)
+  // Persisted to disk so --continue restarts don't reset the circuit breaker
+  private ctxCircuitFile: string = '';
+
   constructor(
     agent: AgentProcess,
     paths: BusPaths,
@@ -101,6 +113,10 @@ export class FastChecker {
     // Initialize usage tier state
     this.usageTierFile = join(paths.stateDir, 'usage-tier.json');
     this.loadUsageTier();
+
+    // Load persisted circuit breaker state so --continue restarts don't reset it
+    this.ctxCircuitFile = join(paths.stateDir, '.ctx-circuit.json');
+    this.loadCtxCircuit();
   }
 
   /**
@@ -237,6 +253,9 @@ export class FastChecker {
 
     // Usage rate-limit guard: check every 15 min
     await this.checkUsageTier();
+
+    // Context monitor: check usage thresholds and fire warnings/handoffs
+    await this.checkContextStatus();
   }
 
   /**
@@ -272,6 +291,7 @@ export class FastChecker {
     try {
       const tailBytes = Math.min(20000, size);
       if (tailBytes > 0) {
+        const { openSync, readSync, closeSync } = require('fs');
         const fd = openSync(stdoutPath, 'r');
         const buf = Buffer.alloc(tailBytes);
         readSync(fd, buf, 0, tailBytes, size - tailBytes);
@@ -305,7 +325,7 @@ export class FastChecker {
         .sendMessage(this.chatId, `Got stuck (${reason}). Hard-restarting now.`)
         .catch(() => { /* non-critical */ });
     }
-    this.agent.hardRestartSelf(reason).catch(e => this.log(`hardRestartSelf failed: ${e}`));
+    this.forceContextRestart(reason);
   }
 
   /**
@@ -1317,6 +1337,27 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
     this.ctxCircuitRestarts.push(now);
     this.saveCtxCircuit();
 
+    // If the agent wrote a handoff doc in the last 15 minutes but didn't get to call
+    // hard-restart --handoff-doc (e.g. Tier 3 force-restart cut it short), pick it up
+    // so the new session still receives handoff context.
+    try {
+      const handoffsDir = join(this.agent.getAgentDir(), 'memory', 'handoffs');
+      if (existsSync(handoffsDir)) {
+        const cutoff = now - 15 * 60_000;
+        const recent = readdirSync(handoffsDir)
+          .filter(f => f.startsWith('handoff-') && f.endsWith('.md'))
+          .map(f => ({ f, mtime: statSync(join(handoffsDir, f)).mtimeMs }))
+          .filter(({ mtime }) => mtime >= cutoff)
+          .sort((a, b) => b.mtime - a.mtime);
+        if (recent.length > 0) {
+          const docPath = join(handoffsDir, recent[0].f);
+          const markerPath = join(this.paths.stateDir, '.handoff-doc-path');
+          writeFileSync(markerPath, docPath, 'utf-8');
+          this.log(`Tier 3 restart: found recent handoff doc, writing marker → ${docPath}`);
+        }
+      }
+    } catch { /* non-fatal — proceed without handoff context */ }
+
     // Reset per-session context state for the new session
     this.ctxHandoffFiredAt = 0;
     this.ctxHandoffDeadlineAt = 0;
@@ -1382,6 +1423,37 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
       writeFileSync(this.dedupFilePath, hashes.join('\n') + '\n', 'utf-8');
     } catch {
       // Non-critical - dedup will still work in memory
+    }
+  }
+
+  /**
+   * Load circuit breaker state from disk.
+   * Persisting this across --continue restarts is critical: without it,
+   * the in-memory ctxCircuitRestarts array resets on every restart, making
+   * the circuit breaker unable to count restarts and stop a restart loop.
+   */
+  private loadCtxCircuit(): void {
+    try {
+      if (!existsSync(this.ctxCircuitFile)) return;
+      const data = JSON.parse(readFileSync(this.ctxCircuitFile, 'utf-8'));
+      this.ctxCircuitRestarts = Array.isArray(data.restarts) ? data.restarts : [];
+      this.ctxCircuitBrokenAt = typeof data.brokenAt === 'number' ? data.brokenAt : null;
+    } catch {
+      // Start fresh on error
+    }
+  }
+
+  /**
+   * Persist circuit breaker state to disk after every update.
+   */
+  private saveCtxCircuit(): void {
+    try {
+      writeFileSync(this.ctxCircuitFile, JSON.stringify({
+        restarts: this.ctxCircuitRestarts,
+        brokenAt: this.ctxCircuitBrokenAt,
+      }), 'utf-8');
+    } catch {
+      // Non-critical
     }
   }
 

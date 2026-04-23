@@ -16,6 +16,7 @@ export default defineConfig({
     'hooks/hook-loop-detector': 'src/hooks/hook-loop-detector.ts',
     'hooks/hook-skill-autopr': 'src/hooks/hook-skill-autopr.ts',
     'hooks/hook-skill-telemetry': 'src/hooks/hook-skill-telemetry.ts',
+    'hooks/hook-context-status': 'src/hooks/hook-context-status.ts',
   },
   format: ['cjs'],
   target: 'node20',
