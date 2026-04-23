@@ -123,10 +123,8 @@ describe('GET /api/comms/feed', () => {
 // ---------------------------------------------------------------------------
 describe('GET /api/comms/channels', () => {
   it('groups messages by pair and reports last-message metadata', async () => {
-    // Use recent timestamps to avoid 7-day archive threshold
-    const now = new Date();
-    const t1 = new Date(now.getTime() - 3600_000).toISOString(); // 1h ago
-    const t2 = new Date(now.getTime() - 1800_000).toISOString(); // 30m ago
+    const t1 = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const t2 = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
     writeHistory([
       { id: 'm1', from: 'boris', to: 'nick', priority: 'normal', timestamp: t1, text: 'hi', reply_to: null },
       { id: 'm2', from: 'nick', to: 'boris', priority: 'normal', timestamp: t2, text: 'reply', reply_to: null },
