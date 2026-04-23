@@ -158,6 +158,44 @@ function isRegisteredAgent(frameworkRoot: string, target: string): boolean {
   return false;
 }
 
+// Extensions the dashboard channel-view can render inline. Kept in sync with
+// MEDIA_URL_PATTERN in components/comms/channel-view.tsx + ALLOWED_TYPES in
+// api/comms/upload/route.ts. Anything outside this list falls back to text
+// and the file is still delivered over Telegram by the caller.
+const DASHBOARD_INLINE_EXTS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp',
+  '.mp3', '.m4a', '.wav', '.ogg', '.opus',
+  '.mp4', '.mov',
+]);
+
+/**
+ * Copy a local file into {ctxRoot}/dashboard-uploads so the dashboard
+ * /comms view can render it inline via /api/media/... Returns the
+ * resulting media URL, or null if the source can't be published (missing
+ * file, disallowed extension, copy error).
+ */
+function publishFileToDashboardUploads(
+  ctxRoot: string,
+  agentName: string | undefined,
+  srcPath: string,
+): string | null {
+  try {
+    const { copyFileSync, mkdirSync } = require('fs') as typeof import('fs');
+    const { extname } = require('path') as typeof import('path');
+    if (!existsSync(srcPath)) return null;
+    const ext = extname(srcPath).toLowerCase();
+    if (!DASHBOARD_INLINE_EXTS.has(ext)) return null;
+    const uploadsDir = join(ctxRoot, 'dashboard-uploads');
+    mkdirSync(uploadsDir, { recursive: true });
+    const safeAgent = (agentName || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const destName = `${Date.now()}-tg-${safeAgent}${ext}`;
+    copyFileSync(srcPath, join(uploadsDir, destName));
+    return `/api/media/dashboard-uploads/${destName}`;
+  } catch {
+    return null;
+  }
+}
+
 busCommand
   .command('send-message')
   .argument('<to>', 'Target agent')
@@ -1228,13 +1266,28 @@ busCommand
         sentMessageId = result?.result?.message_id ?? 0;
       }
 
-      // Log outbound and cache last-sent for context injection
+      // Log outbound and cache last-sent for context injection.
+      //
+      // When the send included --image or --file, publish the same file to
+      // {ctxRoot}/dashboard-uploads/ and append its /api/media/... URL to
+      // the logged text. The dashboard /comms channel-view detects media
+      // URLs in message text and renders inline images / audio players,
+      // so this is what makes the Telegram attachment visible in the bus
+      // terminal. The Telegram send above is unchanged.
       const env = resolveEnv();
       if (env.agentName && env.ctxRoot) {
-        logOutboundMessage(env.ctxRoot, env.agentName, chatId, message, sentMessageId, {
+        let dashText = message;
+        const attachmentPath = opts.image || opts.file;
+        if (attachmentPath) {
+          const mediaUrl = publishFileToDashboardUploads(env.ctxRoot, env.agentName, attachmentPath);
+          if (mediaUrl) {
+            dashText = message ? `${message}\n${mediaUrl}` : mediaUrl;
+          }
+        }
+        logOutboundMessage(env.ctxRoot, env.agentName, chatId, dashText, sentMessageId, {
           parseMode: opts.plainText ? 'none' : 'html',
         });
-        cacheLastSent(env.ctxRoot, env.agentName, chatId, message);
+        cacheLastSent(env.ctxRoot, env.agentName, chatId, dashText);
         // Auto-emit activity event so dashboard sees every Telegram send,
         // even from agents that never call log-event directly.
         try {
