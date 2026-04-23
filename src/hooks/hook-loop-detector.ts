@@ -237,7 +237,9 @@ export function checkEssential(toolName: string, toolInput: unknown): boolean {
   if (toolName === 'Bash') {
     const cmd = input.command;
     if (typeof cmd === 'string') {
-      return ESSENTIAL_COMMANDS.some(ec => cmd.includes(`bus ${ec}`));
+      if (ESSENTIAL_COMMANDS.some(ec => cmd.includes(`bus ${ec}`))) return true;
+      // Cron-driven scripts are expected to run repeatedly — exempt them.
+      if (cmd.includes('cortextos-vm-sync-push.js') || cmd.includes('sync-agent-memories.js')) return true;
     }
   }
 
