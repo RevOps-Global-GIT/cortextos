@@ -58,7 +58,12 @@ function formatTime(iso: string): string {
 // the best element for the file type. Images and audio render inline; every
 // other file type (documents, SQL, PDF, video, unknown extensions) renders
 // as a download link so the user can still open what the agent sent.
-const MEDIA_URL_PATTERN = /\/api\/media\/[^\s]+?\.[A-Za-z0-9]{1,6}(?=[\s.,;!?]|$)/g;
+//
+// Use a greedy `\S+` and anchor on the LAST extension in the URL so filenames
+// containing intra-name dots (e.g. combined-v1.4-v1.5.sql) match through to
+// the final `.sql`. `.` intentionally NOT in the lookahead class — otherwise
+// an internal dot truncates the match.
+const MEDIA_URL_PATTERN = /\/api\/media\/\S+\.[A-Za-z0-9]{1,6}(?=[\s,;!?)\]]|$)/g;
 
 function isImageUrl(url: string): boolean {
   return /\.(png|jpg|jpeg|gif|webp)$/i.test(url);
