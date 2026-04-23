@@ -25,6 +25,8 @@ export interface Experiment {
   started_at: string | null;
   completed_at: string | null;
   changes_description: string | null;
+  /** UUID assigned by orch_experiments on first sync. Stored here to enable PATCH on subsequent state changes. */
+  orch_id?: string;
 }
 
 export interface ExperimentCreateOptions {
@@ -103,7 +105,7 @@ function historyDir(agentDir: string): string {
   return join(agentDir, 'experiments', 'history');
 }
 
-function loadExperiment(agentDir: string, experimentId: string): Experiment {
+export function loadExperiment(agentDir: string, experimentId: string): Experiment {
   const filePath = join(historyDir(agentDir), `${experimentId}.json`);
   if (!existsSync(filePath)) {
     throw new Error(`Experiment ${experimentId} not found`);
@@ -500,4 +502,122 @@ export function manageCycle(
     default:
       throw new Error(`Unknown cycle action: ${action}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Supabase sync — non-blocking, fail-open
+// ---------------------------------------------------------------------------
+
+/**
+ * Sync a local Experiment to the orch_experiments table.
+ * - If experiment.orch_id is set: PATCH that row (UPDATE).
+ * - Otherwise: INSERT and store the returned UUID as orch_id in the local file.
+ * Always non-blocking: errors are logged but never thrown.
+ *
+ * Mapping:
+ *   hypothesis        → hypothesis
+ *   measurement/surface → method
+ *   metric+direction  → success_criteria
+ *   agent             → proposed_by
+ *   status            → status
+ *   baseline_value, result_value, decision, learning → results_json
+ */
+export async function syncExperimentToSupabase(
+  experiment: Experiment,
+  agentDir: string,
+): Promise<void> {
+  const url = process.env.SUPABASE_RGOS_URL || process.env.SUPABASE_URL || '';
+  const key = process.env.SUPABASE_RGOS_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key) return; // no credentials — silently skip
+
+  const base = `${url}/rest/v1/orch_experiments`;
+  const headers: Record<string, string> = {
+    'apikey': key,
+    'Authorization': `Bearer ${key}`,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation',
+  };
+
+  const payload = {
+    hypothesis: experiment.hypothesis,
+    method: experiment.measurement || `${experiment.metric} via ${experiment.surface}`,
+    proposed_by: experiment.agent,
+    success_criteria: `${experiment.metric} (${experiment.direction}) — ${experiment.surface || 'general'}`,
+    // orch_experiments uses 'complete' not 'completed' (check constraint)
+    status: experiment.status === 'completed' ? 'complete' : experiment.status,
+    started_at: experiment.started_at ?? undefined,
+    completed_at: experiment.completed_at ?? undefined,
+    results_json: {
+      metric: experiment.metric,
+      direction: experiment.direction,
+      baseline: experiment.baseline_value,
+      result: experiment.result_value,
+      decision: experiment.decision,
+      learning: experiment.learning,
+      local_id: experiment.id,
+    },
+    token_budget: 0,
+    tokens_used: 0,
+  };
+
+  try {
+    if (experiment.orch_id) {
+      // PATCH existing row
+      await fetch(`${base}?id=eq.${encodeURIComponent(experiment.orch_id)}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify(payload),
+      });
+    } else {
+      // INSERT and capture the UUID
+      const res = await fetch(base, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      });
+      if (res.ok) {
+        const rows = await res.json() as Array<{ id: string }>;
+        const orchId = rows?.[0]?.id;
+        if (orchId) {
+          // Store orch_id back in the local experiment file
+          const updated = { ...experiment, orch_id: orchId };
+          saveExperiment(agentDir, updated);
+        }
+      }
+    }
+  } catch {
+    // Silently fail — local operation already succeeded
+  }
+}
+
+/**
+ * Bulk-sync all local experiments for an agent to orch_experiments.
+ * Skips any already synced (orch_id present). Returns counts.
+ */
+export async function syncAllExperimentsToSupabase(
+  agentDir: string,
+): Promise<{ synced: number; skipped: number; errors: number }> {
+  const dir = historyDir(agentDir);
+  if (!existsSync(dir)) return { synced: 0, skipped: 0, errors: 0 };
+
+  let synced = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+  for (const file of files) {
+    try {
+      const exp = JSON.parse(readFileSync(join(dir, file), 'utf-8')) as Experiment;
+      if (exp.orch_id) {
+        skipped++;
+        continue;
+      }
+      await syncExperimentToSupabase(exp, agentDir);
+      synced++;
+    } catch {
+      errors++;
+    }
+  }
+
+  return { synced, skipped, errors };
 }

@@ -9,7 +9,7 @@ import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
 import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
-import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
+import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { createApproval, updateApproval } from '../bus/approval.js';
@@ -20,6 +20,7 @@ import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, 
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { generateSkill } from '../bus/generate-skill.js';
+import { syncSkills } from '../bus/sync-skills.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -725,6 +726,12 @@ busCommand
       );
       console.log(`approval_required: ${approvalId}`);
     }
+
+    // Sync to orch_experiments (non-blocking, best-effort)
+    try {
+      const exp = loadExperiment(agentDir, id);
+      await syncExperimentToSupabase(exp, agentDir);
+    } catch { /* non-fatal */ }
   });
 
 busCommand
@@ -732,11 +739,12 @@ busCommand
   .description('Start running a proposed experiment')
   .argument('<id>', 'Experiment ID')
   .argument('[description]', 'Description of changes')
-  .action((id: string, description?: string) => {
+  .action(async (id: string, description?: string) => {
     const env = resolveEnv();
     const agentDir = env.agentDir || process.cwd();
     const experiment = runExperiment(agentDir, id, description);
     console.log(JSON.stringify(experiment, null, 2));
+    try { await syncExperimentToSupabase(experiment, agentDir); } catch { /* non-fatal */ }
   });
 
 busCommand
@@ -746,7 +754,7 @@ busCommand
   .argument('<value>', 'Measured value')
   .option('--score <n>', 'Score 1-10')
   .option('--justification <text>', 'Justification text')
-  .action((id: string, value: string, opts: { score?: string; justification?: string }) => {
+  .action(async (id: string, value: string, opts: { score?: string; justification?: string }) => {
     const env = resolveEnv();
     const agentDir = env.agentDir || process.cwd();
     const experiment = evaluateExperiment(agentDir, id, parseFloat(value), {
@@ -754,6 +762,7 @@ busCommand
       justification: opts.justification,
     });
     console.log(JSON.stringify(experiment, null, 2));
+    try { await syncExperimentToSupabase(experiment, agentDir); } catch { /* non-fatal */ }
   });
 
 busCommand
@@ -2113,6 +2122,39 @@ busCommand
     }
   });
 
+
+busCommand
+  .command('sync-skills')
+  .description('Upsert agent SKILL.md files into the orch_skills Supabase table')
+  .option('--agent <dir>', 'Absolute path to agent root (default: CTX_AGENT_DIR env)')
+  .option('--dry-run', 'Print skills that would be synced without writing to DB')
+  .action(async (opts: { agent?: string; dryRun?: boolean }) => {
+    const env = resolveEnv();
+    try {
+      const result = await syncSkills({
+        agentDir: opts.agent ?? env.agentDir,
+        agentName: env.agentName,
+        dryRun: opts.dryRun,
+      });
+      console.log(JSON.stringify(result));
+    } catch (err) {
+      console.error(`sync-skills failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('sync-experiments')
+  .description('Bulk-sync all local experiments to the orch_experiments Supabase table')
+  .option('--agent <name>', 'Agent whose experiments to sync (default: current agent)')
+  .action(async (opts: { agent?: string }) => {
+    const env = resolveEnv();
+    const agentDir = opts.agent && env.frameworkRoot
+      ? join(env.frameworkRoot, 'orgs', env.org, 'agents', opts.agent)
+      : (env.agentDir || process.cwd());
+    const result = await syncAllExperimentsToSupabase(agentDir);
+    console.log(JSON.stringify(result));
+  });
 
 busCommand
   .command('generate-skill')
