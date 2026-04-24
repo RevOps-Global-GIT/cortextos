@@ -132,6 +132,109 @@ function yesterdayDateStr() {
   return d.toISOString().slice(0, 10);
 }
 
+// ── Token / cost collection ───────────────────────────────────────────────────
+
+const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
+
+const MODEL_PRICING = {
+  opus:   { inputPerM: 15,  outputPerM: 75,  cacheWritePerM: 3.75, cacheReadPerM: 1.50 },
+  sonnet: { inputPerM: 3,   outputPerM: 15,  cacheWritePerM: 3.75, cacheReadPerM: 0.30 },
+  haiku:  { inputPerM: 0.8, outputPerM: 4,   cacheWritePerM: 1.00, cacheReadPerM: 0.08 },
+};
+
+function resolvePricingKey(model) {
+  const lower = (model || "").toLowerCase();
+  if (lower.includes("opus"))  return "opus";
+  if (lower.includes("haiku")) return "haiku";
+  return "sonnet";
+}
+
+function calcCost(model, inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens) {
+  const p = MODEL_PRICING[resolvePricingKey(model)] || MODEL_PRICING.sonnet;
+  return Math.round((
+    (inputTokens      / 1e6) * p.inputPerM +
+    (outputTokens     / 1e6) * p.outputPerM +
+    (cacheWriteTokens / 1e6) * p.cacheWritePerM +
+    (cacheReadTokens  / 1e6) * p.cacheReadPerM
+  ) * 1e6) / 1e6;
+}
+
+/**
+ * Scan ~/.claude/projects/ for JSONL files belonging to an agent directory
+ * (dirs ending in "agents-<agentName>") and aggregate today's token usage.
+ * Returns { date, input_tokens, output_tokens, cache_creation_tokens, cost_usd }
+ * or null if no data found.
+ */
+function readDailyTokensForAgent(agentName) {
+  if (!fs.existsSync(CLAUDE_PROJECTS_DIR)) return null;
+
+  const today = todayDateStr();
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheWriteTokens = 0;
+  let cacheReadTokens = 0;
+  let costUsd = 0;
+  let found = false;
+
+  let projectDirs;
+  try {
+    projectDirs = fs.readdirSync(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+  } catch (_) {
+    return null;
+  }
+
+  for (const dir of projectDirs) {
+    if (!dir.isDirectory()) continue;
+    // Match dirs like "-home-...-agents-dev" or "-home-...-agents-orchestrator"
+    if (!dir.name.endsWith(`-agents-${agentName}`) && !dir.name.endsWith(`-agents-${agentName}-`)) continue;
+
+    const projectPath = path.join(CLAUDE_PROJECTS_DIR, dir.name);
+    let files;
+    try {
+      files = fs.readdirSync(projectPath).filter((f) => f.endsWith(".jsonl"));
+    } catch (_) {
+      continue;
+    }
+
+    for (const file of files) {
+      const filePath = path.join(projectPath, file);
+      const lines = readJsonlFile(filePath);
+
+      for (const entry of lines) {
+        const ts = entry.timestamp;
+        if (!ts || !ts.startsWith(today)) continue;
+
+        const msg = entry.message || entry;
+        const model = msg.model;
+        if (!model) continue;
+
+        const usage = msg.usage || {};
+        const inp  = usage.input_tokens ?? msg.input_tokens ?? 0;
+        const out  = usage.output_tokens ?? msg.output_tokens ?? 0;
+        const cw   = usage.cache_creation_input_tokens ?? 0;
+        const cr   = usage.cache_read_input_tokens ?? 0;
+        if (inp === 0 && out === 0 && cw === 0 && cr === 0) continue;
+
+        inputTokens      += inp;
+        outputTokens     += out;
+        cacheWriteTokens += cw;
+        cacheReadTokens  += cr;
+        costUsd          += msg.costUSD ?? calcCost(model, inp, out, cw, cr);
+        found = true;
+      }
+    }
+  }
+
+  if (!found) return null;
+  return {
+    date: today,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    cache_creation_tokens: cacheWriteTokens,
+    cost_usd: Math.round(costUsd * 1e6) / 1e6,
+  };
+}
+
 // ── Data collection ───────────────────────────────────────────────────────────
 
 /** List all agent names from state dir (skip non-agent entries) */
@@ -343,9 +446,12 @@ function buildPayload(watermark) {
     const transitions = taskTransitions[agentName] || [];
     const counts = taskCounts[agentName] || { completed: 0, failed: 0 };
 
+    const daily = readDailyTokensForAgent(agentName);
+
     const agentPayload = { name: agentName };
 
     if (hb) agentPayload.heartbeat = hb;
+    if (daily) agentPayload.daily = daily;
     if (events.length > 0) agentPayload.events = events;
     if (transitions.length > 0) agentPayload.task_transitions = transitions;
     if (counts.completed > 0) agentPayload.tasks_completed_today = counts.completed;
@@ -479,8 +585,12 @@ async function main() {
     0,
   );
 
+  const totalCostUsd = payload.agents.reduce((s, a) => s + (a.daily?.cost_usd || 0), 0);
+  const agentsWithTokens = payload.agents.filter((a) => a.daily).length;
+
   console.log(
-    `[vm-sync-push] Payload: ${agentCount} agents, ${eventCount} events, ${transitionCount} transitions`,
+    `[vm-sync-push] Payload: ${agentCount} agents, ${eventCount} events, ${transitionCount} transitions, ` +
+    `${agentsWithTokens} with tokens ($${totalCostUsd.toFixed(4)} today)`,
   );
 
   if (agentCount === 0) {
