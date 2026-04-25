@@ -1,8 +1,8 @@
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import type { TelegramUpdate, TelegramMessage, TelegramCallbackQuery, TelegramMessageReaction } from '../types/index.js';
 import { TelegramAPI } from './api.js';
-import { ensureDir } from '../utils/atomic.js';
+import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { withRetry, isTransientError } from '../utils/retry.js';
 
 export type MessageHandler = (msg: TelegramMessage) => void;
@@ -236,13 +236,14 @@ export class TelegramPoller {
   }
 
   /**
-   * Save current offset to state file.
+   * Save current offset to state file using an atomic write (write-then-rename).
+   * Prevents a torn/empty offset file on crash mid-write, which would cause the
+   * poller to restart from offset 0 and re-deliver already-processed messages.
    */
   private saveOffset(): void {
-    ensureDir(this.stateDir);
     const offsetFile = join(this.stateDir, this.offsetFileName);
     try {
-      writeFileSync(offsetFile, String(this.offset), 'utf-8');
+      atomicWriteSync(offsetFile, String(this.offset));
     } catch {
       // Ignore write errors
     }
