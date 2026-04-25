@@ -15,6 +15,7 @@ export function AppearanceTab() {
   const [density, setDensity] = useState<Density>('comfortable');
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
     // Read density from localStorage
     const saved = localStorage.getItem('ctx-density') as Density | null;

@@ -75,6 +75,7 @@ export function getGoalHistory(
   org: string
 ): Array<{ timestamp: string; change: string }> {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { getRecentEvents } = require('./events');
     const events = getRecentEvents(50, org) as Array<{
       type: string;

@@ -32,6 +32,7 @@ export function SkillsGrid({ agents }: SkillsGridProps) {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadSkills();
   }, [loadSkills]);
 

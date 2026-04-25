@@ -23,6 +23,7 @@ export function BottleneckSection({
 
   // Sync with parent if bottleneck changes externally
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setValue(initialBottleneck);
     lastSavedRef.current = initialBottleneck;
   }, [initialBottleneck]);
