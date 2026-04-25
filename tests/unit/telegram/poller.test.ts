@@ -224,6 +224,67 @@ describe('TelegramPoller — offset-after-handler', () => {
   });
 });
 
+describe('TelegramPoller — atomic offset persistence', () => {
+  let stateDir: string;
+
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), 'cortextos-poller-atomic-'));
+  });
+
+  afterEach(() => {
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it('offset file is never empty or corrupt after a successful poll', async () => {
+    // Simulates a restart mid-poll: after pollOnce() completes, a new poller
+    // instance reads the persisted offset file and must see a valid integer.
+    // A non-atomic writeFileSync can leave a zero-byte file if the process
+    // dies between open() and write(), causing the restarted poller to read
+    // '' → NaN → reset to 0 and re-deliver already-processed messages.
+    const { api } = makeStubApi([makeMessageUpdate(700, 'atomic-test')]);
+    const poller = new TelegramPoller(api, stateDir);
+    poller.onMessage(() => { /* no-op */ });
+    await poller.pollOnce();
+
+    const offsetFile = join(stateDir, '.telegram-offset');
+    expect(existsSync(offsetFile)).toBe(true);
+    const raw = readFileSync(offsetFile, 'utf-8').trim();
+    const parsed = parseInt(raw, 10);
+    expect(isNaN(parsed)).toBe(false);
+    expect(parsed).toBe(701);
+
+    // A fresh poller instance loading the persisted offset must resume at 701,
+    // not at 0, proving restart-safe recovery.
+    const { api: api2, calls: calls2 } = makeStubApi([]);
+    const poller2 = new TelegramPoller(api2, stateDir);
+    await poller2.pollOnce();
+    expect(calls2[0]).toBe(701);
+  });
+
+  it('uses per-suffix offset files so two pollers in the same stateDir do not collide', async () => {
+    // If two bots share a stateDir (e.g. agent bot + activity-channel bot),
+    // they must persist offsets to distinct files. Without the suffix, both
+    // pollers write to .telegram-offset and clobber each other's position.
+    const { api: api1 } = makeStubApi([makeMessageUpdate(800, 'bot1')]);
+    const { api: api2 } = makeStubApi([makeMessageUpdate(900, 'bot2')]);
+
+    const poller1 = new TelegramPoller(api1, stateDir, 1000, 'bot1');
+    const poller2 = new TelegramPoller(api2, stateDir, 1000, 'bot2');
+
+    poller1.onMessage(() => { /* no-op */ });
+    poller2.onMessage(() => { /* no-op */ });
+
+    await poller1.pollOnce();
+    await poller2.pollOnce();
+
+    const offset1 = readFileSync(join(stateDir, '.telegram-offset-bot1'), 'utf-8').trim();
+    const offset2 = readFileSync(join(stateDir, '.telegram-offset-bot2'), 'utf-8').trim();
+
+    expect(offset1).toBe('801');
+    expect(offset2).toBe('901');
+  });
+});
+
 describe('TelegramPoller — stop-before-start race', () => {
   let stateDir: string;
 
