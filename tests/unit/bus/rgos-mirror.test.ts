@@ -43,6 +43,7 @@ import {
   migrateRetryQueueIds,
   mapPriority,
   mapStatus,
+  migrateRetryQueueConstraints,
   _resetDrainLock,
 } from '../../../src/bus/rgos-mirror.js';
 import type { Task, InboxMessage } from '../../../src/types/index.js';
@@ -911,5 +912,132 @@ describe('rgos-mirror — buildTaskRow() constraint smoke tests', () => {
     const row = buildTaskRow(makeTask({ status: 'pending', priority: 'normal' }));
     expect(row.status).toBe('approved');
     expect(row.priority).toBe('medium');
+  });
+});
+
+// ── Retry queue constraint migration (scenario 15) ───────────────────────────
+
+describe('rgos-mirror — migrateRetryQueueConstraints()', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-test-'));
+    setMirrorEnv(tmpDir);
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+  });
+
+  afterEach(() => {
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('remaps priority=normal to medium and status=pending to approved', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: { id: uuidv5('task_001'), priority: 'normal', status: 'pending', title: 'Old task' },
+      ts: '2026-04-25T14:56:39.125Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueConstraints();
+
+    const entries = readRetryQueue(qPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].row.priority).toBe('medium');
+    expect(entries[0].row.status).toBe('approved');
+    // Other fields preserved
+    expect(entries[0].row.title).toBe('Old task');
+  });
+
+  it('remaps priority=urgent to high', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: { id: uuidv5('task_002'), priority: 'urgent', status: 'in_progress' },
+      ts: '2026-04-25T14:56:39.125Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueConstraints();
+
+    const entries = readRetryQueue(qPath);
+    expect(entries[0].row.priority).toBe('high');
+    expect(entries[0].row.status).toBe('in_progress'); // already valid, untouched
+  });
+
+  it('skips entries that already have valid RGOS values (idempotent)', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: { id: uuidv5('task_003'), priority: 'medium', status: 'approved' },
+      ts: '2026-04-25T14:56:39.125Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    const before = readFileSync(qPath, 'utf-8');
+
+    migrateRetryQueueConstraints();
+
+    // File should be unchanged (no rewrite happened)
+    const after = readFileSync(qPath, 'utf-8');
+    expect(after).toBe(before);
+  });
+
+  it('does not touch cortex_messages entries', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const entry = {
+      table: 'cortex_messages' as const,
+      row: { id: uuidv5('msg_001'), payload: { priority: 'normal' } },
+      ts: '2026-04-25T14:56:39.125Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueConstraints();
+
+    const entries = readRetryQueue(qPath);
+    // payload.priority is not remapped — messages don't have top-level priority
+    expect((entries[0].row.payload as Record<string, unknown>).priority).toBe('normal');
+  });
+
+  it('handles mixed queue — only migrates entries that need it', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const lines = [
+      JSON.stringify({ table: 'orch_tasks', row: { id: uuidv5('task_a'), priority: 'normal', status: 'pending' }, ts: '2026-04-25T09:00:00Z' }),
+      JSON.stringify({ table: 'orch_tasks', row: { id: uuidv5('task_b'), priority: 'high', status: 'completed' }, ts: '2026-04-25T09:01:00Z' }),
+    ].join('\n') + '\n';
+    writeFileSync(qPath, lines, { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueConstraints();
+
+    const entries = readRetryQueue(qPath);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].row.priority).toBe('medium'); // migrated
+    expect(entries[0].row.status).toBe('approved');  // migrated
+    expect(entries[1].row.priority).toBe('high');    // unchanged
+    expect(entries[1].row.status).toBe('completed'); // unchanged
+  });
+
+  it('no-ops when queue is empty', () => {
+    // Should not throw
+    migrateRetryQueueConstraints();
+  });
+
+  it('constraint migration runs automatically inside drainRetryQueue', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '' }));
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: { id: uuidv5('task_poison'), priority: 'normal', status: 'pending' },
+      ts: '2026-04-25T09:00:00Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    _resetDrainLock();
+
+    await drainRetryQueue();
+
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
+    expect(body.priority).toBe('medium');
+    expect(body.status).toBe('approved');
+    vi.unstubAllGlobals();
   });
 });

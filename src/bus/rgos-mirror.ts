@@ -161,6 +161,8 @@ export async function drainRetryQueue(): Promise<void> {
   if (!qPath) return;
   // Transparently migrate any pre-v5 entries before attempting upsert
   migrateRetryQueueIds();
+  // Remap raw bus constraint values (priority=normal, status=pending, etc.)
+  migrateRetryQueueConstraints();
   const entries = readRetryQueue(qPath);
   if (entries.length === 0) return;
 
@@ -193,6 +195,60 @@ export async function drainRetryQueue(): Promise<void> {
 // Reset the drain lock — exported for tests only
 export function _resetDrainLock(): void {
   draining = false;
+}
+
+// ---------------------------------------------------------------------------
+// One-shot migration: remap raw bus constraint values in the retry queue
+// ---------------------------------------------------------------------------
+
+// Valid RGOS enum values — anything outside these sets needs remapping.
+const RGOS_VALID_PRIORITIES = new Set(['low', 'medium', 'high']);
+const RGOS_VALID_STATUSES = new Set(['proposed', 'approved', 'in_progress', 'completed', 'cancelled', 'blocked', 'review']);
+
+/**
+ * Migrates any orch_tasks retry queue entries whose priority or status still
+ * carry raw bus values (e.g. priority="normal", status="pending") that RGOS
+ * rejects with a constraint violation.  Idempotent — entries already holding
+ * valid RGOS enum values are untouched.
+ *
+ * Called automatically at the start of drainRetryQueue alongside
+ * migrateRetryQueueIds so stale queued entries are transparently upgraded
+ * before the next upsert attempt.
+ */
+export function migrateRetryQueueConstraints(): void {
+  const qPath = retryQueuePath();
+  if (!qPath) return;
+  const entries = readRetryQueue(qPath);
+  if (entries.length === 0) return;
+
+  let changed = false;
+  const migrated = entries.map(entry => {
+    if (entry.table !== 'orch_tasks') return entry;
+
+    const priority = entry.row.priority as string | undefined;
+    const status = entry.row.status as string | undefined;
+
+    const needsPriority = priority !== undefined && !RGOS_VALID_PRIORITIES.has(priority);
+    const needsStatus = status !== undefined && !RGOS_VALID_STATUSES.has(status);
+
+    if (!needsPriority && !needsStatus) return entry;
+
+    changed = true;
+    const newRow = { ...entry.row };
+    if (needsPriority) newRow.priority = mapPriority(priority!);
+    if (needsStatus) newRow.status = mapStatus(status!);
+    return { ...entry, row: newRow };
+  });
+
+  if (!changed) return;
+
+  try {
+    writeFileSync(
+      qPath,
+      migrated.map(e => JSON.stringify(e)).join('\n') + '\n',
+      { encoding: 'utf-8', mode: 0o600 },
+    );
+  } catch { /* best-effort */ }
 }
 
 // ---------------------------------------------------------------------------
