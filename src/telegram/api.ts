@@ -571,10 +571,22 @@ export class TelegramAPI {
    * Send typing indicator.
    */
   async sendChatAction(chatId: string | number, action: string = 'typing'): Promise<any> {
-    return this.post('sendChatAction', {
-      chat_id: chatId,
-      action,
-    });
+    return withRetry(
+      () => this.post('sendChatAction', { chat_id: chatId, action }),
+      {
+        maxAttempts: 2,
+        baseDelayMs: 1000,
+        maxDelayMs: 5_000,
+        isRetryable: (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          // post() wraps TimeoutError/AbortError — match either the raw name or the wrapped message.
+          if (msg.includes('timed out')) return true;
+          // Telegram API errors (4xx) are permanent.
+          if (msg.startsWith('Telegram API error')) return false;
+          return isTransientError(err);
+        },
+      },
+    );
   }
 
   /**
