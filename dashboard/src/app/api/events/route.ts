@@ -68,11 +68,19 @@ export async function GET(request: NextRequest) {
       )
       .all(...params, limit, offset);
 
-    // Parse the data column from JSON string back to object
-    const events = (rows as Record<string, unknown>[]).map((row) => ({
-      ...row,
-      data: row.data ? JSON.parse(row.data as string) : null,
-    }));
+    // Parse the data column from JSON string back to object.
+    // Use per-row try-catch so a single malformed data value doesn't 500 the whole response.
+    const events = (rows as Record<string, unknown>[]).map((row) => {
+      let data: unknown = null;
+      if (row.data) {
+        try {
+          data = JSON.parse(row.data as string);
+        } catch {
+          data = null;
+        }
+      }
+      return { ...row, data };
+    });
 
     return Response.json(events);
   } catch (err) {
