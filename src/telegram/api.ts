@@ -299,26 +299,34 @@ export class TelegramAPI {
       formData.append('reply_markup', JSON.stringify(replyMarkup));
     }
 
-    try {
-      const response = await fetch(`${this.baseUrl}/sendPhoto`, {
-        method: 'POST',
-        body: formData,
-        signal: AbortSignal.timeout(60000),
-      });
-      const result = await response.json() as any;
-      if (!result.ok) {
-        throw new Error(`Telegram API error: ${result.description || 'Unknown error'}`);
-      }
-      return result;
-    } catch (err) {
-      if (err instanceof Error && err.message.startsWith('Telegram API error')) {
-        throw err;
-      }
-      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-        throw new Error(`Telegram API request timed out after 60s: sendPhoto`);
-      }
-      throw new Error(`Telegram API request failed: ${err}`);
-    }
+    return withRetry(
+      async () => {
+        const response = await fetch(`${this.baseUrl}/sendPhoto`, {
+          method: 'POST',
+          body: formData,
+          signal: AbortSignal.timeout(60000),
+        });
+        const result = await response.json() as any;
+        if (!result.ok) {
+          throw new Error(`Telegram API error: ${result.description || 'Unknown error'}`);
+        }
+        return result;
+      },
+      {
+        maxAttempts: 3,
+        baseDelayMs: 1000,
+        maxDelayMs: 10_000,
+        isRetryable: (err) => {
+          // Telegram API errors (4xx) are permanent — don't retry.
+          if (err instanceof Error && err.message.startsWith('Telegram API error')) return false;
+          return isTransientError(err);
+        },
+        onRetry: (attempt, err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[telegram] sendPhoto attempt ${attempt} failed, retrying: ${msg}`);
+        },
+      },
+    );
   }
 
   /**
@@ -350,26 +358,34 @@ export class TelegramAPI {
       formData.append('reply_markup', JSON.stringify(replyMarkup));
     }
 
-    try {
-      const response = await fetch(`${this.baseUrl}/sendDocument`, {
-        method: 'POST',
-        body: formData,
-        signal: AbortSignal.timeout(60000),
-      });
-      const result = await response.json() as any;
-      if (!result.ok) {
-        throw new Error(`Telegram API error: ${result.description || 'Unknown error'}`);
-      }
-      return result;
-    } catch (err) {
-      if (err instanceof Error && err.message.startsWith('Telegram API error')) {
-        throw err;
-      }
-      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
-        throw new Error(`Telegram API request timed out after 60s: sendDocument`);
-      }
-      throw new Error(`Telegram API request failed: ${err}`);
-    }
+    return withRetry(
+      async () => {
+        const response = await fetch(`${this.baseUrl}/sendDocument`, {
+          method: 'POST',
+          body: formData,
+          signal: AbortSignal.timeout(60000),
+        });
+        const result = await response.json() as any;
+        if (!result.ok) {
+          throw new Error(`Telegram API error: ${result.description || 'Unknown error'}`);
+        }
+        return result;
+      },
+      {
+        maxAttempts: 3,
+        baseDelayMs: 1000,
+        maxDelayMs: 10_000,
+        isRetryable: (err) => {
+          // Telegram API errors (4xx) are permanent — don't retry.
+          if (err instanceof Error && err.message.startsWith('Telegram API error')) return false;
+          return isTransientError(err);
+        },
+        onRetry: (attempt, err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[telegram] sendDocument attempt ${attempt} failed, retrying: ${msg}`);
+        },
+      },
+    );
   }
 
   /**
