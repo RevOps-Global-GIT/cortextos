@@ -4,6 +4,7 @@ import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveRepo
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { randomDigits } from '../utils/random.js';
 import { validatePriority } from '../utils/validate.js';
+import { mirrorTaskToRgos } from './rgos-mirror.js';
 
 /**
  * Create a new task. Identical JSON format to bash create-task.sh.
@@ -82,6 +83,11 @@ export function createTask(
 
   ensureDir(paths.taskDir);
   atomicWriteSync(join(paths.taskDir, `${taskId}.json`), JSON.stringify(task));
+
+  // Mirror to Supabase (fire-and-forget; never blocks local write path)
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    mirrorTaskToRgos(task, 'create').catch(() => undefined);
+  }
 
   // Cycle-safe now: validation already passed, so symmetric-edge
   // maintenance is just mutating peer JSONs.
@@ -276,6 +282,10 @@ export function updateTask(
     task.status = status;
     task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     atomicWriteSync(filePath, JSON.stringify(task));
+    // Mirror to Supabase (fire-and-forget)
+    if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+      mirrorTaskToRgos(task, 'update').catch(() => undefined);
+    }
   } catch (err) {
     throw new Error(`Task ${taskId} update failed: ${err}`);
   }
@@ -469,6 +479,10 @@ export function completeTask(
       task.result = result;
     }
     atomicWriteSync(filePath, JSON.stringify(task));
+    // Mirror to Supabase (fire-and-forget)
+    if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+      mirrorTaskToRgos(task, 'complete').catch(() => undefined);
+    }
   } catch (err) {
     throw new Error(`Task ${taskId} complete failed: ${err}`);
   }
