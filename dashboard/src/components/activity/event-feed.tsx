@@ -96,6 +96,7 @@ export function EventFeed({ initialEvents, filters }: EventFeedProps) {
       message: (sse.data?.message as string) ?? sse.type ?? 'Event',
     }));
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setAllEvents((prev) => {
       const merged = [...newEvents, ...prev];
       const seen = new Set<string>();

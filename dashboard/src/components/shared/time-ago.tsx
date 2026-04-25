@@ -38,6 +38,7 @@ export function TimeAgo({ date, className }: TimeAgoProps) {
   const [relative, setRelative] = useState(() => formatRelative(date));
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRelative(formatRelative(date));
     const interval = setInterval(() => {
       setRelative(formatRelative(date));

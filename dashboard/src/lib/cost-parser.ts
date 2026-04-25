@@ -136,6 +136,7 @@ export function scanClaudeProjectsCosts(): CostEntry[] {
   if (!fs.existsSync(claudeDir)) return [];
 
   // Import here to avoid circular deps — config imports db
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { getOrgs, CTX_FRAMEWORK_ROOT } = require('./config') as typeof import('./config');
   const allowedOrgs = new Set(getOrgs());
 

@@ -341,6 +341,7 @@ export function syncCostsLazy(): void {
   const lastCostSync = (globalThis as unknown as Record<string, number>).__lastCostSync ?? 0;
   if (now - lastCostSync > COST_SYNC_INTERVAL_MS) {
     try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { syncCosts } = require('./cost-parser');
       const costResult = syncCosts();
       (globalThis as unknown as Record<string, number>).__lastCostSync = now;

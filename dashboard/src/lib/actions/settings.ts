@@ -418,7 +418,7 @@ export async function addAllowedRoot(rawPath: string): Promise<ActionResult> {
   }
 
   const configPath = getAllowedRootsConfigPath();
-  let current: { additional_roots: string[] } = { additional_roots: [] };
+  const current: { additional_roots: string[] } = { additional_roots: [] };
   if (fs.existsSync(configPath)) {
     try {
       const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -451,7 +451,7 @@ export async function removeAllowedRoot(rawPath: string): Promise<ActionResult> 
   const normalized = normalizeFsPath(rawPath.trim());
   const configPath = getAllowedRootsConfigPath();
 
-  let current: { additional_roots: string[] } = { additional_roots: [] };
+  const current: { additional_roots: string[] } = { additional_roots: [] };
   if (fs.existsSync(configPath)) {
     try {
       const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));

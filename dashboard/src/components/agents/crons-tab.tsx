@@ -139,7 +139,7 @@ export function CronsTab({ agentName }: CronsTabProps) {
 
       {crons.length === 0 ? (
         <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
-          No crons configured. Click "Add Cron" to create one.
+          No crons configured. Click &quot;Add Cron&quot; to create one.
         </div>
       ) : (
         <div className="space-y-3">
