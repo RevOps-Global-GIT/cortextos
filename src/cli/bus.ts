@@ -2790,9 +2790,12 @@ busCommand
       frameworkRoot: env.frameworkRoot || process.cwd(),
       agentName: env.agentName || 'unknown',
       org: env.org || 'revops-global',
-      meta: { prompt: prompt.slice(0, 200), duration_ms: result.durationMs },
+      meta: { prompt: prompt.slice(0, 200), duration_ms: result.durationMs, used_fallback: result.usedFallback ?? false },
     });
 
+    if (result.usedFallback) {
+      console.log('[via cortex VM fallback — Mac SSH was unreachable]');
+    }
     console.log(result.output);
   });
 
