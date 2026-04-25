@@ -69,12 +69,6 @@ export function validateApprovalCategory(category: string): asserts category is 
   }
 }
 
-export function validateModel(model: string): void {
-  if (!/^[a-zA-Z0-9._-]+$/.test(model)) {
-    throw new Error(`Invalid model name '${model}'. Must be alphanumeric with dots and hyphens.`);
-  }
-}
-
 export function isValidJson(str: string): boolean {
   try {
     JSON.parse(str);
