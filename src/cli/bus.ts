@@ -293,7 +293,7 @@ busCommand
             const result = await api.sendDocument(chatId, tmpAudioFile, caption);
             sentMessageId = result?.result?.message_id ?? 0;
           } else {
-            const result = await api.sendMessage(chatId, text, undefined, { parseMode: 'Markdown' });
+            const result = await api.sendMessage(chatId, text, undefined, { parseMode: 'HTML' });
             sentMessageId = result?.result?.message_id ?? 0;
           }
           if (env.ctxRoot && env.agentName) {
@@ -2908,15 +2908,8 @@ busCommand
 
     // Log the event
     const env = resolveEnv();
-    await logEvent({
-      category: 'action',
-      action: 'computer_use_task',
-      severity: 'info',
-      frameworkRoot: env.frameworkRoot || process.cwd(),
-      agentName: env.agentName || 'unknown',
-      org: env.org || 'revops-global',
-      meta: { prompt: prompt.slice(0, 200), duration_ms: result.durationMs, used_fallback: result.usedFallback ?? false },
-    });
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    logEvent(paths, env.agentName, env.org, 'action', 'computer_use_task', 'info', { prompt: prompt.slice(0, 200), duration_ms: result.durationMs, used_fallback: result.usedFallback ?? false });
 
     if (result.usedFallback) {
       console.log('[via cortex VM fallback — Mac SSH was unreachable]');

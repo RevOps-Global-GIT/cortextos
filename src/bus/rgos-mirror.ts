@@ -277,15 +277,15 @@ export function migrateRetryQueueIds(): void {
 
     changed = true;
     const newId = uuidv5(id);
-    const newRow = { ...entry.row, id: newId };
+    const newRow = { ...entry.row, id: newId } as Record<string, unknown>;
 
     if (entry.table === 'orch_tasks') {
-      const meta = (newRow.metadata as Record<string, unknown> | undefined) ?? {};
-      newRow.metadata = { bus_task_id: id, ...meta };
+      const meta = (newRow['metadata'] as Record<string, unknown> | undefined) ?? {};
+      newRow['metadata'] = { bus_task_id: id, ...meta };
     } else {
       // cortex_messages: bus_message_id goes in payload
-      const payload = (newRow.payload as Record<string, unknown> | undefined) ?? {};
-      newRow.payload = { bus_message_id: id, ...payload };
+      const payload = (newRow['payload'] as Record<string, unknown> | undefined) ?? {};
+      newRow['payload'] = { bus_message_id: id, ...payload };
     }
 
     return { ...entry, row: newRow };
