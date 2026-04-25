@@ -23,6 +23,7 @@ import { sendSlack } from '../bus/send-slack.js';
 import { generateSkill } from '../bus/generate-skill.js';
 import { syncSkills } from '../bus/sync-skills.js';
 import { runWorkflow } from '../bus/run-workflow.js';
+import { computerUse } from '../bus/computer-use.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -2756,6 +2757,43 @@ busCommand
       console.log('\nRestart affected agents to apply the new settings:');
       console.log('  cortextos restart <agent-name>');
     }
+  });
+
+// --- computer-use ---
+
+busCommand
+  .command('computer-use <prompt>')
+  .description('Run a prompt on Codex with @Computer Use plugin via SSH to Greg\'s Mac')
+  .option('--no-plugin', 'Send a plain Codex prompt without the Computer Use plugin')
+  .option('--workdir <dir>', 'Working directory for Codex on the Mac')
+  .option('--timeout <seconds>', 'Max wait time in seconds (default: 300)', '300')
+  .option('--ssh-host <host>', 'SSH host (default: gregs-mac)', 'gregs-mac')
+  .action(async (prompt: string, opts: { noPlugin?: boolean; workdir?: string; timeout?: string; sshHost?: string }) => {
+    const result = await computerUse(prompt, {
+      noPlugin: opts.noPlugin,
+      workdir: opts.workdir,
+      timeout: parseInt(opts.timeout ?? '300', 10),
+      sshHost: opts.sshHost,
+    });
+
+    if (!result.ok) {
+      console.error(`computer-use failed: ${result.error}`);
+      process.exit(1);
+    }
+
+    // Log the event
+    const env = resolveEnv();
+    await logEvent({
+      category: 'action',
+      action: 'computer_use_task',
+      severity: 'info',
+      frameworkRoot: env.frameworkRoot || process.cwd(),
+      agentName: env.agentName || 'unknown',
+      org: env.org || 'revops-global',
+      meta: { prompt: prompt.slice(0, 200), duration_ms: result.durationMs },
+    });
+
+    console.log(result.output);
   });
 
 function sleepMs(ms: number): Promise<void> {

@@ -2,6 +2,7 @@
 // All bus functions for agent-to-agent messaging, tasks, events, heartbeats, approvals
 
 export { sendMessage, checkInbox, ackInbox } from './message.js';
+export { computerUse, type ComputerUseOptions, type ComputerUseResult } from './computer-use.js';
 export { createTask, updateTask, completeTask, listTasks } from './task.js';
 export { logEvent } from './event.js';
 export { updateHeartbeat, readAllHeartbeats } from './heartbeat.js';
