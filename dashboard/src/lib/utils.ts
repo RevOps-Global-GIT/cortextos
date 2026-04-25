@@ -24,7 +24,13 @@ export function stripHtmlComments(value: string): string {
   });
   // Eat whitespace adjacent to the comment so inline comments don't leave a
   // visible double space (e.g. "Hello <!-- note --> World" → "Hello World").
-  const stripped = guarded.replace(/[ \t]*<!--[\s\S]*?-->[ \t]*/g, " ");
+  // Each comment replacement inserts exactly one space. When two or more
+  // comments appear consecutively the replacements stack, producing "  " or
+  // "   " etc. A second pass collapses any 2+ run of spaces/tabs to a single
+  // space so "Word <!-- A --> <!-- B --> End" → "Word End" (not "Word  End").
+  const stripped = guarded
+    .replace(/[ \t]*<!--[\s\S]*?-->[ \t]*/g, " ")
+    .replace(/[ \t]{2,}/g, " ");
   const restored = stripped.replace(
     /\x00\x01FENCE(\d+)FENCE\x01\x00/g,
     (_, i) => fenced[Number(i)],

@@ -9,6 +9,7 @@ import {
   parseGoalsMd,
   serializeGoalsMd,
 } from '../markdown-parser';
+import { stripHtmlComments } from '../utils';
 
 // ---------------------------------------------------------------------------
 // Generic parser round-trip
@@ -242,6 +243,23 @@ Hello <!-- note --> World
     const { fields } = parseIdentityMd(input);
     // Double space artifact must not leak to the UI.
     expect(fields.role).toBe('Hello World');
+  });
+
+  it('REGRESSION: two consecutive inline comments do not leave a double space', () => {
+    // Bug: each comment replacement inserts " " independently. Two back-to-back
+    // comments produce "Word  Word" (double space) instead of "Word Word".
+    const result = stripHtmlComments('Word <!-- A --> <!-- B --> End');
+    expect(result).toBe('Word End');
+  });
+
+  it('REGRESSION: three consecutive inline comments do not leave triple space', () => {
+    const result = stripHtmlComments('Start <!-- X --> <!-- Y --> <!-- Z --> End');
+    expect(result).toBe('Start End');
+  });
+
+  it('single inline comment still collapses to one space', () => {
+    // Verify existing behavior is preserved by the fix.
+    expect(stripHtmlComments('Hello <!-- note --> World')).toBe('Hello World');
   });
 });
 
