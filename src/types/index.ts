@@ -244,8 +244,9 @@ export interface CronEntry {
   fire_at?: string;
   prompt: string;
   /** "recurring" (default) restores on every session start.
-   *  "once" restores only if fire_at is still in the future; deleted after firing. */
-  type?: 'recurring' | 'once';
+   *  "once" restores only if fire_at is still in the future; deleted after firing.
+   *  "disabled" skips restoration entirely (cron is paused). */
+  type?: 'recurring' | 'once' | 'disabled';
   /**
    * Optional shell command evaluated before each fire. If the command exits
    * with code 1, or exits 0 with stdout containing {"wake":false}, the cron
