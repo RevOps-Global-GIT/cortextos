@@ -834,3 +834,127 @@ describe('FastChecker', () => {
     });
   });
 });
+
+// ── rescanPendingApprovals (B4) ──────────────────────────────────────────────
+
+describe('FastChecker.rescanPendingApprovals', () => {
+  let testDir: string;
+  let paths: BusPaths;
+
+  function writePendingApproval(id: string, title = 'Deploy to prod', description = ''): void {
+    const pendingDir = join(paths.approvalDir, 'pending');
+    mkdirSync(pendingDir, { recursive: true });
+    const approval = {
+      id,
+      title,
+      requesting_agent: 'dev',
+      org: 'revops-global',
+      category: 'deployment',
+      status: 'pending',
+      description,
+      created_at: '2026-04-25T10:00:00Z',
+      updated_at: '2026-04-25T10:00:00Z',
+      resolved_at: null,
+      resolved_by: null,
+    };
+    writeFileSync(join(pendingDir, `${id}.json`), JSON.stringify(approval));
+  }
+
+  function createFastChecker(telegramApi: ReturnType<typeof createMockTelegramApi> | null, chatId: string | null) {
+    const agent = createMockAgent();
+    return new FastChecker(agent, paths, '/tmp/framework', {
+      telegramApi: telegramApi ?? undefined,
+      chatId: chatId ?? undefined,
+    });
+  }
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'fc-rescan-test-'));
+    paths = createTestPaths(testDir);
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('sends one Telegram message per pending approval with Approve/Deny buttons', async () => {
+    const telegramApi = createMockTelegramApi();
+    const checker = createFastChecker(telegramApi, '12345');
+
+    writePendingApproval('approval_111_aaaaa', 'Deploy API v2');
+    writePendingApproval('approval_222_bbbbb', 'Send outbound email');
+
+    // Access private method via cast
+    await (checker as any).rescanPendingApprovals();
+
+    expect(telegramApi.sendMessage).toHaveBeenCalledTimes(2);
+
+    const [, msg1, kbd1] = telegramApi.sendMessage.mock.calls[0];
+    expect(msg1).toContain('Deploy API v2');
+    expect(msg1).toContain('⏳ Pending approval (restart re-notify)');
+    expect(msg1).toContain('approval_111_aaaaa');
+    expect(kbd1.inline_keyboard[0]).toEqual([
+      { text: '✅ Approve', callback_data: 'appr_allow_approval_111_aaaaa' },
+      { text: '❌ Deny', callback_data: 'appr_deny_approval_111_aaaaa' },
+    ]);
+
+    const [, msg2] = telegramApi.sendMessage.mock.calls[1];
+    expect(msg2).toContain('Send outbound email');
+  });
+
+  it('includes description in message when present', async () => {
+    const telegramApi = createMockTelegramApi();
+    const checker = createFastChecker(telegramApi, '12345');
+    writePendingApproval('approval_333_ccccc', 'Merge to main', 'Branch: feat/new-feature, 12 commits');
+
+    await (checker as any).rescanPendingApprovals();
+
+    const [, msg] = telegramApi.sendMessage.mock.calls[0];
+    expect(msg).toContain('Branch: feat/new-feature, 12 commits');
+  });
+
+  it('no-ops when there are no pending approvals', async () => {
+    const telegramApi = createMockTelegramApi();
+    const checker = createFastChecker(telegramApi, '12345');
+
+    await (checker as any).rescanPendingApprovals();
+
+    expect(telegramApi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('no-ops when telegramApi is not configured', async () => {
+    writePendingApproval('approval_444_ddddd', 'Some approval');
+    const checker = createFastChecker(null, null);
+
+    // Should not throw
+    await (checker as any).rescanPendingApprovals();
+    // No telegramApi to check, just verify no error
+  });
+
+  it('sends to the correct chatId', async () => {
+    const telegramApi = createMockTelegramApi();
+    const checker = createFastChecker(telegramApi, '99999');
+    writePendingApproval('approval_555_eeeee', 'Finance approval');
+
+    await (checker as any).rescanPendingApprovals();
+
+    const [sentChatId] = telegramApi.sendMessage.mock.calls[0];
+    expect(sentChatId).toBe('99999');
+  });
+
+  it('continues re-notifying remaining approvals if one Telegram send fails', async () => {
+    const telegramApi = createMockTelegramApi();
+    telegramApi.sendMessage
+      .mockRejectedValueOnce(new Error('Telegram timeout'))
+      .mockResolvedValueOnce({ ok: true });
+    const checker = createFastChecker(telegramApi, '12345');
+
+    writePendingApproval('approval_666_fffff', 'First — will fail');
+    writePendingApproval('approval_777_ggggg', 'Second — should still send');
+
+    await (checker as any).rescanPendingApprovals();
+
+    // Both were attempted — error on first did not abort the second
+    expect(telegramApi.sendMessage).toHaveBeenCalledTimes(2);
+  });
+});

@@ -5,7 +5,7 @@ import { createHash } from 'crypto';
 import { hardRestart } from '../bus/system.js';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
-import { updateApproval } from '../bus/approval.js';
+import { updateApproval, listPendingApprovals } from '../bus/approval.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
@@ -156,6 +156,10 @@ export class FastChecker {
     this.log('Bootstrap complete. Beginning poll loop.');
     this.bootstrappedAt = Date.now();
     this.stdoutLastChangeAt = Date.now();
+
+    // Re-notify user of any approvals that were pending before restart.
+    // Runs once per session start; best-effort (errors are logged, not thrown).
+    this.rescanPendingApprovals().catch(err => this.log(`rescanPendingApprovals error: ${err}`));
 
     // Idle-session heartbeat watchdog: fires every 50 min regardless of REPL state
     const HEARTBEAT_INTERVAL_MS = 50 * 60 * 1000;
@@ -864,6 +868,56 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     }
 
     await this.routeApprovalCallback(apprMatch[1] as 'allow' | 'deny', apprMatch[2], query, activityApi);
+  }
+
+  /**
+   * On session start, re-notify the user of any approvals that were in
+   * pending/ before the restart. Without this, a crash while an approval is
+   * pending leaves the approval silently sitting in pending/ forever — the
+   * user never gets another notification and the requesting agent stays blocked.
+   *
+   * Sends one Telegram message per pending approval with Approve/Deny buttons
+   * (same callback_data format as createApproval's activity-channel post, so
+   * handleCallback routes them correctly). No-ops if Telegram is not configured.
+   *
+   * Best-effort: errors are logged and never propagate to the caller.
+   */
+  private async rescanPendingApprovals(): Promise<void> {
+    if (!this.telegramApi || !this.chatId) return;
+
+    let pending;
+    try {
+      pending = listPendingApprovals(this.paths);
+    } catch {
+      return; // approvalDir missing or unreadable — nothing to do
+    }
+
+    if (pending.length === 0) return;
+    this.log(`rescanPendingApprovals: ${pending.length} pending approval(s) found — re-notifying`);
+
+    for (const approval of pending) {
+      try {
+        const lines = [
+          `⏳ Pending approval (restart re-notify): ${approval.title}`,
+          `Category: ${approval.category}`,
+          `Requested by: ${approval.requesting_agent}`,
+        ];
+        if (approval.description) lines.push('', approval.description);
+        lines.push('', `id: ${approval.id}`);
+
+        const keyboard = {
+          inline_keyboard: [[
+            { text: '✅ Approve', callback_data: `appr_allow_${approval.id}` },
+            { text: '❌ Deny', callback_data: `appr_deny_${approval.id}` },
+          ]],
+        };
+
+        await this.telegramApi.sendMessage(this.chatId, lines.join('\n'), keyboard);
+        this.log(`rescanPendingApprovals: re-notified for ${approval.id}`);
+      } catch (err) {
+        this.log(`rescanPendingApprovals: failed to re-notify ${approval.id}: ${err}`);
+      }
+    }
   }
 
   /**
