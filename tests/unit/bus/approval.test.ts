@@ -10,7 +10,7 @@ vi.mock('../../../src/bus/message', () => ({
   sendMessage: vi.fn(),
 }));
 
-import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync } from 'fs';
+import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { createApproval, updateApproval, listPendingApprovals } from '../../../src/bus/approval';
@@ -267,5 +267,64 @@ describe('listPendingApprovals', () => {
     const pending = listPendingApprovals(paths);
     expect(pending).toHaveLength(1);
     expect(pending[0].id).toBe(id1);
+  });
+
+  it('CRASH RECOVERY: filters stale pending entry that also exists in resolved/', async () => {
+    // Simulates the post-crash state where the daemon died between
+    // sendMessage (inbox notification delivered) and unlinkSync (pending removal).
+    // Both pending/ and resolved/ contain the same approval id.
+    // listPendingApprovals must NOT surface this as a pending approval.
+    const id = await createApproval(paths, 'alice', 'TestOrg', 'Crash victim', 'deployment', undefined, frameworkRoot);
+    const pendingDir = join(paths.approvalDir, 'pending');
+    const resolvedDir = join(paths.approvalDir, 'resolved');
+
+    // Manually simulate crash: write to resolved/ WITHOUT removing from pending/
+    mkdirSync(resolvedDir, { recursive: true });
+    const approvalJson = readFileSync(join(pendingDir, `${id}.json`), 'utf-8');
+    const resolved = { ...JSON.parse(approvalJson), status: 'approved' };
+    writeFileSync(join(resolvedDir, `${id}.json`), JSON.stringify(resolved), 'utf-8');
+    // Do NOT unlink the pending file (simulating the crash)
+
+    const pending = listPendingApprovals(paths);
+    // Must not surface the stale pending entry
+    expect(pending.find(a => a.id === id)).toBeUndefined();
+  });
+});
+
+describe('updateApproval — notification-before-unlink order (bug B4 regression guard)', () => {
+  it('inbox notification is sent before pending file is removed', async () => {
+    // Regression guard for bug B4: the inbox sendMessage must fire before
+    // unlinkSync so a crash between those two steps leaves the notification
+    // delivered rather than silently lost.
+    //
+    // Mechanism: install a mock implementation for sendMessage that checks
+    // whether the pending file still exists at the moment the notification
+    // fires. It must — the reordered code sends the notification before unlink.
+    const { sendMessage: sm } = await import('../../../src/bus/message');
+    const smMock = sm as ReturnType<typeof vi.fn>;
+
+    const approvalId = await createApproval(paths, 'alice', 'TestOrg', 'Order test', 'deployment', undefined, frameworkRoot);
+    smMock.mockClear();
+
+    // Track whether pending file exists when sendMessage fires
+    let pendingFileExistedDuringNotify = false;
+    smMock.mockImplementationOnce((..._args: unknown[]) => {
+      const pendingFile = join(paths.approvalDir, 'pending', `${approvalId}.json`);
+      pendingFileExistedDuringNotify = existsSync(pendingFile);
+      return 'mock-msg-id';
+    });
+
+    updateApproval(paths, approvalId, 'approved', 'test note');
+
+    // sendMessage must have been called
+    expect(smMock).toHaveBeenCalledTimes(1);
+    // The pending file must have been present when sendMessage was called
+    expect(pendingFileExistedDuringNotify).toBe(true);
+
+    // After updateApproval returns, pending is gone and resolved exists
+    const pendingFile = join(paths.approvalDir, 'pending', `${approvalId}.json`);
+    const resolvedFile = join(paths.approvalDir, 'resolved', `${approvalId}.json`);
+    expect(existsSync(pendingFile)).toBe(false);
+    expect(existsSync(resolvedFile)).toBe(true);
   });
 });
