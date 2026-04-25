@@ -876,3 +876,53 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
     releaseLock(lockBase);
   });
 });
+
+describe('claimTask — RGOS mirror hook', () => {
+  let testDir: string;
+  let paths: BusPaths;
+  let mirrorMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-claim-mirror-'));
+    paths = {
+      ctxRoot: testDir,
+      inbox: join(testDir, 'inbox', 'x'),
+      inflight: join(testDir, 'inflight', 'x'),
+      processed: join(testDir, 'processed', 'x'),
+      logDir: join(testDir, 'logs', 'x'),
+      stateDir: join(testDir, 'state', 'x'),
+      taskDir: join(testDir, 'tasks'),
+      approvalDir: join(testDir, 'approvals'),
+      analyticsDir: join(testDir, 'analytics'),
+      heartbeatDir: join(testDir, 'heartbeats'),
+    };
+    mirrorMock = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('../../../src/bus/rgos-mirror', () => ({ mirrorTaskToRgos: mirrorMock }));
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('mirror is suppressed in VITEST environment (process.env.VITEST is set)', () => {
+    // The VITEST env var is set by the vitest runner; the guard in claimTask
+    // prevents mirrorTaskToRgos from being called. Verify the claim still
+    // succeeds and the task transitions to in_progress.
+    const id = createTask(paths, 'dev', 'acme', 'Mirror suppression test');
+    const task = claimTask(paths, id, 'dev');
+    expect(task.status).toBe('in_progress');
+    expect(task.assigned_to).toBe('dev');
+    // Mirror is fire-and-forget with VITEST guard — no call expected in test env
+    expect(mirrorMock).not.toHaveBeenCalled();
+  });
+
+  it('claimTask sets in_progress + assigned_to on disk regardless of mirror env', () => {
+    const id = createTask(paths, 'dev', 'acme', 'Disk state test');
+    claimTask(paths, id, 'alice');
+    const onDisk = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
+    expect(onDisk.status).toBe('in_progress');
+    expect(onDisk.assigned_to).toBe('alice');
+  });
+});

@@ -6,6 +6,8 @@ import { hardRestart } from '../bus/system.js';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval, listPendingApprovals } from '../bus/approval.js';
+import { listTasks } from '../bus/task.js';
+import { mirrorTaskToRgos } from '../bus/rgos-mirror.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
@@ -160,6 +162,10 @@ export class FastChecker {
     // Re-notify user of any approvals that were pending before restart.
     // Runs once per session start; best-effort (errors are logged, not thrown).
     this.rescanPendingApprovals().catch(err => this.log(`rescanPendingApprovals error: ${err}`));
+
+    // Mirror any in-progress tasks that may have been claimed during a gap window
+    // (e.g. before the claimTask mirror hook shipped). Idempotent — upsert on UUIDv5 ID.
+    this.backfillInProgressTasks().catch(err => this.log(`backfillInProgressTasks error: ${err}`));
 
     // Idle-session heartbeat watchdog: fires every 50 min regardless of REPL state
     const HEARTBEAT_INTERVAL_MS = 50 * 60 * 1000;
@@ -918,6 +924,28 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         this.log(`rescanPendingApprovals: failed to re-notify ${approval.id}: ${err}`);
       }
     }
+  }
+
+  /**
+   * On session start, push any locally in-progress tasks to the RGOS mirror.
+   * Handles the gap window where claimTask ran before the mirror hook shipped.
+   * Idempotent — all mirror operations are upserts (POST + Prefer:merge-duplicates).
+   * No-ops immediately if the task directory does not exist (first-boot guard).
+   */
+  private async backfillInProgressTasks(): Promise<void> {
+    // listTasks() already returns [] when taskDir is missing; explicit guard for clarity.
+    if (!existsSync(this.paths.taskDir)) return;
+
+    const tasks = listTasks(this.paths, { status: 'in_progress' });
+    if (tasks.length === 0) return;
+
+    this.log(`backfillInProgressTasks: mirroring ${tasks.length} in-progress task(s) to RGOS`);
+    for (const task of tasks) {
+      await mirrorTaskToRgos(task, 'update').catch(err =>
+        this.log(`backfillInProgressTasks: failed to mirror ${task.id}: ${err}`),
+      );
+    }
+    this.log(`backfillInProgressTasks: done`);
   }
 
   /**

@@ -489,6 +489,11 @@ export function claimTask(
     throw new Error(`Task ${taskId} claim commit failed: ${err}`);
   }
   appendTaskAudit(paths, taskId, { event: 'claim', agent, from: prevStatus, to: 'in_progress' });
+  // Mirror to Supabase (fire-and-forget). Uses upsert (POST + Prefer:merge-duplicates)
+  // so this safely inserts the row if the createTask mirror previously failed.
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    mirrorTaskToRgos(task, 'update').catch(() => undefined);
+  }
   return task;
 }
 

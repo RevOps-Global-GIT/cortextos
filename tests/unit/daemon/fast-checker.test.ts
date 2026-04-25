@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('child_process', () => ({ execFile: vi.fn() }));
+vi.mock('../../../src/bus/task', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/bus/task')>();
+  return { ...actual, listTasks: vi.fn().mockReturnValue([]) };
+});
+vi.mock('../../../src/bus/rgos-mirror', () => ({ mirrorTaskToRgos: vi.fn().mockResolvedValue(undefined) }));
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { FastChecker } from '../../../src/daemon/fast-checker';
 import type { BusPaths, TelegramCallbackQuery } from '../../../src/types';
+import { listTasks } from '../../../src/bus/task';
+import { mirrorTaskToRgos } from '../../../src/bus/rgos-mirror';
 
 // Minimal mock for AgentProcess
 function createMockAgent(name = 'test-agent') {
@@ -956,5 +963,90 @@ describe('FastChecker.rescanPendingApprovals', () => {
 
     // Both were attempted — error on first did not abort the second
     expect(telegramApi.sendMessage).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('FastChecker.backfillInProgressTasks', () => {
+  let testDir: string;
+  let paths: BusPaths;
+
+  function createFastCheckerForBackfill() {
+    return new FastChecker(createMockAgent(), paths, '/tmp/framework', {});
+  }
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'fc-backfill-test-'));
+    paths = createTestPaths(testDir);
+    vi.mocked(listTasks).mockReturnValue([]);
+    vi.mocked(mirrorTaskToRgos).mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+    vi.clearAllMocks();
+  });
+
+  it('calls mirrorTaskToRgos for each in-progress task', async () => {
+    const tasks = [
+      { id: 'task_001', status: 'in_progress', title: 'Work A' },
+      { id: 'task_002', status: 'in_progress', title: 'Work B' },
+    ] as any[];
+    vi.mocked(listTasks).mockReturnValue(tasks);
+
+    const checker = createFastCheckerForBackfill();
+    await (checker as any).backfillInProgressTasks();
+
+    expect(mirrorTaskToRgos).toHaveBeenCalledTimes(2);
+    expect(mirrorTaskToRgos).toHaveBeenCalledWith(tasks[0], 'update');
+    expect(mirrorTaskToRgos).toHaveBeenCalledWith(tasks[1], 'update');
+  });
+
+  it('is a no-op when there are no in-progress tasks', async () => {
+    vi.mocked(listTasks).mockReturnValue([]);
+
+    const checker = createFastCheckerForBackfill();
+    await (checker as any).backfillInProgressTasks();
+
+    expect(mirrorTaskToRgos).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op when taskDir does not exist (first-boot guard)', async () => {
+    // Remove the taskDir so existsSync returns false
+    const { rmSync: rm } = await import('fs');
+    rm(paths.taskDir, { recursive: true, force: true });
+
+    const checker = createFastCheckerForBackfill();
+    await (checker as any).backfillInProgressTasks();
+
+    expect(mirrorTaskToRgos).not.toHaveBeenCalled();
+    expect(listTasks).not.toHaveBeenCalled();
+  });
+
+  it('continues mirroring remaining tasks if one mirror call fails', async () => {
+    const tasks = [
+      { id: 'task_003', status: 'in_progress', title: 'Fail first' },
+      { id: 'task_004', status: 'in_progress', title: 'Succeed second' },
+    ] as any[];
+    vi.mocked(listTasks).mockReturnValue(tasks);
+    vi.mocked(mirrorTaskToRgos)
+      .mockRejectedValueOnce(new Error('Supabase timeout'))
+      .mockResolvedValueOnce(undefined);
+
+    const checker = createFastCheckerForBackfill();
+    // Should not throw
+    await expect((checker as any).backfillInProgressTasks()).resolves.toBeUndefined();
+
+    expect(mirrorTaskToRgos).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes listTasks filter for in_progress status via paths', async () => {
+    const checker = createFastCheckerForBackfill();
+    await (checker as any).backfillInProgressTasks();
+
+    // listTasks should be called with the checker's paths and in_progress filter
+    expect(listTasks).toHaveBeenCalledWith(
+      expect.objectContaining({ taskDir: paths.taskDir }),
+      { status: 'in_progress' },
+    );
   });
 });
