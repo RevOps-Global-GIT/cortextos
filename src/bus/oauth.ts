@@ -16,6 +16,7 @@ import { existsSync, readFileSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import { withRetry, isTransientError } from '../utils/retry.js';
 
 // --- Types ---
 
@@ -205,12 +206,21 @@ export async function checkUsageApi(
     }
   }
 
-  const response = await fetch('https://api.anthropic.com/api/oauth/usage', {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'anthropic-beta': 'oauth-2025-04-20',
+  const response = await withRetry(
+    () => fetch('https://api.anthropic.com/api/oauth/usage', {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'anthropic-beta': 'oauth-2025-04-20',
+      },
+      signal: AbortSignal.timeout(15000),
+    }),
+    {
+      maxAttempts: 3,
+      baseDelayMs: 500,
+      maxDelayMs: 10_000,
+      isRetryable: isTransientError,
     },
-  });
+  );
 
   if (!response.ok) {
     throw new Error(`Usage API returned ${response.status}: ${await response.text()}`);
@@ -272,6 +282,10 @@ export async function refreshOAuthToken(
   if (!account) throw new Error(`Account "${name}" not found in accounts.json`);
   if (!account.refresh_token) throw new Error(`Account "${name}" has no refresh_token`);
 
+  // NO withRetry here — refresh tokens are one-time use. Retrying after
+  // ECONNRESET/ETIMEDOUT is dangerous: the server may have consumed the token
+  // and issued new tokens that we never received, corrupting refresh state.
+  // Resilience for this path = graceful re-auth on failure, not retry.
   const response = await fetch('https://console.anthropic.com/v1/oauth/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -279,6 +293,7 @@ export async function refreshOAuthToken(
       grant_type: 'refresh_token',
       refresh_token: account.refresh_token,
     }),
+    signal: AbortSignal.timeout(15000),
   });
 
   if (!response.ok) {
