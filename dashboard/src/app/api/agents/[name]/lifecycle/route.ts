@@ -74,8 +74,8 @@ export async function POST(
   if (org !== undefined) {
     try {
       safeOrg = validateIdentifier(org, 'org');
-    } catch (err: any) {
-      return Response.json({ error: err.message }, { status: 400 });
+    } catch (err: unknown) {
+      return Response.json({ error: (err as Error).message }, { status: 400 });
     }
   }
 

@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
     : (request.headers.get('x-real-ip') ?? 'unknown');
   const { allowed, retryAfter } = checkRateLimit(ip);
   if (!allowed) {
-    return Response.json({ error: 'Too many attempts' }, { status: 429, headers: { 'Retry-After': String(retryAfter) } } as any);
+    return Response.json({ error: 'Too many attempts' }, { status: 429, headers: { 'Retry-After': String(retryAfter) } } as ResponseInit);
   }
 
   // Security (H8/H13): No hardcoded JWT secret fallback.

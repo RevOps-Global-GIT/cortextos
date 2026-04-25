@@ -43,6 +43,7 @@ export default function StrategyPage() {
   }, [effectiveOrg]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
     loadData();
   }, [loadData]);

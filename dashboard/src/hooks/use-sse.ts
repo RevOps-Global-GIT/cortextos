@@ -90,6 +90,7 @@ export function useSSE(options: UseSSEOptions = {}): UseSSEReturn {
 
       // Auto-reconnect after delay
       reconnectTimerRef.current = setTimeout(() => {
+        // eslint-disable-next-line react-hooks/immutability
         connect();
       }, RECONNECT_DELAY_MS);
     };

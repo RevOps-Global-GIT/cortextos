@@ -44,6 +44,7 @@ export function GoalsList({ goals: initialGoals, org, onRefresh }: GoalsListProp
 
   // Sync when props change
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setGoals([...initialGoals].sort((a, b) => a.order - b.order));
   }, [initialGoals]);
 

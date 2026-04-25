@@ -31,7 +31,7 @@ export default function KnowledgeBasePage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Knowledge Base</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Search, browse, and manage your organization's shared knowledge. Powered by multimodal RAG.
+          Search, browse, and manage your organization&apos;s shared knowledge. Powered by multimodal RAG.
         </p>
       </div>
 

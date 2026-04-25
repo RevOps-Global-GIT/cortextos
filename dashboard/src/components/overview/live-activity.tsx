@@ -77,6 +77,7 @@ export function LiveActivity({ initialEvents }: LiveActivityProps) {
   useEffect(() => {
     if (sseEvents.length > 0) {
       const newDisplayEvents = sseEvents.map(sseToDisplayEvent);
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLiveEvents(newDisplayEvents);
     }
   }, [sseEvents]);

@@ -41,6 +41,7 @@ export function SkillCard({ skill, agents, onRefresh }: SkillCardProps) {
     selectableAgents.every((a) => selected.has(`${a.org}/${a.name}`));
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
 
