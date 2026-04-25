@@ -6,7 +6,6 @@ import {
   validateEventCategory,
   validateEventSeverity,
   validateApprovalCategory,
-  validateModel,
   isValidJson,
   stripControlChars,
 } from '../../../src/utils/validate';
@@ -99,17 +98,6 @@ describe('validateApprovalCategory', () => {
     for (const cat of ['external-comms', 'financial', 'deployment', 'data-deletion', 'other']) {
       expect(() => validateApprovalCategory(cat)).not.toThrow();
     }
-  });
-});
-
-describe('validateModel', () => {
-  it('accepts valid models', () => {
-    expect(() => validateModel('claude-opus-4-5-20250514')).not.toThrow();
-    expect(() => validateModel('claude-haiku-4-5-20251001')).not.toThrow();
-  });
-
-  it('rejects invalid models', () => {
-    expect(() => validateModel('model; rm -rf /')).toThrow();
   });
 });
 

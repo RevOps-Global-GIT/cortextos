@@ -508,3 +508,5 @@ export interface AgentStatus {
   crashCount?: number;
   model?: string;
 }
+
+export type { Workflow, WorkflowStep } from './workflow.js';
