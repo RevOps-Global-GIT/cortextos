@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, existsSync, writeFileSync, unlinkSync, statSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, writeFileSync, unlinkSync, statSync, openSync, readSync, closeSync } from 'fs';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { join } from 'path';
 import { createHash } from 'crypto';
@@ -47,6 +47,17 @@ export class FastChecker {
 
   // Idle-session heartbeat watchdog
   private heartbeatTimer: NodeJS.Timeout | null = null;
+
+  // Poll-cycle stall watchdog + circuit breaker
+  private pollCycleWatchdog: NodeJS.Timeout | null = null;
+  private lastPollCycleCompletedAt: number = 0;
+  private watchdogRestarts: number[] = [];
+  private watchdogCircuitBroken: boolean = false;
+  private watchdogCircuitBrokenAt: number = 0;
+  private readonly POLL_CYCLE_TIMEOUT_MS = 30_000;
+  private readonly WATCHDOG_MAX_RESTARTS = 3;
+  private readonly WATCHDOG_WINDOW_MS = 15 * 60 * 1000;   // 15 min
+  private readonly WATCHDOG_CIRCUIT_RESET_MS = 30 * 60 * 1000; // 30 min
 
   // Gmail watch state
   private gmailWatch?: { query: string; intervalMs: number };
@@ -143,6 +154,8 @@ export class FastChecker {
     // Wait for bootstrap
     await this.waitForBootstrap();
     this.log('Bootstrap complete. Beginning poll loop.');
+    this.bootstrappedAt = Date.now();
+    this.stdoutLastChangeAt = Date.now();
 
     // Idle-session heartbeat watchdog: fires every 50 min regardless of REPL state
     const HEARTBEAT_INTERVAL_MS = 50 * 60 * 1000;
@@ -154,11 +167,82 @@ export class FastChecker {
       });
     }, HEARTBEAT_INTERVAL_MS);
 
+    // Poll-cycle stall watchdog: runs independently every 30s.
+    // If pollCycle hasn't completed in 90s the loop is wedged — hard-restart.
+    // A circuit breaker halts auto-restart after 3 trips in 15 min (upstream likely down).
+    this.lastPollCycleCompletedAt = Date.now();
+    const WATCHDOG_INTERVAL_MS = 30_000;
+    const STALL_THRESHOLD_MS = 90_000;
+    this.pollCycleWatchdog = setInterval(() => {
+      const now = Date.now();
+      if (this.bootstrappedAt === 0) return;
+      if (now - this.bootstrappedAt < STALL_THRESHOLD_MS) return;
+
+      // Auto-reset circuit breaker after 30 min of quiet
+      if (this.watchdogCircuitBroken && now - this.watchdogCircuitBrokenAt > this.WATCHDOG_CIRCUIT_RESET_MS) {
+        this.watchdogCircuitBroken = false;
+        this.watchdogRestarts = [];
+        this.log('Watchdog circuit breaker reset after 30min quiet window');
+      }
+      if (this.watchdogCircuitBroken) return;
+
+      const stallMs = now - this.lastPollCycleCompletedAt;
+      if (stallMs <= STALL_THRESHOLD_MS) return;
+
+      // Prune restart history older than the window
+      this.watchdogRestarts = this.watchdogRestarts.filter(t => now - t < this.WATCHDOG_WINDOW_MS);
+
+      // Circuit break: too many restarts mean restart isn't fixing it
+      if (this.watchdogRestarts.length >= this.WATCHDOG_MAX_RESTARTS) {
+        this.watchdogCircuitBroken = true;
+        this.watchdogCircuitBrokenAt = now;
+        const winMin = this.WATCHDOG_WINDOW_MS / 60_000;
+        const resetMin = this.WATCHDOG_CIRCUIT_RESET_MS / 60_000;
+        this.log(
+          `Watchdog circuit breaker TRIPPED: ${this.watchdogRestarts.length} restarts in ${winMin}min. ` +
+          `Halting auto-restart for ${resetMin}min — likely upstream issue. ` +
+          `Check manually with: pm2 logs cortextos-daemon`,
+        );
+        if (this.telegramApi && this.chatId) {
+          this.telegramApi
+            .sendMessage(
+              this.chatId,
+              `⚠️ ${agentName} watchdog tripped — ${this.watchdogRestarts.length} auto-restarts in ${winMin}min. Restart loop paused ${resetMin}min. Likely upstream issue. Manual fix: pm2 restart cortextos-daemon`,
+            )
+            .catch(() => {});
+        }
+        this.lastPollCycleCompletedAt = now;
+        return;
+      }
+
+      this.watchdogRestarts.push(now);
+      this.log(
+        `pollCycle stalled for ${Math.round(stallMs / 1000)}s — triggering hard-restart ` +
+        `(${this.watchdogRestarts.length}/${this.WATCHDOG_MAX_RESTARTS} in ${this.WATCHDOG_WINDOW_MS / 60_000}min window)`,
+      );
+      this.agent.hardRestartSelf(`pollCycle stalled for ${Math.round(stallMs / 1000)}s`).catch(err => {
+        this.log(`Force-restart error: ${err}`);
+      });
+      this.lastPollCycleCompletedAt = now;
+    }, WATCHDOG_INTERVAL_MS);
+
     while (this.running) {
       try {
         // Check for urgent signal file
         this.checkUrgentSignal();
-        await this.pollCycle();
+        // Race pollCycle against a timeout so a hung operation (e.g. stuck fetch,
+        // slow execFile) can't freeze the loop indefinitely. If the timeout fires,
+        // the underlying operation is abandoned and the loop continues on the next tick.
+        await Promise.race([
+          this.pollCycle(),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`pollCycle timeout after ${this.POLL_CYCLE_TIMEOUT_MS}ms`)),
+              this.POLL_CYCLE_TIMEOUT_MS,
+            ),
+          ),
+        ]);
+        this.lastPollCycleCompletedAt = Date.now();
       } catch (err) {
         this.log(`Poll error: ${err}`);
       }
@@ -178,6 +262,10 @@ export class FastChecker {
     if (this.heartbeatTimer !== null) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
+    }
+    if (this.pollCycleWatchdog !== null) {
+      clearInterval(this.pollCycleWatchdog);
+      this.pollCycleWatchdog = null;
     }
   }
 
@@ -293,7 +381,6 @@ export class FastChecker {
     try {
       const tailBytes = Math.min(20000, size);
       if (tailBytes > 0) {
-        const { openSync, readSync, closeSync } = require('fs');
         const fd = openSync(stdoutPath, 'r');
         const buf = Buffer.alloc(tailBytes);
         readSync(fd, buf, 0, tailBytes, size - tailBytes);
