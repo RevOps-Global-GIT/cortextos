@@ -17,6 +17,8 @@ export default defineConfig({
     'hooks/hook-skill-autopr': 'src/hooks/hook-skill-autopr.ts',
     'hooks/hook-skill-telemetry': 'src/hooks/hook-skill-telemetry.ts',
     'hooks/hook-context-status': 'src/hooks/hook-context-status.ts',
+    'hooks/hook-policy-check': 'src/hooks/hook-policy-check.ts',
+    'hooks/hook-policy-check-mcp': 'src/hooks/hook-policy-check-mcp.ts',
   },
   format: ['cjs'],
   target: 'node20',
