@@ -105,3 +105,37 @@ cortextos bus check-human-tasks
 ```
 
 Surface any findings to the user via Telegram if critical.
+
+---
+
+## Worked Example: Investigating a stale agent
+
+An agent shows as stale on the dashboard (last heartbeat >2h ago).
+
+**Step 1 -- Check heartbeat:**
+```bash
+cortextos bus read-all-heartbeats --format text
+# Look for: last seen timestamp, status message
+```
+
+**Step 2 -- Check if process is running:**
+```bash
+cortextos status
+# Look for: agent PID, uptime, model
+```
+
+**Step 3 -- Check event logs for errors:**
+```bash
+cat ~/.cortextos/cortextos1/orgs/revops-global/analytics/events/<agent>/$(date -u +%Y-%m-%d).jsonl | \
+  python3 -c "import sys,json; lines=[json.loads(l) for l in sys.stdin]; errors=[l for l in lines if l.get('category')=='error']; print(f'{len(errors)} errors of {len(lines)} events')"
+```
+
+**Step 4 -- If stale >2h with no errors:** Agent is likely idle. Send a ping:
+```bash
+cortextos bus send-message <agent> normal "Health check -- are you active?"
+```
+
+**Step 5 -- If stale >2h with errors:** Restart the agent:
+```bash
+cortextos bus self-restart --reason "stale >2h with errors in event log"
+```

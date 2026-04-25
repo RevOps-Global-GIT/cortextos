@@ -115,3 +115,37 @@ cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
 - Session start, every heartbeat, session end — minimum 3 entries
 - Each entry captures context state, not just activity
 - Update MEMORY.md at least once per week with durable learnings
+
+---
+
+## Worked Example: Saving a feedback memory
+
+User says: "Don't mock the database in tests -- we got burned last quarter"
+
+**Step 1 -- Write the memory file:**
+
+```bash
+cat > /path/to/memory/feedback_no_db_mocking.md << 'EOF'
+---
+name: No database mocking in tests
+description: Integration tests must hit a real database, not mocks -- prior incident with divergent mocks
+type: feedback
+---
+
+Integration tests must hit a real database, not mocks.
+
+**Why:** Prior incident where mock/prod divergence masked a broken migration.
+**How to apply:** When writing tests that touch the database, always use the test database, never mock the DB layer.
+EOF
+```
+
+**Step 2 -- Add to MEMORY.md index:**
+
+```
+- [No database mocking](feedback_no_db_mocking.md) -- Integration tests must use real DB, not mocks (prior incident)
+```
+
+**Key rules:**
+- MEMORY.md is an index (one line per entry, under 150 chars). Full content goes in separate files.
+- Use the frontmatter format (name, description, type) in each memory file.
+- Types: user, feedback, project, reference.

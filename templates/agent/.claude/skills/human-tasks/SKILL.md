@@ -75,3 +75,24 @@ The instructions field should be complete enough that the human can execute with
 ## Consequence
 
 Leaving work undone without creating a human task = invisible blocker. The system stalls silently. Create the human task within 1 heartbeat of discovering you're blocked by a human dependency.
+
+---
+
+## Worked Example: When to create vs when to solve yourself
+
+**Correct -- create a human task (genuine capability boundary):**
+```bash
+cortextos bus create-task "Raise Gemini API spending cap" \
+  --desc "KB queries returning 429 RESOURCE_EXHAUSTED. Greg needs to visit ai.studio/spend and raise the monthly cap. Agents cannot do this -- requires Google account access." \
+  --assignee human \
+  --priority high
+```
+
+**Incorrect -- do NOT create a human task (solve it yourself):**
+- "Need to install a Python package" -- run pip install
+- "Need to create a directory" -- run mkdir
+- "Need to read a config file" -- use Read tool
+- "Need to restart an agent" -- use cortextos bus self-restart
+- "Need to check git status" -- run git status
+
+Per feedback memory: be self-sufficient. Only escalate genuine capability boundaries.

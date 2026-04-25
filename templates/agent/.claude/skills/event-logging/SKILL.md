@@ -99,3 +99,31 @@ cortextos bus log-event action briefing_sent info \
 - Every task completion = 1 event
 - Every session start/end = 1 event each
 - Every significant coordination action = 1 event
+
+---
+
+## Worked Examples
+
+**Log a task completion:**
+```bash
+cortextos bus log-event action task_completed info \
+  --meta '{"agent":"analyst","task_id":"N1-coordination-planes","title":"Coordination plane unification spike"}'
+```
+
+**Log a morning brief send:**
+```bash
+cortextos bus log-event action briefing_sent info \
+  --meta '{"agent":"analyst","channel":"slack","date":"2026-04-25"}'
+```
+
+**Log a KB refresh:**
+```bash
+cortextos bus log-event action kb_refresh info \
+  --meta '{"agent":"analyst","phase":"daily","doc_count_before":442,"doc_count_after":473,"delta":18}'
+```
+
+**Event naming conventions:**
+- Use specific names: `task_completed`, `kb_refresh`, `theta_wave_complete`, `briefing_sent`
+- NOT generic: `action_completed`, `work_done`, `update`
+- Always include `agent` in metadata
+- Include `task_id` when the event relates to a task

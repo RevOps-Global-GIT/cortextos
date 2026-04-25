@@ -107,3 +107,29 @@ cortextos bus list-approvals --format json
 2. **Always block your task** pointing to the approval ID — so work isn't lost while waiting
 3. **Never assume approval** — if you don't have an inbox confirmation, you don't have approval
 4. **One re-ping max** — after 4h, ping once and wait
+
+---
+
+## Worked Example: skip_review decision
+
+**Task needs Greg's sign-off (external comms, financial, deployment):**
+```
+mcp__rgos__cortex_complete_task(
+  task_id="<uuid>",
+  result="Draft email ready for Biologos renewal. See output/biologos-renewal-email.md",
+  skip_review=false   // Greg must review before action
+)
+```
+
+**Routine internal task (no sign-off needed):**
+```
+mcp__rgos__cortex_complete_task(
+  task_id="<uuid>",
+  result="Entity enrichment batch 12 complete. 6 entities updated.",
+  skip_review=true    // Routine work, auto-complete
+)
+```
+
+**Rule of thumb:**
+- `skip_review=false`: external comms drafts, financial decisions, deployment approvals, first-time patterns
+- `skip_review=true`: research, audits, internal analysis, autonomous backlog, repeat patterns
