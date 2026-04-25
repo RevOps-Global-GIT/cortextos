@@ -21,6 +21,8 @@
  *                           separates these in the future)
  */
 
+import { withRetry, isTransientError } from '../utils/retry.js';
+
 interface SendSlackOptions {
   threadTs?: string;
   inboxId?: string;
@@ -81,21 +83,36 @@ export async function sendSlack(
   const endpoint = `${url}/functions/v1/agent-slack-post`;
 
   try {
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-internal-secret': secret,
+    return await withRetry(
+      async () => {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-internal-secret': secret,
+          },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(15000),
+        });
+        const data = (await res.json()) as {
+          ok: boolean;
+          ts?: string;
+          error?: string;
+          as_app?: string;
+        };
+        return data;
       },
-      body: JSON.stringify(body),
-    });
-    const data = (await res.json()) as {
-      ok: boolean;
-      ts?: string;
-      error?: string;
-      as_app?: string;
-    };
-    return data;
+      {
+        maxAttempts: 2,
+        baseDelayMs: 2000,
+        maxDelayMs: 5_000,
+        isRetryable: isTransientError,
+        onRetry: (attempt, err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[slack] webhook attempt ${attempt} failed, retrying: ${msg}`);
+        },
+      },
+    );
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

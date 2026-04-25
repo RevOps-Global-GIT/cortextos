@@ -20,6 +20,7 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import type { Task } from '../types/index.js';
+import { withRetry, isTransientError } from '../utils/retry.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,12 +71,21 @@ interface RgosTask {
 
 async function fetchRgosTask(taskId: string, url: string, key: string): Promise<RgosTask> {
   const endpoint = `${url}/rest/v1/orch_tasks?id=eq.${encodeURIComponent(taskId)}&select=id,title,description,result,status,assigned_to,created_by&limit=1`;
-  const res = await fetch(endpoint, {
-    headers: {
-      'apikey': key,
-      'Authorization': `Bearer ${key}`,
+  const res = await withRetry(
+    () => fetch(endpoint, {
+      headers: {
+        'apikey': key,
+        'Authorization': `Bearer ${key}`,
+      },
+      signal: AbortSignal.timeout(15000),
+    }),
+    {
+      maxAttempts: 3,
+      baseDelayMs: 500,
+      maxDelayMs: 10_000,
+      isRetryable: isTransientError,
     },
-  });
+  );
   if (!res.ok) {
     throw new Error(`RGOS task fetch failed: HTTP ${res.status}`);
   }
