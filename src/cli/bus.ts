@@ -1688,6 +1688,111 @@ function runHook(hookName: string): void {
   process.exit(result.status ?? 0);
 }
 
+function runHookStatus(): void {
+  const { existsSync, readFileSync } = require('fs');
+  const hooks = [
+    'hook-policy-check',
+    'hook-policy-check-mcp',
+    'hook-loop-detector',
+  ];
+  let allOk = true;
+  for (const hook of hooks) {
+    const hookPath = join(__dirname, `hooks/${hook}.js`);
+    const exists = existsSync(hookPath);
+    console.log(`${exists ? '✅' : '❌'} ${hook}.js — ${exists ? 'present' : 'MISSING in dist/'}`);
+    if (!exists) allOk = false;
+  }
+
+  // Check settings.json for PreToolUse policy hook entries
+  const agentDir = process.env.CTX_AGENT_DIR || process.cwd();
+  const settingsPath = join(agentDir, '.claude', 'settings.json');
+  if (existsSync(settingsPath)) {
+    try {
+      const settings = JSON.parse(readFileSync(settingsPath, 'utf-8'));
+      const preToolUse: any[] = settings?.hooks?.PreToolUse ?? [];
+      const hasBashHook = preToolUse.some((entry: any) =>
+        JSON.stringify(entry).includes('hook-policy-check') &&
+        !JSON.stringify(entry).includes('hook-policy-check-mcp'),
+      );
+      const hasMcpHook = preToolUse.some((entry: any) =>
+        JSON.stringify(entry).includes('hook-policy-check-mcp'),
+      );
+      console.log(`${hasBashHook ? '✅' : '❌'} settings.json PreToolUse — hook-policy-check (Bash/P1+P2+P4)`);
+      console.log(`${hasMcpHook ? '✅' : '❌'} settings.json PreToolUse — hook-policy-check-mcp (MCP/P3)`);
+      if (!hasBashHook || !hasMcpHook) allOk = false;
+    } catch {
+      console.log(`❌ settings.json — parse error`);
+      allOk = false;
+    }
+  } else {
+    console.log(`❌ settings.json — not found at ${settingsPath}`);
+    allOk = false;
+  }
+
+  console.log(allOk ? '\nAll policy hooks healthy.' : '\nSome hooks are missing or not registered. Re-run install or check dist/.');
+  process.exit(allOk ? 0 : 1);
+}
+
+function runTestHooks(): void {
+  const { spawnSync: sp } = require('child_process');
+  const hookPath = join(__dirname, 'hooks/hook-policy-check.js');
+  const mcpHookPath = join(__dirname, 'hooks/hook-policy-check-mcp.js');
+
+  interface TestCase {
+    policy: string;
+    input: Record<string, unknown>;
+    agent?: string;
+    expect: 'BLOCKED' | 'ALLOWED';
+    description: string;
+  }
+
+  const cases: TestCase[] = [
+    // P1 — external sends
+    { policy: 'P1', input: { tool_name: 'Bash', tool_input: { command: 'cortextos bus send-telegram 123456789 "hello"' } }, agent: 'analyst', expect: 'BLOCKED', description: 'P1: analyst send-telegram to numeric ID' },
+    { policy: 'P1', input: { tool_name: 'Bash', tool_input: { command: 'cortextos bus send-telegram 123456789 "hello"' } }, agent: 'orchestrator', expect: 'ALLOWED', description: 'P1: orchestrator send-telegram (exempt)' },
+    { policy: 'P1', input: { tool_name: 'Bash', tool_input: { command: 'cortextos bus send-message orchestrator normal "hi"' } }, agent: 'analyst', expect: 'ALLOWED', description: 'P1: send-message to orchestrator (not a direct Telegram send)' },
+    // P2 — git push
+    { policy: 'P2', input: { tool_name: 'Bash', tool_input: { command: 'git push origin main' } }, agent: 'dev', expect: 'BLOCKED', description: 'P2: git push origin main' },
+    { policy: 'P2', input: { tool_name: 'Bash', tool_input: { command: 'git push fork feat/my-branch' } }, agent: 'dev', expect: 'ALLOWED', description: 'P2: git push fork (allowed)' },
+    { policy: 'P2', input: { tool_name: 'Bash', tool_input: { command: 'git status' } }, agent: 'dev', expect: 'ALLOWED', description: 'P2: git status (not a push)' },
+    // P4 — staging discipline
+    { policy: 'P4', input: { tool_name: 'Bash', tool_input: { command: 'git add -A' } }, agent: 'dev', expect: 'BLOCKED', description: 'P4: git add -A' },
+    { policy: 'P4', input: { tool_name: 'Bash', tool_input: { command: 'git add .' } }, agent: 'dev', expect: 'BLOCKED', description: 'P4: git add .' },
+    { policy: 'P4', input: { tool_name: 'Bash', tool_input: { command: 'git add ./src/bus/task.ts' } }, agent: 'dev', expect: 'ALLOWED', description: 'P4: git add ./relative/path (allowed)' },
+    { policy: 'P4', input: { tool_name: 'Bash', tool_input: { command: 'git add src/bus/task.ts orgs/dev/CLAUDE.md' } }, agent: 'dev', expect: 'ALLOWED', description: 'P4: git add specific files (allowed)' },
+    // P3 — MCP hook (always blocks when hook fires)
+    { policy: 'P3', input: { tool_name: 'mcp__rgos__instantly_activate_campaign', tool_input: {} }, agent: 'orchestrator', expect: 'BLOCKED', description: 'P3: MCP instantly activate campaign' },
+  ];
+
+  let passed = 0;
+  let failed = 0;
+
+  for (const tc of cases) {
+    const isMcp = tc.policy === 'P3';
+    const path = isMcp ? mcpHookPath : hookPath;
+    const env = { ...process.env, CTX_AGENT_NAME: tc.agent ?? 'dev' };
+    const result = sp(process.execPath, [path], {
+      input: JSON.stringify(tc.input),
+      env,
+      encoding: 'utf-8',
+    });
+    const stdout = (result.stdout ?? '').trim();
+    let decision = 'ALLOWED';
+    if (stdout) {
+      try {
+        const parsed = JSON.parse(stdout);
+        if (parsed.decision === 'block') decision = 'BLOCKED';
+      } catch { /* non-JSON stdout = allow */ }
+    }
+    const ok = decision === tc.expect;
+    console.log(`${ok ? '✅' : '❌'} ${tc.description} → ${decision} (expected ${tc.expect})`);
+    if (ok) passed++; else failed++;
+  }
+
+  console.log(`\n${passed}/${passed + failed} policy tests passed.`);
+  process.exit(failed > 0 ? 1 : 0);
+}
+
 // ---------------------------------------------------------------------------
 // Telegram utility commands — parity with bash edit-message / answer-callback
 // ---------------------------------------------------------------------------
@@ -2289,6 +2394,26 @@ busCommand
   .command('hook-loop-detector')
   .description('PreToolUse hook: detects and blocks repeated tool loops (repetition and ping-pong patterns)')
   .action(() => runHook('hook-loop-detector'));
+
+busCommand
+  .command('hook-policy-check')
+  .description('PreToolUse hook (Bash): enforces P1 (external sends funnel), P2 (push to fork), P4 (git staging discipline)')
+  .action(() => runHook('hook-policy-check'));
+
+busCommand
+  .command('hook-policy-check-mcp')
+  .description('PreToolUse hook (MCP): enforces P3 (no email automation without approval) for instantly_* MCP tools')
+  .action(() => runHook('hook-policy-check-mcp'));
+
+busCommand
+  .command('hook-status')
+  .description('Diagnostic: checks that A4 policy hooks are installed and registered in settings.json')
+  .action(() => runHookStatus());
+
+busCommand
+  .command('test-hooks')
+  .description('Test runner: validates A4 policy hook patterns against sample inputs')
+  .action(() => runTestHooks());
 
 busCommand
   .command('hook-skill-autopr')
