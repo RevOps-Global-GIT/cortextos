@@ -13,9 +13,38 @@
  * Also no-ops when SUPABASE_RGOS_URL or SUPABASE_RGOS_SERVICE_KEY are absent.
  */
 
+import { createHash } from 'crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import type { Task, InboxMessage } from '../types/index.js';
+
+// ---------------------------------------------------------------------------
+// UUIDv5 — deterministic UUID from bus ID (RFC 4122 §4.3, stdlib only)
+// ---------------------------------------------------------------------------
+
+// Fixed namespace (RFC 4122 DNS namespace — arbitrary but constant)
+const UUID_NAMESPACE = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function nsBytes(): Buffer {
+  return Buffer.from(UUID_NAMESPACE.replace(/-/g, ''), 'hex');
+}
+
+export function uuidv5(name: string): string {
+  const hash = createHash('sha1')
+    .update(nsBytes())
+    .update(Buffer.from(name, 'utf-8'))
+    .digest();
+  // Take first 16 bytes, set version (5) and variant (RFC 4122) bits
+  hash[6] = (hash[6] & 0x0f) | 0x50;
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+  const h = hash.slice(0, 16).toString('hex');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20,32)}`;
+}
+
+export function isUuid(s: string): boolean {
+  return UUID_RE.test(s);
+}
 
 const ORG_ID = '00000000-0000-0000-0000-000000000001';
 const RETRY_MAX = 500;
@@ -130,6 +159,8 @@ export async function drainRetryQueue(): Promise<void> {
   if (draining) return; // Concurrency guard: only one drain loop at a time
   const qPath = retryQueuePath();
   if (!qPath) return;
+  // Transparently migrate any pre-v5 entries before attempting upsert
+  migrateRetryQueueIds();
   const entries = readRetryQueue(qPath);
   if (entries.length === 0) return;
 
@@ -165,17 +196,98 @@ export function _resetDrainLock(): void {
 }
 
 // ---------------------------------------------------------------------------
+// One-shot migration: rewrite old bus-format IDs in the retry queue to UUIDv5
+// ---------------------------------------------------------------------------
+
+/**
+ * Migrates any retry queue entries that still carry raw bus IDs (non-UUID) in
+ * their row.id field.  Idempotent — entries already holding a UUID are skipped.
+ * Adds bus_task_id / bus_message_id to metadata/payload so the original bus ID
+ * is not lost.
+ *
+ * Called automatically at the start of drainRetryQueue so old queued entries
+ * are transparently upgraded before the next upsert attempt.
+ */
+export function migrateRetryQueueIds(): void {
+  const qPath = retryQueuePath();
+  if (!qPath) return;
+  const entries = readRetryQueue(qPath);
+  if (entries.length === 0) return;
+
+  let changed = false;
+  const migrated = entries.map(entry => {
+    const id = entry.row.id as string | undefined;
+    if (!id || isUuid(id)) return entry; // already a UUID or missing — skip
+
+    changed = true;
+    const newId = uuidv5(id);
+    const newRow = { ...entry.row, id: newId };
+
+    if (entry.table === 'orch_tasks') {
+      const meta = (newRow.metadata as Record<string, unknown> | undefined) ?? {};
+      newRow.metadata = { bus_task_id: id, ...meta };
+    } else {
+      // cortex_messages: bus_message_id goes in payload
+      const payload = (newRow.payload as Record<string, unknown> | undefined) ?? {};
+      newRow.payload = { bus_message_id: id, ...payload };
+    }
+
+    return { ...entry, row: newRow };
+  });
+
+  if (!changed) return;
+
+  try {
+    writeFileSync(
+      qPath,
+      migrated.map(e => JSON.stringify(e)).join('\n') + '\n',
+      { encoding: 'utf-8', mode: 0o600 },
+    );
+  } catch { /* best-effort */ }
+}
+
+// ---------------------------------------------------------------------------
+// Constraint maps — translate bus values to RGOS enum values
+// ---------------------------------------------------------------------------
+
+// RGOS orch_tasks.priority accepts: low | medium | high
+const PRIORITY_MAP: Record<string, string> = {
+  low: 'low',
+  normal: 'medium',
+  high: 'high',
+  urgent: 'high',
+};
+
+// RGOS orch_tasks.status accepts: proposed | approved | in_progress | completed | cancelled | blocked | review
+const STATUS_MAP: Record<string, string> = {
+  pending: 'approved',
+  in_progress: 'in_progress',
+  completed: 'completed',
+  cancelled: 'cancelled',
+  blocked: 'blocked',
+  review: 'review',
+};
+
+export function mapPriority(p: string): string {
+  return PRIORITY_MAP[p] ?? 'medium';
+}
+
+export function mapStatus(s: string): string {
+  return STATUS_MAP[s] ?? 'approved';
+}
+
+// ---------------------------------------------------------------------------
 // Payload builders
 // ---------------------------------------------------------------------------
 
 export function buildTaskRow(task: Task): Record<string, unknown> {
   return {
-    id: task.id,
+    id: uuidv5(task.id),
     org_id: ORG_ID,
     title: task.title,
     description: task.description || null,
-    status: task.status,
-    priority: task.priority,
+    status: mapStatus(task.status),
+    priority: mapPriority(task.priority),
     assigned_to: task.assigned_to,
     created_by: task.created_by,
     parent_task_id: null,
@@ -189,6 +301,7 @@ export function buildTaskRow(task: Task): Record<string, unknown> {
     due_date: task.due_date ?? null,
     project_id: null,
     metadata: {
+      bus_task_id: task.id,
       org: task.org,
       project: task.project || null,
       meta: task.meta ?? null,
@@ -205,7 +318,7 @@ export function buildTaskRow(task: Task): Record<string, unknown> {
 
 export function buildMessageRow(msg: InboxMessage): Record<string, unknown> {
   return {
-    id: msg.id,
+    id: uuidv5(msg.id),
     org_id: ORG_ID,
     from_agent: msg.from,
     to_agent: msg.to,
@@ -213,6 +326,7 @@ export function buildMessageRow(msg: InboxMessage): Record<string, unknown> {
     subject: null,
     body: msg.text,
     payload: {
+      bus_message_id: msg.id,
       priority: msg.priority,
       ...(msg.trace_id ? { trace_id: msg.trace_id } : {}),
     },

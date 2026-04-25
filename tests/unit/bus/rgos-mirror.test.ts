@@ -1,7 +1,7 @@
 /**
  * Unit tests for src/bus/rgos-mirror.ts
  *
- * Covers all 10 plan scenarios + concurrent drain lock:
+ * Covers all 10 plan scenarios + concurrent drain lock + UUID migration:
  * 1. mirrorTaskToRgos fires and payload shape is correct
  * 2. Status transitions (update) mirror correctly
  * 3. Completion + result field mirrored
@@ -13,6 +13,9 @@
  * 9. Retry drain on success → queued items flushed
  * 10. Retry queue FIFO eviction at 500 entries
  * 11. Concurrent drain lock → second call returns immediately
+ * 12. UUIDv5 determinism and format
+ * 13. Retry queue migration (bus IDs → UUIDv5)
+ * 14. Replay / PostgREST UUID validation
  *
  * Strategy: vi.stubGlobal('fetch') to intercept all HTTP without real network.
  * Temp dirs for retry queue file assertions.
@@ -20,7 +23,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, existsSync } from 'fs';
+import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -35,9 +38,18 @@ import {
   buildTaskRow,
   buildMessageRow,
   isEnabled,
+  uuidv5,
+  isUuid,
+  migrateRetryQueueIds,
+  mapPriority,
+  mapStatus,
   _resetDrainLock,
 } from '../../../src/bus/rgos-mirror.js';
 import type { Task, InboxMessage } from '../../../src/types/index.js';
+
+// ── UUID regex — v5 specifically ─────────────────────────────────────────────
+
+const UUID_V5_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -145,16 +157,63 @@ describe('rgos-mirror — isEnabled()', () => {
   });
 });
 
+describe('rgos-mirror — uuidv5() and isUuid()', () => {
+  it('produces a valid UUIDv5 string (version byte = 5, variant = 8-9-a-b)', () => {
+    const result = uuidv5('task_1234567890_001');
+    expect(result).toMatch(UUID_V5_RE);
+  });
+
+  it('is deterministic — same input always yields same output', () => {
+    const a = uuidv5('task_1234567890_001');
+    const b = uuidv5('task_1234567890_001');
+    expect(a).toBe(b);
+  });
+
+  it('produces different UUIDs for different inputs', () => {
+    const a = uuidv5('task_1234567890_001');
+    const b = uuidv5('task_1234567890_002');
+    expect(a).not.toBe(b);
+  });
+
+  it('works on message ID format', () => {
+    const result = uuidv5('1777129008288-dev-9kims');
+    expect(result).toMatch(UUID_V5_RE);
+  });
+
+  it('isUuid returns true for a valid UUID', () => {
+    expect(isUuid('6ba7b810-9dad-11d1-80b4-00c04fd430c8')).toBe(true);
+    expect(isUuid(uuidv5('anything'))).toBe(true);
+  });
+
+  it('isUuid returns false for bus-format IDs', () => {
+    expect(isUuid('task_1234567890_001')).toBe(false);
+    expect(isUuid('1777129008288-dev-9kims')).toBe(false);
+    expect(isUuid('msg_test_001')).toBe(false);
+  });
+});
+
 describe('rgos-mirror — buildTaskRow()', () => {
-  it('maps required fields correctly', () => {
+  it('row.id is a UUIDv5 derived from the bus task ID', () => {
     const task = makeTask();
     const row = buildTaskRow(task);
+    expect(row.id).toMatch(UUID_V5_RE);
+    expect(row.id).toBe(uuidv5(task.id));
+  });
 
-    expect(row.id).toBe(task.id);
+  it('metadata.bus_task_id preserves the original bus ID', () => {
+    const task = makeTask();
+    const row = buildTaskRow(task);
+    const meta = row.metadata as Record<string, unknown>;
+    expect(meta.bus_task_id).toBe(task.id);
+  });
+
+  it('maps other required fields correctly', () => {
+    const task = makeTask();
+    const row = buildTaskRow(task);
     expect(row.org_id).toBe('00000000-0000-0000-0000-000000000001');
     expect(row.title).toBe(task.title);
-    expect(row.status).toBe('pending');
-    expect(row.priority).toBe('normal');
+    expect(row.status).toBe('approved'); // pending → approved via STATUS_MAP
+    expect(row.priority).toBe('medium'); // normal → medium via PRIORITY_MAP
     expect(row.assigned_to).toBe('dev');
     expect(row.created_by).toBe('orchestrator');
     expect(row.source).toBe('cortextos_bus_mirror');
@@ -190,11 +249,23 @@ describe('rgos-mirror — buildTaskRow()', () => {
 });
 
 describe('rgos-mirror — buildMessageRow()', () => {
-  it('maps required fields correctly', () => {
+  it('row.id is a UUIDv5 derived from the bus message ID', () => {
     const msg = makeMessage();
     const row = buildMessageRow(msg);
+    expect(row.id).toMatch(UUID_V5_RE);
+    expect(row.id).toBe(uuidv5(msg.id));
+  });
 
-    expect(row.id).toBe('msg_test_001');
+  it('payload.bus_message_id preserves the original bus ID', () => {
+    const msg = makeMessage();
+    const row = buildMessageRow(msg);
+    const payload = row.payload as Record<string, unknown>;
+    expect(payload.bus_message_id).toBe(msg.id);
+  });
+
+  it('maps other required fields correctly', () => {
+    const msg = makeMessage();
+    const row = buildMessageRow(msg);
     expect(row.org_id).toBe('00000000-0000-0000-0000-000000000001');
     expect(row.from_agent).toBe('orchestrator');
     expect(row.to_agent).toBe('dev');
@@ -255,16 +326,19 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     expect((opts?.headers as Record<string, string>)['Prefer']).toBe('resolution=merge-duplicates');
   });
 
-  it('sends correct payload for createTask (scenario 1)', async () => {
+  it('sends UUIDv5 id and correct payload for createTask (scenario 1)', async () => {
     const task = makeTask();
     await mirrorTaskToRgos(task, 'create');
 
     const mockFetch = vi.mocked(fetch);
     const [, opts] = mockFetch.mock.calls[0];
     const body = JSON.parse(opts?.body as string);
-    expect(body.id).toBe(task.id);
-    expect(body.status).toBe('pending');
+    expect(body.id).toMatch(UUID_V5_RE);
+    expect(body.id).toBe(uuidv5(task.id));
+    expect(body.status).toBe('approved'); // pending → approved via STATUS_MAP
+    expect(body.priority).toBe('medium'); // normal → medium via PRIORITY_MAP
     expect(body.source).toBe('cortextos_bus_mirror');
+    expect(body.metadata.bus_task_id).toBe(task.id);
   });
 
   it('mirrors status transition for updateTask (scenario 2)', async () => {
@@ -272,6 +346,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     await mirrorTaskToRgos(task, 'update');
 
     const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
+    expect(body.id).toMatch(UUID_V5_RE);
     expect(body.status).toBe('in_progress');
     expect(body.updated_at).toBe('2026-04-25T10:30:00Z');
   });
@@ -285,6 +360,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     await mirrorTaskToRgos(task, 'complete');
 
     const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
+    expect(body.id).toMatch(UUID_V5_RE);
     expect(body.status).toBe('completed');
     expect(body.result).toBe('Shipped the feature');
     expect(body.completed_at).toBe('2026-04-25T11:00:00Z');
@@ -319,17 +395,19 @@ describe('rgos-mirror — mirrorMessageToRgos (scenario 4)', () => {
     expect(url).toBe('https://test.supabase.co/rest/v1/cortex_messages');
   });
 
-  it('sends correct payload for mirrorMessageToRgos', async () => {
+  it('sends UUIDv5 id and correct payload for mirrorMessageToRgos', async () => {
     const msg = makeMessage({ trace_id: 'trace-xyz', reply_to: 'msg_parent' });
     await mirrorMessageToRgos(msg);
 
     const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
-    expect(body.id).toBe('msg_test_001');
+    expect(body.id).toMatch(UUID_V5_RE);
+    expect(body.id).toBe(uuidv5(msg.id));
     expect(body.from_agent).toBe('orchestrator');
     expect(body.to_agent).toBe('dev');
     expect(body.body).toBe('Hello from orchestrator');
     expect(body.thread_id).toBe('trace-xyz');
     expect(body.reply_to_id).toBe('msg_parent');
+    expect(body.payload.bus_message_id).toBe(msg.id);
     expect(body.source).toBeUndefined(); // messages don't have source
   });
 });
@@ -412,7 +490,11 @@ describe('rgos-mirror — network failure → retry enqueue (scenario 8)', () =>
     const entries = readRetryQueue(qPath);
     expect(entries).toHaveLength(1);
     expect(entries[0].table).toBe('orch_tasks');
-    expect(entries[0].row.id).toBe(task.id);
+    // row.id must now be a UUIDv5
+    expect(entries[0].row.id as string).toMatch(UUID_V5_RE);
+    expect(entries[0].row.id).toBe(uuidv5(task.id));
+    // original bus ID preserved in metadata
+    expect((entries[0].row.metadata as Record<string, unknown>).bus_task_id).toBe(task.id);
     expect(entries[0].ts).toBeDefined();
   });
 
@@ -426,17 +508,21 @@ describe('rgos-mirror — network failure → retry enqueue (scenario 8)', () =>
     const entries = readRetryQueue(qPath);
     expect(entries).toHaveLength(1);
     expect(entries[0].table).toBe('orch_tasks');
+    expect(entries[0].row.id as string).toMatch(UUID_V5_RE);
   });
 
   it('enqueues message to retry.jsonl when fetch fails', async () => {
     mockFetchFail('Network unreachable');
 
-    await mirrorMessageToRgos(makeMessage());
+    const msg = makeMessage();
+    await mirrorMessageToRgos(msg);
 
     const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
     const entries = readRetryQueue(qPath);
     expect(entries).toHaveLength(1);
     expect(entries[0].table).toBe('cortex_messages');
+    expect(entries[0].row.id as string).toMatch(UUID_V5_RE);
+    expect((entries[0].row.payload as Record<string, unknown>).bus_message_id).toBe(msg.id);
   });
 });
 
@@ -461,10 +547,10 @@ describe('rgos-mirror — retry drain on success (scenario 9)', () => {
   it('drains queued entries when fetch succeeds (scenario 9)', async () => {
     const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
 
-    // Pre-populate retry queue with 3 entries
-    enqueueRetry({ table: 'orch_tasks', row: { id: 'task_001' }, ts: '2026-04-25T09:00:00Z' });
-    enqueueRetry({ table: 'orch_tasks', row: { id: 'task_002' }, ts: '2026-04-25T09:01:00Z' });
-    enqueueRetry({ table: 'cortex_messages', row: { id: 'msg_001' }, ts: '2026-04-25T09:02:00Z' });
+    // Pre-populate retry queue with 3 entries (already UUID format — simulating migrated entries)
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_001') }, ts: '2026-04-25T09:00:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_002') }, ts: '2026-04-25T09:01:00Z' });
+    enqueueRetry({ table: 'cortex_messages', row: { id: uuidv5('msg_001') }, ts: '2026-04-25T09:02:00Z' });
     expect(readRetryQueue(qPath)).toHaveLength(3);
 
     mockFetchOk();
@@ -478,8 +564,8 @@ describe('rgos-mirror — retry drain on success (scenario 9)', () => {
   it('leaves only failed entries after partial drain', async () => {
     const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
 
-    enqueueRetry({ table: 'orch_tasks', row: { id: 'task_will_succeed' }, ts: '2026-04-25T09:00:00Z' });
-    enqueueRetry({ table: 'orch_tasks', row: { id: 'task_will_fail' }, ts: '2026-04-25T09:01:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_will_succeed') }, ts: '2026-04-25T09:00:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_will_fail') }, ts: '2026-04-25T09:01:00Z' });
 
     // First call succeeds, second fails
     vi.stubGlobal('fetch', vi.fn()
@@ -491,7 +577,7 @@ describe('rgos-mirror — retry drain on success (scenario 9)', () => {
 
     const remaining = readRetryQueue(qPath);
     expect(remaining).toHaveLength(1);
-    expect(remaining[0].row.id).toBe('task_will_fail');
+    expect(remaining[0].row.id).toBe(uuidv5('task_will_fail'));
   });
 
   it('no-ops drain when retry queue is empty', async () => {
@@ -573,7 +659,7 @@ describe('rgos-mirror — concurrent drain lock (scenario 11)', () => {
 
   it('second concurrent drain returns immediately without calling fetch again (scenario 11)', async () => {
     const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
-    enqueueRetry({ table: 'orch_tasks', row: { id: 'task_001' }, ts: '2026-04-25T09:00:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_001') }, ts: '2026-04-25T09:00:00Z' });
 
     // Slow fetch — drain1 will hold the lock during its await
     let resolveFirst!: () => void;
@@ -604,5 +690,226 @@ describe('rgos-mirror — concurrent drain lock (scenario 11)', () => {
     expect(readRetryQueue(qPath)).toHaveLength(0);
     // Total fetches = 1 (drain2 was a no-op)
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Retry queue migration (scenario 13) ─────────────────────────────────────
+
+describe('rgos-mirror — migrateRetryQueueIds()', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-test-'));
+    setMirrorEnv(tmpDir);
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+  });
+
+  afterEach(() => {
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('rewrites bus-format task IDs to UUIDv5 and preserves original in metadata', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const oldId = 'task_1777128629875_496';
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: { id: oldId, title: 'Old task', metadata: { org: 'revops-global' } },
+      ts: '2026-04-25T14:56:39.125Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueIds();
+
+    const entries = readRetryQueue(qPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].row.id as string).toMatch(UUID_V5_RE);
+    expect(entries[0].row.id).toBe(uuidv5(oldId));
+    const meta = entries[0].row.metadata as Record<string, unknown>;
+    expect(meta.bus_task_id).toBe(oldId);
+    // Other metadata preserved
+    expect(meta.org).toBe('revops-global');
+  });
+
+  it('rewrites bus-format message IDs to UUIDv5 and preserves original in payload', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const oldId = '1777129008288-dev-9kims';
+    const entry = {
+      table: 'cortex_messages' as const,
+      row: { id: oldId, body: 'hello', payload: { priority: 'normal' } },
+      ts: '2026-04-25T14:56:48.485Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueIds();
+
+    const entries = readRetryQueue(qPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].row.id as string).toMatch(UUID_V5_RE);
+    expect(entries[0].row.id).toBe(uuidv5(oldId));
+    const payload = entries[0].row.payload as Record<string, unknown>;
+    expect(payload.bus_message_id).toBe(oldId);
+    expect(payload.priority).toBe('normal');
+  });
+
+  it('skips entries that already have a UUID id (idempotent)', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const alreadyUuid = uuidv5('task_001');
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: { id: alreadyUuid, metadata: { bus_task_id: 'task_001' } },
+      ts: '2026-04-25T14:56:39Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueIds();
+
+    const entries = readRetryQueue(qPath);
+    // ID must be unchanged
+    expect(entries[0].row.id).toBe(alreadyUuid);
+    // bus_task_id must be preserved
+    expect((entries[0].row.metadata as Record<string, unknown>).bus_task_id).toBe('task_001');
+  });
+
+  it('handles mixed queue with some migrated and some old entries', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const oldTaskId = 'task_1234567890_001';
+    const alreadyUuid = uuidv5('task_already_migrated');
+    const lines = [
+      JSON.stringify({ table: 'orch_tasks', row: { id: oldTaskId }, ts: '2026-04-25T09:00:00Z' }),
+      JSON.stringify({ table: 'orch_tasks', row: { id: alreadyUuid }, ts: '2026-04-25T09:01:00Z' }),
+    ].join('\n') + '\n';
+    writeFileSync(qPath, lines, { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueIds();
+
+    const entries = readRetryQueue(qPath);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].row.id).toBe(uuidv5(oldTaskId));
+    expect(entries[1].row.id).toBe(alreadyUuid);
+  });
+
+  it('no-ops when queue is empty', () => {
+    // Should not throw
+    migrateRetryQueueIds();
+  });
+
+  it('migration runs automatically inside drainRetryQueue', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '' }));
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const oldId = 'task_legacy_000';
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: { id: oldId },
+      ts: '2026-04-25T09:00:00Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    _resetDrainLock();
+
+    await drainRetryQueue();
+
+    // The fetch body should contain the UUIDv5 id, not the old bus id
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
+    expect(body.id).toMatch(UUID_V5_RE);
+    expect(body.id).toBe(uuidv5(oldId));
+    vi.unstubAllGlobals();
+  });
+});
+
+// ── Replay / PostgREST UUID validation (scenario 14) ─────────────────────────
+
+describe('rgos-mirror — PostgREST UUID validation (scenario 14)', () => {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  it('buildTaskRow produces a row.id that passes PostgREST UUID validation', () => {
+    // Simulates PostgREST accepting the payload: id must match UUID format
+    const task = makeTask({ id: 'task_1777128629875_496' });
+    const row = buildTaskRow(task);
+    expect(typeof row.id).toBe('string');
+    expect(row.id as string).toMatch(UUID_RE);
+  });
+
+  it('buildMessageRow produces a row.id that passes PostgREST UUID validation', () => {
+    const msg = makeMessage({ id: '1777129008288-dev-9kims' });
+    const row = buildMessageRow(msg);
+    expect(typeof row.id).toBe('string');
+    expect(row.id as string).toMatch(UUID_RE);
+  });
+
+  it('upsert payload with bus-format id would have triggered 22P02 — UUIDv5 fixes it', () => {
+    // Verify the old format explicitly fails the UUID regex (documenting the root cause)
+    const busTaskId = 'task_1777128629875_496';
+    const busMessageId = '1777129008288-dev-9kims';
+    expect(busTaskId).not.toMatch(UUID_RE);
+    expect(busMessageId).not.toMatch(UUID_RE);
+
+    // And confirm the fix produces valid UUIDs
+    expect(uuidv5(busTaskId)).toMatch(UUID_RE);
+    expect(uuidv5(busMessageId)).toMatch(UUID_RE);
+  });
+
+  it('same bus ID always maps to the same UUID (idempotent upsert is safe)', () => {
+    const busId = 'task_1234567890_001';
+    const uuid1 = uuidv5(busId);
+    const uuid2 = uuidv5(busId);
+    expect(uuid1).toBe(uuid2);
+    expect(uuid1).toMatch(UUID_RE);
+  });
+});
+
+// ── Priority and status constraint maps ──────────────────────────────────────
+
+const RGOS_VALID_PRIORITIES = new Set(['low', 'medium', 'high']);
+const RGOS_VALID_STATUSES = new Set(['proposed', 'approved', 'in_progress', 'completed', 'cancelled', 'blocked', 'review']);
+
+describe('rgos-mirror — mapPriority()', () => {
+  it('low → low', () => { expect(mapPriority('low')).toBe('low'); });
+  it('normal → medium', () => { expect(mapPriority('normal')).toBe('medium'); });
+  it('high → high', () => { expect(mapPriority('high')).toBe('high'); });
+  it('urgent → high (collapse upward)', () => { expect(mapPriority('urgent')).toBe('high'); });
+  it('unknown falls back to medium', () => { expect(mapPriority('whatever')).toBe('medium'); });
+
+  it('all bus priorities map to a valid RGOS priority value', () => {
+    for (const p of ['low', 'normal', 'high', 'urgent']) {
+      expect(RGOS_VALID_PRIORITIES.has(mapPriority(p))).toBe(true);
+    }
+  });
+});
+
+describe('rgos-mirror — mapStatus()', () => {
+  it('pending → approved', () => { expect(mapStatus('pending')).toBe('approved'); });
+  it('in_progress → in_progress', () => { expect(mapStatus('in_progress')).toBe('in_progress'); });
+  it('completed → completed', () => { expect(mapStatus('completed')).toBe('completed'); });
+  it('cancelled → cancelled', () => { expect(mapStatus('cancelled')).toBe('cancelled'); });
+  it('blocked → blocked', () => { expect(mapStatus('blocked')).toBe('blocked'); });
+  it('review → review', () => { expect(mapStatus('review')).toBe('review'); });
+  it('unknown falls back to approved', () => { expect(mapStatus('whatever')).toBe('approved'); });
+
+  it('all bus statuses map to a valid RGOS status value', () => {
+    for (const s of ['pending', 'in_progress', 'completed', 'cancelled', 'blocked', 'review']) {
+      expect(RGOS_VALID_STATUSES.has(mapStatus(s))).toBe(true);
+    }
+  });
+});
+
+describe('rgos-mirror — buildTaskRow() constraint smoke tests', () => {
+  it('buildTaskRow always produces a valid RGOS priority', () => {
+    for (const priority of ['low', 'normal', 'high', 'urgent']) {
+      const row = buildTaskRow(makeTask({ priority }));
+      expect(RGOS_VALID_PRIORITIES.has(row.priority as string)).toBe(true);
+    }
+  });
+
+  it('buildTaskRow always produces a valid RGOS status', () => {
+    for (const status of ['pending', 'in_progress', 'completed', 'cancelled', 'blocked', 'review'] as const) {
+      const row = buildTaskRow(makeTask({ status }));
+      expect(RGOS_VALID_STATUSES.has(row.status as string)).toBe(true);
+    }
+  });
+
+  it('buildTaskRow with bus defaults (pending/normal) produces approved/medium', () => {
+    const row = buildTaskRow(makeTask({ status: 'pending', priority: 'normal' }));
+    expect(row.status).toBe('approved');
+    expect(row.priority).toBe('medium');
   });
 });
