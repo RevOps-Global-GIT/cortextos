@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync, existsSync, appendFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import { withRetry, isTransientError } from '../utils/retry.js';
 import { randomString } from '../utils/random.js';
 
 // --- Types ---
@@ -589,19 +590,27 @@ export async function syncExperimentToSupabase(
 
   try {
     if (experiment.orch_id) {
-      // PATCH existing row
-      await fetch(`${base}?id=eq.${encodeURIComponent(experiment.orch_id)}`, {
-        method: 'PATCH',
-        headers,
-        body: JSON.stringify(payload),
-      });
+      // PATCH existing row — idempotent, safe to retry
+      await withRetry(
+        () => fetch(`${base}?id=eq.${encodeURIComponent(experiment.orch_id!)}`, {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(15000),
+        }),
+        { maxAttempts: 3, baseDelayMs: 500, maxDelayMs: 10_000, isRetryable: isTransientError },
+      );
     } else {
-      // INSERT and capture the UUID
-      const res = await fetch(base, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-      });
+      // INSERT and capture the UUID — 1 retry only (non-idempotent; duplicate risk on retry)
+      const res = await withRetry(
+        () => fetch(base, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(15000),
+        }),
+        { maxAttempts: 2, baseDelayMs: 500, maxDelayMs: 5_000, isRetryable: isTransientError },
+      );
       if (res.ok) {
         const rows = await res.json() as Array<{ id: string }>;
         const orchId = rows?.[0]?.id;
