@@ -2,9 +2,47 @@ import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlin
 import { join } from 'path';
 import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomDigits } from '../utils/random.js';
 import { validatePriority } from '../utils/validate.js';
 import { mirrorTaskToRgos } from './rgos-mirror.js';
+
+// ---------------------------------------------------------------------------
+// Per-task read-modify-write lock
+// ---------------------------------------------------------------------------
+
+/**
+ * Acquire the per-task lock, run `fn`, then release.  Retries up to
+ * MAX_RETRIES × RETRY_MS (≈1 s) before throwing.  Uses Atomics.wait
+ * for synchronous sleep — safe for CLI subprocesses.
+ *
+ * Lock dir: <taskDir>/.task-locks/<taskId>/  (each task gets its own mutex)
+ */
+function withTaskLock<T>(taskDir: string, taskId: string, fn: () => T): T {
+  const lockBase = join(taskDir, '.task-locks', taskId);
+  ensureDir(lockBase);
+
+  const MAX_RETRIES = 20;
+  const RETRY_MS = 50;
+
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    if (acquireLock(lockBase)) {
+      try {
+        return fn();
+      } finally {
+        releaseLock(lockBase);
+      }
+    }
+    // Synchronous sleep — CLI subprocesses only, this is safe.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RETRY_MS);
+  }
+
+  throw new Error(`Task ${taskId}: could not acquire r/m/w lock after ${MAX_RETRIES} retries (${MAX_RETRIES * RETRY_MS}ms)`);
+}
+
+// ---------------------------------------------------------------------------
+// Task CRUD
+// ---------------------------------------------------------------------------
 
 /**
  * Create a new task. Identical JSON format to bash create-task.sh.
@@ -113,12 +151,14 @@ function addSymmetricEdge(
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) return; // Peer task missing — surfaced at resolution time.
   try {
-    const task = JSON.parse(readFileSync(filePath, 'utf-8')) as Task;
-    const list = task[field] ?? [];
-    if (!list.includes(peerId)) {
-      task[field] = [...list, peerId];
-      atomicWriteSync(filePath, JSON.stringify(task));
-    }
+    withTaskLock(paths.taskDir, taskId, () => {
+      const task = JSON.parse(readFileSync(filePath, 'utf-8')) as Task;
+      const list = task[field] ?? [];
+      if (!list.includes(peerId)) {
+        task[field] = [...list, peerId];
+        atomicWriteSync(filePath, JSON.stringify(task));
+      }
+    });
   } catch { /* best-effort */ }
 }
 
@@ -275,17 +315,19 @@ export function updateTask(
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
   try {
-    const content = readFileSync(filePath, 'utf-8');
-    const task: Task = JSON.parse(content);
-    prevStatus = task.status;
-    assignee = task.assigned_to;
-    task.status = status;
-    task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    atomicWriteSync(filePath, JSON.stringify(task));
-    // Mirror to Supabase (fire-and-forget)
-    if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
-      mirrorTaskToRgos(task, 'update').catch(() => undefined);
-    }
+    withTaskLock(paths.taskDir, taskId, () => {
+      const content = readFileSync(filePath, 'utf-8');
+      const task: Task = JSON.parse(content);
+      prevStatus = task.status;
+      assignee = task.assigned_to;
+      task.status = status;
+      task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      atomicWriteSync(filePath, JSON.stringify(task));
+      // Mirror to Supabase (fire-and-forget)
+      if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+        mirrorTaskToRgos(task, 'update').catch(() => undefined);
+      }
+    });
   } catch (err) {
     throw new Error(`Task ${taskId} update failed: ${err}`);
   }
@@ -431,13 +473,15 @@ export function claimTask(
     throw new Error(`Task ${taskId} already claimed by ${owner}`);
   }
 
-  // Lock held — safe to mutate the task JSON.
+  // Lock held — safe to mutate the task JSON under the r/m/w lock.
   const prevStatus = task.status;
-  task.status = 'in_progress';
-  task.assigned_to = agent;
-  task.updated_at = now;
   try {
-    atomicWriteSync(filePath, JSON.stringify(task));
+    withTaskLock(paths.taskDir, taskId, () => {
+      task.status = 'in_progress';
+      task.assigned_to = agent;
+      task.updated_at = now;
+      atomicWriteSync(filePath, JSON.stringify(task));
+    });
   } catch (err) {
     // Roll back the claim so a retry can succeed; we never want a ghost
     // lock surviving a write failure on the task JSON itself.
@@ -468,21 +512,23 @@ export function completeTask(
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
   try {
-    const content = readFileSync(filePath, 'utf-8');
-    const task: Task = JSON.parse(content);
-    prevStatus = task.status;
-    assignee = task.assigned_to;
-    task.status = 'completed';
-    task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    task.completed_at = task.updated_at;
-    if (result) {
-      task.result = result;
-    }
-    atomicWriteSync(filePath, JSON.stringify(task));
-    // Mirror to Supabase (fire-and-forget)
-    if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
-      mirrorTaskToRgos(task, 'complete').catch(() => undefined);
-    }
+    withTaskLock(paths.taskDir, taskId, () => {
+      const content = readFileSync(filePath, 'utf-8');
+      const task: Task = JSON.parse(content);
+      prevStatus = task.status;
+      assignee = task.assigned_to;
+      task.status = 'completed';
+      task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      task.completed_at = task.updated_at;
+      if (result) {
+        task.result = result;
+      }
+      atomicWriteSync(filePath, JSON.stringify(task));
+      // Mirror to Supabase (fire-and-forget)
+      if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+        mirrorTaskToRgos(task, 'complete').catch(() => undefined);
+      }
+    });
   } catch (err) {
     throw new Error(`Task ${taskId} complete failed: ${err}`);
   }

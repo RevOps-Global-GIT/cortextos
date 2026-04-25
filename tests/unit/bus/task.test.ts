@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, findTaskFile } from '../../../src/bus/task';
+import { acquireLock, releaseLock } from '../../../src/utils/lock';
 import type { BusPaths } from '../../../src/types';
 
 describe('Task Management', () => {
@@ -782,5 +783,96 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
     expect(report.archived.map(a => a.id)).toEqual([id]);
     // Active JSON still present
     expect(existsSync(join(paths.taskDir, `${id}.json`))).toBe(true);
+  });
+});
+
+// ── Task r/m/w lock (B3) ─────────────────────────────────────────────────────
+
+describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
+  let testDir: string;
+  let paths: BusPaths;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-lock-test-'));
+    paths = {
+      ctxRoot: testDir,
+      inbox: join(testDir, 'inbox', 'dev'),
+      inflight: join(testDir, 'inflight', 'dev'),
+      processed: join(testDir, 'processed', 'dev'),
+      logDir: join(testDir, 'logs', 'dev'),
+      stateDir: join(testDir, 'state', 'dev'),
+      taskDir: join(testDir, 'tasks'),
+      approvalDir: join(testDir, 'approvals'),
+      analyticsDir: join(testDir, 'analytics'),
+      heartbeatDir: join(testDir, 'heartbeats'),
+    };
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('sequential updateTask calls on the same task complete without deadlock', () => {
+    const id = createTask(paths, 'dev', 'acme', 'Lock test task');
+    // Rapid sequential status transitions — each must acquire and release the lock cleanly.
+    updateTask(paths, id, 'in_progress');
+    updateTask(paths, id, 'blocked');
+    updateTask(paths, id, 'in_progress');
+    const task = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
+    expect(task.status).toBe('in_progress');
+  });
+
+  it('updateTask then completeTask on the same task both succeed', () => {
+    const id = createTask(paths, 'dev', 'acme', 'Lock test — update then complete');
+    updateTask(paths, id, 'in_progress');
+    completeTask(paths, id, 'finished');
+    const task = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
+    expect(task.status).toBe('completed');
+    expect(task.result).toBe('finished');
+  });
+
+  it('claimTask then updateTask on the same task both succeed', () => {
+    const id = createTask(paths, 'dev', 'acme', 'Lock test — claim then update');
+    claimTask(paths, id, 'dev');
+    updateTask(paths, id, 'blocked');
+    const task = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
+    expect(task.status).toBe('blocked');
+  });
+
+  it('addSymmetricEdge via createTask with blockedBy locks peer tasks correctly', () => {
+    const blocker = createTask(paths, 'dev', 'acme', 'Blocker task');
+    const dependent = createTask(paths, 'dev', 'acme', 'Dependent task', { blockedBy: [blocker] });
+    // Both peer lock files should not be left behind (lock released)
+    const blockerLockDir = join(paths.taskDir, '.task-locks', blocker, '.lock.d');
+    expect(existsSync(blockerLockDir)).toBe(false); // lock released
+    // Dependency state should be correct
+    const blockerTask = JSON.parse(readFileSync(join(paths.taskDir, `${blocker}.json`), 'utf-8'));
+    expect(blockerTask.blocks).toContain(dependent);
+  });
+
+  it('lock dir is created at .task-locks/<taskId> and cleaned up after operations', () => {
+    const id = createTask(paths, 'dev', 'acme', 'Lock dir cleanup test');
+    updateTask(paths, id, 'in_progress');
+    completeTask(paths, id, 'done');
+    // Lock dir base should exist (created by ensureDir), but .lock.d must be gone
+    const lockDir = join(paths.taskDir, '.task-locks', id, '.lock.d');
+    expect(existsSync(lockDir)).toBe(false);
+  });
+
+  it('lock timeout: throws when lock cannot be acquired within retry window', () => {
+    // Manually hold the lock to simulate a contending process
+    const id = createTask(paths, 'dev', 'acme', 'Lock timeout test');
+    const lockBase = join(paths.taskDir, '.task-locks', id);
+    mkdirSync(lockBase, { recursive: true });
+    acquireLock(lockBase); // Hold the lock with current process PID
+
+    // updateTask should fail after retries because *this* process holds the lock —
+    // acquireLock re-checks: pid matches running process → lock IS held → returns false each time
+    // However, since it's our OWN pid (process.kill(pid, 0) succeeds), it will keep returning false.
+    // This exercises the retry-and-throw path.
+    expect(() => updateTask(paths, id, 'in_progress')).toThrow(/could not acquire r\/m\/w lock/);
+
+    // Release the lock so afterEach cleanup succeeds
+    releaseLock(lockBase);
   });
 });
