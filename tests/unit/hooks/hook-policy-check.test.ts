@@ -193,6 +193,20 @@ describe('hook-policy-check — P4: git add discipline', () => {
     const r = runPolicyCheck('git add -f orgs/revops-global/agents/dev/CLAUDE.md');
     expect(r.decision).toBe('allow');
   });
+
+  it('does not false-positive on heredoc commit message mentioning staging examples', () => {
+    // Commit messages documenting staging discipline should not self-trigger P4.
+    const lines = [
+      "git commit -m \"$(cat <<'EOF'",
+      'docs: update CLAUDE.md with staging discipline',
+      '',
+      'Use specific paths, not catch-all staging.',
+      'EOF',
+      ')"',
+    ];
+    const r = runPolicyCheck(lines.join('\n'));
+    expect(r.decision).toBe('allow');
+  });
 });
 
 // ---------------------------------------------------------------------------

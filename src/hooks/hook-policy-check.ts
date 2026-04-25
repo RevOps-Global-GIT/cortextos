@@ -112,9 +112,13 @@ async function main(): Promise<void> {
   const command: string = tool_input?.command ?? '';
   const agent = process.env.CTX_AGENT_NAME || 'unknown';
 
-  checkP1(command, agent);
-  checkP2(command, agent);
-  checkP4(command, agent);
+  // Strip heredoc content for all checks — prevents commit message bodies
+  // containing policy-example text from triggering false-positives.
+  const skeleton = command.replace(/<<['"]?\w+['"]?[\s\S]*/g, '');
+
+  checkP1(skeleton, agent);
+  checkP2(command, agent); // checkP2 does its own heredoc strip internally
+  checkP4(skeleton, agent);
 
   // All checks passed — allow the tool call
   process.exit(0);
