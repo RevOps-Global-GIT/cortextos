@@ -34,8 +34,7 @@ export async function GET(
     const content = await fs.readFile(logFile, 'utf-8');
     // Strip ANSI escape codes from log output
     const stripped = content.replace(
-      // eslint-disable-next-line no-control-regex
-      /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[\?]?[0-9;]*[a-zA-Z]/g,
+        /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b\[[\?]?[0-9;]*[a-zA-Z]/g,
       '',
     );
     // Clean up control chars and excessive whitespace

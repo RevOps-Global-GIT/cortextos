@@ -10,7 +10,7 @@ interface DbUser {
   created_at: string;
 }
 
-export async function GET(_request: NextRequest) {
+export async function GET() {
   try {
     const rows = db.prepare('SELECT id, username, created_at FROM users ORDER BY id').all() as DbUser[];
     return Response.json({ users: rows.map(r => ({ id: r.id, username: r.username, created_at: r.created_at })) });

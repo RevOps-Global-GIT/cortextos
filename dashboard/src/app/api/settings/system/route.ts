@@ -30,7 +30,7 @@ function readConfig(): SystemConfig {
   return { ...DEFAULT };
 }
 
-export async function GET(_request: NextRequest) {
+export async function GET() {
   try {
     return Response.json({ config: readConfig() });
   } catch (err) {

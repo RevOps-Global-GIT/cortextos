@@ -11,8 +11,6 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import {
-  CHART_GOLD,
-  CHART_GOLD_MUTED,
   AXIS_STYLE,
   GRID_STYLE,
   TOOLTIP_STYLE,

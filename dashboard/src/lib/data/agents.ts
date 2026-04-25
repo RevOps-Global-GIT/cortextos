@@ -2,13 +2,11 @@
 // Discovers agents, reads identity/config files, returns typed agent data
 
 import fs from 'fs/promises';
-import fsSync from 'fs';
 import path from 'path';
 import {
   CTX_ROOT,
   getAgentDir,
   getHeartbeatPath,
-  getAgentStateDir,
   getAllAgents,
 } from '@/lib/config';
 import { getHeartbeat, getHealthStatus } from '@/lib/data/heartbeats';
@@ -20,7 +18,6 @@ import type {
   AgentIdentity,
   AgentPaths,
   HealthStatus,
-  Heartbeat,
   MemoryFile,
   LogFile,
 } from '@/lib/types';

@@ -18,7 +18,7 @@ export default function LoginPage() {
   const router = useRouter();
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [showSplash, setShowSplash] = useState(false);
+  const [showSplash] = useState(false);
 
   // Redirect to setup if no users exist
   useEffect(() => {

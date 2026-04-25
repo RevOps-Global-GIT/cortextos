@@ -3,7 +3,7 @@
 import fs from 'fs';
 import path from 'path';
 import { revalidatePath } from 'next/cache';
-import { getFrameworkRoot, CTX_ROOT, getOrgs, getAgentsForOrg } from '@/lib/config';
+import { getFrameworkRoot, getOrgs, getAgentsForOrg } from '@/lib/config';
 import type { ActionResult } from '@/lib/types';
 
 // ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ import {
 } from '@/components/shared';
 import { IconPencil, IconFile, IconPhoto, IconFileText, IconCode } from '@tabler/icons-react';
 import { DeliverablePreview } from '@/components/tasks/deliverable-preview';
-import type { Task, TaskOutput, TaskStatus, TaskPriority } from '@/lib/types';
+import type { Task, TaskOutput, TaskStatus } from '@/lib/types';
 
 export interface TaskDetailSheetProps {
   task: Task | null;
