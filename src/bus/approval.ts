@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'fs';
+import { readdirSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
@@ -183,15 +183,32 @@ export function updateApproval(
     ensureDir(destDir);
     atomicWriteSync(join(destDir, `${approvalId}.json`), JSON.stringify(approval));
 
-    // Remove from pending
-    const { unlinkSync } = require('fs');
-    unlinkSync(filePath);
-
-    // Notify requesting agent via inbox
+    // Notify requesting agent via inbox BEFORE removing from pending.
+    //
+    // Race fix (bug B4): the previous order was write-resolved → unlink-pending →
+    // send-inbox. If the daemon crashed between unlink and send-inbox, the approval
+    // was resolved on disk but the requesting agent never received the decision —
+    // permanently blocking it.
+    //
+    // New order: write-resolved → send-inbox → unlink-pending.
+    // If the daemon crashes between send-inbox and unlink-pending, the pending file
+    // becomes a stale orphan. listPendingApprovals() filters these out by checking
+    // whether the same id also exists in resolved/. The worst outcome is a harmless
+    // duplicate inbox message if the daemon restarts and retries — far better than
+    // a silently lost decision.
     if (approval.requesting_agent) {
       const noteText = note ? ` Note: ${note}` : '';
       const msg = `Approval decision: ${status.toUpperCase()}\napproval_id: ${approvalId}\ndecision: ${status}${noteText}`;
       sendMessage(paths, 'system', approval.requesting_agent, 'urgent', msg);
+    }
+
+    // Remove from pending (after inbox notification is safely on disk)
+    const { unlinkSync } = require('fs');
+    try {
+      unlinkSync(filePath);
+    } catch {
+      // If unlink fails (e.g. concurrent resolution or crash-recovery retry),
+      // the notification was already delivered — this is non-fatal.
     }
   } catch (err) {
     throw new Error(`Approval ${approvalId} not found: ${err}`);
@@ -200,9 +217,17 @@ export function updateApproval(
 
 /**
  * List pending approvals.
+ *
+ * Filters out stale orphaned pending files: if a file exists in both pending/
+ * and resolved/ (possible when a daemon crash occurs between inbox notification
+ * and unlink-pending in updateApproval), the entry is already resolved and
+ * must not be surfaced as pending. The orphaned pending file will be cleaned up
+ * on the next updateApproval call for that id (unlinkSync is now wrapped in
+ * try/catch for this case).
  */
 export function listPendingApprovals(paths: BusPaths): Approval[] {
   const pendingDir = join(paths.approvalDir, 'pending');
+  const resolvedDir = join(paths.approvalDir, 'resolved');
   let files: string[];
   try {
     files = readdirSync(pendingDir).filter(f => f.endsWith('.json'));
@@ -212,6 +237,9 @@ export function listPendingApprovals(paths: BusPaths): Approval[] {
 
   const approvals: Approval[] = [];
   for (const file of files) {
+    // Skip stale pending entries that are already in resolved/ (crash-recovery orphans)
+    if (existsSync(join(resolvedDir, file))) continue;
+
     try {
       const content = readFileSync(join(pendingDir, file), 'utf-8');
       approvals.push(JSON.parse(content));
