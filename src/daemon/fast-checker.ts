@@ -230,9 +230,7 @@ export class FastChecker {
         `pollCycle stalled for ${Math.round(stallMs / 1000)}s — triggering hard-restart ` +
         `(${this.watchdogRestarts.length}/${this.WATCHDOG_MAX_RESTARTS} in ${this.WATCHDOG_WINDOW_MS / 60_000}min window)`,
       );
-      this.agent.hardRestartSelf(`pollCycle stalled for ${Math.round(stallMs / 1000)}s`).catch(err => {
-        this.log(`Force-restart error: ${err}`);
-      });
+      this.triggerHardRestart(`pollCycle stalled for ${Math.round(stallMs / 1000)}s`);
       this.lastPollCycleCompletedAt = now;
     }, WATCHDOG_INTERVAL_MS);
 

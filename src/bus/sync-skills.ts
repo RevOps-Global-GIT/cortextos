@@ -100,16 +100,16 @@ function scanSkillsDir(dir: string, agentName: string): SkillSyncEntry[] {
   if (!existsSync(dir)) return [];
 
   const results: SkillSyncEntry[] = [];
-  let entries: ReturnType<typeof readdirSync>;
+  let entries: import('fs').Dirent<string>[];
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
+    entries = readdirSync(dir, { withFileTypes: true }) as import('fs').Dirent<string>[];
   } catch {
     return results;
   }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const skillFile = join(dir, entry.name, 'SKILL.md');
+    const skillFile = join(dir, entry.name as string, 'SKILL.md');
     if (!existsSync(skillFile)) continue;
 
     try {
