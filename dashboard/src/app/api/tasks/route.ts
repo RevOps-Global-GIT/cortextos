@@ -14,7 +14,8 @@ const SAFE_PATH_REGEX = /^[/\w.-]+$/;
 // Validation constants
 // ---------------------------------------------------------------------------
 
-const VALID_STATUSES = ['pending', 'in_progress', 'blocked', 'completed'];
+// VALID_STATUSES reserved for future query-param validation
+// const VALID_STATUSES = ['pending', 'in_progress', 'blocked', 'completed'];
 const VALID_PRIORITIES = ['urgent', 'high', 'normal', 'low'];
 
 // ---------------------------------------------------------------------------

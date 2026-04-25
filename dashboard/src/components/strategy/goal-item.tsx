@@ -12,7 +12,6 @@ import {
 } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Progress, ProgressTrack, ProgressIndicator } from '@/components/ui/progress';
 import type { Goal } from '@/lib/types';
 
 interface GoalItemProps {

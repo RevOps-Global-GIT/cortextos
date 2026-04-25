@@ -63,7 +63,7 @@ export async function PUT(
   const decoded = decodeURIComponent(name);
 
   try {
-    const { agentDir, org } = resolveAgent(name);
+    const { agentDir } = resolveAgent(name);
     const configPath = path.join(agentDir, 'config.json');
     const raw = await fs.readFile(configPath, 'utf-8');
     const config: AgentConfig = JSON.parse(raw);

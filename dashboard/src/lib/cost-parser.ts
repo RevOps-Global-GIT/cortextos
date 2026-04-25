@@ -137,7 +137,7 @@ export function scanClaudeProjectsCosts(): CostEntry[] {
 
   // Import here to avoid circular deps — config imports db
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { getOrgs, CTX_FRAMEWORK_ROOT } = require('./config') as typeof import('./config');
+  const { getOrgs } = require('./config') as typeof import('./config');
   const allowedOrgs = new Set(getOrgs());
 
   // Also allow the instance ID itself as a fallback org label

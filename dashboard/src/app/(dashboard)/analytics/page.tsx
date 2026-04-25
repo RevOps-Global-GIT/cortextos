@@ -13,7 +13,7 @@ import { AgentEffectiveness } from '@/components/analytics/agent-effectiveness';
 import { CostTracking } from '@/components/analytics/cost-tracking';
 import { GoalProgress } from '@/components/analytics/goal-progress';
 import { FleetHealth } from '@/components/analytics/fleet-health';
-import { getFleetHealth, getLatestSnapshot, getPlanUsage, getUsageHistory } from '@/lib/data/reports';
+import { getFleetHealth, getPlanUsage, getUsageHistory } from '@/lib/data/reports';
 
 export default async function AnalyticsPage({
   searchParams,

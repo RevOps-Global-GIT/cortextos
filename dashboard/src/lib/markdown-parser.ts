@@ -89,16 +89,6 @@ export function serializeMarkdown(parsed: ParsedMarkdown): string {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Get the trimmed text content of a section by heading name (case-insensitive). */
-function getSectionContent(parsed: ParsedMarkdown, ...headings: string[]): string {
-  const lowerHeadings = headings.map((h) => h.toLowerCase());
-  for (const section of parsed.sections) {
-    if (lowerHeadings.includes(section.heading.toLowerCase())) {
-      return section.content.trim();
-    }
-  }
-  return '';
-}
 
 /**
  * Update a section's content by heading. If found, replaces content;

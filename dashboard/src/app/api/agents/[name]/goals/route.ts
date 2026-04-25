@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import os from 'os';
 import { getFrameworkRoot } from '@/lib/config';

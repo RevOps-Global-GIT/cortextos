@@ -1,4 +1,3 @@
-import { NextRequest } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { getOrgs, getAgentsForOrg, getAgentDir } from '@/lib/config';
@@ -10,7 +9,7 @@ function maskToken(token: string): string {
   return token.slice(0, 4) + '****' + token.slice(-4);
 }
 
-export async function GET(_request: NextRequest) {
+export async function GET() {
   try {
     const configs: Array<{ agent: string; org: string; botToken: string; chatId: string }> = [];
     const orgs = getOrgs();

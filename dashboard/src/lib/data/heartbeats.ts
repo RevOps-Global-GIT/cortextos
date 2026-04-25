@@ -4,7 +4,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { CTX_ROOT, getHeartbeatPath } from '@/lib/config';
-import type { Heartbeat, HealthStatus, AgentHealth, HealthSummary } from '@/lib/types';
+import type { Heartbeat, HealthStatus, HealthSummary } from '@/lib/types';
 
 // Default staleness thresholds (minutes)
 const STALE_THRESHOLD_MIN = 300; // 5 hours

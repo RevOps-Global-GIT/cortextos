@@ -21,7 +21,7 @@ interface MessageFeedProps {
   onMessageClick?: (pair: string) => void;
 }
 
-export function MessageFeed({ messages, onAgentClick, onMessageClick }: MessageFeedProps) {
+export function MessageFeed({ messages, onMessageClick }: MessageFeedProps) {
   if (messages.length === 0) {
     return (
       <p className="py-12 text-center text-sm text-muted-foreground">
