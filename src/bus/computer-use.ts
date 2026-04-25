@@ -17,6 +17,14 @@
  *   4. Codex runs the task non-interactively and writes the last message to stdout
  *   5. The result is returned and logged as a computer_use_task event
  *
+ * Fallback chain (Mac SSH → localhost Codex CLI):
+ *   When SSH to the Mac fails with a connection-level error (host unreachable,
+ *   ConnectTimeout, EHOSTUNREACH, etc.), the function falls back to running
+ *   `codex exec --json` locally on the cortex VM. This fallback only applies
+ *   to code-only tasks (noPlugin=true). Tasks that require the @Computer Use
+ *   plugin (screen capture, mouse, macOS GUI) fail fast with a clear error —
+ *   running them locally would silently degrade without display access.
+ *
  * Notes on Computer Use via SSH:
  *   Screen-capture and mouse tools require a macOS display session. When invoked
  *   over SSH, those specific calls fail gracefully and Codex falls back to shell
@@ -30,7 +38,7 @@ import { execFileSync } from 'child_process';
 export interface ComputerUseOptions {
   /** Skip the @Computer Use plugin prefix — send a plain Codex prompt */
   noPlugin?: boolean;
-  /** Working directory for Codex on the Mac */
+  /** Working directory for Codex on the Mac (or locally when fallback is used) */
   workdir?: string;
   /** Timeout in seconds (default: 300) */
   timeout?: number;
@@ -38,6 +46,8 @@ export interface ComputerUseOptions {
   sshHost?: string;
   /** Path to codex-dispatch.sh on the Mac */
   dispatchScript?: string;
+  /** Disable localhost codex exec fallback when Mac SSH is unreachable (default: fallback enabled) */
+  noFallback?: boolean;
 }
 
 export interface ComputerUseResult {
@@ -45,10 +55,33 @@ export interface ComputerUseResult {
   output?: string;
   error?: string;
   durationMs: number;
+  /** True if the localhost codex exec fallback was used instead of Mac SSH */
+  usedFallback?: boolean;
 }
 
 const DEFAULT_SSH_HOST = 'gregs-mac';
 const DEFAULT_DISPATCH_SCRIPT = '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh';
+
+/**
+ * Patterns that indicate an SSH connection-level failure (not a task failure).
+ * Only these errors should trigger the localhost fallback.
+ */
+const SSH_CONNECTION_ERROR_PATTERNS = [
+  /connect to host .* port \d+: (Connection refused|No route to host|Network is unreachable)/i,
+  /ssh: connect to host .* port \d+: Operation timed out/i,
+  /ConnectTimeout/i,
+  /Connection timed out/i,
+  /No such host/i,
+  /Temporary failure in name resolution/i,
+  /EHOSTUNREACH/i,
+  /ECONNREFUSED/i,
+  /ssh_exchange_identification: Connection closed/i,
+  /kex_exchange_identification: Connection closed/i,
+];
+
+function isSshConnectionError(msg: string): boolean {
+  return SSH_CONNECTION_ERROR_PATTERNS.some((re) => re.test(msg));
+}
 
 export async function computerUse(
   prompt: string,
@@ -87,10 +120,91 @@ export async function computerUse(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      error: msg,
-      durationMs: Date.now() - start,
-    };
+
+    // Only attempt fallback on connection-level SSH failures
+    if (!isSshConnectionError(msg)) {
+      return {
+        ok: false,
+        error: msg,
+        durationMs: Date.now() - start,
+      };
+    }
+
+    // Log the SSH failure before attempting fallback
+    try {
+      execFileSync('cortextos', ['bus', 'log-event', 'action', 'computer_use_ssh_failure', 'warn',
+        '--meta', JSON.stringify({ host: sshHost, reason: msg.slice(0, 200), promptLength: prompt.length })],
+        { encoding: 'utf-8', timeout: 10_000 });
+    } catch { /* non-fatal — continue to fallback decision */ }
+
+    // Computer-use tasks (noPlugin=false) require a Mac display session.
+    // Running locally would silently degrade — fail fast with a clear message.
+    if (!opts.noPlugin) {
+      return {
+        ok: false,
+        error: `Mac SSH unreachable (${sshHost}) — computer-use tasks require Mac display session. Use --no-plugin for code-only tasks that can run on cortex VM.`,
+        durationMs: Date.now() - start,
+        usedFallback: false,
+      };
+    }
+
+    // Fallback disabled by caller
+    if (opts.noFallback) {
+      return {
+        ok: false,
+        error: `Mac SSH unreachable (${sshHost}) — fallback disabled.`,
+        durationMs: Date.now() - start,
+        usedFallback: false,
+      };
+    }
+
+    // Fallback: run codex exec --json locally on the cortex VM
+    try {
+      const raw = execFileSync('codex', ['exec', '--json', prompt], {
+        timeout: timeoutSec * 1000,
+        encoding: 'utf-8',
+        cwd: opts.workdir,
+      });
+
+      let output: string;
+      try {
+        const parsed = JSON.parse(raw) as { message?: string; exit_code?: number };
+        const exitCode = typeof parsed.exit_code === 'number' ? parsed.exit_code : 0;
+        if (exitCode !== 0) {
+          return {
+            ok: false,
+            error: `codex exec exited with code ${exitCode}: ${parsed.message ?? ''}`,
+            durationMs: Date.now() - start,
+            usedFallback: true,
+          };
+        }
+        output = parsed.message ?? raw.trim();
+      } catch {
+        // If --json output isn't parseable, use raw output
+        output = raw.trim();
+      }
+
+      // Log successful fallback use
+      try {
+        execFileSync('cortextos', ['bus', 'log-event', 'action', 'computer_use_fallback', 'info',
+          '--meta', JSON.stringify({ promptLength: prompt.length, durationMs: Date.now() - start, ok: true })],
+          { encoding: 'utf-8', timeout: 10_000 });
+      } catch { /* non-fatal */ }
+
+      return {
+        ok: true,
+        output,
+        durationMs: Date.now() - start,
+        usedFallback: true,
+      };
+    } catch (fallbackErr) {
+      const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+      return {
+        ok: false,
+        error: `Mac SSH unreachable; localhost codex exec also failed: ${fallbackMsg}`,
+        durationMs: Date.now() - start,
+        usedFallback: true,
+      };
+    }
   }
 }
