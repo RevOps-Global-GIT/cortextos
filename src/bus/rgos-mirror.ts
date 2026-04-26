@@ -101,9 +101,12 @@ export function enqueueRetry(entry: RetryEntry): void {
     const existing = readRetryQueue(qPath);
     existing.push(entry);
     // FIFO eviction: drop oldest entries if over cap
-    const trimmed = existing.length > RETRY_MAX
-      ? existing.slice(existing.length - RETRY_MAX)
-      : existing;
+    let trimmed = existing;
+    if (existing.length > RETRY_MAX) {
+      const dropped = existing.length - RETRY_MAX;
+      console.warn(`[bus-mirror] WARN: retry queue at cap (${RETRY_MAX}); evicting ${dropped} oldest entr${dropped === 1 ? 'y' : 'ies'} — data loss`);
+      trimmed = existing.slice(existing.length - RETRY_MAX);
+    }
     writeFileSync(qPath, trimmed.map(e => JSON.stringify(e)).join('\n') + '\n', {
       encoding: 'utf-8',
       mode: 0o600,
@@ -201,7 +204,8 @@ export async function drainRetryQueue(): Promise<void> {
     for (const entry of entries) {
       try {
         await postgrestUpsert(entry.table, entry.row);
-      } catch {
+      } catch (err) {
+        console.error(`[bus-mirror] drain: ${entry.table} upsert failed — will re-queue: ${err instanceof Error ? err.message : String(err)}`);
         failed.push(entry);
       }
     }
@@ -471,8 +475,9 @@ export async function mirrorTaskToRgos(
   try {
     await postgrestUpsert('orch_tasks', row);
     // Async drain: never await, never block the write path
-    setImmediate(() => drainRetryQueue().catch(() => undefined));
-  } catch {
+    setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (task):', err)));
+  } catch (err) {
+    console.warn(`[bus-mirror] orch_tasks upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
     enqueueRetry({ table: 'orch_tasks', row, ts: new Date().toISOString() });
   }
 }
@@ -485,8 +490,9 @@ export async function mirrorMessageToRgos(msg: InboxMessage): Promise<void> {
   const row = buildMessageRow(msg);
   try {
     await postgrestUpsert('cortex_messages', row);
-    setImmediate(() => drainRetryQueue().catch(() => undefined));
-  } catch {
+    setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (message):', err)));
+  } catch (err) {
+    console.warn(`[bus-mirror] cortex_messages upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
     enqueueRetry({ table: 'cortex_messages', row, ts: new Date().toISOString() });
   }
 }
