@@ -44,6 +44,7 @@ import {
   mapPriority,
   mapStatus,
   migrateRetryQueueConstraints,
+  migrateRetryQueueReplyToId,
   _resetDrainLock,
 } from '../../../src/bus/rgos-mirror.js';
 import type { Task, InboxMessage } from '../../../src/types/index.js';
@@ -283,10 +284,17 @@ describe('rgos-mirror — buildMessageRow()', () => {
     expect((row.payload as Record<string, unknown>).trace_id).toBe('trace-abc-123');
   });
 
-  it('maps reply_to to reply_to_id', () => {
+  it('maps reply_to to reply_to_id as UUIDv5', () => {
     const msg = makeMessage({ reply_to: 'msg_original_001' });
     const row = buildMessageRow(msg);
-    expect(row.reply_to_id).toBe('msg_original_001');
+    expect(isUuid(row.reply_to_id as string)).toBe(true);
+    expect(row.reply_to_id).toBe(uuidv5('msg_original_001'));
+  });
+
+  it('sets reply_to_id to null when reply_to is null', () => {
+    const msg = makeMessage({ reply_to: null });
+    const row = buildMessageRow(msg);
+    expect(row.reply_to_id).toBeNull();
   });
 
   it('sets thread_id to null when no trace_id', () => {
@@ -407,7 +415,7 @@ describe('rgos-mirror — mirrorMessageToRgos (scenario 4)', () => {
     expect(body.to_agent).toBe('dev');
     expect(body.body).toBe('Hello from orchestrator');
     expect(body.thread_id).toBe('trace-xyz');
-    expect(body.reply_to_id).toBe('msg_parent');
+    expect(body.reply_to_id).toBe(uuidv5('msg_parent'));
     expect(body.payload.bus_message_id).toBe(msg.id);
     expect(body.source).toBeUndefined(); // messages don't have source
   });
@@ -1039,5 +1047,89 @@ describe('rgos-mirror — migrateRetryQueueConstraints()', () => {
     expect(body.priority).toBe('medium');
     expect(body.status).toBe('approved');
     vi.unstubAllGlobals();
+  });
+});
+
+// ── Retry queue reply_to_id migration (scenario 16) ─────────────────────────
+
+describe('rgos-mirror — migrateRetryQueueReplyToId()', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-test-'));
+    setMirrorEnv(tmpDir);
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+  });
+
+  afterEach(() => {
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('converts raw bus reply_to_id to UUIDv5 in cortex_messages entries', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const rawReplyTo = '1777131057931-orchestrator-ojlbs';
+    const entry = {
+      table: 'cortex_messages' as const,
+      row: { id: uuidv5('msg_001'), reply_to_id: rawReplyTo, body: 'test' },
+      ts: '2026-04-26T10:00:00Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueReplyToId();
+
+    const lines = readFileSync(qPath, 'utf-8').trim().split('\n');
+    const migrated = JSON.parse(lines[0]);
+    expect(isUuid(migrated.row.reply_to_id)).toBe(true);
+    expect(migrated.row.reply_to_id).toBe(uuidv5(rawReplyTo));
+  });
+
+  it('leaves already-UUID reply_to_id untouched', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const alreadyUuid = uuidv5('some-msg-id');
+    const entry = {
+      table: 'cortex_messages' as const,
+      row: { id: uuidv5('msg_002'), reply_to_id: alreadyUuid, body: 'test' },
+      ts: '2026-04-26T10:00:00Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueReplyToId();
+
+    const lines = readFileSync(qPath, 'utf-8').trim().split('\n');
+    const result = JSON.parse(lines[0]);
+    expect(result.row.reply_to_id).toBe(alreadyUuid);
+  });
+
+  it('leaves null reply_to_id untouched', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const entry = {
+      table: 'cortex_messages' as const,
+      row: { id: uuidv5('msg_003'), reply_to_id: null, body: 'test' },
+      ts: '2026-04-26T10:00:00Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueReplyToId();
+
+    const lines = readFileSync(qPath, 'utf-8').trim().split('\n');
+    const result = JSON.parse(lines[0]);
+    expect(result.row.reply_to_id).toBeNull();
+  });
+
+  it('does not touch orch_tasks entries', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: { id: uuidv5('task_001'), reply_to_id: 'raw-bus-id-xyz' },
+      ts: '2026-04-26T10:00:00Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueReplyToId();
+
+    const lines = readFileSync(qPath, 'utf-8').trim().split('\n');
+    const result = JSON.parse(lines[0]);
+    expect(result.row.reply_to_id).toBe('raw-bus-id-xyz'); // untouched
   });
 });
