@@ -1,5 +1,6 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
+import { atomicWriteSync } from '../utils/atomic.js';
 import { join } from 'path';
 
 export const goalsCommand = new Command('goals')
@@ -73,6 +74,6 @@ goalsCommand
       '',
     );
 
-    writeFileSync(goalsMdPath, lines.join('\n'), 'utf-8');
+    atomicWriteSync(goalsMdPath, lines.join('\n'));
     console.log(`Generated GOALS.md for ${options.agent}`);
   });
