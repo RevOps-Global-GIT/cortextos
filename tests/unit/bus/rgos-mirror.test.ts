@@ -1132,6 +1132,35 @@ describe('rgos-mirror — migrateRetryQueueReplyToId()', () => {
     const result = JSON.parse(lines[0]);
     expect(result.row.reply_to_id).toBe('raw-bus-id-xyz'); // untouched
   });
+
+  it('reply_to_id migration runs automatically inside drainRetryQueue', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => '' }));
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const rawReplyTo = '1777131057931-orchestrator-ojlbs';
+    const entry = {
+      table: 'cortex_messages' as const,
+      row: {
+        id: uuidv5('msg_autorun_test'),
+        reply_to_id: rawReplyTo,
+        body: 'test auto-run',
+        from_agent: 'orchestrator',
+        to_agent: 'dev',
+        priority: 'normal',
+        created_at: '2026-04-26T10:00:00Z',
+      },
+      ts: '2026-04-26T10:00:00Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    _resetDrainLock();
+
+    await drainRetryQueue();
+
+    // The fetch body should have a UUIDv5 reply_to_id, not the raw bus ID
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
+    expect(isUuid(body.reply_to_id)).toBe(true);
+    expect(body.reply_to_id).toBe(uuidv5(rawReplyTo));
+    vi.unstubAllGlobals();
+  });
 });
 
 // ── FK retry path ─────────────────────────────────────────────────────────────
