@@ -5,7 +5,11 @@ vi.mock('../../../src/bus/task', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../src/bus/task')>();
   return { ...actual, listTasks: vi.fn().mockReturnValue([]) };
 });
-vi.mock('../../../src/bus/rgos-mirror', () => ({ mirrorTaskToRgos: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../../../src/bus/rgos-mirror', () => ({
+  mirrorTaskToRgos: vi.fn().mockResolvedValue(undefined),
+  drainRetryQueue: vi.fn().mockResolvedValue(undefined),
+  isEnabled: vi.fn().mockReturnValue(false),
+}));
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
