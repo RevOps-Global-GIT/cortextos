@@ -1,5 +1,6 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { atomicWriteSync } from '../utils/atomic.js';
 import { join } from 'path';
 import { homedir, platform } from 'os';
 import { execSync, spawn, spawnSync } from 'child_process';
@@ -163,7 +164,7 @@ export const startCommand = new Command('start')
           ...(existingOrg ? { org: existingOrg } : {}),
         };
         mkdirSync(join(ctxRoot, 'config'), { recursive: true });
-        writeFileSync(enabledPath, JSON.stringify(enabledAgents, null, 2) + '\n', 'utf-8');
+        atomicWriteSync(enabledPath, JSON.stringify(enabledAgents, null, 2));
         console.log(`  Registered ${agent} in enabled-agents.json`);
       }
 
