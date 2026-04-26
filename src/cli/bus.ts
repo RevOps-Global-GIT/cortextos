@@ -18,6 +18,7 @@ import { createReminder, listReminders, ackReminder, pruneReminders } from '../b
 import { updateCronFire } from '../bus/cron-state.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
+import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled } from '../bus/rgos-mirror.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { generateSkill } from '../bus/generate-skill.js';
@@ -2885,6 +2886,64 @@ busCommand
   });
 
 // --- computer-use ---
+
+busCommand
+  .command('drain-mirror')
+  .description('Synchronously drain the RGOS mirror retry queue — for post-deploy verification or manual recovery')
+  .option('--json', 'Output result as JSON', false)
+  .action(async (opts: { json?: boolean }) => {
+    const qPath = retryQueuePath();
+
+    if (!isEnabled()) {
+      const msg = 'RGOS mirror is disabled (kill switch or missing env). Nothing to drain.';
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: true, skipped: true, reason: msg }));
+      } else {
+        console.log(msg);
+      }
+      return;
+    }
+
+    if (!qPath) {
+      const msg = 'Cannot locate retry queue: CTX_ROOT or CTX_AGENT_NAME not set.';
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: false, error: msg }));
+      } else {
+        console.error(msg);
+        process.exit(1);
+      }
+      return;
+    }
+
+    const before = readRetryQueue(qPath).length;
+    if (before === 0) {
+      const msg = 'Retry queue is empty — nothing to drain.';
+      if (opts.json) {
+        console.log(JSON.stringify({ ok: true, before: 0, after: 0, drained: 0 }));
+      } else {
+        console.log(msg);
+      }
+      return;
+    }
+
+    if (!opts.json) {
+      console.log(`drain-mirror: ${before} entr${before === 1 ? 'y' : 'ies'} in queue — draining…`);
+    }
+
+    await drainRetryQueue();
+
+    const after = readRetryQueue(qPath).length;
+    const drained = before - after;
+
+    if (opts.json) {
+      console.log(JSON.stringify({ ok: true, before, after, drained }));
+    } else if (after === 0) {
+      console.log(`drain-mirror: drained ${drained}/${before} — queue is now empty.`);
+    } else {
+      console.log(`drain-mirror: drained ${drained}/${before} — ${after} still failed (PostgREST unreachable?).`);
+      process.exit(1);
+    }
+  });
 
 busCommand
   .command('computer-use <prompt>')

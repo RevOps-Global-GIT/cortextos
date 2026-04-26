@@ -7,7 +7,7 @@ import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } f
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval, listPendingApprovals } from '../bus/approval.js';
 import { listTasks } from '../bus/task.js';
-import { mirrorTaskToRgos } from '../bus/rgos-mirror.js';
+import { mirrorTaskToRgos, drainRetryQueue, isEnabled as isMirrorEnabled } from '../bus/rgos-mirror.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
@@ -166,6 +166,13 @@ export class FastChecker {
     // Mirror any in-progress tasks that may have been claimed during a gap window
     // (e.g. before the claimTask mirror hook shipped). Idempotent — upsert on UUIDv5 ID.
     this.backfillInProgressTasks().catch(err => this.log(`backfillInProgressTasks error: ${err}`));
+
+    // Boot-time drain: flush any queued retry entries that accumulated while the
+    // daemon was down. Short-lived CLI processes exit before setImmediate fires so
+    // entries can stack up between restarts. The daemon is long-lived — safe to await.
+    if (isMirrorEnabled()) {
+      drainRetryQueue().catch(err => this.log(`boot drain error: ${err}`));
+    }
 
     // Idle-session heartbeat watchdog: fires every 50 min regardless of REPL state
     const HEARTBEAT_INTERVAL_MS = 50 * 60 * 1000;
