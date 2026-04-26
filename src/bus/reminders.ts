@@ -12,10 +12,10 @@
  *   3. Agent processes the reminder, calls `cortextos bus ack-reminder <id>`
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
-import { ensureDir } from '../utils/atomic.js';
+import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import type { BusPaths } from '../types/index.js';
 
 export interface Reminder {
@@ -45,7 +45,7 @@ function readReminders(paths: BusPaths): Reminder[] {
 
 function writeReminders(paths: BusPaths, reminders: Reminder[]): void {
   ensureDir(paths.stateDir);
-  writeFileSync(remindersPath(paths), JSON.stringify(reminders, null, 2) + '\n', 'utf-8');
+  atomicWriteSync(remindersPath(paths), JSON.stringify(reminders, null, 2));
 }
 
 /**

@@ -1,5 +1,6 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { atomicWriteSync } from '../utils/atomic.js';
 import { join } from 'path';
 import { homedir } from 'os';
 import { IPCClient } from '../daemon/ipc-server.js';
@@ -116,7 +117,7 @@ function writeEnabledAgents(instanceId: string, agents: Record<string, any>): vo
   const path = getEnabledAgentsPath(instanceId);
   const dir = join(homedir(), '.cortextos', instanceId, 'config');
   mkdirSync(dir, { recursive: true });
-  writeFileSync(path, JSON.stringify(agents, null, 2) + '\n', 'utf-8');
+  atomicWriteSync(path, JSON.stringify(agents, null, 2));
 }
 
 export const enableAgentCommand = new Command('enable')
