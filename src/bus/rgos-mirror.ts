@@ -147,6 +147,33 @@ async function postgrestUpsert(
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
+
+    // FK violation on reply_to_id (23503): parent message was never mirrored.
+    // Strip reply_to_id and retry once — the reply becomes a standalone message
+    // in RGOS rather than blocking the drain forever.
+    if (
+      res.status === 409 &&
+      body.includes('"23503"') &&
+      table === 'cortex_messages' &&
+      row['reply_to_id'] != null
+    ) {
+      const retryRow = { ...row, reply_to_id: null };
+      const retryRes = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'apikey': serviceKey,
+          'Authorization': `Bearer ${serviceKey}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates',
+        },
+        body: JSON.stringify(retryRow),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (retryRes.ok) return; // retry succeeded
+      const retryBody = await retryRes.text().catch(() => '');
+      throw new Error(`PostgREST ${table} upsert failed ${retryRes.status} (after FK retry): ${retryBody.slice(0, 200)}`);
+    }
+
     throw new Error(`PostgREST ${table} upsert failed ${res.status}: ${body.slice(0, 200)}`);
   }
 }

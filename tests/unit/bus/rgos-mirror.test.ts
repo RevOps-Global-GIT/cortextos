@@ -1133,3 +1133,109 @@ describe('rgos-mirror — migrateRetryQueueReplyToId()', () => {
     expect(result.row.reply_to_id).toBe('raw-bus-id-xyz'); // untouched
   });
 });
+
+// ── FK retry path ─────────────────────────────────────────────────────────────
+
+describe('rgos-mirror — FK constraint retry (23503)', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-fk-'));
+    process.env.CTX_ROOT = tmpDir;
+    process.env.CTX_AGENT_NAME = 'dev';
+    process.env.SUPABASE_RGOS_URL = 'https://fake.supabase.co';
+    process.env.SUPABASE_RGOS_SERVICE_KEY = 'test-key';
+    delete process.env.BUS_RGOS_MIRROR_DISABLED;
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+    _resetDrainLock();
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    delete process.env.CTX_ROOT;
+    delete process.env.CTX_AGENT_NAME;
+    delete process.env.SUPABASE_RGOS_URL;
+    delete process.env.SUPABASE_RGOS_SERVICE_KEY;
+    vi.restoreAllMocks();
+  });
+
+  it('retries with reply_to_id=null on 409/23503 FK violation and succeeds', async () => {
+    const calls: { url: string; body: Record<string, unknown> }[] = [];
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      calls.push({ url: String(url), body });
+      // First call: FK violation
+      if (calls.length === 1) {
+        return { ok: false, status: 409, text: async () => '{"code":"23503","message":"FK violation"}' };
+      }
+      // Retry call: succeed
+      return { ok: true, status: 201, text: async () => '' };
+    });
+
+    const msg = {
+      id: 'msg_001',
+      from: 'dev',
+      to: 'orchestrator',
+      priority: 'normal' as const,
+      timestamp: '2026-04-26T10:00:00.000Z',
+      text: 'hello',
+      reply_to: 'msg_parent',
+      trace_id: undefined,
+    };
+
+    await mirrorMessageToRgos(msg as any);
+
+    expect(calls).toHaveLength(2);
+    // First attempt had reply_to_id set
+    expect(calls[0].body.reply_to_id).not.toBeNull();
+    // Retry had reply_to_id stripped
+    expect(calls[1].body.reply_to_id).toBeNull();
+    // Nothing queued — retry succeeded
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(false);
+  });
+
+  it('enqueues on retry failure after 23503 — does not loop infinitely', async () => {
+    vi.stubGlobal('fetch', async () => ({
+      ok: false, status: 409,
+      text: async () => '{"code":"23503","message":"FK violation"}',
+    }));
+
+    const msg = {
+      id: 'msg_002',
+      from: 'dev',
+      to: 'orchestrator',
+      priority: 'normal' as const,
+      timestamp: '2026-04-26T10:00:00.000Z',
+      text: 'hello',
+      reply_to: 'msg_parent',
+    };
+
+    await mirrorMessageToRgos(msg as any);
+
+    // Should have enqueued — not crashed
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(true);
+    const entries = readRetryQueue(qPath);
+    expect(entries).toHaveLength(1);
+  });
+
+  it('does not retry orch_tasks on 23503 (FK only applies to cortex_messages.reply_to_id)', async () => {
+    const calls: number[] = [];
+    vi.stubGlobal('fetch', async () => {
+      calls.push(1);
+      return { ok: false, status: 409, text: async () => '{"code":"23503","message":"FK violation"}' };
+    });
+
+    const task = {
+      id: 'task_001', org: 'test', title: 'T', description: '', status: 'pending',
+      priority: 'normal', assigned_to: 'dev', created_by: 'dev',
+      created_at: '2026-04-26T10:00:00.000Z', updated_at: '2026-04-26T10:00:00.000Z',
+    };
+
+    await mirrorTaskToRgos(task as any, 'create');
+
+    // Only 1 call — no FK retry for orch_tasks
+    expect(calls).toHaveLength(1);
+  });
+});
