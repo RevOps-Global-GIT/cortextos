@@ -163,6 +163,8 @@ export async function drainRetryQueue(): Promise<void> {
   migrateRetryQueueIds();
   // Remap raw bus constraint values (priority=normal, status=pending, etc.)
   migrateRetryQueueConstraints();
+  // Convert raw bus IDs in reply_to_id to UUIDv5
+  migrateRetryQueueReplyToId();
   const entries = readRetryQueue(qPath);
   if (entries.length === 0) return;
 
@@ -302,6 +304,38 @@ export function migrateRetryQueueIds(): void {
   } catch { /* best-effort */ }
 }
 
+/**
+ * Migrates cortex_messages retry entries whose reply_to_id is a raw bus ID
+ * (non-UUID) to UUIDv5, matching buildMessageRow's behavior.
+ * Idempotent — entries with UUID or null reply_to_id are untouched.
+ */
+export function migrateRetryQueueReplyToId(): void {
+  const qPath = retryQueuePath();
+  if (!qPath) return;
+  const entries = readRetryQueue(qPath);
+  if (entries.length === 0) return;
+
+  let changed = false;
+  const migrated = entries.map(entry => {
+    if (entry.table !== 'cortex_messages') return entry;
+    const replyToId = entry.row.reply_to_id as string | null | undefined;
+    if (!replyToId || isUuid(replyToId)) return entry; // already UUID or null — skip
+
+    changed = true;
+    return { ...entry, row: { ...entry.row, reply_to_id: uuidv5(replyToId) } };
+  });
+
+  if (!changed) return;
+
+  try {
+    writeFileSync(
+      qPath,
+      migrated.map(e => JSON.stringify(e)).join('\n') + '\n',
+      { encoding: 'utf-8', mode: 0o600 },
+    );
+  } catch { /* best-effort */ }
+}
+
 // ---------------------------------------------------------------------------
 // Constraint maps — translate bus values to RGOS enum values
 // ---------------------------------------------------------------------------
@@ -387,7 +421,7 @@ export function buildMessageRow(msg: InboxMessage): Record<string, unknown> {
       ...(msg.trace_id ? { trace_id: msg.trace_id } : {}),
     },
     thread_id: msg.trace_id ?? null,
-    reply_to_id: msg.reply_to ?? null,
+    reply_to_id: msg.reply_to ? uuidv5(msg.reply_to) : null,
     read_at: null,
     created_at: msg.timestamp,
   };
