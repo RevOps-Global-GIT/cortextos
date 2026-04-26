@@ -15,9 +15,9 @@
  * Storage: state/<agent>/cron-state.json (same dir as pending-reminders.json).
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { ensureDir } from '../utils/atomic.js';
+import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 
 export interface CronFireRecord {
   name: string;
@@ -73,7 +73,7 @@ export function updateCronFire(
   }
 
   state.updated_at = now;
-  writeFileSync(cronStatePath(stateDir), JSON.stringify(state, null, 2) + '\n', 'utf-8');
+  atomicWriteSync(cronStatePath(stateDir), JSON.stringify(state, null, 2));
 }
 
 /**
