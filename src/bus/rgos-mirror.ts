@@ -125,6 +125,32 @@ function clearRetryQueue(qPath: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// PostgREST error classification
+// ---------------------------------------------------------------------------
+
+/**
+ * Permanent HTTP status codes — errors that will never resolve by retrying.
+ *
+ * - 400 Bad Request: malformed payload / schema mismatch
+ * - 403 Forbidden: service-key auth failure (wrong key or RLS policy)
+ * - 422 Unprocessable Entity: constraint violation (bad enum value, etc.)
+ *
+ * 500 / 503 / network errors / 409 FK violations are transient — re-queue.
+ */
+const PERMANENT_HTTP_STATUSES = new Set([400, 403, 422]);
+
+export class PostgRESTError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly isPermanent: boolean,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'PostgRESTError';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PostgREST upsert
 // ---------------------------------------------------------------------------
 
@@ -174,10 +200,20 @@ async function postgrestUpsert(
       });
       if (retryRes.ok) return; // retry succeeded
       const retryBody = await retryRes.text().catch(() => '');
-      throw new Error(`PostgREST ${table} upsert failed ${retryRes.status} (after FK retry): ${retryBody.slice(0, 200)}`);
+      const retryPermanent = PERMANENT_HTTP_STATUSES.has(retryRes.status);
+      throw new PostgRESTError(
+        retryRes.status,
+        retryPermanent,
+        `PostgREST ${table} upsert failed ${retryRes.status} (after FK retry): ${retryBody.slice(0, 200)}`,
+      );
     }
 
-    throw new Error(`PostgREST ${table} upsert failed ${res.status}: ${body.slice(0, 200)}`);
+    const permanent = PERMANENT_HTTP_STATUSES.has(res.status);
+    throw new PostgRESTError(
+      res.status,
+      permanent,
+      `PostgREST ${table} upsert failed ${res.status}: ${body.slice(0, 200)}`,
+    );
   }
 }
 
@@ -201,14 +237,30 @@ export async function drainRetryQueue(): Promise<void> {
   draining = true;
   try {
     const failed: RetryEntry[] = [];
+    let countProcessed = 0;
+    let countDiscarded = 0;
+
     for (const entry of entries) {
       try {
         await postgrestUpsert(entry.table, entry.row);
+        countProcessed++;
       } catch (err) {
-        console.error(`[bus-mirror] drain: ${entry.table} upsert failed — will re-queue: ${err instanceof Error ? err.message : String(err)}`);
-        failed.push(entry);
+        if (err instanceof PostgRESTError && err.isPermanent) {
+          // Permanent error (400/403/422): re-queuing will never succeed — discard.
+          console.error(`[bus-mirror] drain: permanent HTTP ${err.status} on ${entry.table} — discarding entry (will not retry): ${err.message}`);
+          countDiscarded++;
+        } else {
+          console.error(`[bus-mirror] drain: ${entry.table} upsert failed — will re-queue: ${err instanceof Error ? err.message : String(err)}`);
+          failed.push(entry);
+        }
       }
     }
+
+    const countFailed = failed.length;
+    console.log(
+      `[bus-mirror] drain complete: queued=${entries.length} pushed=${countProcessed} requeued=${countFailed} discarded=${countDiscarded}`,
+    );
+
     if (failed.length === 0) {
       clearRetryQueue(qPath);
     } else {
@@ -477,8 +529,12 @@ export async function mirrorTaskToRgos(
     // Async drain: never await, never block the write path
     setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (task):', err)));
   } catch (err) {
-    console.warn(`[bus-mirror] orch_tasks upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
-    enqueueRetry({ table: 'orch_tasks', row, ts: new Date().toISOString() });
+    if (err instanceof PostgRESTError && err.isPermanent) {
+      console.error(`[bus-mirror] orch_tasks upsert permanent error (HTTP ${err.status}) — discarding (will not retry): ${err.message}`);
+    } else {
+      console.warn(`[bus-mirror] orch_tasks upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
+      enqueueRetry({ table: 'orch_tasks', row, ts: new Date().toISOString() });
+    }
   }
 }
 
@@ -492,7 +548,11 @@ export async function mirrorMessageToRgos(msg: InboxMessage): Promise<void> {
     await postgrestUpsert('cortex_messages', row);
     setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (message):', err)));
   } catch (err) {
-    console.warn(`[bus-mirror] cortex_messages upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
-    enqueueRetry({ table: 'cortex_messages', row, ts: new Date().toISOString() });
+    if (err instanceof PostgRESTError && err.isPermanent) {
+      console.error(`[bus-mirror] cortex_messages upsert permanent error (HTTP ${err.status}) — discarding (will not retry): ${err.message}`);
+    } else {
+      console.warn(`[bus-mirror] cortex_messages upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
+      enqueueRetry({ table: 'cortex_messages', row, ts: new Date().toISOString() });
+    }
   }
 }
