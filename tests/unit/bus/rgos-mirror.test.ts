@@ -45,6 +45,7 @@ import {
   mapStatus,
   migrateRetryQueueConstraints,
   migrateRetryQueueReplyToId,
+  PostgRESTError,
   _resetDrainLock,
 } from '../../../src/bus/rgos-mirror.js';
 import type { Task, InboxMessage } from '../../../src/types/index.js';
@@ -1266,5 +1267,219 @@ describe('rgos-mirror — FK constraint retry (23503)', () => {
 
     // Only 1 call — no FK retry for orch_tasks
     expect(calls).toHaveLength(1);
+  });
+});
+
+// ── P2: 4xx permanent error classification (scenario 17) ────────────────────
+
+describe('rgos-mirror — permanent 4xx: discard without retry', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-4xx-'));
+    setMirrorEnv(tmpDir);
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+    _resetDrainLock();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('PostgRESTError.isPermanent is true for 400, 403, 422', () => {
+    for (const status of [400, 403, 422]) {
+      const err = new PostgRESTError(status, true, `HTTP ${status}`);
+      expect(err.isPermanent).toBe(true);
+      expect(err.status).toBe(status);
+    }
+  });
+
+  it('PostgRESTError.isPermanent is false for 500, 503, 409', () => {
+    for (const status of [500, 503, 409]) {
+      const err = new PostgRESTError(status, false, `HTTP ${status}`);
+      expect(err.isPermanent).toBe(false);
+    }
+  });
+
+  it('mirrorTaskToRgos: HTTP 400 → discards, no retry queue entry', async () => {
+    mockFetchHttpError(400, '{"message":"malformed request"}');
+    const task = makeTask();
+    await mirrorTaskToRgos(task, 'create');
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(false);
+  });
+
+  it('mirrorTaskToRgos: HTTP 403 → discards, no retry queue entry', async () => {
+    mockFetchHttpError(403, '{"message":"Forbidden"}');
+    const task = makeTask();
+    await mirrorTaskToRgos(task, 'create');
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(false);
+  });
+
+  it('mirrorTaskToRgos: HTTP 422 → discards, no retry queue entry', async () => {
+    mockFetchHttpError(422, '{"code":"23514","message":"constraint violation"}');
+    const task = makeTask();
+    await mirrorTaskToRgos(task, 'create');
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(false);
+  });
+
+  it('mirrorMessageToRgos: HTTP 400 → discards, no retry queue entry', async () => {
+    mockFetchHttpError(400, '{"message":"bad payload"}');
+    const msg = makeMessage();
+    await mirrorMessageToRgos(msg);
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(false);
+  });
+
+  it('mirrorMessageToRgos: HTTP 422 → discards, no retry queue entry', async () => {
+    mockFetchHttpError(422, '{"code":"23514","message":"enum violation"}');
+    const msg = makeMessage();
+    await mirrorMessageToRgos(msg);
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(false);
+  });
+
+  it('mirrorTaskToRgos: HTTP 500 still enqueues for retry (transient)', async () => {
+    mockFetchHttpError(500, 'Internal Server Error');
+    const task = makeTask();
+    await mirrorTaskToRgos(task, 'create');
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(true);
+    expect(readRetryQueue(qPath)).toHaveLength(1);
+  });
+});
+
+// ── P2: drain with 4xx entries (scenario 18) ────────────────────────────────
+
+describe('rgos-mirror — drain: 4xx entries are discarded not re-queued', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-drain4xx-'));
+    setMirrorEnv(tmpDir);
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+    _resetDrainLock();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('drain: permanent 422 entry is discarded, queue is cleared', async () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_bad_enum') }, ts: '2026-04-27T00:00:00Z' });
+
+    mockFetchHttpError(422, '{"code":"23514","message":"invalid enum"}');
+    await drainRetryQueue();
+
+    // Entry was discarded — queue should be empty
+    expect(readRetryQueue(qPath)).toHaveLength(0);
+  });
+
+  it('drain: mixed queue — 422 discarded, 500 re-queued, success cleared', async () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_ok') }, ts: '2026-04-27T00:00:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_422') }, ts: '2026-04-27T00:00:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_500') }, ts: '2026-04-27T00:00:00Z' });
+
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: true, text: async () => '' })                          // task_ok → success
+      .mockResolvedValueOnce({ ok: false, status: 422, text: async () => '{"code":"23514"}' }) // task_422 → permanent
+      .mockResolvedValueOnce({ ok: false, status: 500, text: async () => 'DB error' }),  // task_500 → transient
+    );
+
+    await drainRetryQueue();
+
+    // Only task_500 should remain
+    const remaining = readRetryQueue(qPath);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].row.id).toBe(uuidv5('task_500'));
+  });
+});
+
+// ── P2: drain summary log (scenario 19) ─────────────────────────────────────
+
+describe('rgos-mirror — drain summary log', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-summary-'));
+    setMirrorEnv(tmpDir);
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+    _resetDrainLock();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('logs drain summary with correct counts on full success', async () => {
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_a') }, ts: '2026-04-27T00:00:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_b') }, ts: '2026-04-27T00:00:00Z' });
+    mockFetchOk();
+
+    const logSpy = vi.spyOn(console, 'log');
+    await drainRetryQueue();
+
+    const summaryCall = logSpy.mock.calls.find(c => String(c[0]).includes('drain complete'));
+    expect(summaryCall).toBeDefined();
+    const msg = String(summaryCall![0]);
+    expect(msg).toContain('queued=2');
+    expect(msg).toContain('pushed=2');
+    expect(msg).toContain('requeued=0');
+    expect(msg).toContain('discarded=0');
+    logSpy.mockRestore();
+  });
+
+  it('logs drain summary with requeued count when transient failures occur', async () => {
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_ok') }, ts: '2026-04-27T00:00:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_fail') }, ts: '2026-04-27T00:00:00Z' });
+
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: true, text: async () => '' })
+      .mockRejectedValueOnce(new Error('network timeout')),
+    );
+
+    const logSpy = vi.spyOn(console, 'log');
+    await drainRetryQueue();
+
+    const summaryCall = logSpy.mock.calls.find(c => String(c[0]).includes('drain complete'));
+    expect(summaryCall).toBeDefined();
+    const msg = String(summaryCall![0]);
+    expect(msg).toContain('queued=2');
+    expect(msg).toContain('pushed=1');
+    expect(msg).toContain('requeued=1');
+    expect(msg).toContain('discarded=0');
+    logSpy.mockRestore();
+  });
+
+  it('logs drain summary with discarded count when permanent errors occur', async () => {
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_ok') }, ts: '2026-04-27T00:00:00Z' });
+    enqueueRetry({ table: 'orch_tasks', row: { id: uuidv5('task_422') }, ts: '2026-04-27T00:00:00Z' });
+
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({ ok: true, text: async () => '' })
+      .mockResolvedValueOnce({ ok: false, status: 422, text: async () => '{"code":"23514"}' }),
+    );
+
+    const logSpy = vi.spyOn(console, 'log');
+    await drainRetryQueue();
+
+    const summaryCall = logSpy.mock.calls.find(c => String(c[0]).includes('drain complete'));
+    expect(summaryCall).toBeDefined();
+    const msg = String(summaryCall![0]);
+    expect(msg).toContain('queued=2');
+    expect(msg).toContain('pushed=1');
+    expect(msg).toContain('requeued=0');
+    expect(msg).toContain('discarded=1');
+    logSpy.mockRestore();
   });
 });
