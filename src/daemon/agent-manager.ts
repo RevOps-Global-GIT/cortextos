@@ -383,7 +383,6 @@ export class AgentManager {
             const relImagePath = toRel(media.image_path);
             const relFilePath = toRel(media.file_path);
 
-            log(`[DEBUG] media.type=${media.type} image_path=${JSON.stringify(relImagePath)} file_path=${JSON.stringify(relFilePath)}`);
             let formatted: string;
             if (media.type === 'photo') {
               formatted = FastChecker.formatTelegramPhotoMessage(from, effectiveChatId, media.text, relImagePath);
