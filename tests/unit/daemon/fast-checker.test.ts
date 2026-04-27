@@ -16,7 +16,7 @@ import { tmpdir } from 'os';
 import { FastChecker } from '../../../src/daemon/fast-checker';
 import type { BusPaths, TelegramCallbackQuery } from '../../../src/types';
 import { listTasks } from '../../../src/bus/task';
-import { mirrorTaskToRgos } from '../../../src/bus/rgos-mirror';
+import { mirrorTaskToRgos, drainRetryQueue, isEnabled as isMirrorEnabled } from '../../../src/bus/rgos-mirror';
 
 // Minimal mock for AgentProcess
 function createMockAgent(name = 'test-agent') {
@@ -1052,5 +1052,67 @@ describe('FastChecker.backfillInProgressTasks', () => {
       expect.objectContaining({ taskDir: paths.taskDir }),
       { status: 'in_progress' },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FastChecker boot drain
+// ---------------------------------------------------------------------------
+
+describe('FastChecker boot drain', () => {
+  // start() is async and awaits waitForBootstrap() before calling drainRetryQueue.
+  // We use fake timers + advanceTimersByTimeAsync to flush the microtask queue
+  // and let the pre-loop section of start() execute before asserting.
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+
+  it('calls drainRetryQueue() on start() when mirror is enabled', async () => {
+    const testDir = mkdtempSync(join(tmpdir(), 'fc-boot-drain-test-'));
+    try {
+      const p = createTestPaths(testDir);
+      const agent = createMockAgent();
+      const drainSpy = vi.mocked(drainRetryQueue);
+      const enabledSpy = vi.mocked(isMirrorEnabled);
+
+      drainSpy.mockClear();
+      enabledSpy.mockImplementation(() => true);
+
+      const checker = new FastChecker(agent, p, '/tmp/framework');
+      checker.start();
+      // Advance 0ms to flush pending microtasks (bootstrap await resolves immediately
+      // since isBootstrapped() returns true — the await just yields to the microtask queue)
+      await vi.advanceTimersByTimeAsync(0);
+      checker.stop();
+      checker.wake();
+
+      expect(drainSpy).toHaveBeenCalledOnce();
+    } finally {
+      vi.mocked(isMirrorEnabled).mockImplementation(() => false);
+      rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not call drainRetryQueue() on start() when mirror is disabled', async () => {
+    const testDir = mkdtempSync(join(tmpdir(), 'fc-boot-drain-disabled-'));
+    try {
+      const p = createTestPaths(testDir);
+      const agent = createMockAgent();
+      const drainSpy = vi.mocked(drainRetryQueue);
+      const enabledSpy = vi.mocked(isMirrorEnabled);
+
+      drainSpy.mockClear();
+      enabledSpy.mockImplementation(() => false);
+
+      const checker = new FastChecker(agent, p, '/tmp/framework');
+      checker.start();
+      await vi.advanceTimersByTimeAsync(0);
+      checker.stop();
+      checker.wake();
+
+      expect(drainSpy).not.toHaveBeenCalled();
+    } finally {
+      rmSync(testDir, { recursive: true, force: true });
+    }
   });
 });
