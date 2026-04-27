@@ -1,4 +1,5 @@
 import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { atomicWriteSync } from '../utils/atomic.js';
 import { join, sep } from 'path';
 import { homedir } from 'os';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
@@ -954,7 +955,7 @@ export class AgentProcess implements ManagedAgent {
         }
       }
       ensureDir(join(this.env.ctxRoot, 'logs', this.name));
-      writeFileSync(crashFile, `${today}:${this.crashCount}`, 'utf-8');
+      atomicWriteSync(crashFile, `${today}:${this.crashCount}`);
     } catch { /* ignore */ }
   }
 
