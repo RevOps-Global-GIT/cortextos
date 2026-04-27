@@ -15,6 +15,7 @@
 
 import { createHash } from 'crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { atomicWriteSync } from '../utils/atomic.js';
 import { join } from 'path';
 import type { Task, InboxMessage } from '../types/index.js';
 
@@ -107,10 +108,7 @@ export function enqueueRetry(entry: RetryEntry): void {
       console.warn(`[bus-mirror] WARN: retry queue at cap (${RETRY_MAX}); evicting ${dropped} oldest entr${dropped === 1 ? 'y' : 'ies'} — data loss`);
       trimmed = existing.slice(existing.length - RETRY_MAX);
     }
-    writeFileSync(qPath, trimmed.map(e => JSON.stringify(e)).join('\n') + '\n', {
-      encoding: 'utf-8',
-      mode: 0o600,
-    });
+    atomicWriteSync(qPath, trimmed.map(e => JSON.stringify(e)).join('\n'));
   } catch {
     // Best-effort: never crash the caller over a retry queue write failure
   }
@@ -118,7 +116,7 @@ export function enqueueRetry(entry: RetryEntry): void {
 
 function clearRetryQueue(qPath: string): void {
   try {
-    writeFileSync(qPath, '', { encoding: 'utf-8', mode: 0o600 });
+    atomicWriteSync(qPath, '');
   } catch {
     // Best-effort
   }

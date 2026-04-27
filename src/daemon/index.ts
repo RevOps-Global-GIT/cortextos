@@ -5,7 +5,7 @@ import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 
 import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { homedir } from 'os';
-import { ensureDir } from '../utils/atomic.js';
+import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 
 // ---------------------------------------------------------------------------
 // Crash handling: turn silent daemon deaths into attributable, observable
@@ -50,7 +50,7 @@ export function readCrashHistory(ctxRoot: string): CrashHistory {
 export function writeCrashHistory(ctxRoot: string, history: CrashHistory): void {
   try {
     ensureDir(join(ctxRoot, 'state'));
-    writeFileSync(crashHistoryPath(ctxRoot), JSON.stringify(history, null, 2), 'utf-8');
+    atomicWriteSync(crashHistoryPath(ctxRoot), JSON.stringify(history, null, 2));
   } catch {
     // disk full / permission issue — don't block exit
     console.error('[daemon] Failed to persist crash history (non-fatal)');

@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, existsSync, writeFileSync, unlinkSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { atomicWriteSync } from '../utils/atomic.js';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { join } from 'path';
 import { createHash } from 'crypto';
@@ -616,7 +617,7 @@ export class FastChecker {
    */
   private saveUsageTier(): void {
     try {
-      writeFileSync(this.usageTierFile, JSON.stringify({ tier: this.usageTier, checkedAt: Date.now() }) + '\n', 'utf-8');
+      atomicWriteSync(this.usageTierFile, JSON.stringify({ tier: this.usageTier, checkedAt: Date.now() }));
     } catch {
       // Non-critical
     }
