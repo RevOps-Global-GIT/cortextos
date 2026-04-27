@@ -15,7 +15,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { spawnSync } from 'child_process';
-import { mkdtempSync, mkdirSync, readFileSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'fs';
 import { rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -278,6 +278,281 @@ describe('hook-context-status smoke', () => {
       expect(existsSync(statusFile)).toBe(false);
     } finally {
       cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 4: hook-compact-telegram
+// ---------------------------------------------------------------------------
+
+describe('hook-compact-telegram smoke', () => {
+  it('exits 0 silently when BOT_TOKEN / CHAT_ID are absent', () => {
+    // Base runHook env has no BOT_TOKEN or CHAT_ID — hook should no-op immediately.
+    const result = runHook(
+      'hook-compact-telegram',
+      {},
+      // Explicitly strip creds in case CI inherits them from process.env
+      { BOT_TOKEN: '', CHAT_ID: '' },
+    );
+
+    expect(result.exitCode).toBe(0);
+    // No JSON output expected — hook returns before writing anything
+    expect(result.output).toBeNull();
+  });
+
+  it('exits 0 even with fake credentials (network fail caught internally)', () => {
+    // Pass syntactically valid-looking but useless creds.
+    // fetch will throw or return non-2xx — hook catches all errors and still exits 0.
+    const result = runHook(
+      'hook-compact-telegram',
+      {},
+      { BOT_TOKEN: 'fake_bot_token_for_test', CHAT_ID: '000000000' },
+    );
+
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 5: hook-idle-flag
+// ---------------------------------------------------------------------------
+
+describe('hook-idle-flag smoke', () => {
+  it('writes last_idle.flag with a Unix timestamp at the correct path', () => {
+    const tmpHome = mkdtempSync(join(tmpdir(), 'ctx-idle-flag-'));
+    try {
+      const before = Math.floor(Date.now() / 1000);
+
+      const result = runHook(
+        'hook-idle-flag',
+        {},
+        {
+          CTX_AGENT_NAME: 'test-agent',
+          CTX_INSTANCE_ID: 'default',
+          HOME: tmpHome,
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+
+      const flagPath = join(tmpHome, '.cortextos', 'default', 'state', 'test-agent', 'last_idle.flag');
+      expect(existsSync(flagPath)).toBe(true);
+
+      const ts = parseInt(readFileSync(flagPath, 'utf-8').trim(), 10);
+      const after = Math.floor(Date.now() / 1000);
+      expect(ts).toBeGreaterThanOrEqual(before);
+      expect(ts).toBeLessThanOrEqual(after);
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 0 silently when CTX_AGENT_NAME is missing', () => {
+    const result = runHook(
+      'hook-idle-flag',
+      {},
+      // Override to remove the default CTX_AGENT_NAME set by runHook's base env
+      { CTX_AGENT_NAME: '' },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 6: hook-crash-alert
+// ---------------------------------------------------------------------------
+
+describe('hook-crash-alert smoke', () => {
+  it('exits 0 and appends to crashes.log (plain crash, no Telegram creds)', () => {
+    // hook-crash-alert uses homedir() not CTX_ROOT — redirect HOME to temp dir.
+    const tmpHome = mkdtempSync(join(tmpdir(), 'ctx-crash-alert-'));
+    try {
+      const result = runHook(
+        'hook-crash-alert',
+        {},
+        {
+          CTX_AGENT_NAME: 'test-agent',
+          CTX_INSTANCE_ID: 'default',
+          HOME: tmpHome,
+          // No BOT_TOKEN / CHAT_ID — Telegram skipped, log still written
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+
+      const crashLog = join(tmpHome, '.cortextos', 'default', 'logs', 'test-agent', 'crashes.log');
+      expect(existsSync(crashLog)).toBe(true);
+      const content = readFileSync(crashLog, 'utf-8');
+      // No marker files → endType defaults to 'crash'
+      expect(content).toMatch(/type=crash/);
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('reads .user-stop marker and uses endType=user-stop in crashes.log', () => {
+    const tmpHome = mkdtempSync(join(tmpdir(), 'ctx-crash-alert-stop-'));
+    try {
+      // Pre-create the state dir and drop a .user-stop marker
+      const stateDir = join(tmpHome, '.cortextos', 'default', 'state', 'test-agent');
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(join(stateDir, '.user-stop'), 'stopped via cortextos stop', 'utf-8');
+
+      const result = runHook(
+        'hook-crash-alert',
+        {},
+        {
+          CTX_AGENT_NAME: 'test-agent',
+          CTX_INSTANCE_ID: 'default',
+          HOME: tmpHome,
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+
+      const crashLog = join(tmpHome, '.cortextos', 'default', 'logs', 'test-agent', 'crashes.log');
+      expect(existsSync(crashLog)).toBe(true);
+      const content = readFileSync(crashLog, 'utf-8');
+      expect(content).toMatch(/type=user-stop/);
+      // Marker file should be consumed (deleted) by the hook
+      expect(existsSync(join(stateDir, '.user-stop'))).toBe(false);
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 7: hook-session-restore
+// ---------------------------------------------------------------------------
+
+describe('hook-session-restore smoke', () => {
+  it('exits 0 silently when source is not compact (startup)', () => {
+    const { ctxRoot, cleanup } = makeTempRoot();
+    try {
+      const result = runHook(
+        'hook-session-restore',
+        { session_id: 'test-session', source: 'startup' },
+        { CTX_ROOT: ctxRoot, CTX_AGENT_NAME: 'test-agent' },
+      );
+
+      expect(result.exitCode).toBe(0);
+      // No additionalContext output expected — non-compact source is a no-op
+      expect(result.output).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('outputs additionalContext when source=compact and recent facts exist', () => {
+    const { ctxRoot, stateDir, cleanup } = makeTempRoot();
+    try {
+      // Create facts directory and write a recent JSONL entry
+      const factsDir = join(stateDir, 'memory', 'facts');
+      mkdirSync(factsDir, { recursive: true });
+      const today = new Date().toISOString().slice(0, 10);
+      const factsFile = join(factsDir, `${today}.jsonl`);
+      const entry = {
+        ts: new Date().toISOString(),
+        session_id: 'prev-session',
+        agent: 'test-agent',
+        org: 'test-org',
+        source: 'precompact',
+        summary: 'Shipped PR #29 (drain-mirror smoke tests). Suite 1101/1101.',
+        keywords: ['drain-mirror', 'smoke-tests'],
+      };
+      writeFileSync(factsFile, JSON.stringify(entry) + '\n', 'utf-8');
+
+      const result = runHook(
+        'hook-session-restore',
+        { session_id: 'new-session', source: 'compact' },
+        { CTX_ROOT: ctxRoot, CTX_AGENT_NAME: 'test-agent' },
+      );
+
+      expect(result.exitCode).toBe(0);
+      const hookOut = result.output?.hookSpecificOutput as Record<string, unknown> | undefined;
+      expect(hookOut?.hookEventName).toBe('SessionStart');
+      expect(typeof hookOut?.additionalContext).toBe('string');
+      expect(hookOut?.additionalContext as string).toMatch(/Context from Previous Session/);
+      expect(hookOut?.additionalContext as string).toMatch(/drain-mirror/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('exits 0 silently when source=compact but no facts file exists', () => {
+    const { ctxRoot, cleanup } = makeTempRoot();
+    try {
+      // No facts dir or file — hook should no-op and exit 0
+      const result = runHook(
+        'hook-session-restore',
+        { session_id: 'new-session', source: 'compact' },
+        { CTX_ROOT: ctxRoot, CTX_AGENT_NAME: 'test-agent' },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 8: hook-skill-telemetry
+// ---------------------------------------------------------------------------
+
+describe('hook-skill-telemetry smoke', () => {
+  it('exits 0 silently when tool_name is not Skill', () => {
+    const result = runHook(
+      'hook-skill-telemetry',
+      { tool_name: 'Read', tool_input: { file_path: '/tmp/test.txt' } },
+    );
+
+    expect(result.exitCode).toBe(0);
+    // Non-Skill tool → immediate return, no stderr output
+    expect(result.stderr).toBe('');
+  });
+
+  it('exits 0 with a skip message when no .env is found', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'ctx-skill-telemetry-'));
+    try {
+      const result = runHook(
+        'hook-skill-telemetry',
+        { tool_name: 'Skill', tool_input: { skill: 'memory' } },
+        { CTX_AGENT_DIR: tmpDir }, // dir exists but has no .env file
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toMatch(/no .env found/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits 0 with a skip message when skill slug is missing from tool_input', () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), 'ctx-skill-telemetry-slug-'));
+    try {
+      // Create a .env with credentials so we get past the creds check
+      writeFileSync(
+        join(tmpDir, '.env'),
+        'SUPABASE_RGOS_URL=https://example.supabase.co\nSUPABASE_RGOS_SERVICE_KEY=test-key\n',
+        'utf-8',
+      );
+
+      const result = runHook(
+        'hook-skill-telemetry',
+        { tool_name: 'Skill', tool_input: {} }, // no 'skill' key
+        { CTX_AGENT_DIR: tmpDir },
+      );
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).toMatch(/no skill slug/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });
