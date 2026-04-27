@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { join } from 'path';
 import { homedir } from 'os';
