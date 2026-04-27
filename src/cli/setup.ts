@@ -24,17 +24,12 @@ function ask(iface: Interface, question: string): Promise<string> {
   return new Promise(resolve => iface.question(question, answer => resolve(answer.trim())));
 }
 
-function askRequired(iface: Interface, question: string, errorMsg: string): Promise<string> {
-  return new Promise(async resolve => {
-    while (true) {
-      const answer = await ask(iface, question);
-      if (answer) {
-        resolve(answer);
-        return;
-      }
-      console.log(`  ${errorMsg}`);
-    }
-  });
+async function askRequired(iface: Interface, question: string, errorMsg: string): Promise<string> {
+  while (true) {
+    const answer = await ask(iface, question);
+    if (answer) return answer;
+    console.log(`  ${errorMsg}`);
+  }
 }
 
 function askDefault(iface: Interface, question: string, defaultVal: string): Promise<string> {
