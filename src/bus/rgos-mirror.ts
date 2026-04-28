@@ -49,6 +49,7 @@ export function isUuid(s: string): boolean {
 
 const ORG_ID = '00000000-0000-0000-0000-000000000001';
 const RETRY_MAX = 500;
+export const EVENT_RETRY_MAX = 3;
 const MIRROR_SOURCE = 'cortextos_bus_mirror';
 
 // Module-level drain lock — prevents parallel drain loops from stacking.
@@ -70,9 +71,10 @@ export function isEnabled(): boolean {
 // ---------------------------------------------------------------------------
 
 export interface RetryEntry {
-  table: 'orch_tasks' | 'cortex_messages';
+  table: 'orch_tasks' | 'cortex_messages' | 'orch_events';
   row: Record<string, unknown>;
   ts: string;
+  retries_remaining?: number;
 }
 
 export function retryQueuePath(): string | null {
@@ -153,7 +155,7 @@ export class PostgRESTError extends Error {
 // ---------------------------------------------------------------------------
 
 async function postgrestUpsert(
-  table: 'orch_tasks' | 'cortex_messages',
+  table: 'orch_tasks' | 'cortex_messages' | 'orch_events',
   row: Record<string, unknown>,
 ): Promise<void> {
   const url = process.env.SUPABASE_RGOS_URL!;
@@ -239,6 +241,14 @@ export async function drainRetryQueue(): Promise<void> {
     let countDiscarded = 0;
 
     for (const entry of entries) {
+      // Event entries carry a retry cap — discard when exhausted so stale events
+      // do not clog the queue during extended outages (tasks/messages are unaffected).
+      if (entry.retries_remaining !== undefined && entry.retries_remaining <= 0) {
+        console.warn(`[bus-mirror] drain: event retry cap reached on ${entry.table} — discarding entry`);
+        countDiscarded++;
+        continue;
+      }
+
       try {
         await postgrestUpsert(entry.table, entry.row);
         countProcessed++;
@@ -249,7 +259,11 @@ export async function drainRetryQueue(): Promise<void> {
           countDiscarded++;
         } else {
           console.error(`[bus-mirror] drain: ${entry.table} upsert failed — will re-queue: ${err instanceof Error ? err.message : String(err)}`);
-          failed.push(entry);
+          // Decrement retries_remaining for event entries; leave undefined for tasks/messages.
+          const requeueEntry: RetryEntry = entry.retries_remaining !== undefined
+            ? { ...entry, retries_remaining: entry.retries_remaining - 1 }
+            : entry;
+          failed.push(requeueEntry);
         }
       }
     }
@@ -551,6 +565,48 @@ export async function mirrorMessageToRgos(msg: InboxMessage): Promise<void> {
     } else {
       console.warn(`[bus-mirror] cortex_messages upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
       enqueueRetry({ table: 'cortex_messages', row, ts: new Date().toISOString() });
+    }
+  }
+}
+
+/**
+ * Mirror a bus log-event call to Supabase orch_events. Fire-and-forget.
+ * Events are observability data — lower durability priority than tasks/messages.
+ * Retry cap: EVENT_RETRY_MAX (3) so stale events do not clog the queue on outages.
+ */
+export async function mirrorEventToRgos(event: {
+  id: string;
+  agent: string;
+  org: string;
+  timestamp: string;
+  category: string;
+  event: string;
+  severity: string;
+  metadata: Record<string, unknown>;
+}): Promise<void> {
+  if (!isEnabled()) return;
+  const taskId =
+    typeof event.metadata.task_id === 'string' && isUuid(event.metadata.task_id)
+      ? (event.metadata.task_id as string)
+      : null;
+  const row = {
+    id: uuidv5(event.id),
+    org_id: ORG_ID,
+    event_type: `${event.category}/${event.event}`,
+    agent_id: event.agent,
+    task_id: taskId,
+    message: event.event,
+    metadata: event.metadata,
+  };
+  try {
+    await postgrestUpsert('orch_events', row);
+    setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (event):', err)));
+  } catch (err) {
+    if (err instanceof PostgRESTError && err.isPermanent) {
+      console.error(`[bus-mirror] orch_events upsert permanent error (HTTP ${err.status}) — discarding: ${err.message}`);
+    } else {
+      console.warn(`[bus-mirror] orch_events upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
+      enqueueRetry({ table: 'orch_events', row, ts: new Date().toISOString(), retries_remaining: EVENT_RETRY_MAX });
     }
   }
 }
