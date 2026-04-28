@@ -592,11 +592,11 @@ export async function mirrorEventToRgos(event: {
   const row = {
     id: uuidv5(event.id),
     org_id: ORG_ID,
-    event_type: `${event.category}/${event.event}`,
+    event_type: event.event,
     agent_id: event.agent,
     task_id: taskId,
     message: event.event,
-    metadata: event.metadata,
+    metadata: { ...event.metadata, category: event.category },
   };
   try {
     await postgrestUpsert('orch_events', row);
