@@ -5,29 +5,19 @@ import { tmpdir } from 'os';
 import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, findTaskFile } from '../../../src/bus/task';
 import { acquireLock, releaseLock } from '../../../src/utils/lock';
 import type { BusPaths } from '../../../src/types';
+import { makeTempDir, removeTempDir, makeBusPaths } from '../../setup';
 
 describe('Task Management', () => {
   let testDir: string;
   let paths: BusPaths;
 
   beforeEach(() => {
-    testDir = mkdtempSync(join(tmpdir(), 'cortextos-task-test-'));
-    paths = {
-      ctxRoot: testDir,
-      inbox: join(testDir, 'inbox', 'paul'),
-      inflight: join(testDir, 'inflight', 'paul'),
-      processed: join(testDir, 'processed', 'paul'),
-      logDir: join(testDir, 'logs', 'paul'),
-      stateDir: join(testDir, 'state', 'paul'),
-      taskDir: join(testDir, 'tasks'),
-      approvalDir: join(testDir, 'approvals'),
-      analyticsDir: join(testDir, 'analytics'),
-      heartbeatDir: join(testDir, 'heartbeats'),
-    };
+    testDir = makeTempDir('cortextos-task-test-');
+    paths = makeBusPaths(testDir, 'paul');
   });
 
   afterEach(() => {
-    rmSync(testDir, { recursive: true, force: true });
+    removeTempDir(testDir);
   });
 
   describe('createTask', () => {

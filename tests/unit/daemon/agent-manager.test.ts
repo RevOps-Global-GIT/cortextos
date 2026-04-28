@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { buildReplyContext } from '../../../src/daemon/agent-manager.js';
+import { makeTempDir, removeTempDir } from '../../setup';
 
 // Mock the PTY layer so we don't load native bindings or spawn real processes.
 // AgentManager → AgentProcess → AgentPTY → node-pty. We mock at AgentProcess.
@@ -52,7 +53,7 @@ describe('AgentManager.discoverAndStart - BUG-028 fix', () => {
   let frameworkRoot: string;
 
   beforeEach(() => {
-    testDir = mkdtempSync(join(tmpdir(), 'cortextos-am-test-'));
+    testDir = makeTempDir('cortextos-am-test-');
     ctxRoot = join(testDir, 'instance');
     frameworkRoot = join(testDir, 'framework');
     mkdirSync(join(ctxRoot, 'config'), { recursive: true });
@@ -61,7 +62,7 @@ describe('AgentManager.discoverAndStart - BUG-028 fix', () => {
   });
 
   afterEach(() => {
-    rmSync(testDir, { recursive: true, force: true });
+    removeTempDir(testDir);
   });
 
   it('skips agents marked enabled: false in enabled-agents.json', async () => {
