@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
+import { SignJWT } from 'jose';
 import { db } from '@/lib/db';
 import type { User } from '@/lib/types';
 import { checkRateLimit, resetRateLimit } from '@/lib/rate-limit';
@@ -65,11 +65,11 @@ export async function POST(request: NextRequest) {
     resetRateLimit(ip);
 
     // Generate JWT
-    const token = jwt.sign(
-      { sub: String(user.id), name: user.username },
-      JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    const secret = new TextEncoder().encode(JWT_SECRET);
+    const token = await new SignJWT({ sub: String(user.id), name: user.username })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setExpirationTime('30d')
+      .sign(secret);
 
     return Response.json({
       token,
