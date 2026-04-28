@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { Heartbeat, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import { mirrorEventToRgos } from './rgos-mirror.js';
 
 /**
  * Update heartbeat for the current agent.
@@ -34,6 +35,21 @@ export function updateHeartbeat(
     join(paths.stateDir, 'heartbeat.json'),
     JSON.stringify(heartbeat),
   );
+
+  // Fire-and-forget mirror to Supabase orch_events. Never awaited — local file is authoritative.
+  const eventId = `${Math.floor(Date.now() / 1000)}-${agentName}-hb`;
+  setImmediate(() => {
+    mirrorEventToRgos({
+      id: eventId,
+      agent: agentName,
+      org: heartbeat.org,
+      timestamp: ts,
+      category: 'heartbeat',
+      event: 'agent_heartbeat',
+      severity: 'info',
+      metadata: { status, mode, loop_interval: heartbeat.loop_interval, current_task: heartbeat.current_task },
+    }).catch(() => undefined);
+  });
 }
 
 /**
