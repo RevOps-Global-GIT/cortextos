@@ -4,6 +4,7 @@ import type { EventCategory, EventSeverity, BusPaths } from '../types/index.js';
 import { ensureDir } from '../utils/atomic.js';
 import { randomString } from '../utils/random.js';
 import { validateEventCategory, validateEventSeverity, isValidJson } from '../utils/validate.js';
+import { mirrorEventToRgos } from './rgos-mirror.js';
 
 /**
  * Log a structured event. Appends JSONL line to daily event file.
@@ -54,4 +55,9 @@ export function logEvent(
   });
 
   appendFileSync(join(eventsDir, `${today}.jsonl`), eventLine + '\n', 'utf-8');
+
+  // Fire-and-forget mirror to Supabase orch_events. Never awaited — local JSONL is authoritative.
+  setImmediate(() => {
+    mirrorEventToRgos({ id: eventId, agent: agentName, org, timestamp, category, event: eventName, severity, metadata: meta }).catch(() => undefined);
+  });
 }
