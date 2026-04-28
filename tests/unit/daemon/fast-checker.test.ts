@@ -7,6 +7,7 @@ vi.mock('../../../src/bus/task', async (importOriginal) => {
 });
 vi.mock('../../../src/bus/rgos-mirror', () => ({
   mirrorTaskToRgos: vi.fn().mockResolvedValue(undefined),
+  mirrorApprovalToRgos: vi.fn().mockResolvedValue(undefined),
   drainRetryQueue: vi.fn().mockResolvedValue(undefined),
   isEnabled: vi.fn().mockReturnValue(false),
 }));
