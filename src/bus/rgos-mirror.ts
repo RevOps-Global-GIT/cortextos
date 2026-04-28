@@ -610,3 +610,51 @@ export async function mirrorEventToRgos(event: {
     }
   }
 }
+
+/**
+ * Mirror an approval lifecycle event to Supabase orch_events. Fire-and-forget.
+ * Provides an audit trail for trust-boundary decisions.
+ * WRITE-ONLY to Supabase — local approval files remain authoritative for allow/deny.
+ */
+export async function mirrorApprovalToRgos(approval: {
+  id: string;
+  title: string;
+  requesting_agent: string;
+  org: string;
+  category: string;
+  status: string;
+  description?: string;
+  resolved_by?: string | null;
+}, busEvent: 'approval_created' | 'approval_resolved'): Promise<void> {
+  if (!isEnabled()) return;
+  const eventId = uuidv5(`${approval.id}_${busEvent}`);
+  const row = {
+    id: eventId,
+    org_id: ORG_ID,
+    event_type: 'agent_message',
+    agent_id: approval.requesting_agent,
+    task_id: null,
+    message: busEvent,
+    metadata: {
+      bus_event: busEvent,
+      approval_id: approval.id,
+      category: approval.category,
+      title: approval.title,
+      status: approval.status,
+      description: approval.description ?? null,
+      resolved_by: approval.resolved_by ?? null,
+      org: approval.org,
+    },
+  };
+  try {
+    await postgrestUpsert('orch_events', row);
+    setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (approval):', err)));
+  } catch (err) {
+    if (err instanceof PostgRESTError && err.isPermanent) {
+      console.error(`[bus-mirror] orch_events approval upsert permanent error (HTTP ${err.status}) — discarding: ${err.message}`);
+    } else {
+      console.warn(`[bus-mirror] orch_events approval upsert failed — queuing: ${err instanceof Error ? err.message : String(err)}`);
+      enqueueRetry({ table: 'orch_events', row, ts: new Date().toISOString(), retries_remaining: EVENT_RETRY_MAX });
+    }
+  }
+}

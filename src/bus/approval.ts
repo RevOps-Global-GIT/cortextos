@@ -5,6 +5,7 @@ import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { randomString } from '../utils/random.js';
 import { validateApprovalCategory } from '../utils/validate.js';
 import { sendMessage } from './message.js';
+import { mirrorApprovalToRgos } from './rgos-mirror.js';
 import { postActivity } from './system.js';
 
 /**
@@ -145,6 +146,11 @@ export async function createApproval(
   ensureDir(pendingDir);
   atomicWriteSync(join(pendingDir, `${approvalId}.json`), JSON.stringify(approval));
 
+  // Fire-and-forget mirror to Supabase orch_events. Write-only — local file is authoritative.
+  setImmediate(() => {
+    mirrorApprovalToRgos(approval, 'approval_created').catch(() => undefined);
+  });
+
   // Fan-out to the activity channel so the operator can approve/deny from
   // Telegram without opening the dashboard. AWAITED so short-lived CLI callers do
   // not exit before the Telegram post fetch completes. Errors are
@@ -182,6 +188,11 @@ export function updateApproval(
     const destDir = join(paths.approvalDir, 'resolved');
     ensureDir(destDir);
     atomicWriteSync(join(destDir, `${approvalId}.json`), JSON.stringify(approval));
+
+    // Fire-and-forget mirror to Supabase orch_events. Write-only — local file is authoritative.
+    setImmediate(() => {
+      mirrorApprovalToRgos(approval, 'approval_resolved').catch(() => undefined);
+    });
 
     // Notify requesting agent via inbox BEFORE removing from pending.
     //
