@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDownIcon } from 'lucide-react';
+import { IconChevronDown } from '@tabler/icons-react';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -210,7 +210,7 @@ export function SkillCard({ skill, agents, onRefresh }: SkillCardProps) {
                 <span className={cn('truncate text-left', selected.size === 0 && 'text-muted-foreground')}>
                   {triggerLabel}
                 </span>
-                <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground" />
+                <IconChevronDown className="size-4 shrink-0 text-muted-foreground" />
               </button>
               {open && mounted && panelRect && createPortal(
                 <div
