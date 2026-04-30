@@ -592,7 +592,7 @@ export async function mirrorEventToRgos(event: {
   const row = {
     id: uuidv5(event.id),
     org_id: ORG_ID,
-    event_type: 'agent_message',
+    event_type: event.category,
     agent_id: event.agent,
     task_id: taskId,
     message: event.event,
