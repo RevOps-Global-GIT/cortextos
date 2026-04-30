@@ -11,8 +11,8 @@
  *   - Fire-and-forget mirrorEventToRgos is called (never throws)
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'fs';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import type { BusPaths } from '../../../src/types/index';
@@ -253,6 +253,7 @@ describe('logEvent — mirrorEventToRgos', () => {
 });
 
 describe('logEvent — heartbeat refresh side-effect', () => {
+  beforeEach(() => { mkdirSync(paths.stateDir, { recursive: true }); });
   afterEach(cleanup);
 
   it('bumps last_heartbeat on an existing heartbeat.json without overwriting other fields', async () => {
