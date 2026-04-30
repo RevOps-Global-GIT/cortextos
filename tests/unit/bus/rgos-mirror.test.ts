@@ -32,6 +32,7 @@ import { tmpdir } from 'os';
 import {
   mirrorTaskToRgos,
   mirrorMessageToRgos,
+  mirrorEventToRgos,
   drainRetryQueue,
   enqueueRetry,
   readRetryQueue,
@@ -1481,5 +1482,277 @@ describe('rgos-mirror — drain summary log', () => {
     expect(msg).toContain('requeued=0');
     expect(msg).toContain('discarded=1');
     logSpy.mockRestore();
+  });
+});
+
+// ── mirrorEventToRgos — full coverage ────────────────────────────────────────
+
+const ORG_ID_FIXED = '00000000-0000-0000-0000-000000000001';
+
+function makeEvent(overrides: Partial<{
+  id: string;
+  agent: string;
+  org: string;
+  timestamp: string;
+  category: string;
+  event: string;
+  severity: string;
+  metadata: Record<string, unknown>;
+}> = {}) {
+  return {
+    id: 'evt_test_001',
+    agent: 'dev',
+    org: 'revops-global',
+    timestamp: '2026-04-30T12:00:00.000Z',
+    category: 'action',
+    event: 'session_start',
+    severity: 'info',
+    metadata: {},
+    ...overrides,
+  };
+}
+
+describe('rgos-mirror — mirrorEventToRgos', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-event-'));
+    setMirrorEnv(tmpDir);
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+    _resetDrainLock();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // ── Happy path ─────────────────────────────────────────────────────────────
+
+  it('upserts orch_events with correct row shape', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const evt = makeEvent({ id: 'evt_abc', agent: 'dev', category: 'action', event: 'session_start' });
+    await mirrorEventToRgos(evt);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toContain('/rest/v1/orch_events');
+
+    const body = JSON.parse(options.body as string);
+    expect(body.id).toMatch(UUID_V5_RE);
+    expect(body.id).toBe(uuidv5('evt_abc'));
+    expect(body.org_id).toBe(ORG_ID_FIXED);
+    expect(body.agent_id).toBe('dev');
+    expect(body.message).toBe('session_start');
+  });
+
+  // ── CRITICAL: PR #41 regression guard ─────────────────────────────────────
+
+  it('sets event_type = event.category (not hardcoded agent_message)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorEventToRgos(makeEvent({ category: 'heartbeat', event: 'heartbeat' }));
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.event_type).toBe('heartbeat');
+    expect(body.event_type).not.toBe('agent_message');
+  });
+
+  it.each([
+    'action', 'error', 'metric', 'milestone', 'heartbeat',
+    'message', 'task', 'approval', 'agent_activity',
+  ] as const)('passes EventCategory "%s" through as event_type unchanged', async (category) => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorEventToRgos(makeEvent({ category }));
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.event_type).toBe(category);
+  });
+
+  // ── task_id extraction ─────────────────────────────────────────────────────
+
+  it('extracts task_id when metadata.task_id is a valid UUID', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const validUuid = '550e8400-e29b-41d4-a716-446655440000';
+    await mirrorEventToRgos(makeEvent({ metadata: { task_id: validUuid } }));
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.task_id).toBe(validUuid);
+  });
+
+  it('sets task_id = null when metadata.task_id is a non-UUID string', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorEventToRgos(makeEvent({ metadata: { task_id: 'task_1234567890_001' } }));
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.task_id).toBeNull();
+  });
+
+  it('sets task_id = null when metadata.task_id is absent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorEventToRgos(makeEvent({ metadata: {} }));
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.task_id).toBeNull();
+  });
+
+  // ── metadata enrichment ────────────────────────────────────────────────────
+
+  it('enriches metadata with category and bus_event fields', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorEventToRgos(makeEvent({
+      category: 'action',
+      event: 'task_completed',
+      metadata: { task_id: 'abc', extra: 'data' },
+    }));
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(body.metadata.category).toBe('action');
+    expect(body.metadata.bus_event).toBe('task_completed');
+    expect(body.metadata.task_id).toBe('abc');
+    expect(body.metadata.extra).toBe('data');
+  });
+
+  // ── Kill switch ────────────────────────────────────────────────────────────
+
+  it('no-ops when BUS_RGOS_MIRROR_DISABLED=1', async () => {
+    process.env.BUS_RGOS_MIRROR_DISABLED = '1';
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorEventToRgos(makeEvent());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('no-ops when SUPABASE_RGOS_URL is missing', async () => {
+    delete process.env.SUPABASE_RGOS_URL;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorEventToRgos(makeEvent());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // ── Network failure → retry queue ──────────────────────────────────────────
+
+  it('enqueues to retry with table=orch_events on network failure', async () => {
+    mockFetchFail('connection refused');
+
+    await mirrorEventToRgos(makeEvent({ id: 'evt_retry_me', category: 'heartbeat' }));
+
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const queue = readRetryQueue(qPath);
+    expect(queue).toHaveLength(1);
+    expect(queue[0].table).toBe('orch_events');
+    expect(queue[0].row.id).toBe(uuidv5('evt_retry_me'));
+    expect(queue[0].row.event_type).toBe('heartbeat');
+  });
+
+  it('retry entry respects EVENT_RETRY_MAX retries_remaining', async () => {
+    mockFetchFail('timeout');
+
+    await mirrorEventToRgos(makeEvent({ id: 'evt_cap_test' }));
+
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const queue = readRetryQueue(qPath);
+    expect(queue).toHaveLength(1);
+    expect(queue[0].retries_remaining).toBe(3); // EVENT_RETRY_MAX
+  });
+
+  // ── Permanent 4xx → discard ────────────────────────────────────────────────
+
+  it('discards without retry queue entry on permanent 4xx', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => '{"code":"23514","message":"new row violates check constraint"}',
+    }));
+
+    const errSpy = vi.spyOn(console, 'error');
+    await mirrorEventToRgos(makeEvent({ id: 'evt_permanent' }));
+
+    const queue = readRetryQueue(join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl'));
+    expect(queue).toHaveLength(0);
+    const errCall = errSpy.mock.calls.find(c => String(c[0]).includes('permanent error'));
+    expect(errCall).toBeDefined();
+    errSpy.mockRestore();
+  });
+
+  it('discards without retry queue entry on 422 (permanent)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      text: async () => '{"code":"23514","message":"invalid input"}',
+    }));
+
+    await mirrorEventToRgos(makeEvent({ id: 'evt_422' }));
+
+    const queue = readRetryQueue(join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl'));
+    expect(queue).toHaveLength(0);
+  });
+});
+
+// ── drainRetryQueue — orch_events table path (smoke) ────────────────────────
+
+describe('rgos-mirror — drainRetryQueue handles orch_events entries', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-drain-event-'));
+    setMirrorEnv(tmpDir);
+    mkdirSync(join(tmpDir, 'state', 'dev'), { recursive: true });
+    _resetDrainLock();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('successfully drains an orch_events retry entry', async () => {
+    enqueueRetry({
+      table: 'orch_events',
+      row: { id: uuidv5('evt_drain_01'), event_type: 'heartbeat', agent_id: 'dev' },
+      ts: '2026-04-30T00:00:00Z',
+    });
+
+    mockFetchOk();
+    await drainRetryQueue();
+
+    const remaining = readRetryQueue(join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl'));
+    expect(remaining).toHaveLength(0);
+  });
+
+  it('upserts to orch_events endpoint (not orch_tasks) when draining event entry', async () => {
+    enqueueRetry({
+      table: 'orch_events',
+      row: { id: uuidv5('evt_drain_02'), event_type: 'action', agent_id: 'dev' },
+      ts: '2026-04-30T00:00:00Z',
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    await drainRetryQueue();
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toContain('/rest/v1/orch_events');
+    expect(url).not.toContain('/rest/v1/orch_tasks');
   });
 });
