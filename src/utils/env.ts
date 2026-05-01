@@ -164,15 +164,3 @@ function parseEnvFile(filePath: string): Record<string, string> {
   return result;
 }
 
-/**
- * Source a .env file into process.env (for agent environment).
- */
-export function sourceEnvFile(filePath: string): void {
-  if (!existsSync(filePath)) return;
-  const vars = parseEnvFile(filePath);
-  for (const [key, value] of Object.entries(vars)) {
-    if (!process.env[key]) {
-      process.env[key] = value;
-    }
-  }
-}

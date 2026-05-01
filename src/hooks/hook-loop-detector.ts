@@ -40,7 +40,7 @@ export const PINGPONG_WINDOW = 12;
 export const PINGPONG_BLOCK = 14;
 
 /** Fraction of PINGPONG_WINDOW the two dominant tools must occupy to trigger. */
-export const PINGPONG_DOMINANCE = 0.8;
+const PINGPONG_DOMINANCE = 0.8;
 
 /**
  * Essential bus commands that must never be blocked by loop detection.
