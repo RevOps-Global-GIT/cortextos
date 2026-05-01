@@ -203,6 +203,8 @@ Defined in `config.json` under `crons` array. Set up once per session via `/loop
 
 Crons expire after 7 days. They are recreated from config.json on each session start — but only if you actively recreate them.
 
+**IMPORTANT:** CronCreate fires cron expressions in local timezone ($CTX_TIMEZONE = America/Los_Angeles), not UTC. `"0 7 * * 1-5"` = 7 AM PT (14:00 UTC). Always verify fire times against local clock, not UTC.
+
 ---
 
 ## Restart
