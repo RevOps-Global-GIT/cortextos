@@ -44,7 +44,7 @@ import type { Workflow, WorkflowStep } from '../types/workflow.js';
  *   - A `steps:` sequence of step objects
  *   - Multi-line prompt values via block scalar (|) or flow string ("...")
  */
-export function parseWorkflowYaml(content: string): Workflow {
+function parseWorkflowYaml(content: string): Workflow {
   const lines = content.split('\n');
   const result: Partial<Workflow> & { steps: WorkflowStep[] } = { steps: [] };
 

@@ -27,7 +27,7 @@ export interface CrashEvent { ts: string; err: string; }
 export interface CrashHistory { crashes: CrashEvent[]; lastAlertAt?: string; }
 
 export const CRASH_HISTORY_MAX = 20;
-export const CRASH_LOOP_WINDOW_MS = 15 * 60 * 1000;    // 15 min detection window
+const CRASH_LOOP_WINDOW_MS = 15 * 60 * 1000;    // 15 min detection window
 export const CRASH_LOOP_THRESHOLD = 3;                  // 3 crashes trips the alert
 export const CRASH_LOOP_COOLDOWN_MS = 30 * 60 * 1000;   // 30 min between alerts
 const TELEGRAM_SEND_TIMEOUT_MS = 3000;           // bounded — we're crashing

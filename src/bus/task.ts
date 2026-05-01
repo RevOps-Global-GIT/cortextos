@@ -358,7 +358,7 @@ export interface TaskAuditEntry {
  * Best-effort: a failing audit write never blocks the caller. The
  * audit log is an observability aid, not the source of truth.
  */
-export function appendTaskAudit(
+function appendTaskAudit(
   paths: BusPaths,
   taskId: string,
   entry: Omit<TaskAuditEntry, 'ts'>,
