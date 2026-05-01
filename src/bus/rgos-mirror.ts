@@ -18,6 +18,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { join } from 'path';
 import type { Task, InboxMessage } from '../types/index.js';
+import { escalateCritical } from '../utils/escalate.js';
 
 // ---------------------------------------------------------------------------
 // UUIDv5 — deterministic UUID from bus ID (RFC 4122 §4.3, stdlib only)
@@ -539,7 +540,7 @@ export async function mirrorTaskToRgos(
   try {
     await postgrestUpsert('orch_tasks', row);
     // Async drain: never await, never block the write path
-    setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (task):', err)));
+    setImmediate(() => drainRetryQueue().catch(err => escalateCritical('bus-mirror drain loop (task)', err, { queue: 'tasks' })));
   } catch (err) {
     if (err instanceof PostgRESTError && err.isPermanent) {
       console.error(`[bus-mirror] orch_tasks upsert permanent error (HTTP ${err.status}) — discarding (will not retry): ${err.message}`);
@@ -558,7 +559,7 @@ export async function mirrorMessageToRgos(msg: InboxMessage): Promise<void> {
   const row = buildMessageRow(msg);
   try {
     await postgrestUpsert('cortex_messages', row);
-    setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (message):', err)));
+    setImmediate(() => drainRetryQueue().catch(err => escalateCritical('bus-mirror drain loop (message)', err, { queue: 'messages' })));
   } catch (err) {
     if (err instanceof PostgRESTError && err.isPermanent) {
       console.error(`[bus-mirror] cortex_messages upsert permanent error (HTTP ${err.status}) — discarding (will not retry): ${err.message}`);
@@ -600,7 +601,7 @@ export async function mirrorEventToRgos(event: {
   };
   try {
     await postgrestUpsert('orch_events', row);
-    setImmediate(() => drainRetryQueue().catch(err => console.error('[bus-mirror] drain loop error (event):', err)));
+    setImmediate(() => drainRetryQueue().catch(err => escalateCritical('bus-mirror drain loop (event)', err, { queue: 'events' })));
   } catch (err) {
     if (err instanceof PostgRESTError && err.isPermanent) {
       console.error(`[bus-mirror] orch_events upsert permanent error (HTTP ${err.status}) — discarding: ${err.message}`);
