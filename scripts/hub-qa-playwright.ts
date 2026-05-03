@@ -32,9 +32,9 @@ const noSend     = argv.includes('--no-send');
 // Config — resolve paths relative to this file's location
 // ---------------------------------------------------------------------------
 const SCRIPT_DIR  = path.dirname(new URL(import.meta.url).pathname);
-const AGENT_ROOT  = path.resolve(SCRIPT_DIR, '..');
-const SECRETS_ENV = path.resolve(AGENT_ROOT, '../../secrets.env');
-const OUTPUT_DIR  = path.join(AGENT_ROOT, 'output', 'playwright-qa');
+const REPO_ROOT   = path.resolve(SCRIPT_DIR, '..');
+const SECRETS_ENV = path.resolve(REPO_ROOT, 'orgs/revops-global/secrets.env');
+const OUTPUT_DIR  = path.resolve(REPO_ROOT, 'orgs/revops-global/agents/codex/output/playwright-qa');
 const HUB_URL     = 'https://hub.revopsglobal.com';
 const SUPA_URL    = 'https://yyizocyaehmqrottmnaz.supabase.co';
 
