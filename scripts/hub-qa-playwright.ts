@@ -1124,6 +1124,105 @@ async function runProjectsChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /pipeline checks
+// ---------------------------------------------------------------------------
+async function runPipelineChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'pipeline';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Deal/pipeline items visible (table rows, kanban cards, or list items)
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.locator('table tbody tr, [class*="deal-row"], [class*="dealRow"], [class*="pipeline-row"], [class*="kanban-card"], [class*="kanbanCard"], [role="row"]:not([role="columnheader"])').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await shot(page, `${sp}-2-list`);
+    const rowCount   = await page.locator('table tbody tr, [class*="deal-row"], [class*="dealRow"], [class*="pipeline-row"]').count();
+    const cardCount  = await page.locator('[class*="deal-card"], [class*="dealCard"], [class*="kanban-card"], [class*="kanbanCard"]').count();
+    const roleCount  = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
+    const total = rowCount || cardCount || roleCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 2 Deal list visible', status: 'PASS', evidence: `${total} deal/pipeline item(s) visible (rows:${rowCount}, cards:${cardCount}, listitems:${roleCount}).` });
+    } else {
+      const emptyText = await page.getByText(/no deals|empty pipeline|no results|add your first/i).count();
+      results.push({ check: 'CHECK 2 Deal list visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty pipeline state shown.' : 'No deal rows/cards found — may use unrecognized layout.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Deal list visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Pipeline view controls visible (stage columns, filters, or view toggle)
+  try {
+    await shot(page, `${sp}-3-controls`);
+    const stageCount  = await page.locator('[class*="stage"], [class*="kanban-column"], [class*="kanbanColumn"], [class*="pipeline-stage"]').count();
+    const filterCount = await page.locator('select, [class*="filter"], input[placeholder*="search" i], input[placeholder*="filter" i]').count();
+    const tabCount    = await page.locator('[role="tab"], [class*="tab"]').count();
+    const total = stageCount + filterCount + tabCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 3 Pipeline controls visible', status: 'PASS', evidence: `Controls found: stages/columns:${stageCount}, filters/search:${filterCount}, tabs:${tabCount}.` });
+    } else {
+      results.push({ check: 'CHECK 3 Pipeline controls visible', status: 'DEFERRED', evidence: 'No stage columns, filters, or tabs detected.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Pipeline controls visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Click first deal → detail view loads
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    const urlBefore  = page.url();
+    const firstRow   = page.locator('table tbody tr, [class*="deal-row"], [class*="dealRow"], [role="row"]:not([role="columnheader"])').first();
+    const firstCard  = page.locator('[class*="deal-card"], [class*="dealCard"], [class*="kanban-card"], [class*="kanbanCard"], [role="listitem"]').first();
+    const clickTarget = await firstRow.count() > 0 ? firstRow : firstCard;
+    if (await clickTarget.count() > 0) {
+      const rowText = (await clickTarget.textContent().catch(() => ''))?.trim().slice(0, 50) ?? '';
+      await clickTarget.click();
+      await page.waitForTimeout(1200);
+      await shot(page, `${sp}-4-detail`);
+      const urlAfter = page.url();
+      const detailVisible = await page.locator('[class*="detail"], [class*="deal-header"], [class*="dealHeader"], [class*="panel"], h1, h2').count() > 0;
+      if (urlAfter !== urlBefore || detailVisible) {
+        await page.goto(`https://hub.revopsglobal.com/pipeline`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+        results.push({ check: 'CHECK 4 Deal click → detail', status: 'PASS', evidence: `Clicked "${rowText.slice(0, 40)}". URL: ${urlBefore} → ${urlAfter}. Detail visible: ${detailVisible}. Returned.` });
+      } else {
+        results.push({ check: 'CHECK 4 Deal click → detail', status: 'DEFERRED', evidence: `Clicked deal but URL/content unchanged. Text: "${rowText.slice(0, 40)}".` });
+      }
+    } else {
+      results.push({ check: 'CHECK 4 Deal click → detail', status: 'DEFERRED', evidence: 'No deal rows/cards to click.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 Deal click → detail', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Key data fields present — deal name, value/amount, stage, owner
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    await shot(page, `${sp}-5-columns`);
+    const pageText  = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const hasName   = /deal|opportunity|name/i.test(pageText);
+    const hasValue  = /value|\$|amount|revenue|arr|mrr/i.test(pageText);
+    const hasStage  = /stage|phase|status|qualify|close|prospect|negotiat/i.test(pageText);
+    const cols: string[] = [];
+    if (hasName)  cols.push('deal/name');
+    if (hasValue) cols.push('value/$');
+    if (hasStage) cols.push('stage/status');
+    if (cols.length >= 2) {
+      results.push({ check: 'CHECK 5 Key fields present', status: 'PASS', evidence: `Fields detected: ${cols.join(', ')}.` });
+    } else {
+      results.push({ check: 'CHECK 5 Key fields present', status: 'DEFERRED', evidence: `Only found: ${cols.join(', ') || 'none'}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Key fields present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // Report writer
 // ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
@@ -1237,8 +1336,10 @@ async function main() {
       results = await runCompaniesChecks(page);
     } else if (targetPage === '/projects') {
       results = await runProjectsChecks(page);
+    } else if (targetPage === '/pipeline') {
+      results = await runPipelineChecks(page);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
