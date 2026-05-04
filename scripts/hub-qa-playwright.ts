@@ -1625,6 +1625,106 @@ async function runSocialContentChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /content-review checks
+// ---------------------------------------------------------------------------
+async function runContentReviewChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'content-review';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Review items visible (posts/drafts awaiting review)
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.locator('table tbody tr, [class*="review"], [class*="Review"], [class*="post"], [class*="card"], [role="row"]:not([role="columnheader"]), [role="listitem"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await shot(page, `${sp}-2-list`);
+    const rowCount  = await page.locator('table tbody tr').count();
+    const itemCount = await page.locator('[class*="review"], [class*="Review"], [class*="post"], [class*="card"]').filter({ hasText: /[a-z]/i }).count();
+    const roleCount = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
+    const total = rowCount || itemCount || roleCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 2 Review items visible', status: 'PASS', evidence: `${total} item(s) visible (rows:${rowCount}, items:${itemCount}, listitems:${roleCount}).` });
+    } else {
+      const emptyText = await page.getByText(/no content|no items|empty|nothing to review|all caught up/i).count();
+      results.push({ check: 'CHECK 2 Review items visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty state — no items pending review.' : 'No review items found — may use unrecognized layout.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Review items visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Review action buttons (Approve/Reject/Request Changes/Comment)
+  try {
+    await shot(page, `${sp}-3-actions`);
+    const approveBtn = await page.getByRole('button', { name: /approve/i }).count();
+    const rejectBtn  = await page.getByRole('button', { name: /reject|decline/i }).count();
+    const commentBtn = await page.getByRole('button', { name: /comment|feedback|request.changes/i }).count();
+    const anyAction  = approveBtn + rejectBtn + commentBtn;
+    const tabCount   = await page.locator('[role="tab"], [class*="tab"]').count();
+    if (anyAction > 0) {
+      results.push({ check: 'CHECK 3 Review action buttons present', status: 'PASS', evidence: `Action buttons: approve:${approveBtn}, reject:${rejectBtn}, comment:${commentBtn}.` });
+    } else {
+      results.push({ check: 'CHECK 3 Review action buttons present', status: 'DEFERRED', evidence: `No approve/reject/comment buttons found. Tabs: ${tabCount}. May require item selection first.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Review action buttons present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Click first item → content preview with review actions
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    const urlBefore  = page.url();
+    const firstItem  = page.locator('table tbody tr, [class*="review"], [class*="Review"], [class*="post"], [class*="card"], [role="row"]:not([role="columnheader"]), [role="listitem"]').filter({ hasText: /[a-z]/i }).first();
+    if (await firstItem.count() > 0) {
+      const itemText = (await firstItem.textContent().catch(() => ''))?.trim().slice(0, 50) ?? '';
+      await firstItem.click();
+      await page.waitForTimeout(1200);
+      await shot(page, `${sp}-4-detail`);
+      const urlAfter      = page.url();
+      const previewVisible = await page.locator('[class*="preview"], [class*="detail"], [class*="panel"], [role="dialog"], textarea, [contenteditable], img').count() > 0;
+      if (urlAfter !== urlBefore || previewVisible) {
+        if (urlAfter !== urlBefore) {
+          await page.goto(`https://hub.revopsglobal.com/content-review`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+        }
+        results.push({ check: 'CHECK 4 Item click → preview', status: 'PASS', evidence: `Clicked "${itemText.slice(0, 40)}". URL: ${urlBefore} → ${urlAfter}. Preview visible: ${previewVisible}. Returned.` });
+      } else {
+        results.push({ check: 'CHECK 4 Item click → preview', status: 'DEFERRED', evidence: `Clicked item but no navigation or preview appeared. Text: "${itemText.slice(0, 40)}".` });
+      }
+    } else {
+      results.push({ check: 'CHECK 4 Item click → preview', status: 'DEFERRED', evidence: 'No review items to click.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 Item click → preview', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Key fields — content copy/preview, author, platform, status
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    await shot(page, `${sp}-5-fields`);
+    const pageText    = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const hasPlatform = /linkedin|twitter|instagram|facebook|social/i.test(pageText);
+    const hasStatus   = /pending|review|approved|draft|submitted/i.test(pageText);
+    const hasContent  = /post|content|caption|copy/i.test(pageText);
+    const found: string[] = [];
+    if (hasPlatform) found.push('platform');
+    if (hasStatus)   found.push('status');
+    if (hasContent)  found.push('content/copy');
+    if (found.length >= 2) {
+      results.push({ check: 'CHECK 5 Key fields present', status: 'PASS', evidence: `Fields detected: ${found.join(', ')}.` });
+    } else {
+      results.push({ check: 'CHECK 5 Key fields present', status: 'DEFERRED', evidence: `Only found: ${found.join(', ') || 'none'}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Key fields present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // Report writer
 // ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
@@ -1748,8 +1848,10 @@ async function main() {
       results = await runFleetAgentsChecks(page);
     } else if (targetPage === '/social-content') {
       results = await runSocialContentChecks(page);
+    } else if (targetPage === '/content-review') {
+      results = await runContentReviewChecks(page);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
