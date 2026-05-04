@@ -302,6 +302,16 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
         } catch { /* ignore */ }
       } else {
         results.push({ check: 'CHECK 4 Edit entry', status: 'DEFERRED', evidence: 'Data week found but could not locate an hour cell in the grid (distinct from summary cards).' });
+        // Still return to data week so Check 5 runs in correct page state
+        try {
+          const weekBtn = page.locator('button:has-text("Week")').first();
+          if (await weekBtn.count() > 0) { await weekBtn.click(); await waitForWeekLoad(); }
+          const currentRange = await getDateRange().textContent().catch(() => '');
+          if (dataWeekLabel && !currentRange.includes(dataWeekLabel.slice(0, 6))) {
+            const prevBtn = getPrevBtn();
+            if (await prevBtn.count() > 0) { await prevBtn.click(); await waitForWeekLoad(); }
+          }
+        } catch { /* ignore */ }
       }
     } else {
       results.push({ check: 'CHECK 4 Edit entry', status: 'DEFERRED', evidence: 'No data week found — skipped.' });
