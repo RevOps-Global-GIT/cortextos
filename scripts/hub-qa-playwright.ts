@@ -1826,6 +1826,112 @@ async function runWikiChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /app/cortex/theta checks
+// Validates PR#688 fix: ThetaSession FE field reads (challenger_notes,
+// synthesis_summary, consolidated_memories_count) + status 'complete' render.
+// ---------------------------------------------------------------------------
+async function runCortexThetaChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'cortex-theta';
+
+  // CHECK 1: Page load
+  try {
+    await page.waitForSelector('h1, h2, [class*="title"], [class*="heading"], main', { timeout: 15000 });
+    const h = await page.locator('h1, h2, [class*="title"], [class*="heading"]').first().textContent().catch(() => '');
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`), fullPage: false });
+    const landed = page.url();
+    if (landed.includes('/auth')) {
+      results.push({ check: 'CHECK 1 Page load', status: 'FAIL', evidence: `Auth redirect — session not accepted. URL: ${landed}` });
+      return results;
+    }
+    results.push({ check: 'CHECK 1 Page load', status: 'PASS', evidence: `Page loaded. Heading: "${h?.trim()}". URL: ${landed}` });
+  } catch (e) {
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load-fail.png`) }).catch(() => {});
+    results.push({ check: 'CHECK 1 Page load', status: 'FAIL', evidence: `Did not load within 15s: ${(e as Error).message?.split('\n')[0]}` });
+    return results;
+  }
+
+  // CHECK 2: No "undefined" literals — regression guard for PR#688
+  try {
+    await page.waitForTimeout(1500);
+    const undefinedHits = await page.getByText('undefined', { exact: false }).count();
+    const nullLiterals  = await page.locator('text="null"').count();
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-undefined-check.png`), fullPage: false });
+    if (undefinedHits > 0 || nullLiterals > 0) {
+      results.push({ check: 'CHECK 2 No undefined/null literals', status: 'FAIL', evidence: `${undefinedHits} "undefined" + ${nullLiterals} "null" literal(s) visible — FE field reads still broken post-deploy.` });
+    } else {
+      results.push({ check: 'CHECK 2 No undefined/null literals', status: 'PASS', evidence: 'No "undefined" or "null" literals on page — field reads clean.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 No undefined/null literals', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Status field renders (expects 'complete' post-PR#688)
+  try {
+    const statusEl   = await page.locator('[class*="status"], [data-field="status"], [class*="badge"], [class*="chip"]').count();
+    const completeHit = await page.getByText(/complete/i, { exact: false }).count();
+    const anyStatus   = await page.getByText(/complete|in.progress|pending|processing|active/i, { exact: false }).count();
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-3-status.png`), fullPage: false });
+    if (completeHit > 0) {
+      results.push({ check: 'CHECK 3 Status renders "complete"', status: 'PASS', evidence: `"complete" text found (${completeHit} hit(s)). Status elements: ${statusEl}.` });
+    } else if (anyStatus > 0) {
+      results.push({ check: 'CHECK 3 Status renders "complete"', status: 'DEFERRED', evidence: `Status text visible but "complete" not found. Other status hits: ${anyStatus}. May be different session data.` });
+    } else {
+      results.push({ check: 'CHECK 3 Status renders "complete"', status: 'DEFERRED', evidence: `No status text found. Status elements: ${statusEl}. May be empty data.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Status renders "complete"', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: challenger_notes + synthesis_summary + consolidated_memories_count
+  // Sessions are accordion cards — click first session button to expand before checking fields.
+  try {
+    // Sessions use accordion cards — expand first session to reveal detail fields.
+    // Strategy: click via JS evaluate to bypass any Playwright interception issues.
+    const btnCount = await page.locator('main button').count();
+    if (btnCount > 0) {
+      // Use JS click to ensure it fires even if element is partially out of viewport
+      await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('main button'));
+        if (btns.length > 0) (btns[0] as HTMLButtonElement).click();
+      });
+      // Wait for accordion content DOM insertion (poll for new text)
+      await page.waitForFunction(() => document.body.innerText.length > 1500, { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(500);
+    }
+    const challengerHit = await page.getByText(/challenger/i, { exact: false }).count();
+    const synthHit      = await page.getByText(/synthesis/i, { exact: false }).count();
+    const memHit        = await page.getByText(/consolidated|consolidation/i, { exact: false }).count();
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-4-fields-expanded.png`), fullPage: false });
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-4-fields-bottom.png`), fullPage: false });
+    const missing: string[] = [];
+    if (challengerHit === 0) missing.push('challenger_notes');
+    if (synthHit === 0)      missing.push('synthesis_summary');
+    if (memHit === 0)        missing.push('consolidated_memories_count');
+    if (missing.length === 0) {
+      results.push({ check: 'CHECK 4 PR#688 fields render', status: 'PASS', evidence: `All three fields visible after accordion expand: challenger(${challengerHit}), synthesis(${synthHit}), consolidation(${memHit}).` });
+    } else {
+      results.push({ check: 'CHECK 4 PR#688 fields render', status: 'FAIL', evidence: `Missing field(s) after expand: ${missing.join(', ')}. challenger:${challengerHit}, synthesis:${synthHit}, consolidation:${memHit}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 PR#688 fields render', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Page has substantial content (not blank/empty render)
+  try {
+    const bodyLen = (await page.locator('main, [class*="content"], body').first().innerText().catch(() => '')).trim().length;
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-5-full.png`), fullPage: true });
+    results.push({ check: 'CHECK 5 Page content not blank', status: bodyLen > 150 ? 'PASS' : 'DEFERRED', evidence: `Body text length: ${bodyLen} chars. ${bodyLen > 150 ? 'Substantial content present.' : 'Page appears sparse — may be no theta sessions yet.'}` });
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Page content not blank', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
   const passed  = results.filter(r => r.status === 'PASS').length;
   const failed  = results.filter(r => r.status === 'FAIL').length;
@@ -1906,8 +2012,14 @@ async function main() {
 
     const page = await context.newPage();
 
-    console.log(`Navigating to ${HUB_URL}${targetPage}...`);
-    await page.goto(`${HUB_URL}${targetPage}`, { waitUntil: 'networkidle', timeout: 30000 });
+    // Alias → canonical URL map for short-form --page args
+    const PAGE_URL_MAP: Record<string, string> = {
+      'cortex-theta': '/app/cortex/theta',
+    };
+    const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
+
+    console.log(`Navigating to ${HUB_URL}${navPath}...`);
+    await page.goto(`${HUB_URL}${navPath}`, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForTimeout(2000);
 
     if (page.url().includes('/auth') || page.url().includes('/login')) {
@@ -1951,8 +2063,10 @@ async function main() {
       results = await runContentReviewChecks(page);
     } else if (targetPage === '/app/wiki') {
       results = await runWikiChecks(page);
+    } else if (targetPage === '/app/cortex/theta' || targetPage === 'cortex-theta') {
+      results = await runCortexThetaChecks(page);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
