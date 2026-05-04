@@ -1525,6 +1525,106 @@ async function runFleetAgentsChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /social-content checks
+// ---------------------------------------------------------------------------
+async function runSocialContentChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'social-content';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Content items visible (posts, drafts, scheduled items)
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.locator('table tbody tr, [class*="post"], [class*="Post"], [class*="content-item"], [class*="contentItem"], [class*="draft"], [class*="card"], [role="row"]:not([role="columnheader"]), [role="listitem"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await shot(page, `${sp}-2-list`);
+    const rowCount   = await page.locator('table tbody tr').count();
+    const postCount  = await page.locator('[class*="post"], [class*="Post"], [class*="content-item"], [class*="contentItem"]').filter({ hasText: /[a-z]/i }).count();
+    const cardCount  = await page.locator('[class*="card"], [class*="draft"]').filter({ hasText: /[a-z]/i }).count();
+    const roleCount  = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
+    const total = rowCount || postCount || cardCount || roleCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 2 Content items visible', status: 'PASS', evidence: `${total} item(s) visible (rows:${rowCount}, posts:${postCount}, cards:${cardCount}, listitems:${roleCount}).` });
+    } else {
+      const emptyText = await page.getByText(/no content|no posts|empty|no drafts|no results/i).count();
+      results.push({ check: 'CHECK 2 Content items visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty state shown — no content items.' : 'No content items found — may use unrecognized layout.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Content items visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Filter/view controls (status tabs: draft/scheduled/published, search)
+  try {
+    await shot(page, `${sp}-3-controls`);
+    const tabCount    = await page.locator('[role="tab"], [class*="tab"]').count();
+    const filterCount = await page.locator('select, [class*="filter"], input[placeholder*="search" i], input[placeholder*="filter" i]').count();
+    const buttonCount = await page.locator('button').count();
+    const total = tabCount + filterCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 3 View controls visible', status: 'PASS', evidence: `Controls: tabs:${tabCount}, filters/search:${filterCount}, buttons:${buttonCount}.` });
+    } else {
+      results.push({ check: 'CHECK 3 View controls visible', status: 'DEFERRED', evidence: `No tabs or filter controls. Buttons: ${buttonCount}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 View controls visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Click first content item → detail or edit view
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    const urlBefore   = page.url();
+    const firstItem   = page.locator('table tbody tr, [class*="post"], [class*="Post"], [class*="content-item"], [class*="contentItem"], [class*="card"], [role="row"]:not([role="columnheader"]), [role="listitem"]').filter({ hasText: /[a-z]/i }).first();
+    if (await firstItem.count() > 0) {
+      const itemText = (await firstItem.textContent().catch(() => ''))?.trim().slice(0, 50) ?? '';
+      await firstItem.click();
+      await page.waitForTimeout(1200);
+      await shot(page, `${sp}-4-detail`);
+      const urlAfter     = page.url();
+      const detailVisible = await page.locator('[class*="detail"], [class*="editor"], [class*="edit"], [role="dialog"], textarea, [contenteditable]').count() > 0;
+      if (urlAfter !== urlBefore || detailVisible) {
+        if (urlAfter !== urlBefore) {
+          await page.goto(`https://hub.revopsglobal.com/social-content`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+        }
+        results.push({ check: 'CHECK 4 Item click → detail/edit', status: 'PASS', evidence: `Clicked "${itemText.slice(0, 40)}". URL: ${urlBefore} → ${urlAfter}. Detail/editor visible: ${detailVisible}. Returned.` });
+      } else {
+        results.push({ check: 'CHECK 4 Item click → detail/edit', status: 'DEFERRED', evidence: `Clicked item but no navigation or editor appeared. Text: "${itemText.slice(0, 40)}".` });
+      }
+    } else {
+      results.push({ check: 'CHECK 4 Item click → detail/edit', status: 'DEFERRED', evidence: 'No content items to click.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 Item click → detail/edit', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Key fields — content text, platform (LinkedIn/Twitter), status, author
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    await shot(page, `${sp}-5-fields`);
+    const pageText     = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const hasPlatform  = /linkedin|twitter|x\.com|instagram|facebook|social/i.test(pageText);
+    const hasStatus    = /draft|scheduled|published|approved|pending|review/i.test(pageText);
+    const hasContent   = /post|content|caption|copy|text/i.test(pageText);
+    const found: string[] = [];
+    if (hasPlatform) found.push('platform');
+    if (hasStatus)   found.push('status/stage');
+    if (hasContent)  found.push('content/copy');
+    if (found.length >= 2) {
+      results.push({ check: 'CHECK 5 Key fields present', status: 'PASS', evidence: `Fields detected: ${found.join(', ')}.` });
+    } else {
+      results.push({ check: 'CHECK 5 Key fields present', status: 'DEFERRED', evidence: `Only found: ${found.join(', ') || 'none'}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Key fields present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // Report writer
 // ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
@@ -1646,8 +1746,10 @@ async function main() {
       results = await runFleetTasksChecks(page);
     } else if (targetPage === '/app/fleet/agents') {
       results = await runFleetAgentsChecks(page);
+    } else if (targetPage === '/social-content') {
+      results = await runSocialContentChecks(page);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
