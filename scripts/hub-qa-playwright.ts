@@ -1427,6 +1427,104 @@ async function runFleetTasksChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /app/fleet/agents checks
+// ---------------------------------------------------------------------------
+async function runFleetAgentsChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'app-fleet-agents';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Agent list visible (cards or rows — broad selector matching /app/orchestrator pattern)
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.locator('table tbody tr, [class*="agent"], [class*="Agent"], [class*="card"], [role="row"]:not([role="columnheader"]), [role="listitem"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await shot(page, `${sp}-2-list`);
+    const rowCount  = await page.locator('table tbody tr').count();
+    const cardCount = await page.locator('[class*="agent"], [class*="Agent"], [class*="card"]').filter({ hasText: /[a-z]/i }).count();
+    const roleCount = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
+    const total = rowCount || cardCount || roleCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 2 Agent list visible', status: 'PASS', evidence: `${total} agent item(s) visible (rows:${rowCount}, cards:${cardCount}, listitems:${roleCount}).` });
+    } else {
+      const emptyText = await page.getByText(/no agents|empty|no results/i).count();
+      results.push({ check: 'CHECK 2 Agent list visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty state shown — no agents.' : 'No agent rows/cards found — may use unrecognized layout.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Agent list visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Agent status indicators visible (online/offline/running badges)
+  try {
+    await shot(page, `${sp}-3-status`);
+    const statusBadge = await page.locator('[class*="status"], [class*="badge"], [class*="indicator"], [class*="online"], [class*="offline"], [class*="running"]').count();
+    const pageText    = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const hasStatus   = /online|offline|running|idle|error|dead|alive|active/i.test(pageText);
+    if (statusBadge > 0 || hasStatus) {
+      results.push({ check: 'CHECK 3 Status indicators visible', status: 'PASS', evidence: `Status elements: badges:${statusBadge}, text matches: ${hasStatus}.` });
+    } else {
+      results.push({ check: 'CHECK 3 Status indicators visible', status: 'DEFERRED', evidence: 'No status badges or status text found.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Status indicators visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Click first agent → detail panel or navigation
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    const urlBefore  = page.url();
+    const firstRow   = page.locator('table tbody tr, [class*="agent"], [class*="Agent"], [class*="card"], [role="row"]:not([role="columnheader"]), [role="listitem"]').filter({ hasText: /[a-z]/i }).first();
+    if (await firstRow.count() > 0) {
+      const rowText = (await firstRow.textContent().catch(() => ''))?.trim().slice(0, 50) ?? '';
+      await firstRow.click();
+      await page.waitForTimeout(1200);
+      await shot(page, `${sp}-4-detail`);
+      const urlAfter     = page.url();
+      const detailVisible = await page.locator('[class*="detail"], [class*="panel"], [role="dialog"], [class*="agent-detail"], h1, h2').count() > 0;
+      if (urlAfter !== urlBefore || detailVisible) {
+        if (urlAfter !== urlBefore) {
+          await page.goto(`https://hub.revopsglobal.com/app/fleet/agents`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+        }
+        results.push({ check: 'CHECK 4 Agent click → detail', status: 'PASS', evidence: `Clicked "${rowText.slice(0, 40)}". URL: ${urlBefore} → ${urlAfter}. Detail visible: ${detailVisible}. Returned.` });
+      } else {
+        results.push({ check: 'CHECK 4 Agent click → detail', status: 'DEFERRED', evidence: `Clicked agent but URL/content unchanged. Text: "${rowText.slice(0, 40)}".` });
+      }
+    } else {
+      results.push({ check: 'CHECK 4 Agent click → detail', status: 'DEFERRED', evidence: 'No agent rows/cards to click.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 Agent click → detail', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Key fields — agent name, type/role, last-seen/heartbeat, status
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    await shot(page, `${sp}-5-fields`);
+    const pageText    = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const hasName     = /agent|name/i.test(pageText);
+    const hasHeartbeat = /heartbeat|last.seen|last.active|updated|ping/i.test(pageText);
+    const hasType     = /type|role|analyst|orchestrator|codex|dev|sales/i.test(pageText);
+    const found: string[] = [];
+    if (hasName)      found.push('agent/name');
+    if (hasType)      found.push('type/role');
+    if (hasHeartbeat) found.push('heartbeat/last-seen');
+    if (found.length >= 2) {
+      results.push({ check: 'CHECK 5 Key fields present', status: 'PASS', evidence: `Fields detected: ${found.join(', ')}.` });
+    } else {
+      results.push({ check: 'CHECK 5 Key fields present', status: 'DEFERRED', evidence: `Only found: ${found.join(', ') || 'none'}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Key fields present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // Report writer
 // ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
@@ -1546,8 +1644,10 @@ async function main() {
       results = await runReportsChecks(page);
     } else if (targetPage === '/app/fleet/tasks') {
       results = await runFleetTasksChecks(page);
+    } else if (targetPage === '/app/fleet/agents') {
+      results = await runFleetAgentsChecks(page);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
