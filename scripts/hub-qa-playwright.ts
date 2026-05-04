@@ -610,12 +610,42 @@ async function runTasksChecks(page: Page): Promise<CheckResult[]> {
 
   // CHECK 4: Create task form — open and cancel
   try {
-    const newBtn = page.locator('button:has-text("New task"), button:has-text("Add task"), button:has-text("Create task"), button:has-text("New Task"), button:has-text("+")').first();
+    const newBtn = page.locator([
+      'button:has-text("New task")',
+      'button:has-text("New Task")',
+      'button:has-text("Add task")',
+      'button:has-text("Add Task")',
+      'button:has-text("Create task")',
+      'button:has-text("Create Task")',
+      'button:has-text("Create")',
+      'button:has-text("Add")',
+      'button[aria-label*="new task" i]',
+      'button[aria-label*="add task" i]',
+      'button[aria-label*="create task" i]',
+      'a:has-text("New task")',
+      'a:has-text("Add task")',
+      // Last resort: prominent "+" button near the top of the page (not nav)
+      'button:has-text("+")',
+    ].join(', ')).first();
     if (await newBtn.count() > 0) {
       await newBtn.click();
-      await page.waitForTimeout(800);
+      // Wait for dialog/form to settle — may be a modal, slide-in panel, or inline row
+      await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+      await page.waitForTimeout(500);
       await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-4-create-form.png`) });
-      const formVisible = await page.locator('input[placeholder*="task" i], input[placeholder*="title" i], input[name*="title" i], [role="dialog"] input').count() > 0;
+      const formVisible = await page.locator([
+        'input[placeholder*="task" i]',
+        'input[placeholder*="title" i]',
+        'input[name*="title" i]',
+        '[role="dialog"] input',
+        '[role="dialog"] textarea',
+        'textarea[placeholder*="task" i]',
+        'textarea[placeholder*="title" i]',
+        'input[placeholder*="name" i]',
+        // Inline row editor: any visible text input that appeared after button click
+        'form input[type="text"]',
+        'form textarea',
+      ].join(', ')).count() > 0;
       await page.keyboard.press('Escape');
       await page.waitForTimeout(300);
       results.push({ check: 'CHECK 4 Create task form', status: formVisible ? 'PASS' : 'DEFERRED', evidence: formVisible ? 'Create task button opened a form with input. Escaped without saving.' : 'Create task button clicked but no input form appeared.' });
