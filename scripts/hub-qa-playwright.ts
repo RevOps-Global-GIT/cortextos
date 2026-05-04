@@ -712,7 +712,8 @@ async function runFleetActivityChecks(page: Page): Promise<CheckResult[]> {
 
   // CHECK 3: Timestamps on events
   try {
-    const timestamps = await page.getByText(/\d+s ago|\d+m ago|\d+h ago|just now|today|yesterday|\d{1,2}:\d{2}/i, { exact: false }).count();
+    // Timestamps appear as "3 minutes ago", "less than a minute ago", "2 hours ago", "just now", or HH:MM
+    const timestamps = await page.getByText(/\d+ (second|minute|hour|day)s? ago|less than a minute|just now|today|yesterday|\d{1,2}:\d{2}/i, { exact: false }).count();
     results.push({ check: 'CHECK 3 Event timestamps', status: timestamps > 0 ? 'PASS' : 'DEFERRED', evidence: timestamps > 0 ? `${timestamps} timestamp(s) visible on events.` : 'No timestamps found on events.' });
   } catch (e) {
     results.push({ check: 'CHECK 3 Event timestamps', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
