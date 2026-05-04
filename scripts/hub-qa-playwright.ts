@@ -142,7 +142,12 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
   // Wait for the week's data to finish loading (dismisses the full-page "Loading..." state)
   const waitForWeekLoad = async () => {
     await page.waitForSelector('text=Loading...', { state: 'hidden', timeout: 10000 }).catch(() => {});
-    await page.waitForTimeout(500);
+    // Also wait for the progress bar / hrs text to appear — ensures data has rendered before hasHoursOnPage check
+    await page.waitForSelector(':text("/ ") :text("hrs"), :text("hrs")', { timeout: 2000 }).catch(async () => {
+      // Fallback: wait for page.getByText to resolve — avoids invalid selector issues
+      await page.getByText(/\d+\.\d+ \/ \d+ hrs/).first().waitFor({ timeout: 1500 }).catch(() => {});
+    });
+    await page.waitForTimeout(300);
   };
   // Detect actual time entries using the progress bar "X.X / 40 hrs" — shows 0.0 when empty
   // Much more reliable than scanning for numeric text (day headers cause false positives)
@@ -174,7 +179,7 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
     await waitForWeekLoad();
     // Check current week first
     if (await hasHoursOnPage()) { foundDataWeek = true; dataWeekLabel = 'current week'; }
-    for (let i = 0; i < 4 && !foundDataWeek; i++) {
+    for (let i = 0; i < 6 && !foundDataWeek; i++) {
       if (await prevBtn.count() > 0) {
         await prevBtn.click();
         await waitForWeekLoad();
