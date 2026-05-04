@@ -633,11 +633,12 @@ async function runDashboardChecks(page: Page): Promise<CheckResult[]> {
     if (await navLink.count() > 0) {
       const linkText = await navLink.textContent().catch(() => '?');
       await navLink.click();
-      await page.waitForTimeout(1000);
+      // Wait for SPA navigation to complete before reading URL or navigating back
+      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
       const newUrl = page.url();
-      // Use direct navigation back instead of goBack() — SPA routing makes goBack() unreliable
-      await page.goto(`${HUB_URL}/`);
-      await page.waitForTimeout(800);
+      // Navigate back — use waitUntil:'domcontentloaded' to avoid race with in-flight SPA nav
+      await page.goto(`${HUB_URL}/`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(500);
       results.push({ check: 'CHECK 4 Nav link navigation', status: newUrl !== `${HUB_URL}/` ? 'PASS' : 'DEFERRED', evidence: `Clicking "${linkText?.trim()}" navigated to ${newUrl}. Returned to dashboard.` });
     } else {
       results.push({ check: 'CHECK 4 Nav link navigation', status: 'DEFERRED', evidence: 'No sidebar nav links found.' });
