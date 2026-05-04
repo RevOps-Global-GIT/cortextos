@@ -310,27 +310,32 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
   // It may be hidden until hover. Always click Cancel on any dialog.
   try {
     const attemptDelete = async (): Promise<CheckResult> => {
-      // Broad selectors for the row delete button
+      // Narrow selectors for the row delete button — avoid ASCII "x" which matches nav buttons
       const deleteBtn = page.locator([
         'button[aria-label*="delete" i]',
         'button[aria-label*="remove" i]',
         'button[title*="delete" i]',
         'button[title*="remove" i]',
-        // × character variants (U+00D7, U+2715, U+2717, ASCII x)
-        'button:has-text("×")',
-        'button:has-text("✕")',
-        'button:has-text("✗")',
-        'button:has-text("x")',
+        // Unicode × variants only — NOT ASCII "x" which matches "Next", "Max", etc.
+        'button:has-text("×")',  // U+00D7
+        'button:has-text("✕")',  // U+2715
+        'button:has-text("✗")',  // U+2717
       ].join(', ')).first();
 
       if (await deleteBtn.count() > 0) {
         await deleteBtn.hover();
         await shot(page, '5-delete-hover');
+        const urlBefore = page.url();
         await deleteBtn.click();
-        // Wait up to 2s for confirmation dialog — 600ms was too tight (race condition observed)
+        // Wait up to 2s for confirmation dialog
         const dialogLoc = page.locator('[role="alertdialog"], [role="dialog"]');
         await dialogLoc.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
         await shot(page, '5-delete-clicked');
+        const urlAfter = page.url();
+        if (urlAfter !== urlBefore) {
+          // Click caused navigation — we hit the wrong button (nav element, not delete)
+          return { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: `Button click navigated away (${urlBefore} → ${urlAfter}). Wrong button matched — delete button not found.` };
+        }
         const dialog = await dialogLoc.count() > 0;
         if (dialog) {
           const cancelBtn = page.locator('[role="dialog"] button:has-text("Cancel"), [role="alertdialog"] button:has-text("Cancel")').first();
@@ -356,7 +361,8 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
           for (const btn of allBtns) {
             // Candidate: button with no meaningful text (just icon) or × variants
             const txt = btn.textContent?.trim() ?? '';
-            const isIconBtn = txt === '' || txt === '×' || txt === '✕' || txt === '✗' || txt === 'x' || txt === 'X';
+            // Exclude ASCII x/X — too generic, matches nav buttons. Unicode × variants only.
+            const isIconBtn = txt === '' || txt === '×' || txt === '✕' || txt === '✗';
             if (!isIconBtn) continue;
             // Must be in the same DOM region as a project name (not in the header/footer)
             let ancestor: Element | null = btn.parentElement;
