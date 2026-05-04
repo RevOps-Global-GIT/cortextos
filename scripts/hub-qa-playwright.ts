@@ -517,6 +517,8 @@ async function runMyDayChecks(page: Page): Promise<CheckResult[]> {
   }
 
   // CHECK 3: Content sections (comms feed items, cards, etc.)
+  // Wait up to 3s for comms feed to finish rendering before checking
+  await page.waitForSelector('[class*="card"], [class*="section"], [class*="item"], li', { timeout: 3000 }).catch(() => {});
   results.push(await checkDataOrEmpty(page, sp, 'CHECK 3 Content sections visible',
     '[class*="card"], [class*="section"], [class*="item"], li', /no tasks|nothing scheduled|empty/i));
 
@@ -633,9 +635,10 @@ async function runDashboardChecks(page: Page): Promise<CheckResult[]> {
       await navLink.click();
       await page.waitForTimeout(1000);
       const newUrl = page.url();
-      await page.goBack();
+      // Use direct navigation back instead of goBack() — SPA routing makes goBack() unreliable
+      await page.goto(`${HUB_URL}/`);
       await page.waitForTimeout(800);
-      results.push({ check: 'CHECK 4 Nav link navigation', status: !newUrl.includes('/') || newUrl !== `${HUB_URL}/` ? 'PASS' : 'DEFERRED', evidence: `Clicking "${linkText?.trim()}" navigated to ${newUrl}. Back button worked.` });
+      results.push({ check: 'CHECK 4 Nav link navigation', status: newUrl !== `${HUB_URL}/` ? 'PASS' : 'DEFERRED', evidence: `Clicking "${linkText?.trim()}" navigated to ${newUrl}. Returned to dashboard.` });
     } else {
       results.push({ check: 'CHECK 4 Nav link navigation', status: 'DEFERRED', evidence: 'No sidebar nav links found.' });
     }
