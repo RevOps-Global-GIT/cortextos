@@ -1887,17 +1887,22 @@ async function runCortexThetaChecks(page: Page): Promise<CheckResult[]> {
   // Sessions are accordion cards — click first session button to expand before checking fields.
   try {
     // Sessions use accordion cards — expand first session to reveal detail fields.
-    // Strategy: click via JS evaluate to bypass any Playwright interception issues.
+    // Retry up to 3 times: JS evaluate click can silently fail under Chromium load.
     const btnCount = await page.locator('main button').count();
     if (btnCount > 0) {
-      // Use JS click to ensure it fires even if element is partially out of viewport
-      await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('main button'));
-        if (btns.length > 0) (btns[0] as HTMLButtonElement).click();
-      });
-      // Wait for accordion content DOM insertion (poll for new text)
-      await page.waitForFunction(() => document.body.innerText.length > 1500, { timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(500);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('main button'));
+          if (btns.length > 0) (btns[0] as HTMLButtonElement).click();
+        });
+        const expanded = await page.waitForFunction(
+          () => document.body.innerText.length > 1500,
+          { timeout: 3000 }
+        ).catch(() => null);
+        if (expanded) break;
+        await page.waitForTimeout(500);
+      }
+      await page.waitForTimeout(300);
     }
     const challengerHit = await page.getByText(/challenger/i, { exact: false }).count();
     const synthHit      = await page.getByText(/synthesis/i, { exact: false }).count();
