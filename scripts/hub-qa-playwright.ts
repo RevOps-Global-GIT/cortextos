@@ -927,7 +927,9 @@ async function runCompaniesChecks(page: Page): Promise<CheckResult[]> {
   // CHECK 2: Company list count — how many rows/cards are visible
   try {
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(500);
+    // Wait for at least one row to render (virtual-scroll list may paint after networkidle)
+    await page.waitForSelector('table tbody tr, [role="row"]:not([role="columnheader"])', { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(300);
     await shot(page, `${sp}-2-list`);
     // Try table rows first, then cards
     const rowCount = await page.locator('table tbody tr, [class*="company-row"], [class*="companyRow"]').count();
