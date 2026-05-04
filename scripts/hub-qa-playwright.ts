@@ -619,6 +619,8 @@ async function runTasksChecks(page: Page): Promise<CheckResult[]> {
 
   // CHECK 4: Create task form — open and cancel
   try {
+    // Prefer exact/task-specific labels to avoid matching unrelated "Create" / "Add" buttons
+    // via Playwright's substring :has-text() matching.
     const newBtn = page.locator([
       'button:has-text("New task")',
       'button:has-text("New Task")',
@@ -626,14 +628,12 @@ async function runTasksChecks(page: Page): Promise<CheckResult[]> {
       'button:has-text("Add Task")',
       'button:has-text("Create task")',
       'button:has-text("Create Task")',
-      'button:has-text("Create")',
-      'button:has-text("Add")',
       'button[aria-label*="new task" i]',
       'button[aria-label*="add task" i]',
       'button[aria-label*="create task" i]',
       'a:has-text("New task")',
       'a:has-text("Add task")',
-      // Last resort: prominent "+" button near the top of the page (not nav)
+      // Last resort: "+" icon button (narrow — avoids generic "Create"/"Add" substring matches)
       'button:has-text("+")',
     ].join(', ')).first();
     if (await newBtn.count() > 0) {
