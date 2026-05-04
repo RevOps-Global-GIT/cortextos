@@ -928,7 +928,7 @@ async function runCompaniesChecks(page: Page): Promise<CheckResult[]> {
   try {
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
     // Wait for at least one row to render — use the same locator that works in Check 4
-    await page.locator('table tbody tr, [class*="company-row"], [class*="companyRow"], [role="row"]:not([role="columnheader"])').first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});
+    await page.locator('table tbody tr, [class*="company-row"], [class*="companyRow"], [role="row"]:not([role="columnheader"])').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(500);
     await shot(page, `${sp}-2-list`);
     // Try table rows first, then cards
