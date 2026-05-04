@@ -327,15 +327,17 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
         await deleteBtn.hover();
         await shot(page, '5-delete-hover');
         await deleteBtn.click();
-        await page.waitForTimeout(600);
+        // Wait up to 2s for confirmation dialog — 600ms was too tight (race condition observed)
+        const dialogLoc = page.locator('[role="alertdialog"], [role="dialog"]');
+        await dialogLoc.waitFor({ state: 'visible', timeout: 2000 }).catch(() => {});
         await shot(page, '5-delete-clicked');
-        const dialog = await page.locator('[role="alertdialog"], [role="dialog"]').count() > 0;
+        const dialog = await dialogLoc.count() > 0;
         if (dialog) {
           const cancelBtn = page.locator('[role="dialog"] button:has-text("Cancel"), [role="alertdialog"] button:has-text("Cancel")').first();
           await cancelBtn.click().catch(() => page.keyboard.press('Escape'));
           return { check: 'CHECK 5 Delete entry', status: 'PASS', evidence: 'Delete button opened confirmation dialog. Clicked Cancel — no deletion.' };
         } else {
-          return { check: 'CHECK 5 Delete entry', status: 'FAIL', evidence: 'Delete button clicked — NO confirmation dialog appeared. Immediate deletion risk.' };
+          return { check: 'CHECK 5 Delete entry', status: 'FAIL', evidence: 'Delete button clicked — NO confirmation dialog appeared within 2s. Immediate deletion risk.' };
         }
       }
       return { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: 'No delete button found with known selectors.' };
