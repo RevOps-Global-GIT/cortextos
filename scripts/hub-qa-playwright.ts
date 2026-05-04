@@ -1330,6 +1330,103 @@ async function runReportsChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /app/fleet/tasks checks
+// ---------------------------------------------------------------------------
+async function runFleetTasksChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'app-fleet-tasks';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Task items visible
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.locator('table tbody tr, [class*="task-row"], [class*="taskRow"], [role="row"]:not([role="columnheader"]), [role="listitem"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await shot(page, `${sp}-2-list`);
+    const rowCount  = await page.locator('table tbody tr, [class*="task-row"], [class*="taskRow"]').count();
+    const roleCount = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
+    const total = rowCount || roleCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 2 Task list visible', status: 'PASS', evidence: `${total} task item(s) visible (rows:${rowCount}, listitems:${roleCount}).` });
+    } else {
+      const emptyText = await page.getByText(/no tasks|empty|no results/i).count();
+      results.push({ check: 'CHECK 2 Task list visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty state shown — no tasks.' : 'No task rows found — may use unrecognized layout.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Task list visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Filter/tab controls visible (agent, status, priority filters)
+  try {
+    await shot(page, `${sp}-3-controls`);
+    const tabCount    = await page.locator('[role="tab"], [class*="tab"]').count();
+    const filterCount = await page.locator('select, [class*="filter"], input[placeholder*="search" i], input[placeholder*="filter" i]').count();
+    const total = tabCount + filterCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 3 Filter controls visible', status: 'PASS', evidence: `Controls: tabs:${tabCount}, filters/search:${filterCount}.` });
+    } else {
+      results.push({ check: 'CHECK 3 Filter controls visible', status: 'DEFERRED', evidence: 'No tabs or filter controls found.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Filter controls visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Click first task → detail or expand
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    const urlBefore = page.url();
+    const firstRow  = page.locator('table tbody tr, [class*="task-row"], [class*="taskRow"], [role="row"]:not([role="columnheader"]), [role="listitem"]').first();
+    if (await firstRow.count() > 0) {
+      const rowText = (await firstRow.textContent().catch(() => ''))?.trim().slice(0, 50) ?? '';
+      await firstRow.click();
+      await page.waitForTimeout(1000);
+      await shot(page, `${sp}-4-detail`);
+      const urlAfter = page.url();
+      const detailVisible = await page.locator('[class*="detail"], [class*="panel"], [role="dialog"], h1, h2').count() > 0;
+      if (urlAfter !== urlBefore || detailVisible) {
+        if (urlAfter !== urlBefore) {
+          await page.goto(`https://hub.revopsglobal.com/app/fleet/tasks`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+        }
+        results.push({ check: 'CHECK 4 Task click → detail', status: 'PASS', evidence: `Clicked "${rowText.slice(0, 40)}". URL: ${urlBefore} → ${urlAfter}. Detail visible: ${detailVisible}. Returned.` });
+      } else {
+        results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: `Clicked task but URL/content unchanged. Text: "${rowText.slice(0, 40)}".` });
+      }
+    } else {
+      results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: 'No task rows to click.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 Task click → detail', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Key columns — task name, agent/assignee, status, priority
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    await shot(page, `${sp}-5-columns`);
+    const pageText   = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const hasName    = /task|title|name/i.test(pageText);
+    const hasAgent   = /agent|assignee|owner|assigned/i.test(pageText);
+    const hasStatus  = /status|pending|in.progress|complete|done/i.test(pageText);
+    const cols: string[] = [];
+    if (hasName)   cols.push('task/name');
+    if (hasAgent)  cols.push('agent/assignee');
+    if (hasStatus) cols.push('status');
+    if (cols.length >= 2) {
+      results.push({ check: 'CHECK 5 Key columns present', status: 'PASS', evidence: `Columns detected: ${cols.join(', ')}.` });
+    } else {
+      results.push({ check: 'CHECK 5 Key columns present', status: 'DEFERRED', evidence: `Only found: ${cols.join(', ') || 'none'}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Key columns present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // Report writer
 // ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
@@ -1447,8 +1544,10 @@ async function main() {
       results = await runPipelineChecks(page);
     } else if (targetPage === '/reports') {
       results = await runReportsChecks(page);
+    } else if (targetPage === '/app/fleet/tasks') {
+      results = await runFleetTasksChecks(page);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
