@@ -716,11 +716,14 @@ async function runFleetActivityChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: 'CHECK 3 Event timestamps', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 4: Filter controls (by agent, type, date)
+  // CHECK 4: Filter controls (event-type pill buttons: All, agent spawned, task created, etc.)
   try {
-    const filters = await page.locator('select, [role="combobox"], button[class*="filter" i], input[placeholder*="filter" i], input[placeholder*="search" i]').count();
+    // Pills are plain <button> elements — detect via known labels or by counting sibling buttons near top
+    const filterPills = await page.locator(
+      'button:has-text("All"), button:has-text("agent spawned"), button:has-text("task created"), button:has-text("task completed"), button:has-text("system"), select, [role="combobox"], button[class*="filter" i], input[placeholder*="filter" i], input[placeholder*="search" i]'
+    ).count();
     await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-4-filters.png`) });
-    results.push({ check: 'CHECK 4 Filter controls', status: filters > 0 ? 'PASS' : 'DEFERRED', evidence: filters > 0 ? `${filters} filter/search control(s) visible.` : 'No filter controls found.' });
+    results.push({ check: 'CHECK 4 Filter controls', status: filterPills > 0 ? 'PASS' : 'DEFERRED', evidence: filterPills > 0 ? `${filterPills} filter/pill control(s) visible (event-type tabs).` : 'No filter controls found.' });
   } catch (e) {
     results.push({ check: 'CHECK 4 Filter controls', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
@@ -764,9 +767,10 @@ async function runWorkInboxChecks(page: Page): Promise<CheckResult[]> {
   }
 
   // CHECK 4: Action buttons present (NO-SEND — just verify they exist)
+  // Inbox shows Approve/Deny for approval items, plus Dismiss/Acknowledge/Reply for other types
   try {
-    const actionBtns = await page.locator('button:has-text("Dismiss"), button:has-text("Acknowledge"), button:has-text("Mark"), button:has-text("Reply"), button:has-text("Archive")').count();
-    results.push({ check: 'CHECK 4 Action buttons present', status: actionBtns > 0 ? 'PASS' : 'DEFERRED', evidence: actionBtns > 0 ? `${actionBtns} action button(s) visible (not clicked — NO-SEND).` : 'No Dismiss/Acknowledge/Reply buttons found.' });
+    const actionBtns = await page.locator('button:has-text("Approve"), button:has-text("Deny"), button:has-text("Dismiss"), button:has-text("Acknowledge"), button:has-text("Mark"), button:has-text("Reply"), button:has-text("Archive")').count();
+    results.push({ check: 'CHECK 4 Action buttons present', status: actionBtns > 0 ? 'PASS' : 'DEFERRED', evidence: actionBtns > 0 ? `${actionBtns} action button(s) visible (Approve/Deny/Dismiss — not clicked, NO-SEND).` : 'No action buttons found (Approve/Deny/Dismiss/Acknowledge/Reply).' });
   } catch (e) {
     results.push({ check: 'CHECK 4 Action buttons present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
