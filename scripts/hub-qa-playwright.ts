@@ -1223,6 +1223,113 @@ async function runPipelineChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /reports checks
+// ---------------------------------------------------------------------------
+async function runReportsChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'reports';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Report list or report content visible
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.locator('table tbody tr, [class*="report-row"], [class*="reportRow"], [class*="report-card"], [class*="reportCard"], [role="row"]:not([role="columnheader"]), [role="listitem"], canvas, svg[class*="chart"], [class*="chart"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await shot(page, `${sp}-2-content`);
+    const rowCount    = await page.locator('table tbody tr, [class*="report-row"], [class*="reportRow"]').count();
+    const cardCount   = await page.locator('[class*="report-card"], [class*="reportCard"]').count();
+    const chartCount  = await page.locator('canvas, svg[class*="chart"], [class*="chart"], [class*="graph"]').count();
+    const listCount   = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
+    const total = rowCount + cardCount + chartCount + listCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 2 Report content visible', status: 'PASS', evidence: `Content found: rows:${rowCount}, cards:${cardCount}, charts:${chartCount}, listitems:${listCount}.` });
+    } else {
+      const emptyText = await page.getByText(/no reports|empty|no data|no results/i).count();
+      results.push({ check: 'CHECK 2 Report content visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty state shown — no report data.' : 'No recognizable report content found.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Report content visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Navigation controls (tabs, filters, date range, report type selector)
+  try {
+    await shot(page, `${sp}-3-controls`);
+    const tabCount    = await page.locator('[role="tab"], [class*="tab"]').count();
+    const filterCount = await page.locator('select, [class*="filter"], input[placeholder*="search" i], input[placeholder*="filter" i], [class*="date-range"], [class*="dateRange"]').count();
+    const buttonCount = await page.locator('button').count();
+    const total = tabCount + filterCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 3 Report controls visible', status: 'PASS', evidence: `Controls: tabs:${tabCount}, filters/date:${filterCount}, buttons:${buttonCount}.` });
+    } else {
+      results.push({ check: 'CHECK 3 Report controls visible', status: 'DEFERRED', evidence: `No tabs or filter controls found. Buttons: ${buttonCount}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Report controls visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Click a report item or tab → content updates or detail loads
+  try {
+    const urlBefore = page.url();
+    // Try clicking a tab first, then a row/card
+    const firstTab  = page.locator('[role="tab"]:not([aria-selected="true"]), [class*="tab"]:not([class*="active"])').first();
+    const firstRow  = page.locator('table tbody tr, [class*="report-row"], [class*="reportRow"], [role="listitem"]').first();
+    let clicked = false;
+    let clickLabel = '';
+    if (await firstTab.count() > 0) {
+      clickLabel = (await firstTab.textContent().catch(() => ''))?.trim().slice(0, 40) ?? 'tab';
+      await firstTab.click();
+      await page.waitForTimeout(1000);
+      clicked = true;
+    } else if (await firstRow.count() > 0) {
+      clickLabel = (await firstRow.textContent().catch(() => ''))?.trim().slice(0, 40) ?? 'row';
+      await firstRow.click();
+      await page.waitForTimeout(1000);
+      clicked = true;
+    }
+    if (clicked) {
+      await shot(page, `${sp}-4-after-click`);
+      const urlAfter = page.url();
+      const contentChanged = urlAfter !== urlBefore || await page.locator('canvas, svg[class*="chart"], [class*="chart"], table').count() > 0;
+      results.push({ check: 'CHECK 4 Report interaction', status: contentChanged ? 'PASS' : 'DEFERRED', evidence: `Clicked "${clickLabel}". URL: ${urlBefore} → ${urlAfter}. Content present: ${contentChanged}.` });
+      if (urlAfter !== urlBefore) {
+        await page.goto(`https://hub.revopsglobal.com/reports`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+      }
+    } else {
+      results.push({ check: 'CHECK 4 Report interaction', status: 'DEFERRED', evidence: 'No tabs or rows to interact with.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 Report interaction', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Key data labels present — revenue, time, activity, or pipeline metrics
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    await shot(page, `${sp}-5-labels`);
+    const pageText   = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const hasRevenue = /revenue|arr|mrr|\$|pipeline|deal/i.test(pageText);
+    const hasTime    = /time|hours|logged|week|month/i.test(pageText);
+    const hasActivity = /activity|task|event|agent|message/i.test(pageText);
+    const found: string[] = [];
+    if (hasRevenue)  found.push('revenue/pipeline');
+    if (hasTime)     found.push('time/hours');
+    if (hasActivity) found.push('activity/tasks');
+    if (found.length >= 1) {
+      results.push({ check: 'CHECK 5 Key metric labels present', status: 'PASS', evidence: `Metric domains found: ${found.join(', ')}.` });
+    } else {
+      results.push({ check: 'CHECK 5 Key metric labels present', status: 'DEFERRED', evidence: 'No recognizable metric labels found.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Key metric labels present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // Report writer
 // ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
@@ -1338,8 +1445,10 @@ async function main() {
       results = await runProjectsChecks(page);
     } else if (targetPage === '/pipeline') {
       results = await runPipelineChecks(page);
+    } else if (targetPage === '/reports') {
+      results = await runReportsChecks(page);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
