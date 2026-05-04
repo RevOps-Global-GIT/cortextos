@@ -1727,6 +1727,105 @@ async function runContentReviewChecks(page: Page): Promise<CheckResult[]> {
 // ---------------------------------------------------------------------------
 // Report writer
 // ---------------------------------------------------------------------------
+// /app/wiki checks
+// ---------------------------------------------------------------------------
+async function runWikiChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'app-wiki';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Wiki content visible (articles, pages, sections, or entries)
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.locator('table tbody tr, [class*="wiki"], [class*="Wiki"], [class*="article"], [class*="Article"], [class*="prose"], [class*="markdown"], [class*="rich-text"], .ProseMirror, [data-block], [class*="page"], [class*="entry"], [role="row"]:not([role="columnheader"]), [role="listitem"], article, section').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    await shot(page, `${sp}-2-content`);
+    const articleCount = await page.locator('[class*="wiki"], [class*="Wiki"], [class*="article"], [class*="Article"], [class*="prose"], [class*="markdown"], [class*="rich-text"], .ProseMirror, article').filter({ hasText: /[a-z]/i }).count();
+    const rowCount     = await page.locator('table tbody tr').count();
+    const listCount    = await page.locator('[role="listitem"], [role="row"]:not([role="columnheader"])').count();
+    const total = articleCount || rowCount || listCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 2 Wiki content visible', status: 'PASS', evidence: `${total} item(s) visible (articles:${articleCount}, rows:${rowCount}, listitems:${listCount}).` });
+    } else {
+      const emptyText = await page.getByText(/no articles|empty|no pages|no content|no results/i).count();
+      results.push({ check: 'CHECK 2 Wiki content visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty state — no wiki content.' : 'No wiki content found — may use unrecognized layout.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Wiki content visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Navigation/search controls (sidebar, search, categories)
+  try {
+    await shot(page, `${sp}-3-nav`);
+    const searchCount = await page.locator('input[type="search"], input[placeholder*="search" i], input[placeholder*="find" i]').count();
+    const sidebarCount = await page.locator('[class*="sidebar"], [class*="nav"], [class*="toc"], [class*="contents"], nav').count();
+    const tabCount    = await page.locator('[role="tab"], [class*="tab"]').count();
+    const total = searchCount + sidebarCount + tabCount;
+    if (total > 0) {
+      results.push({ check: 'CHECK 3 Navigation controls visible', status: 'PASS', evidence: `Controls: search:${searchCount}, sidebar/nav:${sidebarCount}, tabs:${tabCount}.` });
+    } else {
+      results.push({ check: 'CHECK 3 Navigation controls visible', status: 'DEFERRED', evidence: 'No search, sidebar, or nav controls found.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Navigation controls visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Click first article/entry → content renders
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    const urlBefore = page.url();
+    const firstItem = page.locator('[class*="wiki"], [class*="Wiki"], [class*="article"], [class*="Article"], table tbody tr, [role="listitem"], [role="row"]:not([role="columnheader"])').filter({ hasText: /[a-z]/i }).first();
+    if (await firstItem.count() > 0) {
+      const itemText = (await firstItem.textContent().catch(() => ''))?.trim().slice(0, 50) ?? '';
+      await firstItem.click();
+      await page.waitForTimeout(1200);
+      await shot(page, `${sp}-4-article`);
+      const urlAfter       = page.url();
+      const contentVisible = await page.locator('article, [class*="content"], [class*="body"], [class*="prose"], p, h1, h2').count() > 0;
+      if (urlAfter !== urlBefore || contentVisible) {
+        if (urlAfter !== urlBefore) {
+          await page.goto(`https://hub.revopsglobal.com/app/wiki`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+        }
+        results.push({ check: 'CHECK 4 Article click → content', status: 'PASS', evidence: `Clicked "${itemText.slice(0, 40)}". URL: ${urlBefore} → ${urlAfter}. Content visible: ${contentVisible}. Returned.` });
+      } else {
+        results.push({ check: 'CHECK 4 Article click → content', status: 'DEFERRED', evidence: `Clicked item but no navigation or content appeared. Text: "${itemText.slice(0, 40)}".` });
+      }
+    } else {
+      results.push({ check: 'CHECK 4 Article click → content', status: 'DEFERRED', evidence: 'No wiki items to click.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 Article click → content', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Key structural elements — headings, body text, last-updated or author metadata
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+    await shot(page, `${sp}-5-structure`);
+    const pageText   = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const hasHeading = /h1|h2|h3/i.test(await page.locator('h1, h2, h3').first().textContent().catch(() => '') ?? '') || await page.locator('h1, h2, h3').count() > 0;
+    const hasMeta    = /updated|created|author|last.edit|modified/i.test(pageText);
+    const hasBody    = pageText.length > 200;
+    const found: string[] = [];
+    if (hasHeading) found.push('headings');
+    if (hasMeta)    found.push('metadata');
+    if (hasBody)    found.push('body-text');
+    if (found.length >= 2) {
+      results.push({ check: 'CHECK 5 Content structure present', status: 'PASS', evidence: `Structure confirmed: ${found.join(', ')}.` });
+    } else {
+      results.push({ check: 'CHECK 5 Content structure present', status: 'DEFERRED', evidence: `Sparse structure: ${found.join(', ') || 'none'}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Content structure present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
   const passed  = results.filter(r => r.status === 'PASS').length;
   const failed  = results.filter(r => r.status === 'FAIL').length;
@@ -1850,8 +1949,10 @@ async function main() {
       results = await runSocialContentChecks(page);
     } else if (targetPage === '/content-review') {
       results = await runContentReviewChecks(page);
+    } else if (targetPage === '/app/wiki') {
+      results = await runWikiChecks(page);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
