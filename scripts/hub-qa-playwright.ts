@@ -228,6 +228,29 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: 'CHECK 3 Log new entry', status: 'FAIL', evidence: `Error: ${e}` });
   }
 
+  // Shared helper: navigate back to the data week found in Check 2.
+  // Does NOT rely on a "Week" view toggle button — instead reads the current date range
+  // and clicks Prev up to 4 times until the data week label appears. This handles both
+  // day-view navigation (where a "Week" button exists) and already-in-week-view states.
+  const returnToDataWeek = async () => {
+    if (!dataWeekLabel || dataWeekLabel === 'current week') return; // nothing to navigate to
+    try {
+      // If we're in day view, try switching to week view first
+      const weekBtn = page.locator('button:has-text("Week")').first();
+      if (await weekBtn.count() > 0) { await weekBtn.click(); await waitForWeekLoad(); }
+      // Navigate by Prev clicks until the data week label appears (up to 4 attempts)
+      const target = dataWeekLabel.trim().slice(0, 6); // e.g. "20 Apr"
+      for (let i = 0; i < 4; i++) {
+        const currentRange = (await getDateRange().textContent().catch(() => '')) ?? '';
+        if (currentRange.includes(target)) break;
+        const prevBtn = getPrevBtn();
+        if (await prevBtn.count() === 0) break;
+        await prevBtn.click();
+        await waitForWeekLoad();
+      }
+    } catch { /* ignore — Check 5 will DEFERRED if still on wrong week */ }
+  };
+
   // CHECK 4: Edit existing entry — click a cell that has an hour value in a DATA row
   // Use page.evaluate to tag a grid hour cell: must be near a project-name sibling, NOT the summary cards
   try {
@@ -289,29 +312,10 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
         // DEFERRED not FAIL when coords existed — clicking may navigate to a view that doesn't show
         // an input immediately (e.g. Day view loads but input requires a second click to focus).
         results.push({ check: 'CHECK 4 Edit entry', status: (coords && inputVisible) ? 'PASS' : 'DEFERRED', evidence: (coords && inputVisible) ? 'Clicking hour cell opened an edit input (Day view entry form). Cancelled without saving.' : (coords ? 'Hour cell clicked but no input appeared — Day view may require second interaction (real friction, not harness error).' : 'Coordinates not obtained for hour cell.') });
-        // Return to data week in Week view for checks 5 & 6
-        try {
-          const weekBtn = page.locator('button:has-text("Week")').first();
-          if (await weekBtn.count() > 0) { await weekBtn.click(); await waitForWeekLoad(); }
-          // "Week" may go to current week — navigate back to data week if needed
-          const currentRange = await getDateRange().textContent().catch(() => '');
-          if (dataWeekLabel && !currentRange.includes('20 Apr')) {
-            const prevBtn = getPrevBtn();
-            if (await prevBtn.count() > 0) { await prevBtn.click(); await waitForWeekLoad(); }
-          }
-        } catch { /* ignore */ }
+        await returnToDataWeek();
       } else {
         results.push({ check: 'CHECK 4 Edit entry', status: 'DEFERRED', evidence: 'Data week found but could not locate an hour cell in the grid (distinct from summary cards).' });
-        // Still return to data week so Check 5 runs in correct page state
-        try {
-          const weekBtn = page.locator('button:has-text("Week")').first();
-          if (await weekBtn.count() > 0) { await weekBtn.click(); await waitForWeekLoad(); }
-          const currentRange = await getDateRange().textContent().catch(() => '');
-          if (dataWeekLabel && !currentRange.includes(dataWeekLabel.slice(0, 6))) {
-            const prevBtn = getPrevBtn();
-            if (await prevBtn.count() > 0) { await prevBtn.click(); await waitForWeekLoad(); }
-          }
-        } catch { /* ignore */ }
+        await returnToDataWeek();
       }
     } else {
       results.push({ check: 'CHECK 4 Edit entry', status: 'DEFERRED', evidence: 'No data week found — skipped.' });
