@@ -121,7 +121,7 @@ interface CheckResult {
 
 async function shot(page: Page, name: string) {
   const file = path.join(OUTPUT_DIR, `${slug(targetPage)}-${name}.png`);
-  await page.screenshot({ path: file, fullPage: false });
+  await page.screenshot({ path: file, fullPage: false }).catch(() => {});
   return file;
 }
 
