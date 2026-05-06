@@ -73,7 +73,7 @@ async function mintSession(serviceKey: string, email: string): Promise<SupabaseS
       'Authorization': `Bearer ${serviceKey}`,
       'apikey': serviceKey,
     },
-    body: JSON.stringify({ type: 'magiclink', email }),
+    body: JSON.stringify({ type: 'recovery', email }),
   });
   if (!genRes.ok) {
     const body = await genRes.text();
