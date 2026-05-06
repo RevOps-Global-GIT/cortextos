@@ -2019,7 +2019,7 @@ async function main() {
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
     console.log(`Navigating to ${HUB_URL}${navPath}...`);
-    await page.goto(`${HUB_URL}${navPath}`, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(`${HUB_URL}${navPath}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
 
     if (page.url().includes('/auth') || page.url().includes('/login')) {

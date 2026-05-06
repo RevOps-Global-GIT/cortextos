@@ -76,6 +76,21 @@ export default function LoginPage() {
     setLoading(true);
     setError('');
 
+    // If CSRF token isn't ready yet (still fetching on slow connections),
+    // wait up to 5s rather than failing silently.
+    if (!csrfTokenRef.current) {
+      let waited = 0;
+      while (!csrfTokenRef.current && waited < 5000) {
+        await new Promise<void>((r) => setTimeout(r, 100));
+        waited += 100;
+      }
+      if (!csrfTokenRef.current) {
+        setError('Security token unavailable. Please refresh and try again.');
+        setLoading(false);
+        return;
+      }
+    }
+
     const form = e.currentTarget;
     const usernameInput = form.querySelector('input[name="username"]') as HTMLInputElement | null;
     const passwordInput = form.querySelector('input[name="password"]') as HTMLInputElement | null;
@@ -188,8 +203,8 @@ export default function LoginPage() {
               {error && (
                 <p className="text-xs text-destructive">{error}</p>
               )}
-              <Button type="submit" className="w-full" disabled={loading || !csrfReady}>
-                {loading ? 'Signing in...' : csrfReady ? 'Sign In' : 'Loading…'}
+              <Button type="submit" className="w-full" disabled={loading}>
+                {loading ? 'Signing in…' : 'Sign In'}
               </Button>
             </form>
           </CardContent>
