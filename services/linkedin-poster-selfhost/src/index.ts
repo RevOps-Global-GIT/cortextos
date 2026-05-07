@@ -13,6 +13,7 @@ import {
   sendConnectionRequest,
   sendDM,
   publishLinkedInPost,
+  discoverLinkedInPosts,
 } from './actions.js';
 import { sendHeartbeat } from './heartbeat.js';
 import { QueueConsumer } from './queue-consumer.js';
@@ -156,9 +157,170 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
       await withActionGuard(res, () => publishLinkedInPost(page, postText, imagePaths));
       break;
     }
+    case '/discover-posts': {
+      const { keywords, limit } = body as { keywords?: string[]; limit?: number };
+      if (!Array.isArray(keywords) || keywords.length === 0) {
+        send(res, 400, { error: 'keywords array required' });
+        break;
+      }
+      if (inFlight) {
+        send(res, 429, { error: 'Another action is in flight — retry in a moment' });
+        break;
+      }
+      try {
+        const posts = await discoverLinkedInPosts(page, keywords, limit ?? 10);
+        send(res, 200, { posts, count: posts.length });
+      } catch (err) {
+        send(res, 500, { error: (err as Error).message });
+      }
+      break;
+    }
     default:
       send(res, 404, { error: 'Not found' });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Engagement batch scheduler
+// (Replaces engage-batch-local.mjs which ran on Mac via the LaunchAgent.
+//  Fires at 6am and 12pm PT Mon-Fri — same windows as the old Mac scheduler.)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_DISCOVERY_KEYWORDS = [
+  'revenue operations strategy',
+  'MQL definition',
+  'marketing operations',
+  'HubSpot workflows',
+  'RevOps',
+  'RevOps and AI',
+  'lead scoring model',
+  'sales marketing alignment B2B',
+  'CRM data hygiene',
+  'marketing ops strategy',
+  'buying group automation',
+  'revenue attribution model',
+];
+
+let lastBatchWindow = '';
+let batchRunning = false;
+
+async function pickBatchKeywords(supabaseUrl: string, supabaseKey: string, n: number): Promise<string[]> {
+  const shuffle = <T>(arr: T[]): T[] => [...arr].sort(() => Math.random() - 0.5);
+  try {
+    const res = await fetch(
+      `${supabaseUrl}/rest/v1/team_members?is_active_sender=eq.true&select=name,topic_keywords`,
+      { headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` } },
+    );
+    if (!res.ok) throw new Error(`team_members ${res.status}`);
+    const senders = await res.json() as Array<{ name: string; topic_keywords: string[] | null }>;
+    const picked: string[] = [];
+    for (const s of shuffle(senders)) {
+      if (picked.length >= n) break;
+      const ownKw = (s.topic_keywords ?? []).filter(k => !picked.includes(k));
+      if (ownKw.length) picked.push(shuffle(ownKw)[0]);
+    }
+    const remaining = shuffle(DEFAULT_DISCOVERY_KEYWORDS.filter(k => !picked.includes(k)));
+    while (picked.length < n && remaining.length) picked.push(remaining.shift()!);
+    return picked;
+  } catch {
+    return shuffle(DEFAULT_DISCOVERY_KEYWORDS).slice(0, n);
+  }
+}
+
+function startEngageBatchScheduler(): void {
+  const BATCH_HOURS_PT = [6, 12];
+  const CHECK_INTERVAL_MS = 5 * 60 * 1000;
+
+  const tick = async () => {
+    // Skip if another action or batch is already running
+    if (inFlight || batchRunning) return;
+
+    const nowPT = new Date(
+      new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }),
+    );
+    const dayPT = nowPT.getDay();
+    const hourPT = nowPT.getHours();
+    const minutePT = nowPT.getMinutes();
+
+    // Weekdays only, within the first 5 minutes of a target hour
+    if (dayPT === 0 || dayPT === 6) return;
+    if (!BATCH_HOURS_PT.includes(hourPT) || minutePT > 5) return;
+
+    const windowKey = `${nowPT.toDateString()}-${hourPT}`;
+    if (lastBatchWindow === windowKey) return;
+
+    console.log(`[engage-batch-sched] Firing window ${windowKey}`);
+    batchRunning = true;
+    inFlight = true; // hold the browser page for discovery navigation
+    lastBatchWindow = windowKey;
+
+    try {
+      const keywords = await pickBatchKeywords(config.supabaseUrl, config.supabaseKey, 4);
+      console.log(`[engage-batch-sched] Keywords: ${keywords.join(', ')}`);
+
+      const page = browser.getPage();
+      const posts = await discoverLinkedInPosts(page, keywords, 10);
+      console.log(`[engage-batch-sched] Discovered ${posts.length} posts`);
+      lastActionAt = Date.now(); // reset cooldown after navigation
+
+      if (posts.length === 0) {
+        console.log('[engage-batch-sched] No posts found — skipping edge function call');
+        return;
+      }
+
+      const BATCH_SIZE = 3;
+      let totalGenerated = 0;
+
+      for (let i = 0; i < posts.length; i += BATCH_SIZE) {
+        const batch = posts.slice(i, i + BATCH_SIZE);
+        console.log(
+          `[engage-batch-sched] Batch ${Math.floor(i / BATCH_SIZE) + 1}: ${batch.length} posts`,
+        );
+        try {
+          const res = await fetch(`${config.supabaseUrl}/functions/v1/engage-batch-generate`, {
+            method: 'POST',
+            headers: {
+              apikey: config.supabaseKey,
+              Authorization: `Bearer ${config.supabaseKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ force: true, posts: batch }),
+            signal: AbortSignal.timeout(180_000),
+          });
+
+          if (!res.ok) {
+            const errText = await res.text().catch(() => '');
+            console.error(`[engage-batch-sched] Edge fn failed: ${res.status} ${errText.slice(0, 200)}`);
+            continue;
+          }
+
+          const result = await res.json() as { generated?: number; errors?: string[] };
+          totalGenerated += result.generated ?? 0;
+          console.log(
+            `[engage-batch-sched] Generated: ${result.generated ?? 0}, errors: ${(result.errors ?? []).length}`,
+          );
+          if (result.errors?.length) result.errors.forEach(e => console.log(`  ${e}`));
+        } catch (err) {
+          console.error(`[engage-batch-sched] Batch error: ${(err as Error).message}`);
+        }
+
+        if (i + BATCH_SIZE < posts.length) {
+          await new Promise(r => setTimeout(r, 2000));
+        }
+      }
+
+      console.log(`[engage-batch-sched] Done: ${totalGenerated} total drafts generated`);
+    } catch (err) {
+      console.error(`[engage-batch-sched] Error: ${(err as Error).message}`);
+    } finally {
+      inFlight = false;
+      batchRunning = false;
+    }
+  };
+
+  // First check after 30s (give server time to fully start), then every 5min
+  setTimeout(() => { void tick(); }, 30_000);
+  setInterval(() => { void tick(); }, CHECK_INTERVAL_MS);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +381,9 @@ async function main(): Promise<void> {
   });
 
   await runHeartbeatLoop();
+
+  // Engagement batch scheduler — replaces engage-batch-local.mjs on Mac
+  startEngageBatchScheduler();
 
   // Graceful shutdown
   const shutdown = async () => {
