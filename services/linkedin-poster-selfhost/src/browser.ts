@@ -27,8 +27,16 @@ export class BrowserManager {
       console.log(`[browser] Using upstream proxy: ${proxyServer}`);
     }
     console.log(`[browser] Launching persistent context: ${this.config.profileDir}`);
+    // Use headed mode when a virtual display is available (Xvfb :99).
+    // LinkedIn detects and degrades headless Chrome, returning no feed content.
+    // With DISPLAY=:99 + Xvfb, headed mode is invisible to the user but
+    // appears as a real browser to LinkedIn.
+    const headless = !process.env['DISPLAY'];
+    if (!headless) {
+      console.log(`[browser] Headed mode enabled (DISPLAY=${process.env['DISPLAY']})`);
+    }
     this.context = await chromium.launchPersistentContext(this.config.profileDir, {
-      headless: true,
+      headless,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
