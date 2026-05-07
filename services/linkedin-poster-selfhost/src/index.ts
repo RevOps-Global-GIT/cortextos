@@ -15,6 +15,7 @@ import {
   publishLinkedInPost,
 } from './actions.js';
 import { sendHeartbeat } from './heartbeat.js';
+import { QueueConsumer } from './queue-consumer.js';
 
 // ---------------------------------------------------------------------------
 // Config from environment
@@ -160,6 +161,16 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 }
 
 // ---------------------------------------------------------------------------
+// Queue consumer (engagement + RPC jobs)
+// ---------------------------------------------------------------------------
+
+function startQueueConsumer(): QueueConsumer {
+  const consumer = new QueueConsumer(config);
+  consumer.start();
+  return consumer;
+}
+
+// ---------------------------------------------------------------------------
 // Heartbeat loop
 // ---------------------------------------------------------------------------
 
@@ -170,7 +181,7 @@ async function runHeartbeatLoop(): Promise<void> {
     try {
       const healthy = await browser.checkHealth();
       await sendHeartbeat(config, {
-        agentName: `linkedin-poster-${config.userId}`,
+        agentName: `linkedin-poster-selfhost-${config.userId}`,
         browserHealthy: healthy,
         status: inFlight ? 'busy' : 'idle',
         profilePath: config.profileDir,
@@ -192,6 +203,8 @@ async function runHeartbeatLoop(): Promise<void> {
 async function main(): Promise<void> {
   await browser.init();
 
+  const queue = startQueueConsumer();
+
   const server = createServer((req, res) => {
     handleRequest(req, res).catch((err) => {
       console.error('[server] Unhandled error:', err);
@@ -209,6 +222,7 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async () => {
     console.log('[server] Shutting down...');
+    queue.stop();
     server.close();
     await browser.close();
     process.exit(0);
