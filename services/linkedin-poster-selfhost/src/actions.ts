@@ -7,6 +7,14 @@ import { readFileSync, existsSync } from 'fs';
 import type { Page } from 'playwright';
 import type { ActionResult } from './types.js';
 
+export interface DiscoveredPost {
+  url: string;
+  authorName: string;
+  authorUrl: string | null;
+  text: string;
+  keyword: string;
+}
+
 const LOGIN_PATTERN = /log.?in|sign.?in|authwall/i;
 
 // ---------------------------------------------------------------------------
@@ -451,4 +459,136 @@ export async function publishLinkedInPost(
   console.log(`[actions] Post submitted via ${postClicked}`);
   await page.waitForTimeout(3000);
   return { success: true };
+}
+
+// ---------------------------------------------------------------------------
+// discoverLinkedInPosts
+// ---------------------------------------------------------------------------
+
+/**
+ * Discover LinkedIn posts for the given keywords using Playwright DOM evaluation.
+ *
+ * LinkedIn feed cards in search results carry `data-urn="urn:li:activity:..."` on
+ * their container elements. We extract post URL, author, and text entirely via
+ * page.evaluate() to avoid any dependency on the deprecated accessibility snapshot API.
+ *
+ * Data extraction tries known LinkedIn SDUI class patterns with a text-length
+ * fallback so it degrades gracefully if class names are updated.
+ */
+export async function discoverLinkedInPosts(
+  page: Page,
+  keywords: string[],
+  limit: number = 10,
+): Promise<DiscoveredPost[]> {
+  const all: DiscoveredPost[] = [];
+  const seenKey = new Set<string>();
+
+  for (const keyword of keywords.slice(0, 6)) {
+    if (all.length >= limit) break;
+    const searchUrl =
+      `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
+    console.log(`[discover] Searching: "${keyword}"`);
+
+    try {
+      await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      await checkSession(page);
+      await page.waitForTimeout(3000); // wait for SDUI feed cards to render
+
+      // Extract all post data from DOM in one evaluate call to minimise round-trips
+      const discovered = await page.evaluate((kw: string): Array<{
+        url: string;
+        authorName: string;
+        authorUrl: string | null;
+        text: string;
+        keyword: string;
+      }> => {
+        const results: Array<{
+          url: string;
+          authorName: string;
+          authorUrl: string | null;
+          text: string;
+          keyword: string;
+        }> = [];
+
+        // Feed post containers are identified by data-urn (LinkedIn SDUI stable attribute)
+        const containers = Array.from(
+          document.querySelectorAll('[data-urn*="urn:li:activity:"]'),
+        );
+
+        for (const container of containers) {
+          const urn = container.getAttribute('data-urn');
+          if (!urn) continue;
+          const url = `https://www.linkedin.com/feed/update/${urn}`;
+
+          // Author: first profile link inside the card
+          let authorName = '';
+          let authorUrl: string | null = null;
+          const profileLinks = Array.from(
+            container.querySelectorAll('a[href*="/in/"], a[href*="/company/"]'),
+          ) as HTMLAnchorElement[];
+          for (const link of profileLinks) {
+            const raw = (link.textContent ?? '').trim();
+            const name = raw
+              .replace(/\s*·\s*(1st|2nd|3rd).*$/i, '')
+              .replace(/Verified\s*Profile/gi, '')
+              .trim();
+            if (name.length > 2 && name.length < 80) {
+              authorName = name;
+              authorUrl = link.href.split('?')[0];
+              break;
+            }
+          }
+          if (!authorName) continue;
+
+          // Post text: try known SDUI class selectors, fall back to longest span/p
+          const textSelectors = [
+            '.feed-shared-update-v2__description',
+            '.update-components-text',
+            '.feed-shared-text',
+            '[data-test-id="main-feed-activity-card__commentary"]',
+          ];
+          let postText = '';
+          for (const sel of textSelectors) {
+            const el = container.querySelector(sel);
+            if (el) {
+              postText = (el.textContent ?? '').trim().substring(0, 500);
+              break;
+            }
+          }
+          if (!postText) {
+            // Fallback: longest text node that isn't a UI label
+            const candidates = Array.from(container.querySelectorAll('span, p'));
+            for (const el of candidates) {
+              const text = (el.textContent ?? '').trim();
+              if (text.length > postText.length && text.length > 40 && !text.startsWith('http')) {
+                postText = text.substring(0, 500);
+              }
+            }
+          }
+          if (!postText) continue;
+
+          results.push({ url, authorName, authorUrl, text: postText, keyword: kw });
+        }
+
+        return results;
+      }, keyword);
+
+      for (const post of discovered) {
+        if (all.length >= limit) break;
+        const dedupKey = post.authorUrl ?? post.authorName.toLowerCase();
+        if (seenKey.has(dedupKey)) continue;
+        seenKey.add(dedupKey);
+        all.push(post);
+      }
+
+      console.log(
+        `[discover] "${keyword}": ${discovered.length} posts found, running total ${all.length}`,
+      );
+    } catch (err) {
+      console.error(`[discover] Keyword "${keyword}" error: ${(err as Error).message}`);
+    }
+  }
+
+  console.log(`[discover] Total: ${all.length} posts discovered`);
+  return all;
 }
