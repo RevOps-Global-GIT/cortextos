@@ -53,8 +53,8 @@ export class BrowserManager {
     if (!this.page) return false;
     try {
       await this.page.goto('https://www.linkedin.com/feed/', {
-        waitUntil: 'networkidle',
-        timeout: 30_000,
+        waitUntil: 'domcontentloaded',
+        timeout: 15_000,
       });
       const title = await this.page.title();
       const healthy = !LOGIN_PATTERN.test(title);
