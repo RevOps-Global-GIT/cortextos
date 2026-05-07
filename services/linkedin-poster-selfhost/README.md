@@ -35,15 +35,30 @@ SENDER_NAME="Greg Harned" \
 npm start
 ```
 
-## Seeding a Login Profile (P2)
+## Seeding a Login Profile (P2 — login CLI)
 
-The profile directory must contain a valid LinkedIn session. Until the Mac-side login CLI is built (P2), seed manually:
+Run on **Greg's Mac** to seed a fresh profile, validate it, and rsync to the server.
 
 ```bash
-# On Greg's Mac — launch Chrome with the target profile dir, log in to LinkedIn, then rsync
-rsync -av ~/Library/Application\ Support/Google/Chrome/Default/ \
-  cortextos-server:/var/lib/linkedin-poster/profiles/greg/
+# First run (one-time): create the base directory on the server
+ssh cortextos@100.84.86.6 "sudo mkdir -p /var/lib/linkedin-poster/profiles && sudo chown cortextos:cortextos /var/lib/linkedin-poster"
+
+# Seed / refresh a user profile
+npm run login -- --user greg --server cortextos@100.84.86.6
+
+# Custom remote base (optional)
+npm run login -- --user greg --server user@host --remote-base /custom/path
 ```
+
+What the CLI does:
+1. Creates a fresh temp profile at `/tmp/poster-login-<user>/` (never touches the existing rgos-linkedin-poster Chrome profile)
+2. Launches **headed** Chromium — you log in to LinkedIn in the window, including 2FA
+3. Waits up to 5 minutes for auth to complete
+4. Validates the session by visiting the feed and checking for an authed DOM element
+5. **Only rsyncs** after validation passes — bad profiles never reach the server
+6. Cleans up temp dir
+
+The remote profile lands at `/var/lib/linkedin-poster/profiles/<user>/`.
 
 ## Endpoints
 
