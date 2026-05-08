@@ -156,7 +156,6 @@ cortextos bus log-event <category> <event_name> <severity> --meta '<json_payload
 
 Examples:
 ```bash
-cortextos bus log-event heartbeat agent_heartbeat info --meta '{"agent":"'$CTX_AGENT_NAME'"}'
 cortextos bus log-event task task_completed info --meta '{"task_id":"task_abc123","summary":"Deployed site"}'
 cortextos bus log-event error deploy_failed error --meta '{"repo":"website","error":"build timeout"}'
 cortextos bus log-event action research_complete info --meta '{"topic":"competitor analysis","findings":3}'
@@ -168,6 +167,7 @@ cortextos bus log-event action research_complete info --meta '{"topic":"competit
 
 ### update-heartbeat
 Update your heartbeat timestamp and status. This is how the system knows you are alive.
+Also logs the heartbeat event automatically — no separate `log-event heartbeat` call needed.
 If you do not call this, the dashboard shows you as DEAD.
 
 ```bash

@@ -15,7 +15,7 @@ The heartbeat is how the dashboard and other agents know you are alive. If you s
 Your `config.json` has a heartbeat cron (default every 4h). When it fires:
 
 ```bash
-# 1. Update your heartbeat with what you're doing
+# 1. Update your heartbeat — also logs the heartbeat event automatically
 cortextos bus update-heartbeat "WORKING ON: <current task summary>"
 
 # 2. Reset the daemon's cron-gap detector (see cron-management skill)
@@ -24,11 +24,7 @@ cortextos bus update-cron-fire heartbeat --interval 4h
 # 3. Check inbox for messages
 cortextos bus check-inbox
 
-# 4. Log heartbeat event
-cortextos bus log-event heartbeat agent_heartbeat info \
-  --meta "{\"agent\":\"$CTX_AGENT_NAME\",\"status\":\"active\"}"
-
-# 5. Check your task queue for anything stale
+# 4. Check your task queue for anything stale
 cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 ```
 

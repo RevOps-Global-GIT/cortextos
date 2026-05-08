@@ -5,9 +5,7 @@ Skipping steps = broken system. The dashboard monitors your compliance.
 
 ## Step 1: Update heartbeat (DO THIS FIRST)
 
-```bash
-cortextos bus update-heartbeat "<1-sentence summary of current work>"
-```
+Run `cortextos bus update-heartbeat "<1-sentence summary of current work>"` — this updates the heartbeat record AND logs the heartbeat event automatically.
 
 If this fails, your agent shows as DEAD on the dashboard. Fix it before anything else.
 
@@ -72,15 +70,7 @@ cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 
 Stale tasks are visible on the dashboard. They make you look broken.
 
-## Step 4: Log heartbeat event
-
-Full reference: `.claude/skills/event-logging/SKILL.md`
-
-```bash
-cortextos bus log-event heartbeat agent_heartbeat info --meta '{"agent":"'$CTX_AGENT_NAME'"}'
-```
-
-## Step 5: Write daily memory
+## Step 4: Write daily memory
 
 Full reference: `.claude/skills/memory/SKILL.md`
 
@@ -167,6 +157,6 @@ This runs automatically on every heartbeat cycle. It ensures past experiences, u
 
 ---
 
-REMINDER: A heartbeat with 0 events logged and 0 memory updates means you did nothing visible.
-Target: >= 2 events and >= 1 memory update per heartbeat cycle.
+REMINDER: A heartbeat with no memory update means you did nothing visible.
+Target: >= 1 memory update per heartbeat cycle.
 Invisible work is wasted work.
