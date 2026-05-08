@@ -483,7 +483,7 @@ export async function discoverLinkedInPosts(
   const all: DiscoveredPost[] = [];
   const seenKey = new Set<string>();
 
-  for (const keyword of keywords.slice(0, 6)) {
+  for (const keyword of keywords) {
     if (all.length >= limit) break;
     const searchUrl =
       `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
