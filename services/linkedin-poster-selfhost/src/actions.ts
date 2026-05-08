@@ -466,14 +466,14 @@ export async function publishLinkedInPost(
 // ---------------------------------------------------------------------------
 
 /**
- * Discover LinkedIn posts for the given keywords using Playwright DOM evaluation.
+ * Discover LinkedIn posts for the given keywords.
  *
- * LinkedIn feed cards in search results carry `data-urn="urn:li:activity:..."` on
- * their container elements. We extract post URL, author, and text entirely via
- * page.evaluate() to avoid any dependency on the deprecated accessibility snapshot API.
+ * Requires headed browser mode (DISPLAY env var set, Xvfb running). LinkedIn's
+ * SDUI does not render feed content in headless Chrome, so DOM extraction only
+ * works when the browser is visible to an X11 display.
  *
- * Data extraction tries known LinkedIn SDUI class patterns with a text-length
- * fallback so it degrades gracefully if class names are updated.
+ * Flow: navigate LinkedIn content search → wait for SDUI render → scroll to
+ * load more → extract post cards from DOM (data-urn + author link + text).
  */
 export async function discoverLinkedInPosts(
   page: Page,
@@ -481,111 +481,122 @@ export async function discoverLinkedInPosts(
   limit: number = 10,
 ): Promise<DiscoveredPost[]> {
   const all: DiscoveredPost[] = [];
-  const seenKey = new Set<string>();
+  const seenUrn = new Set<string>();
+  const headed = !!process.env['DISPLAY'];
+  console.log(`[discover] Mode: ${headed ? 'headed (Xvfb)' : 'headless'}`);
 
   for (const keyword of keywords.slice(0, 6)) {
     if (all.length >= limit) break;
-    const searchUrl =
-      `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
+
+    // LinkedIn content search sorted by recency — proven to return relevant posts
+    const searchUrl = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
     console.log(`[discover] Searching: "${keyword}"`);
 
     try {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       await checkSession(page);
-      await page.waitForTimeout(3000); // wait for SDUI feed cards to render
 
-      // Extract all post data from DOM in one evaluate call to minimise round-trips
-      const discovered = await page.evaluate((kw: string): Array<{
+      // Give SDUI time to render post cards (headed mode renders them; headless does not)
+      await page.waitForTimeout(3000);
+
+      // Scroll to trigger additional post cards to load
+      for (let i = 0; i < 4; i++) {
+        await page.evaluate(() => window.scrollBy(0, 700));
+        await page.waitForTimeout(1000);
+      }
+
+      // Extract post cards from DOM.
+      // LinkedIn renders "Feed post" heading (H2) as the first text in each post card.
+      // We find the smallest div whose text starts with "Feed post" to isolate each card,
+      // then extract author, URL, and post body from its children.
+      type RawExtracted = {
         url: string;
         authorName: string;
         authorUrl: string | null;
         text: string;
-        keyword: string;
-      }> => {
-        const results: Array<{
-          url: string;
-          authorName: string;
-          authorUrl: string | null;
-          text: string;
-          keyword: string;
-        }> = [];
+      };
+      const extracted: RawExtracted[] = await page.evaluate(() => {
+        const results: RawExtracted[] = [];
+        const seenUrls = new Set<string>();
 
-        // Feed post containers are identified by data-urn (LinkedIn SDUI stable attribute)
-        const containers = Array.from(
-          document.querySelectorAll('[data-urn*="urn:li:activity:"]'),
-        );
+        // Find post card containers: divs whose text starts with "Feed post" where
+        // the parent div does NOT also start with "Feed post" (gives us the card root).
+        const allDivs = Array.from(document.querySelectorAll('div'));
+        const feedCards = allDivs.filter(el => {
+          const text = el.textContent?.trim() ?? '';
+          if (!text.startsWith('Feed post')) return false;
+          const parentText = el.parentElement?.textContent?.trim() ?? '';
+          return !parentText.startsWith('Feed post');
+        });
 
-        for (const container of containers) {
-          const urn = container.getAttribute('data-urn');
-          if (!urn) continue;
-          const url = `https://www.linkedin.com/feed/update/${urn}`;
+        for (const el of feedCards.slice(0, 15)) {
+          // Post URL: timestamp link goes to the full post (uses /feed/update/ path)
+          const updateLink = el.querySelector('a[href*="/feed/update/"]') as HTMLAnchorElement | null;
+          const url = updateLink?.href?.split('?')[0] ?? '';
 
-          // Author: first profile link inside the card
-          let authorName = '';
-          let authorUrl: string | null = null;
-          const profileLinks = Array.from(
-            container.querySelectorAll('a[href*="/in/"], a[href*="/company/"]'),
-          ) as HTMLAnchorElement[];
-          for (const link of profileLinks) {
-            const raw = (link.textContent ?? '').trim();
-            const name = raw
-              .replace(/\s*·\s*(1st|2nd|3rd).*$/i, '')
-              .replace(/Verified\s*Profile/gi, '')
-              .trim();
-            if (name.length > 2 && name.length < 80) {
-              authorName = name;
-              authorUrl = link.href.split('?')[0];
-              break;
-            }
-          }
-          if (!authorName) continue;
+          // Author: first /in/ or /company/ link in the card
+          const authorLink = el.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement | null;
+          const authorUrl = authorLink?.href?.split('?')[0] ?? null;
 
-          // Post text: try known SDUI class selectors, fall back to longest span/p
-          const textSelectors = [
-            '.feed-shared-update-v2__description',
-            '.update-components-text',
-            '.feed-shared-text',
-            '[data-test-id="main-feed-activity-card__commentary"]',
-          ];
+          // Author name: first short paragraph (name, not job title, not degree marker)
+          const allPs = Array.from(el.querySelectorAll('p'));
+          const nameP = allPs.find(p => {
+            const t = p.textContent?.trim() ?? '';
+            return t.length >= 2 && t.length <= 80 && !t.startsWith('•') && !/^\d/.test(t) && !/^Follow$/.test(t);
+          });
+          const authorName = nameP?.textContent?.trim() ?? '';
+
+          // Post text: find the Follow button, then take the first long paragraph after it.
+          // Fallback: longest paragraph > 60 chars that isn't author name or job title.
+          const followBtn = Array.from(el.querySelectorAll('button')).find(b =>
+            /^Follow$/i.test(b.textContent?.trim() ?? '')
+          );
           let postText = '';
-          for (const sel of textSelectors) {
-            const el = container.querySelector(sel);
-            if (el) {
-              postText = (el.textContent ?? '').trim().substring(0, 500);
-              break;
-            }
+          if (followBtn) {
+            const psAfter = allPs.filter(p =>
+              followBtn.compareDocumentPosition(p) & Node.DOCUMENT_POSITION_FOLLOWING
+            );
+            postText = psAfter
+              .map(p => p.textContent?.trim() ?? '')
+              .filter(t => t.length > 60 && t !== authorName && !/^\d+[mhdw]/.test(t))
+              .sort((a, b) => b.length - a.length)[0] ?? '';
           }
           if (!postText) {
-            // Fallback: longest text node that isn't a UI label
-            const candidates = Array.from(container.querySelectorAll('span, p'));
-            for (const el of candidates) {
-              const text = (el.textContent ?? '').trim();
-              if (text.length > postText.length && text.length > 40 && !text.startsWith('http')) {
-                postText = text.substring(0, 500);
-              }
-            }
+            // Fallback: longest paragraph in the whole card
+            postText = allPs
+              .map(p => p.textContent?.trim() ?? '')
+              .filter(t => t.length > 80 && t !== authorName && !/^\d+[mhdw]/.test(t) && !t.startsWith('•'))
+              .sort((a, b) => b.length - a.length)[0] ?? '';
           }
-          if (!postText) continue;
 
-          results.push({ url, authorName, authorUrl, text: postText, keyword: kw });
+          if (authorName.length >= 2 && postText.length > 0) {
+            const key = url || authorName + postText.substring(0, 20);
+            if (seenUrls.has(key)) continue;
+            seenUrls.add(key);
+            results.push({ url, authorName, authorUrl, text: postText.substring(0, 500) });
+          }
         }
 
         return results;
-      }, keyword);
+      });
 
-      for (const post of discovered) {
+      console.log(`[discover] "${keyword}": ${extracted.length} posts from DOM extraction`);
+
+      for (const p of extracted) {
         if (all.length >= limit) break;
-        const dedupKey = post.authorUrl ?? post.authorName.toLowerCase();
-        if (seenKey.has(dedupKey)) continue;
-        seenKey.add(dedupKey);
-        all.push(post);
+        const key = p.url || `${p.authorName}:${p.text.substring(0, 20)}`;
+        if (seenUrn.has(key)) continue;
+        seenUrn.add(key);
+        all.push({
+          url: p.url,
+          authorName: p.authorName,
+          authorUrl: p.authorUrl,
+          text: p.text,
+          keyword,
+        });
       }
-
-      console.log(
-        `[discover] "${keyword}": ${discovered.length} posts found, running total ${all.length}`,
-      );
     } catch (err) {
-      console.error(`[discover] Keyword "${keyword}" error: ${(err as Error).message}`);
+      console.error(`[discover] Error for "${keyword}": ${(err as Error).message}`);
     }
   }
 
