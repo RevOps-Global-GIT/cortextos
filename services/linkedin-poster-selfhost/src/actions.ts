@@ -319,27 +319,38 @@ export async function publishLinkedInPost(
 
   console.log('[actions] Opening LinkedIn feed to publish post…');
   await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForTimeout(2000);
+  // Wait for the share box to render — LinkedIn's React app needs extra time after domcontentloaded
+  await page.waitForTimeout(5000);
   await checkSession(page);
 
-  // Click "Start a post" button — may be inside shadow DOM
+  // Click "Start a post" — LinkedIn 2026 renders this as div[role="button"], not <button>
   const startPostClicked = await page.evaluate(() => {
-    // Try light DOM first
+    // Primary: div[role="button"] with text "Start a post" (LinkedIn 2026 SDUI pattern)
+    const divBtns = Array.from(document.querySelectorAll('div[role="button"]'));
+    const divStart = divBtns.find(b => /^Start a post$/i.test((b.textContent ?? '').trim()));
+    if (divStart) { (divStart as HTMLElement).click(); return 'div-role-button'; }
+    // Fallback: <button> with text "Start a post" (older LinkedIn layout)
     const btns = Array.from(document.querySelectorAll('button'));
-    const startBtn = btns.find(b => /Start a post/i.test(b.textContent ?? ''));
-    if (startBtn) { startBtn.click(); return 'light-dom'; }
-    // Try interop-outlet shadow
+    const startBtn = btns.find(b => /Start a post/i.test(b.textContent?.trim() ?? ''));
+    if (startBtn) { startBtn.click(); return 'light-dom-button'; }
+    const ariaBtn = btns.find(b => /Start a post/i.test(b.getAttribute('aria-label') ?? ''));
+    if (ariaBtn) { ariaBtn.click(); return 'light-dom-aria'; }
+    // Fallback: shadow DOM
     const outlet = document.querySelector('#interop-outlet');
     const shadow = outlet?.shadowRoot;
     if (shadow) {
-      const shadowBtns = Array.from(shadow.querySelectorAll('button'));
-      const shadowStart = shadowBtns.find(b => /Start a post/i.test(b.textContent ?? ''));
-      if (shadowStart) { shadowStart.click(); return 'shadow-dom'; }
+      const shadowBtns = Array.from(shadow.querySelectorAll('button, div[role="button"]'));
+      const shadowStart = shadowBtns.find(b =>
+        /Start a post/i.test((b as HTMLElement).textContent?.trim() ?? '') ||
+        /Start a post/i.test(b.getAttribute('aria-label') ?? '')
+      );
+      if (shadowStart) { (shadowStart as HTMLElement).click(); return 'shadow-dom'; }
     }
     return 'not-found';
   });
   if (startPostClicked === 'not-found') {
-    throw new Error("Could not find 'Start a post' button. LinkedIn layout may have changed.");
+    const pageTitle = await page.title();
+    throw new Error(`Could not find 'Start a post' button. Page title: "${pageTitle}"`);
   }
   console.log(`[actions] Start a post clicked via ${startPostClicked}`);
   await page.waitForTimeout(1500);
