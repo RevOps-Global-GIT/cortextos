@@ -3015,6 +3015,11 @@ busCommand
   .action(() => runHook('hook-skill-autopr'));
 
 busCommand
+  .command('hook-skill-telemetry')
+  .description('PostToolUse hook: logs Skill tool calls and SKILL.md Read tool calls to orch_skill_invocations')
+  .action(() => runHook('hook-skill-telemetry'));
+
+busCommand
   .command('create-skill-pr')
   .description('Background worker: commits and draft-PRs a community skill (called by hook-skill-autopr)')
   .argument('<skill-name>', 'Skill directory name under community/skills/')
