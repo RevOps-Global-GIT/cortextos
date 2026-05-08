@@ -315,8 +315,16 @@ async function main(): Promise<void> {
   // --- Strategy 2: Ping-pong ---
   const pp = detectPingPong(state.history);
   if (pp.count >= PINGPONG_BLOCK && pp.tools) {
+    const [toolA, toolB] = pp.tools;
+    // Only block calls that are part of the oscillating pair.
+    // If the current tool is different (e.g. Read, Write, Agent),
+    // the pair's loop does not implicate it — let it through.
+    if (tool_name !== toolA && tool_name !== toolB) {
+      process.exit(0);
+      return;
+    }
     blockCall(
-      `Tool loop detected: "${pp.tools[0]}" and "${pp.tools[1]}" are alternating repeatedly (${pp.count} alternations in the last ${state.history.length} calls). Stop this back-and-forth pattern and try a fundamentally different approach.`,
+      `Tool loop detected: "${toolA}" and "${toolB}" are alternating repeatedly (${pp.count} alternations in the last ${state.history.length} calls). Stop this back-and-forth pattern and try a fundamentally different approach.`,
     );
     return;
   }
