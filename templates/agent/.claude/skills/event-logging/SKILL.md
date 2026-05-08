@@ -44,10 +44,8 @@ cortextos bus log-event task task_completed info \
 ```
 
 ### Heartbeat
-```bash
-cortextos bus log-event heartbeat agent_heartbeat info \
-  --meta "{\"agent\":\"$CTX_AGENT_NAME\",\"status\":\"active\"}"
-```
+
+`cortextos bus update-heartbeat <status>` — logs the heartbeat event automatically. No separate `log-event` call needed.
 
 ---
 
