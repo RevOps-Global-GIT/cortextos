@@ -318,7 +318,7 @@ export async function publishLinkedInPost(
   }
 
   console.log('[actions] Opening LinkedIn feed to publish post…');
-  await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'networkidle', timeout: 30_000 });
+  await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
   await page.waitForTimeout(2000);
   await checkSession(page);
 
@@ -457,8 +457,35 @@ export async function publishLinkedInPost(
     throw new Error("Could not find 'Post' button in composer.");
   }
   console.log(`[actions] Post submitted via ${postClicked}`);
-  await page.waitForTimeout(3000);
-  return { success: true };
+  // Wait for LinkedIn to process the post
+  await page.waitForTimeout(5000);
+
+  // Capture permalink by navigating to the author's recent activity
+  let linkedin_post_id: string | undefined;
+  try {
+    const activityUrl = 'https://www.linkedin.com/in/gregoryharned/recent-activity/shares/';
+    console.log('[actions] Navigating to recent activity to capture permalink…');
+    await page.goto(activityUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+    await page.waitForTimeout(3000);
+    linkedin_post_id = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a[href*="/feed/update/"]'));
+      for (const link of links) {
+        const href = (link as HTMLAnchorElement).href;
+        const clean = href.split('?')[0];
+        if (clean.includes('/feed/update/urn:li:')) return clean;
+      }
+      return undefined;
+    }) as string | undefined;
+    if (linkedin_post_id) {
+      console.log(`[actions] Permalink captured: ${linkedin_post_id}`);
+    } else {
+      console.warn('[actions] Could not extract permalink from recent activity — post may still have published');
+    }
+  } catch (err) {
+    console.warn('[actions] Permalink capture failed (non-fatal):', (err as Error).message.split('\n')[0]);
+  }
+
+  return { success: true, ...(linkedin_post_id ? { linkedin_post_id } : {}) };
 }
 
 // ---------------------------------------------------------------------------
