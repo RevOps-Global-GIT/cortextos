@@ -232,6 +232,26 @@ export class QueueConsumer {
             const res = await this.dispatch('/post', { postText, imagePaths });
             if (!res['success']) throw new Error((res['error'] as string | undefined) ?? 'publish_post failed');
             result = res;
+
+            // Back-write linkedin_scheduled_posts if content_draft_id was in payload
+            const contentDraftId = payload['content_draft_id'] as string | undefined;
+            if (contentDraftId) {
+              const linkedinPostId = (res['linkedin_post_id'] as string | undefined) ?? null;
+              const { error: spErr } = await this.supabase
+                .from('linkedin_scheduled_posts')
+                .update({
+                  status: 'published',
+                  published_at: new Date().toISOString(),
+                  ...(linkedinPostId ? { linkedin_post_id: linkedinPostId } : {}),
+                })
+                .eq('content_draft_id', contentDraftId)
+                .eq('status', 'pending');
+              if (spErr) {
+                console.error(`[queue/jobs] linkedin_scheduled_posts update failed: ${spErr.message}`);
+              } else {
+                console.log(`[queue/jobs] linkedin_scheduled_posts updated for draft ${contentDraftId.slice(0, 8)} permalink=${linkedinPostId ?? 'none'}`);
+              }
+            }
             break;
           }
 
