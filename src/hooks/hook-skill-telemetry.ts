@@ -1,8 +1,13 @@
 /**
- * hook-skill-telemetry.ts — PostToolUse hook (matcher: Skill).
+ * hook-skill-telemetry.ts — PostToolUse hook (matcher: Skill|Read).
  *
- * Fires after every Skill tool call. Extracts the skill slug from tool_input
- * and inserts a row into orch_skill_invocations via PostgREST (direct REST API).
+ * Fires after every Skill tool call and after Read calls that load a SKILL.md.
+ * Inserts a row into orch_skill_invocations via PostgREST (direct REST API).
+ *
+ * Two paths:
+ *   1. tool_name === 'Skill'  → source='agent', slug from tool_input.skill
+ *   2. tool_name === 'Read'   → source='read',  slug extracted from file_path
+ *      matching /.claude/skills/<slug>/SKILL.md
  *
  * Previously this called a Supabase Edge Function (/functions/v1/skill-telemetry)
  * that was never deployed, causing all agent-sourced skill invocations to be
@@ -14,22 +19,43 @@
  *
  * Credentials are read from the agent's .env file (SUPABASE_RGOS_URL +
  * SUPABASE_RGOS_SERVICE_KEY). If absent, the hook exits silently.
+ *
+ * Hot-loop safety: this hook runs in a subprocess and uses only readFileSync +
+ * fetch — it never invokes the Read tool, so no recursive firing can occur.
  */
 
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { readStdin, parseHookInput } from './index.js';
 
+// Matches .claude/skills/<slug>/SKILL.md anywhere in a path
+const SKILL_MD_RE = /\.claude\/skills\/([^/]+)\/SKILL\.md$/;
+
 async function main(): Promise<void> {
   const raw = await readStdin();
   const { tool_name, tool_input } = parseHookInput(raw);
 
-  // Only handle Skill tool calls
-  if (tool_name !== 'Skill') return;
+  let slug: string;
+  let source: 'agent' | 'read';
 
-  const slug: string | undefined = tool_input?.skill;
-  if (!slug || typeof slug !== 'string') {
-    process.stderr.write('hook-skill-telemetry: no skill slug in tool_input — skipping\n');
+  if (tool_name === 'Skill') {
+    // Explicit Skill tool invocation
+    const s: string | undefined = tool_input?.skill;
+    if (!s || typeof s !== 'string') {
+      process.stderr.write('hook-skill-telemetry: no skill slug in tool_input — skipping\n');
+      return;
+    }
+    slug = s;
+    source = 'agent';
+  } else if (tool_name === 'Read') {
+    // Read tool loading a SKILL.md file
+    const filePath: string | undefined = tool_input?.file_path;
+    if (!filePath || typeof filePath !== 'string') return;
+    const match = SKILL_MD_RE.exec(filePath);
+    if (!match) return; // not a SKILL.md read — ignore
+    slug = match[1];
+    source = 'read';
+  } else {
     return;
   }
 
@@ -78,7 +104,7 @@ async function main(): Promise<void> {
     // Insert directly into orch_skill_invocations via PostgREST
     const body: Record<string, unknown> = {
       skill_slug: slug,
-      source: 'agent',
+      source,
       succeeded: true,
     };
     if (skillId) body.skill_id = skillId;
@@ -100,7 +126,9 @@ async function main(): Promise<void> {
       const errBody = await res.text().catch(() => '');
       process.stderr.write(`hook-skill-telemetry: INSERT failed (${res.status}): ${errBody}\n`);
     } else {
-      process.stderr.write(`hook-skill-telemetry: logged invocation for skill "${slug}" (succeeded=true)\n`);
+      process.stderr.write(
+        `hook-skill-telemetry: logged invocation for skill "${slug}" (source=${source}, succeeded=true)\n`,
+      );
     }
   } catch (err) {
     process.stderr.write(`hook-skill-telemetry: error — ${err}\n`);
