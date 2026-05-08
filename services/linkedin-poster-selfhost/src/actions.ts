@@ -450,6 +450,29 @@ export async function publishLinkedInPost(
     await page.waitForTimeout(3000);
   }
 
+  // Intercept LinkedIn's share-creation API response to capture the post URN.
+  // LinkedIn POSTs to /voyager/api/contentcreation/normShares (or similar) when
+  // the Post button is clicked; the response JSON contains the share URN.
+  let capturedUrn: string | undefined;
+  const urnListener = async (response: import('playwright').Response) => {
+    if (capturedUrn) return;
+    try {
+      const url = response.url();
+      if (!url.includes('linkedin.com')) return;
+      if (response.status() < 200 || response.status() >= 300) return;
+      // Only look at POST responses to voyager content-creation endpoints
+      if (!url.includes('normShares') && !url.includes('ugcPosts') &&
+          !url.includes('contentcreation') && !url.includes('/posts')) return;
+      const body = await response.text().catch(() => '');
+      const match = body.match(/urn:li:share:\d+/);
+      if (match) {
+        capturedUrn = match[0];
+        console.log(`[actions] Captured share URN from network: ${capturedUrn}`);
+      }
+    } catch { /* non-fatal */ }
+  };
+  page.on('response', urnListener);
+
   // Click Post button in shadow DOM
   const postClicked = await page.evaluate(() => {
     const outlet = document.querySelector('#interop-outlet');
@@ -468,32 +491,20 @@ export async function publishLinkedInPost(
     throw new Error("Could not find 'Post' button in composer.");
   }
   console.log(`[actions] Post submitted via ${postClicked}`);
-  // Wait for LinkedIn to process the post
-  await page.waitForTimeout(5000);
 
-  // Capture permalink by navigating to the author's recent activity
-  let linkedin_post_id: string | undefined;
-  try {
-    const activityUrl = 'https://www.linkedin.com/in/gregoryharned/recent-activity/shares/';
-    console.log('[actions] Navigating to recent activity to capture permalink…');
-    await page.goto(activityUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
-    await page.waitForTimeout(3000);
-    linkedin_post_id = await page.evaluate(() => {
-      const links = Array.from(document.querySelectorAll('a[href*="/feed/update/"]'));
-      for (const link of links) {
-        const href = (link as HTMLAnchorElement).href;
-        const clean = href.split('?')[0];
-        if (clean.includes('/feed/update/urn:li:')) return clean;
-      }
-      return undefined;
-    }) as string | undefined;
-    if (linkedin_post_id) {
-      console.log(`[actions] Permalink captured: ${linkedin_post_id}`);
-    } else {
-      console.warn('[actions] Could not extract permalink from recent activity — post may still have published');
-    }
-  } catch (err) {
-    console.warn('[actions] Permalink capture failed (non-fatal):', (err as Error).message.split('\n')[0]);
+  // Give LinkedIn time to complete the API call and return the URN
+  await page.waitForTimeout(6000);
+  page.off('response', urnListener);
+
+  // Build permalink from URN if captured
+  const linkedin_post_id = capturedUrn
+    ? `https://www.linkedin.com/feed/update/${capturedUrn}`
+    : undefined;
+
+  if (linkedin_post_id) {
+    console.log(`[actions] Permalink: ${linkedin_post_id}`);
+  } else {
+    console.warn('[actions] Share URN not captured from network — post published but permalink unknown');
   }
 
   return { success: true, ...(linkedin_post_id ? { linkedin_post_id } : {}) };
