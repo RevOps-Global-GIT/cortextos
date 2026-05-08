@@ -48,6 +48,8 @@ export class QueueConsumer {
   private jobProcessing = false;
   private engagementTimer: ReturnType<typeof setInterval> | null = null;
   private jobTimer: ReturnType<typeof setInterval> | null = null;
+  // Fix 4: session publish counter — capped by POSTER_MAX_PUBLISH_PER_SESSION
+  private publishCount = 0;
 
   constructor(config: PosterConfig) {
     this.config = config;
@@ -56,6 +58,14 @@ export class QueueConsumer {
   }
 
   start(): void {
+    // Fix 3: Kill-switch — set POSTER_KILL_SWITCH=true (or 1) to halt the consumer immediately.
+    // Can be applied via systemd override without restarting the full service.
+    const killSwitch = process.env['POSTER_KILL_SWITCH'];
+    if (killSwitch === 'true' || killSwitch === '1') {
+      console.error('[queue] POSTER_KILL_SWITCH is set — poster disabled, not starting consumers');
+      return;
+    }
+
     console.log(`[queue] Starting consumers for user=${this.config.userId}`);
     this.engagementTimer = setInterval(() => this.processEngagementQueue(), 15_000);
     this.jobTimer = setInterval(() => this.processJobQueue(), 5_000);
@@ -218,6 +228,51 @@ export class QueueConsumer {
             const postText = payload['postText'] as string;
             if (!postText) throw new Error('postText required');
 
+            // Fix 4: Session publish cap — prevents test loops from over-publishing.
+            // Set POSTER_MAX_PUBLISH_PER_SESSION=1 in test environments.
+            const maxPerSession = process.env['POSTER_MAX_PUBLISH_PER_SESSION']
+              ? parseInt(process.env['POSTER_MAX_PUBLISH_PER_SESSION'], 10)
+              : Infinity;
+            if (this.publishCount >= maxPerSession) {
+              throw new Error(`session_publish_cap: already published ${this.publishCount} post(s) this session (max=${maxPerSession})`);
+            }
+
+            // Fix 2: Idempotency pre-check — abort if this draft was already published.
+            // Atomically flip to 'publishing' (WHERE status='approved') so a concurrent claimer
+            // will also abort. On publish failure the finally block flips back to 'approved'.
+            const contentDraftId = payload['content_draft_id'] as string | undefined;
+            if (contentDraftId) {
+              const { data: draft, error: draftErr } = await this.supabase
+                .from('content_drafts')
+                .select('status')
+                .eq('id', contentDraftId)
+                .single();
+
+              if (draftErr) {
+                throw new Error(`idempotency_guard: failed to read draft ${contentDraftId.slice(0, 8)}: ${draftErr.message}`);
+              }
+              if (draft?.status !== 'approved') {
+                throw new Error(`idempotency_guard: draft ${contentDraftId.slice(0, 8)} is '${draft?.status}', not 'approved' — skipping`);
+              }
+
+              // Atomically claim the draft by flipping to 'publishing'.
+              // If another process already flipped it, the WHERE status='approved' matches 0 rows.
+              const { data: flippedRows, error: flipErr } = await this.supabase
+                .from('content_drafts')
+                .update({ status: 'publishing' })
+                .eq('id', contentDraftId)
+                .eq('status', 'approved')
+                .select('id');
+
+              if (flipErr) {
+                throw new Error(`idempotency_guard: 'publishing' flip failed for ${contentDraftId.slice(0, 8)}: ${flipErr.message}`);
+              }
+              if (!flippedRows || flippedRows.length === 0) {
+                throw new Error(`idempotency_guard: draft ${contentDraftId.slice(0, 8)} claimed by another process — skipping`);
+              }
+              console.log(`[queue/jobs] draft ${contentDraftId.slice(0, 8)} → publishing`);
+            }
+
             let imagePaths: string[] | undefined;
             if (job.kind === 'publish_post_with_image') {
               const p = payload['image_path'] as string;
@@ -230,11 +285,24 @@ export class QueueConsumer {
             }
 
             const res = await this.dispatch('/post', { postText, imagePaths });
-            if (!res['success']) throw new Error((res['error'] as string | undefined) ?? 'publish_post failed');
+            if (!res['success']) {
+              // Flip draft back to 'approved' so it can be retried
+              if (contentDraftId) {
+                await this.supabase
+                  .from('content_drafts')
+                  .update({ status: 'approved' })
+                  .eq('id', contentDraftId)
+                  .eq('status', 'publishing');
+                console.log(`[queue/jobs] publish failed — draft ${contentDraftId.slice(0, 8)} → approved (retryable)`);
+              }
+              throw new Error((res['error'] as string | undefined) ?? 'publish_post failed');
+            }
+
+            // Increment session counter after confirmed publish
+            this.publishCount++;
             result = res;
 
             // Back-write both tables if content_draft_id was in payload
-            const contentDraftId = payload['content_draft_id'] as string | undefined;
             if (contentDraftId) {
               const linkedinPostId = (res['linkedin_post_id'] as string | undefined) ?? null;
 
