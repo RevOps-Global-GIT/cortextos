@@ -284,3 +284,110 @@ describe('hook-session-restore', () => {
     expect(result.stdout.trim()).toBe('');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Hook 4 — skill-telemetry
+// ---------------------------------------------------------------------------
+//
+// hook-skill-telemetry writes to Supabase PostgREST when credentials are
+// present. All tests below exercise the pre-network exit paths so no real
+// network call is made — credentials are deliberately absent or invalid.
+// The critical invariant is: the hook ALWAYS exits 0 and NEVER emits a
+// block decision, regardless of missing config or network errors.
+
+describe('hook-skill-telemetry', () => {
+  let sandbox: string;
+  let baseEnv: Record<string, string>;
+
+  beforeEach(() => {
+    sandbox = makeSandbox();
+    baseEnv = {
+      CTX_AGENT_DIR: sandbox,
+      CTX_AGENT_NAME: 'test-agent',
+    };
+  });
+
+  afterEach(() => {
+    cleanupSandbox(sandbox);
+  });
+
+  it('exits 0 silently for an unrecognised tool (not Skill or Read)', () => {
+    const payload = { tool_name: 'Write', tool_input: { file_path: '/x.ts', content: '' } };
+    const result = invokeHook(hookPath('hook-skill-telemetry'), payload, baseEnv);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).not.toMatch(/EBADF|spawn error/i);
+    expect(result.stdout.trim()).toBe('');
+    // Must never emit a block decision
+    expect(result.json?.['decision']).toBeUndefined();
+  });
+
+  it('exits 0 silently for a Skill call with no slug in tool_input', () => {
+    const payload = { tool_name: 'Skill', tool_input: {} };
+    const result = invokeHook(hookPath('hook-skill-telemetry'), payload, baseEnv);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('');
+  });
+
+  it('exits 0 silently for a Read of a non-SKILL.md file', () => {
+    const payload = { tool_name: 'Read', tool_input: { file_path: '/home/user/src/main.ts' } };
+    const result = invokeHook(hookPath('hook-skill-telemetry'), payload, baseEnv);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('');
+  });
+
+  it('exits 0 silently when no .env file exists (no Supabase credentials)', () => {
+    // sandbox has no .env — hook must exit before any network call
+    const payload = { tool_name: 'Skill', tool_input: { skill: 'commit' } };
+    const result = invokeHook(hookPath('hook-skill-telemetry'), payload, baseEnv);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('');
+    expect(result.stderr).toMatch(/no \.env found/i);
+  });
+
+  it('exits 0 silently when .env lacks SUPABASE_RGOS_URL', () => {
+    writeFileSync(join(sandbox, '.env'), 'SOME_OTHER_VAR=foo\n', 'utf-8');
+    const payload = { tool_name: 'Skill', tool_input: { skill: 'commit' } };
+    const result = invokeHook(hookPath('hook-skill-telemetry'), payload, baseEnv);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('');
+    expect(result.stderr).toMatch(/SUPABASE_RGOS_URL\/KEY not set/i);
+  });
+
+  it('exits 0 for a Read of a SKILL.md file — extracts slug from path', () => {
+    // No .env → hook exits after slug extraction without hitting the network.
+    // The important assertion is that the slug regex matched (no "no slug" stderr).
+    const payload = {
+      tool_name: 'Read',
+      tool_input: { file_path: '/home/user/.claude/skills/loop/SKILL.md' },
+    };
+    const result = invokeHook(hookPath('hook-skill-telemetry'), payload, baseEnv);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('');
+    // Should hit the "no .env" branch, not the "no slug" branch
+    expect(result.stderr).toMatch(/no \.env found/i);
+    expect(result.stderr).not.toMatch(/no skill slug/i);
+  });
+
+  it('exits 0 with an invalid Supabase URL (network error) — never blocks', () => {
+    // Even if fetch throws (invalid URL / unreachable host), the hook must
+    // swallow the error and exit 0. This validates the catch block.
+    writeFileSync(
+      join(sandbox, '.env'),
+      'SUPABASE_RGOS_URL=http://127.0.0.1:1\nSUPABASE_RGOS_SERVICE_KEY=fake-key\n',
+      'utf-8',
+    );
+    const payload = { tool_name: 'Skill', tool_input: { skill: 'commit' } };
+    const result = invokeHook(hookPath('hook-skill-telemetry'), payload, { ...baseEnv, CTX_AGENT_NAME: '' });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('');
+    // Must never emit a block decision even on network error
+    expect(result.json?.['decision']).toBeUndefined();
+  });
+});

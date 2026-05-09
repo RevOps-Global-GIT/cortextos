@@ -386,3 +386,55 @@ describe('AgentProcess - sessionRefresh writes .session-refresh marker', () => {
     refreshPromise.catch(() => { /* test done */ });
   }, 10000);
 });
+
+// ---------------------------------------------------------------------------
+// Regression: updateRotationResumeSuccess() called after restart (2b63494)
+// ---------------------------------------------------------------------------
+//
+// Bug: writeRotationEvent() inserted a row with resume_success=null but
+// there was no follow-up PATCH once the new session was confirmed running.
+// Fix: updateRotationResumeSuccess() is called after start() in both
+// sessionRefresh() and crash recovery. These tests verify the call happens.
+
+describe('AgentProcess - updateRotationResumeSuccess called after restart (2b63494)', () => {
+  it('sessionRefresh() calls updateRotationResumeSuccess() after start() completes', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    // Spy on the private method — it should be called after start() in sessionRefresh
+    const rrsSpy = vi.spyOn(ap as unknown as { updateRotationResumeSuccess: () => Promise<void> }, 'updateRotationResumeSuccess')
+      .mockResolvedValue(undefined);
+
+    // Mock stop() so we don't need PTY teardown gymnastics
+    vi.spyOn(ap, 'stop').mockResolvedValue();
+    // Mock start() so PTY re-spawn succeeds synchronously
+    vi.spyOn(ap, 'start').mockResolvedValue();
+
+    await ap.sessionRefresh();
+
+    expect(rrsSpy).toHaveBeenCalledOnce();
+  });
+
+  it('crash recovery restart calls updateRotationResumeSuccess() after start()', async () => {
+    vi.useFakeTimers();
+    try {
+      const ap = new AgentProcess('alice', mockEnv, {});
+      await ap.start();
+      expect(ap.getStatus().status).toBe('running');
+
+      const rrsSpy = vi.spyOn(ap as unknown as { updateRotationResumeSuccess: () => Promise<void> }, 'updateRotationResumeSuccess')
+        .mockResolvedValue(undefined);
+
+      // Simulate crash (unintentional exit)
+      capturedOnExit!(1, 0);
+      expect(ap.getStatus().status).toBe('crashed');
+
+      // Advance past the backoff (crash #1 = 5s) to trigger the restart setTimeout
+      await vi.advanceTimersByTimeAsync(6000);
+
+      expect(rrsSpy).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15000);
+});
