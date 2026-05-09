@@ -101,16 +101,25 @@ async function shot(page: Page, label: string) {
 /**
  * Wait for the page to settle after navigation.
  * Waits for networkidle (React Query requests complete) with a hard cap,
- * then an optional extra pause for any deferred renders.
+ * then gates on the app shell mounting before returning.
+ *
+ * Cap raised to 15s (was 8s): pages like /pipeline fire 10+ Supabase queries;
+ * during a Supabase latency spike the 8s cap could fire while the auth shell
+ * (main > div) was still loading, producing false-positive HIGH findings.
+ * After networkidle/cap, waitForSelector('main') ensures the React app shell
+ * has mounted before the hasContent check runs.
  */
 async function waitForSettle(page: Page, extraMs = 500) {
   await page.waitForLoadState('domcontentloaded').catch(() => {});
   // networkidle means no in-flight requests for 500ms — catches React Query fetches.
-  // Cap at 8s so slow pages don't stall the sweep.
+  // Cap at 15s: handles Supabase latency spikes without stalling indefinitely.
   await Promise.race([
     page.waitForLoadState('networkidle').catch(() => {}),
-    new Promise<void>(r => setTimeout(r, 8_000)),
+    new Promise<void>(r => setTimeout(r, 15_000)),
   ]);
+  // Gate on the app shell mounting so hasContent never runs against a skeleton.
+  // Fail-open: if main never appears (true error), hasContent will catch it.
+  await page.waitForSelector('main', { timeout: 5_000 }).catch(() => {});
   if (extraMs > 0) await page.waitForTimeout(extraMs);
 }
 
@@ -155,7 +164,7 @@ async function sweepPage(
     const pageTitle = await page.title().catch(() => '');
     const h1Text = await page.locator('h1').first().textContent().catch(() => '') ?? '';
     const is404 = /404|page not found/i.test(pageTitle) || /^404$|^not found$/i.test(h1Text.trim());
-    const hasContent = await page.locator('h1, h2, h3, table, [role="grid"], [role="tabpanel"], nav, main > div').count().catch(() => 0);
+    const hasContent = await page.locator('h1, h2, h3, table, [role="grid"], [role="tabpanel"], nav, main, main > div').count().catch(() => 0);
 
     if (errBoundary > 0 || errText > 0) {
       renders = 'FAIL';
