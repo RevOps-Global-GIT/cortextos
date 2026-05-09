@@ -1436,6 +1436,10 @@ busCommand
     } finally {
       try { unlinkSync(tmpFile); } catch { /* ignore */ }
     }
+    // Exit after temp file cleanup and all local writes complete.
+    // logEvent() schedules mirrorEventToRgos() via setImmediate → drainRetryQueue;
+    // the drain is disk-persisted and runs on the next daemon cycle.
+    process.exit(0);
   });
 
 // ---------------------------------------------------------------------------
