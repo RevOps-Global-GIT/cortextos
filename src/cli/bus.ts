@@ -320,6 +320,13 @@ busCommand
     }
 
     console.log(msgId);
+    // Exit immediately after all local writes and Telegram mirror complete.
+    // sendMessage() and logEvent() both schedule fire-and-forget async work via
+    // setImmediate → mirrorMessageToRgos/mirrorEventToRgos → drainRetryQueue.
+    // Each drain entry holds a 10s fetch; with a large retry queue the event
+    // loop can stay alive for tens of minutes. The drain is persisted to disk
+    // and runs on the next daemon cycle — exiting here does not lose data.
+    process.exit(0);
   });
 
 busCommand
@@ -342,6 +349,9 @@ busCommand
       logEvent(paths, env.agentName, env.org, 'message', 'inbox_ack', 'info', JSON.stringify({ msg_id: id }));
     } catch { /* non-fatal */ }
     console.log(`ACK'd ${id}`);
+    // Exit after local writes complete — logEvent schedules a drain via setImmediate
+    // that can hold the process alive for tens of minutes (same hazard as send-telegram).
+    process.exit(0);
   });
 
 busCommand
@@ -395,6 +405,10 @@ busCommand
       sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
         `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
     }
+    // Exit after all local writes complete. createTask() fires mirrorTaskToRgos
+    // and sendMessage() fires mirrorMessageToRgos — both via fire-and-forget;
+    // the drain is persisted to disk and runs on the next daemon cycle.
+    process.exit(0);
   });
 
 busCommand
@@ -423,6 +437,9 @@ busCommand
 
     updateTask(paths, id, status as TaskStatus);
     console.log(`Updated ${id} -> ${status}`);
+    // Exit after local write completes — updateTask fires mirrorTaskToRgos
+    // which schedules drainRetryQueue; exit before the drain runs.
+    process.exit(0);
   });
 
 busCommand
@@ -534,6 +551,9 @@ busCommand
 
     completeTask(paths, id, effectiveResult);
     console.log(`Completed ${id}`);
+    // Exit after local write completes — completeTask fires mirrorTaskToRgos
+    // which schedules drainRetryQueue; exit before the drain runs.
+    process.exit(0);
   });
 
 busCommand
@@ -633,6 +653,9 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     logEvent(paths, env.agentName, env.org, category as EventCategory, event, severity as EventSeverity, opts.meta);
     console.log(`Logged ${category}/${event} (${severity})`);
+    // Exit after local JSONL write completes — logEvent schedules mirrorEventToRgos
+    // via setImmediate which triggers drainRetryQueue; exit before drain runs.
+    process.exit(0);
   });
 
 busCommand
@@ -697,6 +720,10 @@ busCommand
       // Non-fatal: heartbeat write already succeeded
     }
     console.log(`Heartbeat updated: ${env.agentName}`);
+    // Exit after all local writes complete — logEvent schedules mirrorEventToRgos
+    // via setImmediate → drainRetryQueue. The drain is disk-persisted and runs
+    // on the next daemon cycle; exiting here does not lose data.
+    process.exit(0);
   });
 
 busCommand
