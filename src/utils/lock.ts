@@ -1,4 +1,4 @@
-import { mkdirSync, rmdirSync, writeFileSync, readFileSync, rmSync } from 'fs';
+import { mkdirSync, rmdirSync, writeFileSync, readFileSync, rmSync, renameSync } from 'fs';
 import { join } from 'path';
 
 /**
@@ -53,14 +53,30 @@ export function acquireLock(dir: string): boolean {
       // Process is alive - lock is held
       return false;
     } catch {
-      // Process is dead - stale lock, remove and re-acquire atomically.
+      // Process is dead — stale lock. Steal it atomically via rename(2).
+      //
+      // renameSync is atomic on POSIX: exactly one process wins when N
+      // concurrent stealers all try to rename the same source path. The
+      // winner gets the stale dir under a unique temp name; losers get
+      // ENOENT (source already renamed) and fall back to the retry loop.
+      //
+      // This closes a double-steal race in the previous rmSync+mkdirSync
+      // approach: two concurrent stealers could each do rmSync (one a
+      // no-op), then both win mkdirSync in sequence because the first
+      // winner's lock dir got wiped by the second stealer's rmSync.
+      const tmpStealDir = join(dir, `.lock.d.steal-${process.pid}-${Date.now()}`);
       try {
-        rmSync(lockDir, { recursive: true, force: true });
+        renameSync(lockDir, tmpStealDir);
+        // We won the rename — exclusively own tmpStealDir. Clean it up and
+        // create the canonical lock dir with our PID.
+        rmSync(tmpStealDir, { recursive: true, force: true });
         mkdirSync(lockDir);
         writeFileSync(pidFile, String(process.pid));
         return true;
       } catch {
-        // Another process beat us to the steal — let caller retry.
+        // rename failed — either another stealer beat us (ENOENT) or a
+        // normal waiter created the lock dir between our check and rename
+        // (EEXIST on mkdirSync). Either way, let the caller retry.
         return false;
       }
     }

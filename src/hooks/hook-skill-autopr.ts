@@ -270,7 +270,13 @@ async function main(): Promise<void> {
   process.stderr.write(`hook-skill-autopr: queued draft PR for skill "${skillName}"\n`);
 }
 
-main().catch(err => {
-  process.stderr.write(`hook-skill-autopr: error — ${err}\n`);
-  process.exit(0); // always exit 0 — never block tool execution
-});
+// Guard: only run as a hook when invoked directly (dist/hooks/hook-skill-autopr.js),
+// NOT when this module is loaded as a bus dependency (dist/cli.js). Without this
+// guard, bus commands like `update-cron` would register a stdin listener (via
+// readStdin()) that keeps piped-stdin processes alive indefinitely.
+if (process.argv[1]?.includes('hook-skill-autopr')) {
+  main().catch(err => {
+    process.stderr.write(`hook-skill-autopr: error — ${err}\n`);
+    process.exit(0); // always exit 0 — never block tool execution
+  });
+}
