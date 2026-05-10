@@ -341,22 +341,49 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
     }
   }
 
-  // CHECK 5: Delete entry — look for × button at end of entry row
+  // CHECK 5: Delete entry — look for × button at end of a row that has hours logged.
   // In RGOS time grid, the row delete button is the × at the far right of each row.
-  // It may be hidden until hover. Always click Cancel on any dialog.
+  // Product behavior (TimesheetWeekView.tsx:651): clicking delete on a 0-hour row
+  // silently removes the row without a confirmation dialog — intentional UX.
+  // This test must therefore only click delete on a row where totalHrs > 0,
+  // which guarantees the AlertDialog will open.
   try {
     const attemptDelete = async (): Promise<CheckResult> => {
+      // Find the index of the first "Remove row" button whose adjacent total cell
+      // shows a non-zero numeric value (hours > 0 → dialog will fire).
+      const rowWithHoursIdx = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll(
+          'button[aria-label="Remove row"], button[title*="delete" i], button[title*="remove" i]'
+        ));
+        for (let i = 0; i < btns.length; i++) {
+          const btnCell = btns[i].closest('div');
+          if (!btnCell) continue;
+          // The total cell is the immediate sibling before the delete button cell
+          const totalCell = btnCell.previousElementSibling;
+          const totalText = totalCell?.textContent?.trim() ?? '';
+          const totalNum = parseFloat(totalText);
+          if (!isNaN(totalNum) && totalNum > 0) return i;
+        }
+        return -1;
+      });
+
       // Narrow selectors for the row delete button — avoid ASCII "x" which matches nav buttons
-      const deleteBtn = page.locator([
-        'button[aria-label*="delete" i]',
-        'button[aria-label*="remove" i]',
+      const allDeleteBtns = page.locator([
+        'button[aria-label="Remove row"]',
         'button[title*="delete" i]',
         'button[title*="remove" i]',
-        // Unicode × variants only — NOT ASCII "x" which matches "Next", "Max", etc.
-        'button:has-text("×")',  // U+00D7
-        'button:has-text("✕")',  // U+2715
-        'button:has-text("✗")',  // U+2717
-      ].join(', ')).first();
+      ].join(', '));
+
+      const deleteBtn = rowWithHoursIdx >= 0
+        ? allDeleteBtns.nth(rowWithHoursIdx)
+        : allDeleteBtns.first();
+
+      if (rowWithHoursIdx < 0 && await allDeleteBtns.count() === 0) {
+        return { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: 'No delete button found on data row.' };
+      }
+      if (rowWithHoursIdx < 0) {
+        return { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: 'All rows have 0 hours logged — delete would be silent (intentional). Cannot verify dialog without hours.' };
+      }
 
       if (await deleteBtn.count() > 0) {
         await deleteBtn.hover();
