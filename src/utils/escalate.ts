@@ -114,7 +114,7 @@ export function escalate(options: EscalateOptions): void {
     }
 
     const { paths, agentName, org, telegramApi, telegramChatId } = _config;
-    const severity = level === 'medium' ? 'warn' : 'error';
+    const severity = level === 'medium' ? 'warning' : 'error';
     const eventMeta: Record<string, unknown> = { context, message, ...meta };
 
     // Event log (medium / high / critical)

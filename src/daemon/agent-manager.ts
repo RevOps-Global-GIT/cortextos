@@ -287,6 +287,14 @@ export class AgentManager {
     // external cron system — agents no longer need to call CronCreate on boot.
     this.startAgentCronScheduler(name);
 
+    // Attach the AgentProcess to its CronScheduler so idle-aware deferral can
+    // query isIdle() / isRunning() before each fire.  attachAgent() is a no-op
+    // if the scheduler wasn't started (Hermes agents, etc.).
+    const scheduler = this.cronSchedulers.get(name);
+    if (scheduler) {
+      scheduler.attachAgent(agentProcess);
+    }
+
     // Start fast checker in background
     checker.start().catch(err => {
       console.error(`[${name}] Fast checker error:`, err);

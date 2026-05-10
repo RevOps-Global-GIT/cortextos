@@ -127,7 +127,7 @@ describe('after initEscalate()', () => {
     const [, , , category, eventName, severity] = mockLogEvent.mock.calls[0];
     expect(category).toBe('error');
     expect(eventName).toBe('system_error');
-    expect(severity).toBe('warn');
+    expect(severity).toBe('warning');
     expect(tg.sendMessage).not.toHaveBeenCalled();
     errSpy.mockRestore();
   });
@@ -238,7 +238,7 @@ describe('after initEscalate()', () => {
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     escalateMedium('ctx', new Error('e'));
     const [, , , , , severity] = mockLogEvent.mock.calls[0];
-    expect(severity).toBe('warn');
+    expect(severity).toBe('warning');
     errSpy.mockRestore();
   });
 });

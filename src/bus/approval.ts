@@ -119,6 +119,7 @@ export async function createApproval(
   category: ApprovalCategory,
   context?: string,
   frameworkRoot?: string,
+  _agentDir?: string,
 ): Promise<string> {
   validateApprovalCategory(category);
 
