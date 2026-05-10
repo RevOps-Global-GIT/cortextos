@@ -116,7 +116,9 @@ async function resolveWorkspace(
 async function createComputer(
   workspaceId: string,
   computerName: string,
-  apiKey: string
+  apiKey: string,
+  ram = 4,
+  cpu = 1
 ): Promise<{ id: string; name: string; status: string }> {
   const response = await orgoPost<CreateComputerResponse>(
     'computers',
@@ -125,8 +127,8 @@ async function createComputer(
       workspace_id: workspaceId,
       name: computerName,
       os: 'linux',
-      ram: 8,
-      cpu: 4,
+      ram,
+      cpu,
       gpu: 'none',
       disk_size_gb: 50,
       resolution: '1280x720x24',
@@ -246,6 +248,8 @@ export const provisionOrgoCommand = new Command('provision-orgo')
   .option('--computer <id>', 'Existing Orgo computer ID to provision onto')
   .option('--create [name]', 'Create a new Orgo computer (optionally named)')
   .option('--agent-name <name>', 'Name for the cortextos agent on the VM', 'cortextos-agent')
+  .option('--ram <gb>', 'RAM in GB for new computer (default: 4, free tier max: 4)', parseInt)
+  .option('--cpu <cores>', 'CPU cores for new computer (default: 1, free tier max: 1)', parseInt)
   .action(
     async (options: {
       apiKey: string;
@@ -253,6 +257,8 @@ export const provisionOrgoCommand = new Command('provision-orgo')
       computer?: string;
       create?: boolean | string;
       agentName: string;
+      ram?: number;
+      cpu?: number;
     }) => {
       const apiKey = options.apiKey || process.env['ORGO_API_KEY'] || '';
       if (!apiKey) {
@@ -286,8 +292,10 @@ export const provisionOrgoCommand = new Command('provision-orgo')
               ? options.create
               : `${options.agentName}-vm`;
 
-          console.log(`Creating Orgo computer '${desiredName}' in workspace '${workspace.name}'...`);
-          const computer = await createComputer(workspace.id, desiredName, apiKey);
+          const ramGb = options.ram ?? 4;
+          const cpuCores = options.cpu ?? 1;
+          console.log(`Creating Orgo computer '${desiredName}' in workspace '${workspace.name}' (ram:${ramGb}GB cpu:${cpuCores})...`);
+          const computer = await createComputer(workspace.id, desiredName, apiKey, ramGb, cpuCores);
           computerId = computer.id;
           computerName = computer.name;
           console.log(`  Computer created: ${computerName} (${computerId}) — status: ${computer.status}`);
