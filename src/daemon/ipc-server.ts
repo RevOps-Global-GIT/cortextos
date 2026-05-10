@@ -866,6 +866,13 @@ export class IPCClient {
       });
 
       socket.on('end', () => {
+        // Destroy immediately so the socket's ref does not keep the calling
+        // process's event loop alive after the response is fully received.
+        // Without this, short-lived CLI child processes that use IPCClient
+        // (e.g. `bus update-cron`) never exit because the half-open socket
+        // continues holding a ref, causing execFile / execFileAsync callers
+        // to wait indefinitely.
+        socket.destroy();
         try {
           resolve(JSON.parse(data));
         } catch {
@@ -874,6 +881,8 @@ export class IPCClient {
       });
 
       socket.on('error', (err: Error) => {
+        // Destroy so the socket ref is released regardless of error type.
+        socket.destroy();
         if ((err as any).code === 'ECONNREFUSED' || (err as any).code === 'ENOENT') {
           resolve({
             success: false,
