@@ -17,9 +17,9 @@
  * Each test gets an isolated temp dir; no state bleeds between runs.
  */
 
-import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { spawnSync, execSync } from 'child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'fs';
 import { rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -30,7 +30,20 @@ import { fileURLToPath } from 'url';
 // Harness
 // ---------------------------------------------------------------------------
 
-const CLI_PATH = resolve(fileURLToPath(import.meta.url), '../../../../dist/cli.js');
+const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '../../../../');
+const CLI_PATH = resolve(REPO_ROOT, 'dist/cli.js');
+
+// ---------------------------------------------------------------------------
+// Build guard — CI test job runs on a fresh checkout with no dist/.
+// drain-mirror spawns dist/cli.js as a subprocess; node exits -1 if absent.
+// Only builds when dist is missing — no-op for local dev.
+// ---------------------------------------------------------------------------
+
+beforeAll(() => {
+  if (!existsSync(CLI_PATH)) {
+    execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  }
+}, 60_000);
 
 interface DrainResult {
   stdout: string;
