@@ -814,6 +814,12 @@ export interface AgentInfo {
   last_heartbeat: string | null;
   current_task: string | null;
   mode: string | null;
+  /** Remote agents discovered via Supabase orch_agent_heartbeats (not local filesystem). */
+  remote?: boolean;
+  /** Hostname of the VM running this agent (populated for remote agents). */
+  host?: string;
+  /** CTX_INSTANCE_ID of the remote instance. */
+  instance_id?: string;
 }
 
 // Agent Status (returned by daemon)
