@@ -138,6 +138,8 @@ interface ScheduledCron {
   changeKey: string;
   /** True while onFire (+ retries) is executing — prevents re-entry on the next tick. */
   firing?: boolean;
+  /** Epoch ms when idle-deferral began (null = not deferring). */
+  deferStart: number | null;
 }
 
 function changeKeyFor(c: CronDefinition): string {
@@ -240,6 +242,24 @@ export interface CronSchedulerOptions {
   logger?: (msg: string) => void;
 }
 
+/**
+ * Minimal interface that AgentProcess exposes to the CronScheduler so the
+ * scheduler can query agent state (idle check, generation) without importing
+ * the full AgentProcess class (avoids circular deps).
+ */
+export interface ManagedAgent {
+  readonly name: string;
+  readonly generation: number;
+  readonly stateDir: string;
+  readonly configPath: string;
+  readonly timezone: string | undefined;
+  isRunning(): boolean;
+  isIdle(): boolean;
+}
+
+/** Max time (ms) to defer a cron while the agent is busy before force-injecting. */
+const MAX_DEFER_MS = 15 * 60_000; // 15 minutes
+
 export class CronScheduler {
   private readonly agentName: string;
   private readonly onFire: (cron: CronDefinition) => Promise<void> | void;
@@ -266,6 +286,12 @@ export class CronScheduler {
 
   /** Epoch ms of the tick interval, exposed so tests can override. */
   static readonly TICK_INTERVAL_MS = 30_000;
+
+  /**
+   * Optional agent reference used for idle-aware cron deferral.
+   * Set via attachAgent() once the AgentProcess is running.
+   */
+  private attachedAgent: ManagedAgent | null = null;
 
   constructor(opts: CronSchedulerOptions) {
     this.agentName = opts.agentName;
@@ -301,6 +327,40 @@ export class CronScheduler {
     }
     this.scheduled.clear();
     this.logger(`[cron-scheduler] stopped for agent "${this.agentName}"`);
+  }
+
+  /**
+   * Register an agent so the scheduler can query its idle/running state when
+   * deciding whether to defer a cron fire.  Re-attaching with a new generation
+   * (e.g. after a crash-restart) replaces the previous reference and resets
+   * any in-progress defer timers so the new session starts clean.
+   */
+  attachAgent(agent: ManagedAgent): void {
+    if (agent.name !== this.agentName) {
+      this.logger(
+        `[cron-scheduler] attachAgent: agent name mismatch ` +
+        `(expected "${this.agentName}", got "${agent.name}") — ignored`,
+      );
+      return;
+    }
+    this.attachedAgent = agent;
+    // Reset defer timers so the fresh session isn't still in a defer window
+    // from the previous generation.
+    for (const sc of this.scheduled.values()) {
+      sc.deferStart = null;
+    }
+    this.logger(`[cron-scheduler] agent "${agent.name}" attached (gen=${agent.generation})`);
+  }
+
+  /**
+   * Unregister a halted or restarting agent so the scheduler does not hold a
+   * stale reference.  Safe to call with an unknown name.
+   */
+  detachAgent(name: string): void {
+    if (this.attachedAgent?.name === name) {
+      this.attachedAgent = null;
+      this.logger(`[cron-scheduler] agent "${name}" detached`);
+    }
   }
 
   /**
@@ -415,7 +475,7 @@ export class CronScheduler {
         nextFireAt = now; // fire on the very next tick
       }
 
-      nextScheduled.set(def.name, { definition: def, nextFireAt, changeKey: key });
+      nextScheduled.set(def.name, { definition: def, nextFireAt, changeKey: key, deferStart: null });
     }
 
     // LAST-GOOD-SCHEDULE FALLBACK (corruption-only)
@@ -465,6 +525,26 @@ export class CronScheduler {
       if (sc.firing) {
         continue;
       }
+
+      // Idle-aware deferral: if we have an attached agent reference and the
+      // agent is not idle, defer the fire rather than interrupting mid-turn.
+      // After MAX_DEFER_MS we force-inject regardless (bounds the wait).
+      const agent = this.attachedAgent;
+      if (agent && agent.isRunning() && !agent.isIdle()) {
+        if (sc.deferStart === null) {
+          sc.deferStart = now;
+          this.logger(`[cron-scheduler] cron "${name}": deferring (agent busy)`);
+          continue;
+        }
+        if (now - sc.deferStart < MAX_DEFER_MS) {
+          continue; // still within deferral window
+        }
+        this.logger(
+          `[cron-scheduler] cron "${name}": force-injecting after ` +
+          `${Math.round((now - sc.deferStart) / 60_000)}m busy defer`,
+        );
+      }
+      sc.deferStart = null;
 
       sc.firing = true;
       const cron = sc.definition;
