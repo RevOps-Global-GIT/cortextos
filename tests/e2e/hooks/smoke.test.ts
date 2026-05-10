@@ -13,8 +13,8 @@
  * makeTempRoot() so state never bleeds between runs.
  */
 
-import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'child_process';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { spawnSync, execSync } from 'child_process';
 import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'fs';
 import { rmSync } from 'fs';
 import { join } from 'path';
@@ -26,7 +26,20 @@ import { resolve } from 'path';
 // Harness helpers
 // ---------------------------------------------------------------------------
 
-const HOOKS_DIR = resolve(fileURLToPath(import.meta.url), '../../../../dist/hooks');
+const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '../../../../');
+const HOOKS_DIR = resolve(REPO_ROOT, 'dist/hooks');
+
+// ---------------------------------------------------------------------------
+// Build guard — CI test job runs on a fresh checkout with no dist/.
+// Hooks are invoked as subprocesses; node exits 1 if the file is absent.
+// Only builds when dist is missing — no-op for local dev.
+// ---------------------------------------------------------------------------
+
+beforeAll(() => {
+  if (!existsSync(resolve(HOOKS_DIR, 'hook-loop-detector.js'))) {
+    execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  }
+}, 60_000);
 
 interface HookResult {
   stdout: string;
