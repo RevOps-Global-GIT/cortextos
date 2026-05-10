@@ -219,7 +219,7 @@ def get_genai_client(api_key):
     return genai.Client(api_key=api_key)
 
 
-def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45)):
+def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45), call_timeout_secs=90):
     """Call client.models.generate_content with bounded retries on transient APIErrors.
 
     Retries on HTTP code in TRANSIENT_HTTP_CODES or status name in
@@ -228,12 +228,39 @@ def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45)):
 
     backoffs is a tuple of sleep seconds between attempts. len(backoffs) is the
     attempt count. Tests pass (0, 0, 0) to skip sleeps.
+
+    call_timeout_secs: hard per-attempt wall-clock timeout (default 90s). The
+    Gemini API occasionally hangs indefinitely on large media files; this
+    prevents one stalled call from blocking the entire ingest pipeline.
+    TimeoutError is treated as a transient failure and retried like a 503.
+    Tests pass call_timeout_secs=None to disable the timeout.
     """
+    import concurrent.futures
     from google.genai import errors as _genai_errors
     last_err = None
     for attempt, backoff in enumerate(backoffs, start=1):
         try:
-            return client.models.generate_content(model=model, contents=contents)
+            if call_timeout_secs is not None:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+                    _future = _pool.submit(
+                        client.models.generate_content, model=model, contents=contents
+                    )
+                    try:
+                        result = _future.result(timeout=call_timeout_secs)
+                    except concurrent.futures.TimeoutError:
+                        raise TimeoutError(
+                            f"generate_content timed out after {call_timeout_secs}s"
+                        )
+            else:
+                result = client.models.generate_content(model=model, contents=contents)
+            return result
+        except TimeoutError as e:
+            last_err = e
+            if attempt < len(backoffs):
+                print(f"    API timeout ({call_timeout_secs}s); retrying in {backoff}s (attempt {attempt}/{len(backoffs)})")
+                time.sleep(backoff)
+            else:
+                print(f"    Exhausted retries on API timeout after {call_timeout_secs}s")
         except _genai_errors.APIError as e:
             last_err = e
             is_transient = (e.code in TRANSIENT_HTTP_CODES) or (e.status in TRANSIENT_STATUS_NAMES)
@@ -317,7 +344,8 @@ def describe_media(client, config, file_path, media_type="video"):
         ),
     }
 
-    response = client.models.generate_content(
+    response = _retry_generate_content(
+        client,
         model=config.get("gemini_model", "gemini-2.5-flash"),
         contents=[
             types.Part.from_bytes(data=data, mime_type=mime),
@@ -1026,7 +1054,8 @@ def ingest_file(client, config, collection, file_path):
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", ".env",
                  ".next", ".nuxt", "dist", "build", ".cache", ".turbo",
                  "vendor", ".terraform", ".angular", ".svelte-kit", ".output",
-                 "coverage", ".nyc_output", ".pytest_cache", ".mypy_cache"}
+                 "coverage", ".nyc_output", ".pytest_cache", ".mypy_cache",
+                 "playwright-qa"}  # QA screenshot dumps — not KB content
     parts = set(file_path.parts)
     if parts & skip_dirs:
         return 0
