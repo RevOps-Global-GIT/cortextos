@@ -17,13 +17,6 @@ export function readStdin(): Promise<string> {
     process.stdin.on('data', (chunk: Buffer<ArrayBufferLike>) => chunks.push(chunk));
     process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
     process.stdin.on('error', reject);
-    // Unref stdin so that piped-stdin callers (e.g. child processes spawned by
-    // integration tests via execFile) can exit when all other work is done,
-    // without waiting for stdin to close.  When called as a real hook, Claude
-    // Code writes to and closes stdin before the process exits anyway, so the
-    // 'end' event still fires normally.  On a TTY, Node.js already unref's stdin
-    // automatically; this makes piped-stdin behaviour consistent.
-    process.stdin.unref();
   });
 }
 
