@@ -10,16 +10,31 @@
  * deterministic gate: "does the hook binary behave correctly in isolation?"
  */
 
-import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'child_process';
+import { describe, it, expect, beforeAll } from 'vitest';
+import { spawnSync, execSync } from 'child_process';
+import { existsSync } from 'fs';
 import { join } from 'path';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const HOOK_PATH = join(__dirname, '../../../dist/hooks/hook-policy-check.js');
-const MCP_HOOK_PATH = join(__dirname, '../../../dist/hooks/hook-policy-check-mcp.js');
+const REPO_ROOT = join(__dirname, '../../../');
+const HOOK_PATH = join(REPO_ROOT, 'dist/hooks/hook-policy-check.js');
+const MCP_HOOK_PATH = join(REPO_ROOT, 'dist/hooks/hook-policy-check-mcp.js');
+
+// ---------------------------------------------------------------------------
+// Build guard — CI test job runs on a fresh checkout with no dist/.
+// Build once before any subprocess test attempts to find the hook binary.
+// Only builds when the compiled output is absent (no-op for local dev where
+// dist/ already exists from a prior `npm run build`).
+// ---------------------------------------------------------------------------
+
+beforeAll(() => {
+  if (!existsSync(HOOK_PATH)) {
+    execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  }
+}, 60_000 /* build can take up to ~30s on a cold CI runner */);
 
 function runHook(
   hookPath: string,
