@@ -17,6 +17,9 @@ describe('Agent Discovery', () => {
     // back to process.cwd() — which is the repo root and has a real orgs/ dir.
     process.env.CTX_FRAMEWORK_ROOT = join(testDir, 'framework');
     delete process.env.CTX_PROJECT_ROOT;
+    // Ensure Supabase env vars are absent so fetchRemoteHeartbeats() no-ops in tests.
+    delete process.env.SUPABASE_RGOS_URL;
+    delete process.env.SUPABASE_RGOS_SERVICE_KEY;
   });
 
   afterEach(() => {
@@ -27,7 +30,7 @@ describe('Agent Discovery', () => {
   });
 
   describe('listAgents', () => {
-    it('discovers agents from enabled-agents.json', () => {
+    it('discovers agents from enabled-agents.json', async () => {
       // Set up enabled-agents.json
       const configDir = join(ctxRoot, 'config');
       mkdirSync(configDir, { recursive: true });
@@ -39,14 +42,14 @@ describe('Agent Discovery', () => {
         }),
       );
 
-      const agents = listAgents(ctxRoot);
+      const agents = await listAgents(ctxRoot);
       expect(agents.length).toBe(2);
       expect(agents.map(a => a.name).sort()).toEqual(['boris', 'paul']);
       expect(agents[0].org).toBe('acme');
       expect(agents[0].enabled).toBe(true);
     });
 
-    it('reads IDENTITY.md first line for role', () => {
+    it('reads IDENTITY.md first line for role', async () => {
       // Set up framework root with agent identity
       const frameworkRoot = join(testDir, 'framework');
       process.env.CTX_FRAMEWORK_ROOT = frameworkRoot;
@@ -66,18 +69,18 @@ describe('Agent Discovery', () => {
         JSON.stringify({ worker: { org: 'testorg', enabled: true } }),
       );
 
-      const agents = listAgents(ctxRoot);
+      const agents = await listAgents(ctxRoot);
       expect(agents.length).toBe(1);
       expect(agents[0].role).toBe('Backend developer responsible for API implementation');
     });
 
-    it('handles missing files gracefully', () => {
+    it('handles missing files gracefully', async () => {
       // No config dir, no heartbeats - should return empty array
-      const agents = listAgents(ctxRoot);
+      const agents = await listAgents(ctxRoot);
       expect(agents).toEqual([]);
     });
 
-    it('handles missing IDENTITY.md gracefully', () => {
+    it('handles missing IDENTITY.md gracefully', async () => {
       const configDir = join(ctxRoot, 'config');
       mkdirSync(configDir, { recursive: true });
       writeFileSync(
@@ -85,12 +88,12 @@ describe('Agent Discovery', () => {
         JSON.stringify({ agent1: { org: 'org1', enabled: true } }),
       );
 
-      const agents = listAgents(ctxRoot);
+      const agents = await listAgents(ctxRoot);
       expect(agents.length).toBe(1);
       expect(agents[0].role).toBe('');
     });
 
-    it('reads heartbeat data for status', () => {
+    it('reads heartbeat data for status', async () => {
       const configDir = join(ctxRoot, 'config');
       mkdirSync(configDir, { recursive: true });
       writeFileSync(
@@ -110,13 +113,13 @@ describe('Agent Discovery', () => {
         }),
       );
 
-      const agents = listAgents(ctxRoot);
+      const agents = await listAgents(ctxRoot);
       expect(agents.length).toBe(1);
       expect(agents[0].last_heartbeat).toBeTruthy();
       expect(agents[0].running).toBe(true); // Recent heartbeat means running
     });
 
-    it('filters by org when specified', () => {
+    it('filters by org when specified', async () => {
       const configDir = join(ctxRoot, 'config');
       mkdirSync(configDir, { recursive: true });
       writeFileSync(
@@ -127,7 +130,7 @@ describe('Agent Discovery', () => {
         }),
       );
 
-      const agents = listAgents(ctxRoot, 'acme');
+      const agents = await listAgents(ctxRoot, 'acme');
       expect(agents.length).toBe(1);
       expect(agents[0].name).toBe('boris');
     });
@@ -135,7 +138,7 @@ describe('Agent Discovery', () => {
     // BUG-028: daemon and CLI must agree on what's enabled.
     // Previously, listAgents short-circuited on enabled-agents.json existence,
     // hiding agents the daemon was actually running from `cortextos list-agents`.
-    it('shows agents from dir scan even when enabled-agents.json exists', () => {
+    it('shows agents from dir scan even when enabled-agents.json exists', async () => {
       // Set up: enabled-agents.json with one agent (alice), but TWO dirs on disk
       // (alice and bob). Previously listAgents would only return alice. After
       // the fix, both should be returned.
@@ -151,11 +154,11 @@ describe('Agent Discovery', () => {
       mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice'), { recursive: true });
       mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', 'bob'), { recursive: true });
 
-      const agents = listAgents(ctxRoot);
+      const agents = await listAgents(ctxRoot);
       expect(agents.map(a => a.name).sort()).toEqual(['alice', 'bob']);
     });
 
-    it('respects enabled: false from enabled-agents.json for agents found in dir scan', () => {
+    it('respects enabled: false from enabled-agents.json for agents found in dir scan', async () => {
       // Set up: dir for alice + entry in enabled-agents.json saying enabled: false.
       // listAgents should return alice with enabled: false (not skip her entirely).
       const configDir = join(ctxRoot, 'config');
@@ -169,7 +172,7 @@ describe('Agent Discovery', () => {
       process.env.CTX_FRAMEWORK_ROOT = frameworkRoot;
       mkdirSync(join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice'), { recursive: true });
 
-      const agents = listAgents(ctxRoot);
+      const agents = await listAgents(ctxRoot);
       expect(agents.length).toBe(1);
       expect(agents[0].name).toBe('alice');
       expect(agents[0].enabled).toBe(false);

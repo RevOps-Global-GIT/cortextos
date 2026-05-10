@@ -3,15 +3,19 @@ import { join } from 'path';
 import type { AgentInfo, AgentConfig, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { sendMessage } from './message.js';
+import { fetchRemoteHeartbeats } from './heartbeat.js';
 
 /**
  * List all agents in the system.
  *
- * Merges two sources of truth:
+ * Merges three sources of truth:
  *   1. The framework directory scan (`${CTX_FRAMEWORK_ROOT}/orgs/<org>/agents/`)
  *      — this is what the daemon discovers and runs.
  *   2. `enabled-agents.json` — explicit user-set enable/disable state from
  *      `cortextos enable`/`disable` and the dashboard.
+ *   3. `orch_agent_heartbeats` Supabase table — heartbeats pushed by remote agents
+ *      on other VMs (instance_id != local CTX_INSTANCE_ID). Remote agents that share
+ *      a name with a local agent are deduplicated (local takes precedence).
  *
  * BUG-028: previously this function treated `enabled-agents.json` as
  * authoritative — if the file existed, the directory scan was skipped, causing
@@ -19,7 +23,7 @@ import { sendMessage } from './message.js';
  * Now both sources are always merged, with the file providing the explicit
  * enabled flag and the directory scan providing the canonical existence check.
  */
-export function listAgents(ctxRoot: string, org?: string): AgentInfo[] {
+export async function listAgents(ctxRoot: string, org?: string): Promise<AgentInfo[]> {
   const agents: AgentInfo[] = [];
   const seen = new Set<string>();
 
@@ -105,6 +109,38 @@ export function listAgents(ctxRoot: string, org?: string): AgentInfo[] {
     if (org && agentOrg !== org) continue;
     seen.add(name);
     agents.push(buildAgentInfo(name, agentOrg, cfg.enabled !== false, ctxRoot));
+  }
+
+  // 4. Append remote agents from Supabase orch_agent_heartbeats.
+  // These are agents on other VMs (different CTX_INSTANCE_ID) whose heartbeats
+  // have been pushed to the shared table. Local agents take precedence — if a
+  // remote row has the same agent_name as a local agent, it is skipped.
+  try {
+    const remoteRows = await fetchRemoteHeartbeats();
+    for (const row of remoteRows) {
+      if (seen.has(row.agent_name)) continue; // local agent wins
+      if (org && row.org !== org) continue;
+      seen.add(row.agent_name);
+
+      const age = Date.now() - new Date(row.last_heartbeat).getTime();
+      const running = age < 10 * 60 * 1000;
+
+      agents.push({
+        name: row.agent_name,
+        org: row.org,
+        role: '',
+        enabled: true,
+        running,
+        last_heartbeat: row.last_heartbeat,
+        current_task: row.current_task || null,
+        mode: row.mode || null,
+        remote: true,
+        host: row.host,
+        instance_id: row.instance_id,
+      });
+    }
+  } catch {
+    // Supabase unavailable — return local agents only, no error
   }
 
   return agents;
