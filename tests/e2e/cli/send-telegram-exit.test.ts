@@ -22,9 +22,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { createServer, type Server } from 'http';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { resolve } from 'path';
@@ -34,7 +34,21 @@ import { fileURLToPath } from 'url';
 // Constants
 // ---------------------------------------------------------------------------
 
-const CLI_PATH = resolve(fileURLToPath(import.meta.url), '../../../../dist/cli.js');
+const REPO_ROOT = resolve(fileURLToPath(import.meta.url), '../../../../');
+const CLI_PATH = resolve(REPO_ROOT, 'dist/cli.js');
+
+// ---------------------------------------------------------------------------
+// Build guard — CI test job runs on a fresh checkout with no dist/.
+// send-telegram spawns dist/cli.js; node exits -1 (ENOENT) if absent,
+// causing all tests to fail the DEADLINE_MS assertion.
+// Only builds when dist is missing — no-op for local dev.
+// ---------------------------------------------------------------------------
+
+beforeAll(() => {
+  if (!existsSync(CLI_PATH)) {
+    execSync('npm run build', { cwd: REPO_ROOT, stdio: 'inherit' });
+  }
+}, 60_000);
 
 /** Maximum ms the subprocess is allowed to run before the test fails. */
 const DEADLINE_MS = 5_000;
