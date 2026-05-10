@@ -7,12 +7,9 @@ Skipping steps = broken system. The dashboard monitors your compliance.
 
 ```bash
 cortextos bus update-heartbeat "<1-sentence summary of current work>"
-cortextos bus update-cron-fire heartbeat --interval 4h
 ```
 
-The first call updates the agent-alive signal on the dashboard. The second call registers with the daemon's cron-gap detector that the heartbeat cron just fired — without it, the daemon fires false "cron gap" alerts even though the cron is running fine (the detector tracks this registration, not the in-memory CronCreate job). Both are required every heartbeat cycle.
-
-If either fails, your agent shows as DEAD on the dashboard. Fix before anything else.
+If this fails, your agent shows as DEAD on the dashboard. Fix it before anything else.
 
 ## Step 2: Sweep inbox for un-ACK'd messages
 
@@ -168,7 +165,7 @@ timeout 120 cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md
 
 This runs automatically on every heartbeat cycle. It ensures past experiences, user preferences, and learned patterns are semantically searchable for future tasks. Skip if GEMINI_API_KEY is not configured.
 
-`timeout 120` ensures a stalled kb-ingest (e.g. a hung Gemini API call on a large image) cannot freeze the heartbeat shell indefinitely. Exit code 124 (timeout killed) is suppressed by `|| true` so the heartbeat continues normally.
+`timeout 120` ensures a stalled kb-ingest (e.g. a hung Gemini API call on a large PNG) cannot freeze the heartbeat shell. Exit code 124 (timeout) is suppressed by `|| true` so the heartbeat continues normally.
 
 ---
 

@@ -32,35 +32,7 @@ cortextos bus ack-inbox "<message_id>"
 
 Un-ACK'd messages are re-delivered after 5 minutes. Target: 0 un-ACK'd after this sweep.
 
-## Step 3: Fleet health check (ORCHESTRATOR — do this before your own tasks)
-
-Full reference: `.claude/skills/agent-management/SKILL.md`
-Approvals reference: `.claude/skills/approvals/SKILL.md`
-Human tasks reference: `.claude/skills/human-tasks/SKILL.md`
-
-```bash
-# Check all agent heartbeats
-cortextos bus read-all-heartbeats
-
-# Check all pending approvals
-cortextos bus list-approvals --format json 2>/dev/null
-
-# Check stale human tasks
-cortextos bus list-tasks --project human-tasks --status pending 2>/dev/null
-```
-
-For each agent: if heartbeat is older than 5 hours, send an alert to that agent and flag in memory.
-
-For any pending approval older than 4 hours: ping the user via Telegram.
-For any [HUMAN] task pending longer than 4 hours: ping the user via Telegram.
-
-```bash
-# Example: ping user about stale approval or human task
-cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "Pending approval needs your decision: <title> — check dashboard"
-cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "[HUMAN] task waiting on you: <title> — blocking <agent> on <parent task>"
-```
-
-## Step 3b: Check own task queue + stale task detection
+## Step 3: Check task queue + stale task detection
 
 Full reference: `.claude/skills/tasks/SKILL.md`
 
@@ -71,7 +43,7 @@ cortextos bus list-tasks --agent $CTX_AGENT_NAME --status in_progress
 
 - If you have pending tasks: pick the highest priority one
 - If you have in_progress tasks older than 2 hours: either complete them NOW or update their status with a note
-- If you have NO tasks: check GOALS.md for objectives, generate tasks for specialist agents
+- If you have NO tasks: check GOALS.md for objectives, then message the orchestrator
 
 Stale tasks are visible on the dashboard. They make you look broken.
 
@@ -102,19 +74,13 @@ cat >> "$MEMORY_DIR/$TODAY.md" << MEMORY
 MEMORY
 ```
 
-## Step 6: Check org goals state
+## Step 6: Check GOALS.md
 
-Full reference: `.claude/skills/goal-management/SKILL.md`
+Read GOALS.md. Goals are refreshed daily by the orchestrator each morning.
 
-```bash
-cat $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/goals.json
-```
-
-- If `daily_focus_set_at` is not today AND it is before 10 AM: trigger morning review now — read `.claude/skills/morning-review/SKILL.md`
-- If `north_star` is empty: message user via Telegram to set it
-- If any agent has an empty `goals.json` (focus and goals both empty): write their goals and regenerate GOALS.md
-
-Also read your own GOALS.md for any manual overrides or notes you left yourself.
+- If goals were updated today: you should already have tasks. If not, create them now — see `.claude/skills/tasks/SKILL.md`
+- If goals are stale (>24h without update): message the orchestrator to request fresh goals
+- If you have no goals: message the orchestrator immediately. Don't idle.
 
 ## Step 7: Resume work
 
@@ -131,6 +97,9 @@ When done:
 ```bash
 cortextos bus complete-task "<task_id>" --result "<summary of what was produced>"
 ```
+
+If you are blocked, see `.claude/skills/human-tasks/SKILL.md` for the human task and approval workflow.
+If you need an approval before acting, see `.claude/skills/approvals/SKILL.md`.
 
 ## Step 8: Guardrail self-check
 
@@ -163,12 +132,12 @@ Keep your memory collection searchable and current:
 
 ```bash
 timeout 120 cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
-  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --collection memory-$CTX_AGENT_NAME --force || true
+  --org $CTX_ORG --agent $CTX_AGENT_NAME --scope private --force || true
 ```
 
 This runs automatically on every heartbeat cycle. It ensures past experiences, user preferences, and learned patterns are semantically searchable for future tasks. Skip if GEMINI_API_KEY is not configured.
 
-`timeout 120` ensures a stalled kb-ingest (e.g. a hung Gemini API call on a large image) cannot freeze the heartbeat shell indefinitely. Exit code 124 (timeout killed) is suppressed by `|| true` so the heartbeat continues normally.
+`timeout 120` ensures a stalled kb-ingest (e.g. a hung Gemini API call on a large PNG) cannot freeze the heartbeat shell. Exit code 124 (timeout) is suppressed by `|| true` so the heartbeat continues normally.
 
 ---
 
