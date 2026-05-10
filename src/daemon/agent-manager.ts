@@ -17,7 +17,6 @@ import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHi
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
-import { transcribeVoice } from '../bus/transcribe-voice.js';
 import { stripBom } from '../utils/strip-bom.js';
 
 type LogFn = (msg: string) => void;
@@ -556,20 +555,7 @@ export class AgentManager {
             } else if (media.type === 'document') {
               formatted = FastChecker.formatTelegramDocumentMessage(from, effectiveChatId, media.text, relFilePath, media.file_name!);
             } else if (media.type === 'voice' || media.type === 'audio') {
-              // STT: transcribe the voice file before injecting so the agent
-              // reads text rather than a raw file path. Best-effort — an empty
-              // transcript still produces a usable message with the file path.
-              const absoluteVoicePath = media.file_path ?? '';
-              const STT_FAIL_MSG = 'Voice transcription failed — please type your message.';
-              const transcript = absoluteVoicePath
-                ? await transcribeVoice(absoluteVoicePath).catch(() => STT_FAIL_MSG)
-                : STT_FAIL_MSG;
-              if (transcript && transcript !== STT_FAIL_MSG) {
-                log(`[voice-stt] transcribed ${absoluteVoicePath}: "${transcript.slice(0, 80)}..."`);
-              } else if (transcript === STT_FAIL_MSG) {
-                log(`[voice-stt] transcription failed for ${absoluteVoicePath}`);
-              }
-              formatted = FastChecker.formatTelegramVoiceMessage(from, effectiveChatId, relFilePath, media.duration, transcript);
+              formatted = FastChecker.formatTelegramVoiceMessage(from, effectiveChatId, relFilePath, media.duration, media.transcript);
             } else {
               // video or video_note
               formatted = FastChecker.formatTelegramVideoMessage(from, effectiveChatId, media.text, relFilePath, media.file_name || '', media.duration);
