@@ -1,7 +1,11 @@
 import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
-  testDir: './tests/playwright',
+  testDir: './',
+  testMatch: [
+    'tests/playwright/**/*.spec.ts',
+    'scripts/bakeoff/**/*.spec.ts',
+  ],
   timeout: 30_000,
   retries: 0,
   workers: 1,
