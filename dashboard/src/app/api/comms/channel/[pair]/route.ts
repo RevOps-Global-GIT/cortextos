@@ -19,6 +19,81 @@ interface BusMessage {
   media_type?: string;
 }
 
+interface SupabaseMessage {
+  id: string;
+  from_agent: string;
+  to_agent: string;
+  body: string;
+  created_at: string;
+  message_type: string | null;
+  reply_to_id: string | null;
+  payload: Record<string, unknown> | null;
+}
+
+/**
+ * Query agent↔agent message history from Supabase cortex_messages table.
+ * Returns messages bidirectionally for the given agent pair, ordered by
+ * created_at ascending (oldest first for chat view), limited to maxRows.
+ */
+async function fetchAgentPairFromSupabase(
+  a1: string,
+  a2: string,
+  maxRows: number,
+  before?: string | null,
+): Promise<BusMessage[]> {
+  const supabaseUrl = process.env.RGOS_SUPABASE_URL || process.env.SUPABASE_URL;
+  const serviceKey = process.env.RGOS_SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!supabaseUrl || !serviceKey) {
+    // Credentials not configured — return empty rather than crashing.
+    return [];
+  }
+
+  // Bidirectional filter: (A→B) OR (B→A)
+  // PostgREST: use `or` query param with parenthesised conditions
+  const beforeFilter = before ? `&created_at=lt.${encodeURIComponent(before)}` : '';
+  const orFilter = `(and(from_agent.eq.${a1},to_agent.eq.${a2}),and(from_agent.eq.${a2},to_agent.eq.${a1}))`;
+  const url =
+    `${supabaseUrl}/rest/v1/cortex_messages` +
+    `?or=${encodeURIComponent(orFilter)}` +
+    `&order=created_at.asc` +
+    `&limit=${maxRows}` +
+    beforeFilter;
+
+  let rows: SupabaseMessage[];
+  try {
+    const res = await fetch(url, {
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        Accept: 'application/json',
+      },
+      // Next.js: don't cache — always fresh
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      console.warn(`[comms-channel] Supabase query failed: ${res.status} ${res.statusText}`);
+      return [];
+    }
+    rows = (await res.json()) as SupabaseMessage[];
+  } catch (err) {
+    console.warn('[comms-channel] Supabase fetch error:', err);
+    return [];
+  }
+
+  return rows.map(row => ({
+    id: row.id,
+    from: row.from_agent,
+    to: row.to_agent,
+    priority: row.message_type ?? 'normal',
+    timestamp: row.created_at,
+    text: row.body ?? '',
+    reply_to: row.reply_to_id ?? null,
+    // Carry through media_type if stored in payload
+    ...(row.payload?.media_type ? { media_type: String(row.payload.media_type) } : {}),
+  }));
+}
+
 /**
  * GET /api/comms/channel/[pair] — Messages for a specific agent pair.
  * pair = "agent1--agent2" (alphabetically sorted).
@@ -50,70 +125,29 @@ export async function GET(
   }
 
   const ctxRoot = getCTXRoot();
-  const messages: BusMessage[] = [];
   const [a1, a2] = agents;
 
   // Resolve user identity so inbound and outbound Telegram messages
   // land in the same channel as bus messages for the same conversation.
   const identity = resolveIdentity(ctxRoot);
 
-  // Primary source: persistent message history log (JSONL)
-  const historyLog = path.join(ctxRoot, 'logs', 'message-history.jsonl');
-  if (fs.existsSync(historyLog)) {
-    try {
-      const lines = fs.readFileSync(historyLog, 'utf-8').trim().split('\n');
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const msg: BusMessage = JSON.parse(line);
-          if (!msg.id || !msg.from || !msg.to || !msg.timestamp) continue;
-          const msgPair = buildPairKey(msg.from, msg.to, identity);
-          if (msgPair !== pair) continue;
-          if (!matchesSearch(msg.text)) continue;
-          if (before && msg.timestamp >= before) continue;
-          messages.push(msg);
-        } catch { /* skip corrupt lines */ }
-      }
-    } catch { /* fall through to inbox scan */ }
+  const messages: BusMessage[] = [];
+  const seen = new Set<string>();
+
+  // ---------------------------------------------------------------------------
+  // Primary source: Supabase cortex_messages (written by bus rgos-mirror).
+  // This replaces the previous filesystem reads (message-history.jsonl +
+  // inbox/processed scanning) which were never written by the bus.
+  // ---------------------------------------------------------------------------
+  const agentMessages = await fetchAgentPairFromSupabase(a1, a2, limit, before);
+  for (const msg of agentMessages) {
+    if (!matchesSearch(msg.text)) continue;
+    seen.add(msg.id);
+    messages.push(msg);
   }
 
-  // Fallback: scan inbox directories for messages not yet in the history log
-  const seen = new Set<string>(messages.map(m => m.id));
-  const inboxBase = path.join(ctxRoot, 'inbox');
-
-  if (fs.existsSync(inboxBase)) {
-    for (const agent of [a1, a2]) {
-      for (const sub of ['processed', 'inflight', '']) {
-        const dir = sub ? path.join(inboxBase, agent, sub) : path.join(inboxBase, agent);
-        if (!fs.existsSync(dir)) continue;
-
-        let files: string[];
-        try {
-          files = fs.readdirSync(dir).filter(f => f.endsWith('.json') && !f.startsWith('.'));
-        } catch { continue; }
-
-        for (const file of files) {
-          try {
-            const raw = fs.readFileSync(path.join(dir, file), 'utf-8');
-            const msg: BusMessage = JSON.parse(raw);
-            if (!msg.id || !msg.from || !msg.to || !msg.timestamp) continue;
-            if (seen.has(msg.id)) continue;
-
-            const msgPair = buildPairKey(msg.from, msg.to, identity);
-            if (msgPair !== pair) continue;
-
-            if (!matchesSearch(msg.text)) continue;
-            if (before && msg.timestamp >= before) continue;
-
-            seen.add(msg.id);
-            messages.push(msg);
-          } catch { /* skip */ }
-        }
-      }
-    }
-  }
-
-  // Include Telegram messages for this pair.
+  // ---------------------------------------------------------------------------
+  // Telegram log fallback for human↔agent channels.
   //
   // Voice transcript dedup — Telegram voice notes produce two log entries
   // with the same message_id: a stub (empty text, written immediately on
@@ -124,6 +158,7 @@ export async function GET(
   // Two-pass approach: first pass builds a bestByMsgId map where entries
   // with non-empty text always beat empty stubs sharing the same id.
   // Second pass emits only the winners. Applies to inbound and outbound.
+  // ---------------------------------------------------------------------------
   const logsBase = path.join(ctxRoot, 'logs');
   if (fs.existsSync(logsBase)) {
     interface RawTelegramEntry {
