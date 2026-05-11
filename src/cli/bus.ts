@@ -1355,18 +1355,26 @@ busCommand
 
 busCommand
   .command('voice-reply')
-  .description("Generate an MP3 from text using the agent's configured voice (edge-tts), send to Telegram, and post text+audio to the dashboard chat")
+  .description(
+    "Generate an MP3 from text and send to Telegram. Engine: google-tts-neural2 (default when GOOGLE_TTS_API_KEY set) " +
+    "or edge-tts (free fallback). Usage logged to voice_usage. Hard cap $5/day → auto-fallback to edge-tts."
+  )
   .argument('<chat-id>', 'Telegram chat ID')
   .argument('<text>', 'Text to speak')
-  .option('--voice <name>', 'Override voice (e.g. en-US-AndrewNeural). Defaults to the voice field in config.json.')
+  .option('--voice <name>', 'Override edge-tts voice name (e.g. en-US-AndrewNeural). Defaults to config.json voice field.')
+  .option('--engine <name>', 'TTS engine: google-tts-neural2 | edge-tts. Default: google-tts-neural2 if key set, else edge-tts.')
   .option('--local', 'Also play through Mac speakers via afplay after sending')
-  .action(async (chatId: string, text: string, opts: { voice?: string; local?: boolean }) => {
+  .action(async (chatId: string, text: string, opts: { voice?: string; engine?: string; local?: boolean }) => {
     const { execFileSync: execFile, spawnSync: spawnCmd } = require('child_process') as typeof import('child_process');
-    const { unlinkSync, existsSync: fsExists, readFileSync: fsRead, mkdirSync: fsMkdir, copyFileSync: fsCopy } = require('fs') as typeof import('fs');
+    const { unlinkSync, existsSync: fsExists, readFileSync: fsRead, mkdirSync: fsMkdir,
+            copyFileSync: fsCopy, writeFileSync: fsWrite, appendFileSync: fsAppend } =
+      require('fs') as typeof import('fs');
     const { join: pathJoin } = require('path') as typeof import('path');
     const os = require('os') as typeof import('os');
+    const https = require('https') as typeof import('https');
 
     const env = resolveEnv();
+    const DAILY_CAP_USD = 5.0;
 
     // Resolve bot token
     let botToken = '';
@@ -1384,47 +1392,127 @@ busCommand
       process.exit(1);
     }
 
-    // Resolve voice: CLI flag > config.json > fallback
-    let voice = opts.voice || '';
-    if (!voice && env.agentDir) {
+    // Resolve edge-tts voice name: CLI flag > config.json > fallback
+    let edgeTtsVoice = opts.voice || '';
+    if (!edgeTtsVoice && env.agentDir) {
       const configPath = pathJoin(env.agentDir, 'config.json');
       if (fsExists(configPath)) {
-        try {
-          const cfg = JSON.parse(fsRead(configPath, 'utf-8'));
-          if (cfg.voice) voice = cfg.voice;
-        } catch { /* use fallback */ }
+        try { const cfg = JSON.parse(fsRead(configPath, 'utf-8')); if (cfg.voice) edgeTtsVoice = cfg.voice; } catch { /* */ }
       }
     }
-    if (!voice) voice = 'en-US-AndrewNeural';
+    if (!edgeTtsVoice) edgeTtsVoice = 'en-US-AndrewNeural';
 
-    // Generate MP3 to a temp file
-    const tmpFile = pathJoin(os.tmpdir(), `voice-reply-${Date.now()}.mp3`);
-    try {
-      execFile('python3', ['-m', 'edge_tts', '--voice', voice, '--text', text, '--write-media', tmpFile], {
-        stdio: 'pipe',
-      });
-    } catch (err: any) {
-      console.error(`edge-tts failed: ${err.message || err}`);
-      process.exit(1);
+    // Determine engine: CLI flag > config.json voice_engine > auto (google if key present, else edge-tts)
+    const gcpKey = process.env.GOOGLE_TTS_API_KEY || '';
+    let desiredEngine: 'google-tts-neural2' | 'edge-tts' = 'edge-tts';
+    if (opts.engine === 'google-tts-neural2') {
+      desiredEngine = 'google-tts-neural2';
+    } else if (opts.engine === 'edge-tts') {
+      desiredEngine = 'edge-tts';
+    } else {
+      // Read from config or auto-detect
+      if (env.agentDir) {
+        const cfgPath = pathJoin(env.agentDir, 'config.json');
+        if (fsExists(cfgPath)) {
+          try {
+            const cfg = JSON.parse(fsRead(cfgPath, 'utf-8'));
+            if (cfg.voice_engine === 'google-tts-neural2') desiredEngine = 'google-tts-neural2';
+          } catch { /* */ }
+        }
+      }
+      // Auto: use google if key is available
+      if (desiredEngine === 'edge-tts' && gcpKey) desiredEngine = 'google-tts-neural2';
     }
+
+    // Check daily cap → fall back to edge-tts if exceeded
+    const spentToday = await todayTtsCost();
+    let usedEngine = desiredEngine;
+    if (desiredEngine === 'google-tts-neural2' && spentToday >= DAILY_CAP_USD) {
+      usedEngine = 'edge-tts';
+      console.warn(`[voice-reply] daily cap $${DAILY_CAP_USD} hit ($${spentToday.toFixed(4)} today). Falling back to edge-tts.`);
+      try {
+        const { execFileSync: ef } = require('child_process') as typeof import('child_process');
+        ef('cortextos', ['bus', 'send-message', 'orchestrator', 'normal',
+          `Voice cap hit: $${spentToday.toFixed(4)} today. Falling back to edge-tts until tomorrow.`],
+          { stdio: 'pipe', timeout: 10000 });
+      } catch { /* non-fatal */ }
+    }
+
+    // Also fall back if google engine selected but no key
+    if (usedEngine === 'google-tts-neural2' && !gcpKey) {
+      console.warn('[voice-reply] GOOGLE_TTS_API_KEY not set — falling back to edge-tts.');
+      usedEngine = 'edge-tts';
+    }
+
+    const tmpFile = pathJoin(os.tmpdir(), `voice-reply-${Date.now()}.mp3`);
+    const t0 = Date.now();
+
+    if (usedEngine === 'google-tts-neural2') {
+      // Google Cloud TTS Neural2
+      const body = JSON.stringify({
+        input: { text },
+        voice: { languageCode: 'en-US', name: 'en-US-Neural2-D' },
+        audioConfig: { audioEncoding: 'MP3' },
+      });
+      await new Promise<void>((resolve, reject) => {
+        const req = https.request(
+          {
+            hostname: 'texttospeech.googleapis.com',
+            path: `/v1/text:synthesize?key=${gcpKey}`,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+          },
+          (res: any) => {
+            const chunks: Buffer[] = [];
+            res.on('data', (c: Buffer) => chunks.push(c));
+            res.on('end', () => {
+              if (res.statusCode !== 200) {
+                reject(new Error(`Google TTS ${res.statusCode}: ${Buffer.concat(chunks).toString().slice(0, 200)}`));
+                return;
+              }
+              try {
+                const json = JSON.parse(Buffer.concat(chunks).toString());
+                fsWrite(tmpFile, Buffer.from(json.audioContent, 'base64'));
+                resolve();
+              } catch (e: any) { reject(e); }
+            });
+          }
+        );
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      }).catch(async (err: Error) => {
+        console.warn(`[voice-reply] Google TTS failed (${err.message}), falling back to edge-tts.`);
+        usedEngine = 'edge-tts';
+        try {
+          execFile('python3', ['-m', 'edge_tts', '--voice', edgeTtsVoice, '--text', text, '--write-media', tmpFile], { stdio: 'pipe' });
+        } catch (e: any) {
+          console.error(`edge-tts fallback failed: ${e.message}`);
+          process.exit(1);
+        }
+      });
+    } else {
+      // edge-tts (free)
+      try {
+        execFile('python3', ['-m', 'edge_tts', '--voice', edgeTtsVoice, '--text', text, '--write-media', tmpFile], { stdio: 'pipe' });
+      } catch (err: any) {
+        console.error(`edge-tts failed: ${err.message || err}`);
+        process.exit(1);
+      }
+    }
+
+    const durationSeconds = (Date.now() - t0) / 1000;
 
     if (!fsExists(tmpFile)) {
-      console.error('edge-tts did not produce output file');
+      console.error('TTS did not produce output file');
       process.exit(1);
     }
 
     try {
-      // Play locally if requested
-      if (opts.local) {
-        spawnCmd('afplay', [tmpFile], { stdio: 'inherit' });
-      }
+      if (opts.local) spawnCmd('afplay', [tmpFile], { stdio: 'inherit' });
 
       // Publish the MP3 under {ctxRoot}/dashboard-uploads so /api/media/...
-      // can serve it back to the dashboard chat UI. We write the file directly
-      // instead of POSTing to /api/comms/upload because that endpoint sits
-      // behind the dashboard's session-cookie middleware — a CLI curl with
-      // no cookie gets 401 and the audio URL silently goes missing from the
-      // outbound log (the whole reason voice replies only showed text).
+      // can serve it back to the dashboard chat UI.
       let audioUrl = '';
       if (env.ctxRoot) {
         try {
@@ -1436,7 +1524,6 @@ busCommand
           audioUrl = `/api/media/dashboard-uploads/${audioFilename}`;
         } catch (err: any) {
           console.error(`[voice-reply] publish to dashboard-uploads failed: ${err.message || err}`);
-          // Non-fatal — Telegram send still proceeds below.
         }
       }
 
@@ -1445,9 +1532,6 @@ busCommand
       await api.sendDocument(chatId, tmpFile, '');
 
       // Log to outbound-messages.jsonl so the dashboard chat shows text + audio player.
-      // The text field contains the spoken text; the audio URL is appended on a new line
-      // so the MessageContent component detects it as a /api/media/ URL and renders
-      // an <audio controls> element inline beneath the text.
       if (env.agentName && env.ctxRoot) {
         const dashboardText = audioUrl ? `${text}\n${audioUrl}` : text;
         logOutboundMessage(env.ctxRoot, env.agentName, chatId, dashboardText, 0, {});
@@ -1455,69 +1539,43 @@ busCommand
         try {
           const paths = resolvePaths(env.agentName, env.instanceId, env.org);
           logEvent(paths, env.agentName, env.org, 'message', 'voice_sent', 'info',
-            JSON.stringify({ chat_id: chatId, voice, chars: text.length, audio_url: audioUrl || null }));
+            JSON.stringify({ chat_id: chatId, engine: usedEngine, chars: text.length, audio_url: audioUrl || null }));
         } catch { /* non-fatal */ }
       }
 
-      console.log('Voice message sent');
+      // Log usage to voice_usage (all engines — edge-tts logs $0 for cost visibility)
+      const costEstimate = estimateTtsCost(usedEngine, text.length);
+      const modelName = usedEngine === 'google-tts-neural2' ? 'en-US-Neural2-D' : edgeTtsVoice;
+      await logTtsUsage({
+        agent: env.agentName || 'unknown',
+        engine: usedEngine,
+        model: modelName,
+        input_chars: text.length,
+        duration_seconds: durationSeconds,
+        cost_estimate_usd: costEstimate,
+      });
+
+      console.log(`Voice message sent (engine=${usedEngine}, ${durationSeconds.toFixed(1)}s, cost=$${costEstimate.toFixed(5)})`);
     } finally {
       try { unlinkSync(tmpFile); } catch { /* ignore */ }
     }
-    // Exit after temp file cleanup and all local writes complete.
-    // logEvent() schedules mirrorEventToRgos() via setImmediate → drainRetryQueue;
-    // the drain is disk-persisted and runs on the next daemon cycle.
     process.exit(0);
   });
 
 // ---------------------------------------------------------------------------
-// Voice POC L1 helpers
+// Voice POC L1 helpers — used by voice-reply and voice-usage-report
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Engine-agnostic TTS framework (Voice POC L1)
-//
-// Supported engines: edge-tts | google-tts-neural2 | gpt-realtime-mini | gpt-realtime-regular
-// Configured per-agent via config.json `voice_engine` field.
-// Default: edge-tts (free, no API key needed) until Greg picks.
-// Fallback chain on $5/day cap breach: realtime → google-tts → edge-tts.
-// All usage (including free engines) logged to voice_usage Supabase table.
-// ---------------------------------------------------------------------------
+type TtsEngine = 'edge-tts' | 'google-tts-neural2';
 
-type TtsEngine = 'edge-tts' | 'google-tts-neural2' | 'gpt-realtime-mini' | 'gpt-realtime-regular';
-
-/** USD per character for each engine. edge-tts is free. */
+/** USD per character. edge-tts is free. */
 const TTS_COST_PER_CHAR: Record<TtsEngine, number> = {
-  'edge-tts':             0,
-  'google-tts-neural2':   0.004 / 1000,   // $0.004 per 1K chars (Neural2)
-  'gpt-realtime-mini':    0.015 / 1000,   // $0.015 per 1K chars (tts-1)
-  'gpt-realtime-regular': 0.030 / 1000,   // $0.030 per 1K chars (tts-1-hd)
+  'edge-tts':           0,
+  'google-tts-neural2': 0.004 / 1000, // $0.004 per 1K chars (Neural2)
 };
-
-/** Fallback chain, cheapest last. Used when cap is hit to step down. */
-const TTS_FALLBACK_CHAIN: TtsEngine[] = [
-  'gpt-realtime-regular',
-  'gpt-realtime-mini',
-  'google-tts-neural2',
-  'edge-tts',
-];
 
 function estimateTtsCost(engine: TtsEngine, chars: number): number {
   return (TTS_COST_PER_CHAR[engine] ?? 0) * chars;
-}
-
-/** Read voice_engine from agent config.json, defaulting to edge-tts. */
-function readVoiceEngine(agentDir: string | undefined): TtsEngine {
-  if (agentDir) {
-    const cfgPath = join(agentDir, 'config.json');
-    if (existsSync(cfgPath)) {
-      try {
-        const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8'));
-        const e = cfg.voice_engine as TtsEngine | undefined;
-        if (e && e in TTS_COST_PER_CHAR) return e;
-      } catch { /* fallthrough */ }
-    }
-  }
-  return 'edge-tts';
 }
 
 /**
@@ -1561,274 +1619,19 @@ async function logTtsUsage(record: {
         Prefer: 'return=minimal',
       },
       body: JSON.stringify({
-        agent:              record.agent,
-        engine:             record.engine,
-        model:              record.model,
-        input_chars:        record.input_chars,
-        duration_seconds:   record.duration_seconds,
-        cost_estimate_usd:  record.cost_estimate_usd,
-        ts:                 new Date().toISOString(),
+        agent:             record.agent,
+        engine:            record.engine,
+        model:             record.model,
+        input_chars:       record.input_chars,
+        duration_seconds:  record.duration_seconds,
+        cost_estimate_usd: record.cost_estimate_usd,
+        ts:                new Date().toISOString(),
       }),
     });
   } catch (err: any) {
     console.error(`[voice-reply] usage log failed: ${err.message}`);
   }
 }
-
-/**
- * Synthesize speech to outFile using the given engine.
- * Throws on failure so the caller can try the next engine in the fallback chain.
- */
-async function synthesizeSpeech(
-  engine: TtsEngine,
-  text: string,
-  agentVoice: string,
-  outFile: string,
-): Promise<void> {
-  const { execFileSync: ef } = require('child_process') as typeof import('child_process');
-  const { writeFileSync: fsWrite } = require('fs') as typeof import('fs');
-  const https = require('https') as typeof import('https');
-
-  if (engine === 'edge-tts') {
-    ef('python3', ['-m', 'edge_tts', '--voice', agentVoice, '--text', text, '--write-media', outFile], { stdio: 'pipe' });
-    return;
-  }
-
-  if (engine === 'google-tts-neural2') {
-    const gcpKey = process.env.GOOGLE_TTS_API_KEY || '';
-    if (!gcpKey) throw new Error('GOOGLE_TTS_API_KEY not set');
-    const body = JSON.stringify({
-      input: { text },
-      voice: { languageCode: 'en-US', name: 'en-US-Neural2-D' },
-      audioConfig: { audioEncoding: 'MP3' },
-    });
-    await new Promise<void>((resolve, reject) => {
-      const req = https.request(
-        {
-          hostname: 'texttospeech.googleapis.com',
-          path: `/v1/text:synthesize?key=${gcpKey}`,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        },
-        (res: any) => {
-          const chunks: Buffer[] = [];
-          res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => {
-            if (res.statusCode !== 200) {
-              reject(new Error(`Google TTS ${res.statusCode}: ${Buffer.concat(chunks).toString().slice(0, 200)}`));
-              return;
-            }
-            const json = JSON.parse(Buffer.concat(chunks).toString());
-            fsWrite(outFile, Buffer.from(json.audioContent, 'base64'));
-            resolve();
-          });
-        }
-      );
-      req.on('error', reject);
-      req.write(body);
-      req.end();
-    });
-    return;
-  }
-
-  // gpt-realtime-mini or gpt-realtime-regular → OpenAI TTS REST
-  const openaiKey = process.env.OPENAI_API_KEY || '';
-  if (!openaiKey) throw new Error('OPENAI_API_KEY not set');
-  const oaiModel = engine === 'gpt-realtime-regular' ? 'tts-1-hd' : 'tts-1';
-  const oaiVoice = process.env.OPENAI_TTS_VOICE || 'alloy';
-  const requestBody = JSON.stringify({ model: oaiModel, input: text, voice: oaiVoice, response_format: 'mp3' });
-  await new Promise<void>((resolve, reject) => {
-    const req = https.request(
-      {
-        hostname: 'api.openai.com',
-        path: '/v1/audio/speech',
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${openaiKey}`,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(requestBody),
-        },
-      },
-      (res: any) => {
-        if (res.statusCode !== 200) {
-          const chunks: Buffer[] = [];
-          res.on('data', (c: Buffer) => chunks.push(c));
-          res.on('end', () => reject(new Error(`OpenAI TTS ${res.statusCode}: ${Buffer.concat(chunks).toString().slice(0, 200)}`)));
-          return;
-        }
-        const chunks: Buffer[] = [];
-        res.on('data', (c: Buffer) => chunks.push(c));
-        res.on('end', () => { fsWrite(outFile, Buffer.concat(chunks)); resolve(); });
-      }
-    );
-    req.on('error', reject);
-    req.write(requestBody);
-    req.end();
-  });
-}
-
-busCommand
-  .command('voice-reply-realtime')
-  .description(
-    'Engine-agnostic TTS: synthesize text via voice_engine from config.json (default: edge-tts), ' +
-    'send MP3 to Telegram, log usage to voice_usage. Falls back down realtime→google-tts→edge-tts ' +
-    'if the $5/day cap is hit.'
-  )
-  .argument('<chat-id>', 'Telegram chat ID')
-  .argument('<text>', 'Text to speak')
-  .option('--engine <name>', 'Override engine (edge-tts|google-tts-neural2|gpt-realtime-mini|gpt-realtime-regular)')
-  .option('--local', 'Also play through speakers via afplay after sending (macOS only)')
-  .action(async (chatId: string, text: string, opts: { engine?: string; local?: boolean }) => {
-    const { unlinkSync, existsSync: fsExists, readFileSync: fsRead, mkdirSync: fsMkdir,
-            copyFileSync: fsCopy, appendFileSync: fsAppend } =
-      require('fs') as typeof import('fs');
-    const { join: pathJoin } = require('path') as typeof import('path');
-    const { spawnSync: spawnCmd } = require('child_process') as typeof import('child_process');
-    const os = require('os') as typeof import('os');
-
-    const env = resolveEnv();
-    const DAILY_CAP_USD = 5.0;
-
-    // Resolve Telegram bot token
-    let botToken = '';
-    if (env.agentDir) {
-      const agentEnv = pathJoin(env.agentDir, '.env');
-      if (fsExists(agentEnv)) {
-        const content = fsRead(agentEnv, 'utf-8');
-        const match = content.match(/^BOT_TOKEN=(.+)$/m);
-        if (match?.[1]?.trim()) botToken = match[1].trim();
-      }
-    }
-    if (!botToken) botToken = process.env.BOT_TOKEN || '';
-    if (!botToken) {
-      console.error('Error: BOT_TOKEN not configured.');
-      process.exit(1);
-    }
-
-    // Determine engine: CLI flag > config.json > default
-    let desiredEngine: TtsEngine = (opts.engine as TtsEngine | undefined) || readVoiceEngine(env.agentDir);
-
-    // Check daily cap and apply fallback chain if needed
-    const spentToday = await todayTtsCost();
-    let effectiveEngine = desiredEngine;
-    if (spentToday >= DAILY_CAP_USD && desiredEngine !== 'edge-tts') {
-      // Walk fallback chain to find a viable (free or cheapest) engine
-      const startIdx = TTS_FALLBACK_CHAIN.indexOf(desiredEngine);
-      effectiveEngine = 'edge-tts'; // safe default
-      for (let i = startIdx + 1; i < TTS_FALLBACK_CHAIN.length; i++) {
-        effectiveEngine = TTS_FALLBACK_CHAIN[i];
-        break; // take the next cheaper engine
-      }
-      console.warn(
-        `[voice-reply-realtime] daily cap $${DAILY_CAP_USD} hit ($${spentToday.toFixed(4)} today). ` +
-        `Stepping down from ${desiredEngine} to ${effectiveEngine}.`
-      );
-      try {
-        const { execFileSync: ef } = require('child_process') as typeof import('child_process');
-        ef('cortextos', ['bus', 'send-message', 'orchestrator', 'normal',
-          `Voice cap hit: $${spentToday.toFixed(4)} today. Stepping down ${desiredEngine} to ${effectiveEngine}.`],
-          { stdio: 'pipe', timeout: 10000 });
-      } catch { /* non-fatal */ }
-    }
-
-    // Resolve edge-tts voice for edge-tts engine
-    const agentVoice = (() => {
-      if (env.agentDir) {
-        const cfgPath = pathJoin(env.agentDir, 'config.json');
-        if (fsExists(cfgPath)) {
-          try { const c = JSON.parse(fsRead(cfgPath, 'utf-8')); if (c.voice) return c.voice as string; } catch { /* */ }
-        }
-      }
-      return 'en-US-AndrewNeural';
-    })();
-
-    const tmpFile = pathJoin(os.tmpdir(), `voice-${Date.now()}.mp3`);
-    const t0 = Date.now();
-
-    // Synthesize with fallback chain on hard errors
-    let usedEngine = effectiveEngine;
-    const chainFromHere = TTS_FALLBACK_CHAIN.slice(TTS_FALLBACK_CHAIN.indexOf(effectiveEngine));
-    let synthesized = false;
-    for (const eng of chainFromHere) {
-      try {
-        await synthesizeSpeech(eng, text, agentVoice, tmpFile);
-        usedEngine = eng;
-        synthesized = true;
-        break;
-      } catch (err: any) {
-        console.warn(`[voice-reply-realtime] ${eng} failed: ${err.message}. Trying next in chain.`);
-      }
-    }
-    if (!synthesized) {
-      console.error('[voice-reply-realtime] All TTS engines failed.');
-      process.exit(1);
-    }
-
-    const durationSeconds = (Date.now() - t0) / 1000;
-
-    if (!fsExists(tmpFile)) {
-      console.error('TTS did not produce output file');
-      process.exit(1);
-    }
-
-    try {
-      if (opts.local) spawnCmd('afplay', [tmpFile], { stdio: 'inherit' });
-
-      // Publish MP3 to dashboard-uploads
-      let audioUrl = '';
-      if (env.ctxRoot) {
-        try {
-          const uploadsDir = pathJoin(env.ctxRoot, 'dashboard-uploads');
-          fsMkdir(uploadsDir, { recursive: true });
-          const safeAgent = (env.agentName || 'agent').replace(/[^a-zA-Z0-9_-]/g, '_');
-          const audioFilename = `${Date.now()}-voice-${safeAgent}.mp3`;
-          fsCopy(tmpFile, pathJoin(uploadsDir, audioFilename));
-          audioUrl = `/api/media/dashboard-uploads/${audioFilename}`;
-        } catch (err: any) {
-          console.error(`[voice-reply-realtime] dashboard publish failed: ${err.message}`);
-        }
-      }
-
-      // Send via Telegram
-      const api = new TelegramAPI(botToken);
-      await api.sendDocument(chatId, tmpFile, '');
-
-      // Log to outbound-messages.jsonl
-      if (env.agentDir) {
-        try {
-          fsAppend(
-            pathJoin(env.agentDir, 'outbound-messages.jsonl'),
-            JSON.stringify({
-              ts: new Date().toISOString(), chat_id: chatId, text,
-              audio_url: audioUrl || null, engine: usedEngine,
-              type: 'voice_realtime', cap_fallback: usedEngine !== desiredEngine,
-            }) + '\n',
-            'utf-8'
-          );
-        } catch { /* non-fatal */ }
-      }
-
-      // Log usage to Supabase (all engines, including free edge-tts)
-      const costEstimate = estimateTtsCost(usedEngine, text.length);
-      const oaiModel = usedEngine === 'gpt-realtime-regular' ? 'tts-1-hd'
-        : usedEngine === 'gpt-realtime-mini' ? 'tts-1'
-        : usedEngine === 'google-tts-neural2' ? 'en-US-Neural2-D'
-        : 'edge-tts';
-      await logTtsUsage({
-        agent:             env.agentName || 'unknown',
-        engine:            usedEngine,
-        model:             oaiModel,
-        input_chars:       text.length,
-        duration_seconds:  durationSeconds,
-        cost_estimate_usd: costEstimate,
-      });
-
-      console.log(`[voice-reply-realtime] sent to chat ${chatId} (engine=${usedEngine}, ${durationSeconds.toFixed(1)}s, cost=$${costEstimate.toFixed(5)})`);
-    } finally {
-      try { unlinkSync(tmpFile); } catch { /* ignore */ }
-    }
-    process.exit(0);
-  });
 
 busCommand
   .command('voice-usage-report')
