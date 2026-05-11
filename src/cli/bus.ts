@@ -1593,7 +1593,7 @@ async function todayTtsCost(): Promise<number> {
       { headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}` } }
     );
     if (!res.ok) return 0;
-    const rows: Array<{ cost_estimate_usd: number }> = await res.json();
+    const rows = await res.json() as Array<{ cost_estimate_usd: number }>;
     return rows.reduce((s, r) => s + (r.cost_estimate_usd ?? 0), 0);
   } catch { return 0; }
 }
@@ -1659,7 +1659,7 @@ busCommand
         console.error(`Supabase query failed: ${res.status}`);
         process.exit(1);
       }
-      const rows: Array<{ agent: string; engine: string; model: string; input_chars: number; cost_estimate_usd: number }> = await res.json();
+      const rows = await res.json() as Array<{ agent: string; engine: string; model: string; input_chars: number; cost_estimate_usd: number }>;
 
       const totalCost  = rows.reduce((s, r) => s + (r.cost_estimate_usd ?? 0), 0);
       const totalCalls = rows.length;
