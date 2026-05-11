@@ -341,49 +341,22 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
     }
   }
 
-  // CHECK 5: Delete entry — look for × button at end of a row that has hours logged.
+  // CHECK 5: Delete entry — look for × button at end of entry row
   // In RGOS time grid, the row delete button is the × at the far right of each row.
-  // Product behavior (TimesheetWeekView.tsx:651): clicking delete on a 0-hour row
-  // silently removes the row without a confirmation dialog — intentional UX.
-  // This test must therefore only click delete on a row where totalHrs > 0,
-  // which guarantees the AlertDialog will open.
+  // It may be hidden until hover. Always click Cancel on any dialog.
   try {
     const attemptDelete = async (): Promise<CheckResult> => {
-      // Find the index of the first "Remove row" button whose adjacent total cell
-      // shows a non-zero numeric value (hours > 0 → dialog will fire).
-      const rowWithHoursIdx = await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll(
-          'button[aria-label="Remove row"], button[title*="delete" i], button[title*="remove" i]'
-        ));
-        for (let i = 0; i < btns.length; i++) {
-          const btnCell = btns[i].closest('div');
-          if (!btnCell) continue;
-          // The total cell is the immediate sibling before the delete button cell
-          const totalCell = btnCell.previousElementSibling;
-          const totalText = totalCell?.textContent?.trim() ?? '';
-          const totalNum = parseFloat(totalText);
-          if (!isNaN(totalNum) && totalNum > 0) return i;
-        }
-        return -1;
-      });
-
       // Narrow selectors for the row delete button — avoid ASCII "x" which matches nav buttons
-      const allDeleteBtns = page.locator([
-        'button[aria-label="Remove row"]',
+      const deleteBtn = page.locator([
+        'button[aria-label*="delete" i]',
+        'button[aria-label*="remove" i]',
         'button[title*="delete" i]',
         'button[title*="remove" i]',
-      ].join(', '));
-
-      const deleteBtn = rowWithHoursIdx >= 0
-        ? allDeleteBtns.nth(rowWithHoursIdx)
-        : allDeleteBtns.first();
-
-      if (rowWithHoursIdx < 0 && await allDeleteBtns.count() === 0) {
-        return { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: 'No delete button found on data row.' };
-      }
-      if (rowWithHoursIdx < 0) {
-        return { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: 'All rows have 0 hours logged — delete would be silent (intentional). Cannot verify dialog without hours.' };
-      }
+        // Unicode × variants only — NOT ASCII "x" which matches "Next", "Max", etc.
+        'button:has-text("×")',  // U+00D7
+        'button:has-text("✕")',  // U+2715
+        'button:has-text("✗")',  // U+2717
+      ].join(', ')).first();
 
       if (await deleteBtn.count() > 0) {
         await deleteBtn.hover();
@@ -2028,6 +2001,94 @@ async function runCortexThetaChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /app/presence checks
+// Validates the LinkedIn Presence page shell, signal selector, and draft editor.
+// ---------------------------------------------------------------------------
+async function runLinkedInPresenceChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'linkedin-presence';
+
+  // CHECK 1: Page load
+  try {
+    await page.waitForSelector('h1, h2, [class*="title"], [class*="heading"], main', { timeout: 15000 });
+    const h = await page.locator('h1, h2, [class*="title"], [class*="heading"]').first().textContent().catch(() => '');
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`), fullPage: false });
+    const landed = page.url();
+    if (landed.includes('/auth') || landed.includes('/login')) {
+      results.push({ check: 'CHECK 1 Page load', status: 'FAIL', evidence: `Auth redirect — session not accepted. URL: ${landed}` });
+      return results;
+    }
+    const heading = h?.trim() ?? '';
+    const headingMatches = /linkedin|presence/i.test(heading);
+    results.push({
+      check: 'CHECK 1 Page load',
+      status: headingMatches ? 'PASS' : 'FAIL',
+      evidence: `Page loaded. Heading: "${heading}". URL: ${landed}. ${headingMatches ? 'Heading matches LinkedIn Presence.' : 'Heading did not contain LinkedIn or Presence.'}`,
+    });
+  } catch (e) {
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load-fail.png`) }).catch(() => {});
+    results.push({ check: 'CHECK 1 Page load', status: 'FAIL', evidence: `Did not load within 15s: ${(e as Error).message?.split('\n')[0]}` });
+    return results;
+  }
+
+  // CHECK 2: No undefined/null literals
+  try {
+    await page.waitForTimeout(1000);
+    const undefinedHits = await page.getByText('undefined', { exact: false }).count();
+    const nullLiterals  = await page.locator('text="null"').count();
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-undefined-check.png`), fullPage: false });
+    if (undefinedHits > 0 || nullLiterals > 0) {
+      results.push({ check: 'CHECK 2 No undefined/null literals', status: 'FAIL', evidence: `${undefinedHits} "undefined" + ${nullLiterals} "null" literal(s) visible.` });
+    } else {
+      results.push({ check: 'CHECK 2 No undefined/null literals', status: 'PASS', evidence: 'No "undefined" or "null" literals on page.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 No undefined/null literals', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: SignalSelector renders
+  try {
+    const signalHits = await page.getByText(/revenue|signal|client/i).count();
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-3-signal-selector.png`), fullPage: false });
+    if (signalHits >= 2) {
+      results.push({ check: 'CHECK 3 SignalSelector renders', status: 'PASS', evidence: `Found ${signalHits} signal-related text hit(s) matching revenue/signal/client.` });
+    } else if (signalHits === 0) {
+      results.push({ check: 'CHECK 3 SignalSelector renders', status: 'DEFERRED', evidence: 'No signal text found, but the page loaded. Signals may be empty.' });
+    } else {
+      results.push({ check: 'CHECK 3 SignalSelector renders', status: 'DEFERRED', evidence: `Only ${signalHits} signal-related text hit(s) found; selector may be partially populated.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 SignalSelector renders', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Draft editor renders
+  try {
+    const textareaCount = await page.locator('textarea').count();
+    const editorTextHits = await page.getByText(/draft|editor|write|compose/i).count();
+    const actionButtons = await page.getByRole('button', { name: /generate|save/i }).count();
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-4-draft-editor.png`), fullPage: false });
+    if (textareaCount > 0 || editorTextHits > 0) {
+      results.push({ check: 'CHECK 4 Draft editor renders', status: 'PASS', evidence: `Draft editor found. Textareas: ${textareaCount}; draft/editor/write/compose text hits: ${editorTextHits}; Generate/Save buttons: ${actionButtons}.` });
+    } else {
+      results.push({ check: 'CHECK 4 Draft editor renders', status: 'DEFERRED', evidence: `No textarea or draft/editor/write/compose text found. Draft editor may need signal selection first. Generate/Save buttons: ${actionButtons}.` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 4 Draft editor renders', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Page has substantial content (not blank/empty render)
+  try {
+    const bodyLen = (await page.locator('body').innerText().catch(() => '')).trim().length;
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-5-full.png`), fullPage: true });
+    results.push({ check: 'CHECK 5 Page content not blank', status: bodyLen > 200 ? 'PASS' : 'FAIL', evidence: `Body text length: ${bodyLen} chars. ${bodyLen > 200 ? 'Substantial content present.' : 'Page appears sparse.'}` });
+  } catch (e) {
+    results.push({ check: 'CHECK 5 Page content not blank', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
   const passed  = results.filter(r => r.status === 'PASS').length;
   const failed  = results.filter(r => r.status === 'FAIL').length;
@@ -2115,6 +2176,7 @@ async function main() {
     // Alias → canonical URL map for short-form --page args
     const PAGE_URL_MAP: Record<string, string> = {
       'cortex-theta': '/app/cortex/theta',
+      'linkedin-presence': '/app/presence',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
@@ -2178,8 +2240,10 @@ async function main() {
       results = await runWithTimeout(() => runWikiChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/cortex/theta' || targetPage === 'cortex-theta') {
       results = await runWithTimeout(() => runCortexThetaChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+    } else if (targetPage === '/app/presence' || targetPage === 'linkedin-presence') {
+      results = await runWithTimeout(() => runLinkedInPresenceChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /pipeline, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
