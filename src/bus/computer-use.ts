@@ -172,7 +172,7 @@ export async function computerUse(
 
     // Log the SSH failure before attempting fallback
     try {
-      execFileSync('cortextos', ['bus', 'log-event', 'action', 'computer_use_ssh_failure', 'warn',
+      execFileSync('cortextos', ['bus', 'log-event', 'action', 'computer_use_ssh_failure', 'warning',
         '--meta', JSON.stringify({ host: sshHost, reason: msg.slice(0, 200), promptLength: prompt.length })],
         { encoding: 'utf-8', timeout: 10_000 });
     } catch { /* non-fatal — continue to fallback decision */ }
