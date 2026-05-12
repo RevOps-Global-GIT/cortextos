@@ -466,6 +466,10 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
     const nextBtn = getNextBtn();
     const dateEl = getDateRange();
 
+    // Wait up to 5s for the prev button to appear — the page may briefly
+    // re-render after CHECK 5's dialog interaction.
+    await prevBtn.waitFor({ state: 'visible', timeout: 5000 }).catch(() => null);
+
     const before = await dateEl.textContent().catch(() => '');
     await shot(page, '6-nav-before');
 
