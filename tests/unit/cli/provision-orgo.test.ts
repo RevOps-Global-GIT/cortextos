@@ -3,6 +3,12 @@
  *
  * All HTTP calls are mocked via vi.stubGlobal('fetch', ...).
  * No real Orgo API calls are made.
+ *
+ * Implementation note: runInstaller uses a background+poll approach because
+ * Orgo /exec has a ~30s hard HTTP timeout. The sequence per install is:
+ *   1. (optional) GitHub API fetch to resolve release asset ID (only if GH_TOKEN set)
+ *   2. POST /exec — launch installer as background Popen, returns { pid }
+ *   3. POST /exec (×N) — poll until { still_running: false, exit_code }
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { provisionOrgoCommand } from '../../../src/cli/provision-orgo';
@@ -11,18 +17,11 @@ import { provisionOrgoCommand } from '../../../src/cli/provision-orgo';
 // Helpers
 // ---------------------------------------------------------------------------
 
-function mockFetch(responses: Array<{ ok: boolean; status?: number; json?: unknown; text?: string }>) {
-  let callIndex = 0;
-  return vi.fn().mockImplementation(async () => {
-    const resp = responses[callIndex] ?? responses[responses.length - 1];
-    callIndex++;
-    return {
-      ok: resp.ok,
-      status: resp.status ?? (resp.ok ? 200 : 500),
-      json: async () => resp.json ?? {},
-      text: async () => resp.text ?? JSON.stringify(resp.json ?? {}),
-    };
-  });
+// Silence console output during tests
+function silenceConsole() {
+  vi.spyOn(console, 'log').mockImplementation(() => {});
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
 }
 
 // Capture process.exit without actually exiting
@@ -32,25 +31,53 @@ function mockExit() {
   }) as never);
 }
 
-// Silence console output during tests
-function silenceConsole() {
-  vi.spyOn(console, 'log').mockImplementation(() => {});
-  vi.spyOn(console, 'error').mockImplementation(() => {});
-}
-
-// Minimal exec response: Python script printed a valid JSON line
-function execSuccess(exitCode = 0, stdoutTail = '[provision] Install complete.') {
+// Launch response: background Popen started, returns PID
+function launchSuccess(pid = 1234) {
   return {
     ok: true,
-    json: {
+    status: 200,
+    json: async () => ({
       success: true,
-      output: JSON.stringify({ exit_code: exitCode, stdout_tail: stdoutTail, stderr_tail: '' }),
-    },
+      output: JSON.stringify({ pid, status: 'launched' }),
+      timeout: false,
+      error: null,
+    }),
+    text: async () => '',
+  };
+}
+
+// Poll response: installer finished
+function pollDone(exitCode = 0, logTail = '[provision] Install complete.') {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      success: true,
+      output: JSON.stringify({ still_running: false, exit_code: exitCode, log_tail: logTail }),
+      timeout: false,
+      error: null,
+    }),
+    text: async () => '',
+  };
+}
+
+// Poll response: still running
+function pollRunning(logTail = '[provision] Installing cortextos...') {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      success: true,
+      output: JSON.stringify({ still_running: true, exit_code: -99, log_tail: logTail }),
+      timeout: false,
+      error: null,
+    }),
+    text: async () => '',
   };
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Tests: option validation
 // ---------------------------------------------------------------------------
 
 describe('provision-orgo — option validation', () => {
@@ -59,7 +86,7 @@ describe('provision-orgo — option validation', () => {
   beforeEach(() => {
     exitSpy = mockExit();
     silenceConsole();
-    vi.stubGlobal('fetch', mockFetch([]));
+    vi.stubGlobal('fetch', vi.fn());
   });
 
   afterEach(() => {
@@ -95,110 +122,143 @@ describe('provision-orgo — option validation', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Tests: existing computer path (--computer)
+// ---------------------------------------------------------------------------
+
 describe('provision-orgo — existing computer path (--computer)', () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
   let exitSpy: ReturnType<typeof mockExit>;
 
+  beforeEach(() => {
+    exitSpy = mockExit();
+    silenceConsole();
+    vi.useFakeTimers();
+    // Ensure GH_TOKEN is unset so GitHub API fetch is skipped in tests
+    delete process.env['GH_TOKEN'];
+  });
+
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
   it('runs the installer and exits 0 on success', async () => {
-    exitSpy = mockExit();
-    silenceConsole();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(launchSuccess())   // POST /exec (launch)
+      .mockResolvedValueOnce(pollDone());        // POST /exec (poll — done)
 
-    fetchMock = mockFetch([execSuccess()]);
     vi.stubGlobal('fetch', fetchMock);
 
-    await provisionOrgoCommand.parseAsync([
+    const parsePromise = provisionOrgoCommand.parseAsync([
       'node', 'cli',
       '--api-key', 'orgo-key-abc',
       '--computer', 'vm-xyz',
       '--agent-name', 'dev',
     ]);
 
-    // fetch called once: POST computers/vm-xyz/exec
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('computers/vm-xyz/exec');
-    expect((init.headers as Record<string, string>)['Authorization']).toBe('Bearer orgo-key-abc');
+    // Advance past the 15s poll interval
+    await vi.runAllTimersAsync();
+    await parsePromise;
 
-    // no exit called (success path)
+    // launch + 1 poll = 2 calls (no GitHub API since GH_TOKEN unset)
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const [launchUrl, launchInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(launchUrl).toContain('computers/vm-xyz/exec');
+    expect((launchInit.headers as Record<string, string>)['Authorization']).toBe('Bearer orgo-key-abc');
+
+    const [pollUrl] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(pollUrl).toContain('computers/vm-xyz/exec');
+
     expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it('exits 1 when the installer exits non-zero', async () => {
-    exitSpy = mockExit();
-    silenceConsole();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(launchSuccess())
+      .mockResolvedValueOnce(pollDone(1, 'npm error: something failed'));
 
-    fetchMock = mockFetch([execSuccess(1, '')]);
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(
-      provisionOrgoCommand.parseAsync([
-        'node', 'cli',
-        '--api-key', 'orgo-key-abc',
-        '--computer', 'vm-xyz',
-      ])
-    ).rejects.toThrow('__EXIT_1__');
+    const parsePromise = provisionOrgoCommand.parseAsync([
+      'node', 'cli',
+      '--api-key', 'orgo-key-abc',
+      '--computer', 'vm-xyz',
+    ]);
+
+    await vi.runAllTimersAsync();
+    await expect(parsePromise).rejects.toThrow('__EXIT_1__');
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
-  it('exits 1 on Orgo API HTTP error', async () => {
-    exitSpy = mockExit();
-    silenceConsole();
-
-    fetchMock = mockFetch([{ ok: false, status: 401, text: 'Unauthorized' }]);
+  it('exits 1 on Orgo API HTTP error during launch', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: 'Unauthorized' }),
+      text: async () => 'Unauthorized',
+    });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(
-      provisionOrgoCommand.parseAsync([
-        'node', 'cli',
-        '--api-key', 'bad-key',
-        '--computer', 'vm-xyz',
-      ])
-    ).rejects.toThrow('__EXIT_1__');
+    const parsePromise = provisionOrgoCommand.parseAsync([
+      'node', 'cli',
+      '--api-key', 'bad-key',
+      '--computer', 'vm-xyz',
+    ]);
+
+    await vi.runAllTimersAsync();
+    await expect(parsePromise).rejects.toThrow('__EXIT_1__');
     expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('polls multiple times while installer is still running', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(launchSuccess())
+      .mockResolvedValueOnce(pollRunning())   // still running
+      .mockResolvedValueOnce(pollRunning())   // still running
+      .mockResolvedValueOnce(pollDone());     // done
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const parsePromise = provisionOrgoCommand.parseAsync([
+      'node', 'cli',
+      '--api-key', 'orgo-key-abc',
+      '--computer', 'vm-xyz',
+    ]);
+
+    await vi.runAllTimersAsync();
+    await parsePromise;
+
+    // 1 launch + 3 polls
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 });
 
+// ---------------------------------------------------------------------------
+// Tests: create new computer path (--create)
+// ---------------------------------------------------------------------------
+
 describe('provision-orgo — create new computer path (--create)', () => {
-  let fetchMock: ReturnType<typeof vi.fn>;
   let exitSpy: ReturnType<typeof mockExit>;
 
+  beforeEach(() => {
+    exitSpy = mockExit();
+    silenceConsole();
+    vi.useFakeTimers();
+    delete process.env['GH_TOKEN'];
+  });
+
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
   it('resolves workspace by name and creates computer, then installs', async () => {
-    exitSpy = mockExit();
-    silenceConsole();
-
-    // Stub setTimeout so the 15s wait is instant
-    vi.useFakeTimers();
-
-    fetchMock = mockFetch([
+    const fetchMock = vi.fn()
       // GET /api/projects
-      {
-        ok: true,
-        json: {
-          projects: [
-            { id: 'ws-001', name: 'RevOps Global', desktops: [] },
-          ],
-        },
-      },
-      // POST /api/computers
-      {
-        ok: true,
-        json: { id: 'vm-new-001', name: 'dev-agent-vm', status: 'creating' },
-      },
-      // POST /api/computers/vm-new-001/exec
-      execSuccess().json,
-    ]);
-    // The third call returns execSuccess directly — fix:
-    fetchMock = vi.fn()
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -207,21 +267,18 @@ describe('provision-orgo — create new computer path (--create)', () => {
         }),
         text: async () => '',
       })
+      // POST /api/computers
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
         json: async () => ({ id: 'vm-new-001', name: 'dev-agent-vm', status: 'creating' }),
         text: async () => '',
       })
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          success: true,
-          output: JSON.stringify({ exit_code: 0, stdout_tail: '[provision] Install complete.', stderr_tail: '' }),
-        }),
-        text: async () => '',
-      });
+      // POST /api/computers/vm-new-001/exec (launch)
+      .mockResolvedValueOnce(launchSuccess())
+      // POST /api/computers/vm-new-001/exec (poll)
+      .mockResolvedValueOnce(pollDone());
+
     vi.stubGlobal('fetch', fetchMock);
 
     const parsePromise = provisionOrgoCommand.parseAsync([
@@ -232,14 +289,12 @@ describe('provision-orgo — create new computer path (--create)', () => {
       '--agent-name', 'dev',
     ]);
 
-    // Fast-forward the 15s VM boot wait
+    // Advance past the 15s VM boot wait + 15s poll interval
     await vi.runAllTimersAsync();
     await parsePromise;
 
-    vi.useRealTimers();
-
-    // 3 fetch calls: projects, create computer, exec
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 4 calls: projects, create, launch, poll
+    expect(fetchMock).toHaveBeenCalledTimes(4);
 
     const [projectsUrl] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(projectsUrl).toContain('projects');
@@ -257,10 +312,7 @@ describe('provision-orgo — create new computer path (--create)', () => {
   });
 
   it('exits 1 when workspace is not found', async () => {
-    exitSpy = mockExit();
-    silenceConsole();
-
-    fetchMock = vi.fn().mockResolvedValueOnce({
+    const fetchMock = vi.fn().mockResolvedValueOnce({
       ok: true,
       status: 200,
       json: async () => ({ projects: [{ id: 'ws-001', name: 'Other Workspace', desktops: [] }] }),
@@ -268,56 +320,142 @@ describe('provision-orgo — create new computer path (--create)', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(
-      provisionOrgoCommand.parseAsync([
-        'node', 'cli',
-        '--api-key', 'orgo-key',
-        '--workspace', 'Nonexistent Workspace',
-        '--create',
-        '--agent-name', 'dev',
-      ])
-    ).rejects.toThrow('__EXIT_1__');
+    const parsePromise = provisionOrgoCommand.parseAsync([
+      'node', 'cli',
+      '--api-key', 'orgo-key',
+      '--workspace', 'Nonexistent Workspace',
+      '--create',
+      '--agent-name', 'dev',
+    ]);
+
+    await vi.runAllTimersAsync();
+    await expect(parsePromise).rejects.toThrow('__EXIT_1__');
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });
 
-describe('provision-orgo — Python exec payload structure', () => {
-  it('embeds base64-encoded bash source in the Python code', async () => {
-    // Access the internal builder via a light integration: parse the exec
-    // body from the fetch call and verify the Python structure.
-    const exitSpy = mockExit();
-    silenceConsole();
+// ---------------------------------------------------------------------------
+// Tests: Python exec payload structure (launch phase)
+// ---------------------------------------------------------------------------
 
-    let capturedBody: { code: string; timeout: number } | null = null;
-    const fetchMock = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
-      capturedBody = JSON.parse(init.body as string) as { code: string; timeout: number };
+describe('provision-orgo — Python exec payload structure', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    delete process.env['GH_TOKEN'];
+    silenceConsole();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('launch payload embeds base64-encoded bash source and uses Popen', async () => {
+    const exitSpy = mockExit();
+    let capturedLaunchBody: { code: string; timeout: number } | null = null;
+
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      if (!capturedLaunchBody) {
+        // First exec call = launch
+        capturedLaunchBody = JSON.parse(init.body as string) as { code: string; timeout: number };
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            output: JSON.stringify({ pid: 9999, status: 'launched' }),
+            timeout: false,
+            error: null,
+          }),
+          text: async () => '',
+        };
+      }
+      // Subsequent calls = poll
       return {
         ok: true,
         status: 200,
         json: async () => ({
           success: true,
-          output: JSON.stringify({ exit_code: 0, stdout_tail: 'ok', stderr_tail: '' }),
+          output: JSON.stringify({ still_running: false, exit_code: 0, log_tail: 'ok' }),
+          timeout: false,
+          error: null,
         }),
         text: async () => '',
       };
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await provisionOrgoCommand.parseAsync([
+    const parsePromise = provisionOrgoCommand.parseAsync([
       'node', 'cli',
       '--api-key', 'key',
       '--computer', 'vm-1',
     ]);
 
-    expect(capturedBody).not.toBeNull();
-    expect(capturedBody!.code).toContain('import base64');
-    expect(capturedBody!.code).toContain('import subprocess');
-    expect(capturedBody!.code).toContain('json.dumps');
-    // Python timeout is less than client-side (265 vs 270s)
-    expect(capturedBody!.timeout).toBe(265);
+    await vi.runAllTimersAsync();
+    await parsePromise;
 
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
+    expect(capturedLaunchBody).not.toBeNull();
+    // Launch code uses Popen (not subprocess.run) for background execution
+    expect(capturedLaunchBody!.code).toContain('import base64');
+    expect(capturedLaunchBody!.code).toContain('subprocess.Popen');
+    // Launch uses a short timeout (not 265s — that was the old synchronous approach)
+    expect(capturedLaunchBody!.timeout).toBeLessThanOrEqual(25);
+
+    void exitSpy;
+  });
+
+  it('poll payload checks PID and reads log file', async () => {
+    const exitSpy = mockExit();
+    let callCount = 0;
+    let capturedPollBody: { code: string; timeout: number } | null = null;
+
+    const fetchMock = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      callCount++;
+      if (callCount === 1) {
+        // Launch
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            output: JSON.stringify({ pid: 5678, status: 'launched' }),
+            timeout: false,
+            error: null,
+          }),
+          text: async () => '',
+        };
+      }
+      // Poll
+      capturedPollBody = JSON.parse(init.body as string) as { code: string; timeout: number };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          success: true,
+          output: JSON.stringify({ still_running: false, exit_code: 0, log_tail: 'done' }),
+          timeout: false,
+          error: null,
+        }),
+        text: async () => '',
+      };
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const parsePromise = provisionOrgoCommand.parseAsync([
+      'node', 'cli',
+      '--api-key', 'key',
+      '--computer', 'vm-1',
+    ]);
+
+    await vi.runAllTimersAsync();
+    await parsePromise;
+
+    expect(capturedPollBody).not.toBeNull();
+    expect(capturedPollBody!.code).toContain('5678');     // PID embedded in poll code
+    expect(capturedPollBody!.code).toContain('ctx-install.log'); // reads log file
+    expect(capturedPollBody!.code).toContain('still_running');
+
     void exitSpy;
   });
 });
