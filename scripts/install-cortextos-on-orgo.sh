@@ -11,7 +11,7 @@
 set -euo pipefail
 
 AGENT_NAME="${1:-cortextos-agent}"
-CORTEXTOS_VERSION="${CORTEXTOS_VERSION:-latest}"
+CORTEXTOS_VERSION="${CORTEXTOS_VERSION:-v0.1.1}"
 NODE_MAJOR="${NODE_MAJOR:-20}"
 
 # ---------------------------------------------------------------------------
@@ -71,22 +71,35 @@ echo "[provision] Node: $(node --version)  npm: $(npm --version)"
 
 # ---------------------------------------------------------------------------
 # 5. Install cortextos globally
-#    Prefer a pre-staged tarball at /tmp/cortextos.tgz (written by provision-orgo
-#    before running this script).  Fall back to a GH_TOKEN-authenticated git
-#    install if the tarball is absent.
+#    Download the release tarball from GitHub (private fork, requires GH_TOKEN).
+#    Falls back to a pre-staged tarball at /tmp/cortextos.tgz if GH_TOKEN absent.
 # ---------------------------------------------------------------------------
-if [ -f /tmp/cortextos.tgz ]; then
-  echo "[provision] Installing cortextos from tarball /tmp/cortextos.tgz..."
-  npm install -g /tmp/cortextos.tgz --loglevel=warn 2>&1
-elif [ -n "${GH_TOKEN:-}" ]; then
-  echo "[provision] No tarball found — installing cortextos from git (tag: ${CORTEXTOS_VERSION})..."
-  npm install -g \
-    "https://x-access-token:${GH_TOKEN}@github.com/RevOps-Global-GIT/cortextos.git#main" \
-    --loglevel=warn 2>&1
+RELEASE_TGZ="/tmp/cortextos.tgz"
+# Use GitHub API releases endpoint (works for private repos with GH_TOKEN).
+# CORTEXTOS_ASSET_ID is set by provision-orgo for the specific release asset.
+ASSET_ID="${CORTEXTOS_ASSET_ID:-}"
+RELEASE_API_URL="https://api.github.com/repos/RevOps-Global-GIT/cortextos/releases/assets/${ASSET_ID}"
+
+if [ -f "$RELEASE_TGZ" ] && [ -s "$RELEASE_TGZ" ]; then
+  echo "[provision] Installing cortextos from pre-staged tarball ${RELEASE_TGZ}..."
+elif [ -n "${GH_TOKEN:-}" ] && [ -n "${ASSET_ID:-}" ]; then
+  echo "[provision] Downloading cortextos ${CORTEXTOS_VERSION} (asset ${ASSET_ID}) via GitHub API..."
+  curl -fsSL \
+    -H "Authorization: token ${GH_TOKEN}" \
+    -H "Accept: application/octet-stream" \
+    "$RELEASE_API_URL" \
+    -o "$RELEASE_TGZ"
+  if [ ! -s "$RELEASE_TGZ" ]; then
+    echo "[provision] ERROR: Downloaded tarball is empty. Check GH_TOKEN and CORTEXTOS_ASSET_ID."
+    exit 1
+  fi
+  echo "[provision] Tarball downloaded ($(wc -c < "$RELEASE_TGZ") bytes)"
 else
-  echo "[provision] ERROR: /tmp/cortextos.tgz not found and GH_TOKEN not set — cannot install cortextos."
+  echo "[provision] ERROR: GH_TOKEN/CORTEXTOS_ASSET_ID not set and no pre-staged tarball."
   exit 1
 fi
+
+npm install -g "$RELEASE_TGZ" --ignore-scripts --loglevel=warn 2>&1
 
 echo "[provision] cortextos: $(cortextos --version 2>/dev/null || echo 'installed')"
 
@@ -125,10 +138,14 @@ SyslogIdentifier=${UNIT_NAME}
 WantedBy=multi-user.target
 UNIT
 
-systemctl daemon-reload
-systemctl enable "${UNIT_NAME}.service" >/dev/null 2>&1
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload
+  systemctl enable "${UNIT_NAME}.service" >/dev/null 2>&1
+  echo "[provision] systemd unit enabled: ${UNIT_NAME}.service"
+else
+  echo "[provision] systemd not available — unit written to ${UNIT_FILE} but not enabled."
+  echo "[provision] Start manually: node \$(command -v cortextos) start ${AGENT_NAME} --foreground"
+fi
 
-echo "[provision] systemd unit enabled: ${UNIT_NAME}.service"
 echo "[provision] Install complete."
 echo "[provision] Next: write ${AGENT_HOME}/.env with BOT_TOKEN, CHAT_ID, CTX_ORG, etc."
-echo "[provision] Then: systemctl start ${UNIT_NAME}"
