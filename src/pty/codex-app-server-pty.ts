@@ -483,7 +483,6 @@ export class CodexAppServerPTY {
             threadId: persisted.threadId,
             cwd: this._cwd,
             ...THREAD_PERMISSION_OVERRIDES,
-            config: { features: { goals: true } },
             excludeTurns: true,
             persistExtendedHistory: true,
           });
@@ -500,7 +499,6 @@ export class CodexAppServerPTY {
           threadId: latest,
           cwd: this._cwd,
           ...THREAD_PERMISSION_OVERRIDES,
-          config: { features: { goals: true } },
           excludeTurns: true,
           persistExtendedHistory: true,
         });
@@ -512,7 +510,6 @@ export class CodexAppServerPTY {
     const started = await this.request<ThreadResponse>('thread/start', {
       cwd: this._cwd,
       ...THREAD_PERMISSION_OVERRIDES,
-      config: { features: { goals: true } },
       sessionStartSource: 'startup',
       experimentalRawEvents: false,
       persistExtendedHistory: true,
