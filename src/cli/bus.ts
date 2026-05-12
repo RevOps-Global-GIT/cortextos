@@ -23,6 +23,7 @@ import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, 
 import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled } from '../bus/rgos-mirror.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
+import { sendTelegramVoice } from '../bus/send-telegram-voice.js';
 import { generateSkill } from '../bus/generate-skill.js';
 import { syncSkills } from '../bus/sync-skills.js';
 import { runWorkflow } from '../bus/run-workflow.js';
@@ -1351,6 +1352,20 @@ busCommand
       console.error(`Failed to send: ${err.message || err}`);
       process.exit(1);
     }
+  });
+
+busCommand
+  .command('send-telegram-voice')
+  .description('Synthesize text with OpenAI tts-1 and send it as a Telegram voice message')
+  .argument('<chat-id>', 'Telegram chat ID')
+  .argument('<text>', 'Text to speak')
+  .action(async (chatId: string, text: string) => {
+    const result = await sendTelegramVoice(chatId, text);
+    if (!result.ok) {
+      console.error(`send-telegram-voice failed: ${result.error}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify({ ok: true, message_id: result.messageId ?? null }));
   });
 
 busCommand
