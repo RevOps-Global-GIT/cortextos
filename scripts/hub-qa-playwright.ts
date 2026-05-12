@@ -24,9 +24,10 @@ const getArg = (flag: string, def = '') => {
   return def;
 };
 
-const targetPage = getArg('--page', '/time');
-const userEmail  = getArg('--user', 'greg@revopsglobal.com');
-const noSend     = argv.includes('--no-send');
+const targetPage   = getArg('--page', '/time');
+const userEmail    = getArg('--user', 'greg@revopsglobal.com');
+const noSend       = argv.includes('--no-send');
+const sessionFile  = getArg('--session-file', '');
 
 // ---------------------------------------------------------------------------
 // Config — resolve paths relative to this file's location
@@ -2182,9 +2183,16 @@ async function main() {
   const serviceKey = env['RGOS_SUPABASE_SERVICE_KEY'] ?? env['SUPABASE_DATA_SERVICE_KEY'];
   if (!serviceKey) throw new Error('RGOS_SUPABASE_SERVICE_KEY not found in secrets.env');
 
-  console.log(`Minting session for ${userEmail}...`);
-  const session = await mintSession(serviceKey, userEmail);
-  console.log(`Session minted for ${(session.user as Record<string,unknown>)?.email ?? userEmail}.`);
+  let session: SupabaseSession;
+  if (sessionFile) {
+    // Pre-minted session provided by parallel harness — skip admin API call.
+    session = JSON.parse(fs.readFileSync(sessionFile, 'utf-8')) as SupabaseSession;
+    console.log(`Session loaded from ${sessionFile}.`);
+  } else {
+    console.log(`Minting session for ${userEmail}...`);
+    session = await mintSession(serviceKey, userEmail);
+    console.log(`Session minted for ${(session.user as Record<string,unknown>)?.email ?? userEmail}.`);
+  }
 
   const SUPA_PROJECT = 'yyizocyaehmqrottmnaz';
   const storageKey   = `sb-${SUPA_PROJECT}-auth-token`;

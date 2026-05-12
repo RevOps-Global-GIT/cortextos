@@ -20,6 +20,7 @@
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 // ---------------------------------------------------------------------------
 // Config
@@ -74,11 +75,12 @@ interface PageResult {
   stderr: string;
 }
 
-function runPage(page: string): Promise<PageResult> {
+function runPage(page: string, sessionFilePath?: string): Promise<PageResult> {
   const start = Date.now();
   return new Promise(resolve => {
     const scriptPath = path.join(path.dirname(new URL(import.meta.url).pathname), 'hub-qa-playwright.ts');
-    const proc = spawn('npx', ['tsx', scriptPath, '--page', page, '--user', USER_EMAIL, '--no-send'], {
+    const extraArgs = sessionFilePath ? ['--session-file', sessionFilePath] : [];
+    const proc = spawn('npx', ['tsx', scriptPath, '--page', page, '--user', USER_EMAIL, '--no-send', ...extraArgs], {
       cwd: path.resolve(path.dirname(new URL(import.meta.url).pathname), '..'),
       env: { ...process.env },
     });
@@ -149,6 +151,56 @@ async function main() {
     return;
   }
 
+  // Mint one session upfront and share via temp file — prevents concurrent
+  // magic-link collisions when 4 children simultaneously hit the admin API.
+  let sessionFilePath: string | undefined;
+  try {
+    const secretsPath = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../orgs/revops-global/secrets.env');
+    if (fs.existsSync(secretsPath)) {
+      const envLines = fs.readFileSync(secretsPath, 'utf-8').split('\n');
+      const envMap: Record<string, string> = {};
+      for (const line of envLines) {
+        const m = line.match(/^([A-Z0-9_]+)=(.*)$/);
+        if (m) envMap[m[1]] = m[2].replace(/^["']|["']$/g, '');
+      }
+      const serviceKey = envMap['RGOS_SUPABASE_SERVICE_KEY'] ?? envMap['SUPABASE_DATA_SERVICE_KEY'];
+      const supaUrl = envMap['RGOS_SUPABASE_URL'] ?? envMap['SUPABASE_URL'];
+      if (serviceKey && supaUrl) {
+        console.log(`Minting shared session for ${USER_EMAIL}...`);
+        const genRes = await fetch(`${supaUrl}/auth/v1/admin/generate_link`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${serviceKey}`, 'apikey': serviceKey },
+          body: JSON.stringify({ type: 'magiclink', email: USER_EMAIL }),
+        });
+        if (genRes.ok) {
+          const genData = await genRes.json() as { action_link?: string; properties?: { action_link?: string } };
+          const actionLink = genData.action_link ?? genData.properties?.action_link;
+          if (actionLink) {
+            const verifyRes = await fetch(actionLink, { redirect: 'manual' });
+            const location = verifyRes.headers.get('location') ?? '';
+            const hash = location.includes('#') ? location.split('#')[1] : '';
+            const params = new URLSearchParams(hash);
+            const accessToken = params.get('access_token');
+            const refreshToken = params.get('refresh_token') ?? '';
+            if (accessToken) {
+              const userRes = await fetch(`${supaUrl}/auth/v1/user`, {
+                headers: { 'Authorization': `Bearer ${accessToken}`, 'apikey': serviceKey },
+              });
+              const user = userRes.ok ? await userRes.json() : {};
+              const session = { access_token: accessToken, refresh_token: refreshToken, token_type: 'bearer', expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, user };
+              sessionFilePath = path.join(os.tmpdir(), `hub-qa-session-${Date.now()}.json`);
+              fs.writeFileSync(sessionFilePath, JSON.stringify(session));
+              console.log(`Session minted and cached at ${sessionFilePath}`);
+            }
+          }
+        }
+        if (!sessionFilePath) console.warn('Session pre-mint failed — children will mint individually (may collide).');
+      }
+    }
+  } catch (e) {
+    console.warn('Session pre-mint error:', e instanceof Error ? e.message : e, '— children will mint individually.');
+  }
+
   const allResults: PageResult[] = [];
   const totalStart = Date.now();
 
@@ -157,7 +209,7 @@ async function main() {
     const batchStart = Date.now();
     console.log(`\n── Batch ${i + 1}/${batches.length}: ${batch.join('  ')} ──`);
 
-    const batchResults = await Promise.all(batch.map(p => runPage(p)));
+    const batchResults = await Promise.all(batch.map(p => runPage(p, sessionFilePath)));
     const batchMs = Date.now() - batchStart;
 
     batchResults.forEach(r => {
@@ -214,6 +266,10 @@ async function main() {
   ];
   fs.writeFileSync(timingPath, lines.join('\n'));
   console.log(`Timing log: ${timingPath}`);
+
+  if (sessionFilePath && fs.existsSync(sessionFilePath)) {
+    fs.unlinkSync(sessionFilePath);
+  }
 
   process.exit(failed + errored > 0 ? 1 : 0);
 }
