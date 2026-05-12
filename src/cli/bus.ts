@@ -3821,12 +3821,27 @@ busCommand
   .option('--workdir <dir>', 'Working directory for Codex on the Mac')
   .option('--timeout <seconds>', 'Max wait time in seconds (default: 300)', '300')
   .option('--ssh-host <host>', 'SSH host (default: gregs-mac)', 'gregs-mac')
-  .action(async (prompt: string, opts: { noPlugin?: boolean; workdir?: string; timeout?: string; sshHost?: string }) => {
+  .option('--dispatch-script <path>', 'Path to codex-dispatch.sh on the Mac', '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh')
+  .option('--disable-fallback', 'Disable localhost codex exec fallback when Mac SSH is unreachable')
+  .action(async (
+    prompt: string,
+    opts: {
+      noPlugin?: boolean;
+      plugin?: boolean;
+      workdir?: string;
+      timeout?: string;
+      sshHost?: string;
+      dispatchScript?: string;
+      disableFallback?: boolean;
+    },
+  ) => {
     const result = await computerUse(prompt, {
-      noPlugin: opts.noPlugin,
+      noPlugin: opts.noPlugin === true || opts.plugin === false,
       workdir: opts.workdir,
       timeout: parseInt(opts.timeout ?? '300', 10),
       sshHost: opts.sshHost,
+      dispatchScript: opts.dispatchScript,
+      noFallback: opts.disableFallback,
     });
 
     if (!result.ok) {
