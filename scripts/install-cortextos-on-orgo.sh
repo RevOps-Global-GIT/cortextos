@@ -71,9 +71,22 @@ echo "[provision] Node: $(node --version)  npm: $(npm --version)"
 
 # ---------------------------------------------------------------------------
 # 5. Install cortextos globally
+#    Prefer a pre-staged tarball at /tmp/cortextos.tgz (written by provision-orgo
+#    before running this script).  Fall back to a GH_TOKEN-authenticated git
+#    install if the tarball is absent.
 # ---------------------------------------------------------------------------
-echo "[provision] Installing cortextos@${CORTEXTOS_VERSION}..."
-npm install -g "cortextos@${CORTEXTOS_VERSION}" --loglevel=warn 2>&1
+if [ -f /tmp/cortextos.tgz ]; then
+  echo "[provision] Installing cortextos from tarball /tmp/cortextos.tgz..."
+  npm install -g /tmp/cortextos.tgz --loglevel=warn 2>&1
+elif [ -n "${GH_TOKEN:-}" ]; then
+  echo "[provision] No tarball found — installing cortextos from git (tag: ${CORTEXTOS_VERSION})..."
+  npm install -g \
+    "https://x-access-token:${GH_TOKEN}@github.com/RevOps-Global-GIT/cortextos.git#main" \
+    --loglevel=warn 2>&1
+else
+  echo "[provision] ERROR: /tmp/cortextos.tgz not found and GH_TOKEN not set — cannot install cortextos."
+  exit 1
+fi
 
 echo "[provision] cortextos: $(cortextos --version 2>/dev/null || echo 'installed')"
 

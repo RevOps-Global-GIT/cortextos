@@ -1,7 +1,8 @@
 import { Command } from 'commander';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -176,17 +177,27 @@ async function createComputer(
 
 function buildPythonInstallScript(
   installShSource: string,
-  agentName: string
+  agentName: string,
+  tgzBase64?: string
 ): string {
   const bashBase64 = Buffer.from(installShSource, 'utf-8').toString('base64');
   const agentNameBase64 = Buffer.from(agentName, 'utf-8').toString('base64');
+
+  const tgzBlock = tgzBase64
+    ? `
+# Write cortextos tarball staged by provision-orgo
+import base64 as _b64
+with open("/tmp/cortextos.tgz", "wb") as _f:
+    _f.write(_b64.b64decode("${tgzBase64}"))
+`
+    : '';
 
   return `
 import base64
 import json
 import os
 import subprocess
-
+${tgzBlock}
 bash_cmd = base64.b64decode("${bashBase64}").decode("utf-8")
 agent_name = base64.b64decode("${agentNameBase64}").decode("utf-8")
 
@@ -238,7 +249,23 @@ async function runInstaller(
     );
   }
 
-  const pythonCode = buildPythonInstallScript(installShSource, agentName);
+  // Build a local npm pack tarball and embed it so the VM never needs npm registry access.
+  let tgzBase64: string | undefined;
+  try {
+    const repoRoot = join(__dirname, '../..');
+    const packOut = execSync('npm pack --pack-destination /tmp 2>/dev/null', {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+    }).trim();
+    const tgzPath = `/tmp/${packOut}`;
+    tgzBase64 = readFileSync(tgzPath).toString('base64');
+    if (existsSync(tgzPath)) unlinkSync(tgzPath);
+    console.log(`Tarball built and embedded (${(tgzBase64.length / 1024).toFixed(0)} KB base64).`);
+  } catch (e) {
+    console.warn('npm pack failed — installer will attempt git-based install:', (e as Error).message);
+  }
+
+  const pythonCode = buildPythonInstallScript(installShSource, agentName, tgzBase64);
 
   // 270s client-side timeout; server-side script timeout is 250s
   const execResponse = await orgoPost<ExecResponse>(
