@@ -9,7 +9,7 @@
  * route modules pick them up at evaluation time.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -160,11 +160,17 @@ describe('GET /api/comms/channels', () => {
 // ---------------------------------------------------------------------------
 describe('GET /api/comms/channel/[pair]', () => {
   it('returns only messages matching the pair, oldest-first', async () => {
-    writeHistory([
-      { id: 'm1', from: 'boris', to: 'nick', priority: 'normal', timestamp: '2026-04-15T09:00:00Z', text: 'first', reply_to: null },
-      { id: 'm2', from: 'nick', to: 'boris', priority: 'normal', timestamp: '2026-04-15T10:00:00Z', text: 'second', reply_to: null },
-      { id: 'm3', from: 'boris', to: 'james', priority: 'normal', timestamp: '2026-04-15T11:00:00Z', text: 'other pair', reply_to: null },
-    ]);
+    // The channel route reads from Supabase cortex_messages (PR #108).
+    // Provide credentials + mock fetch so the route's primary path is exercised.
+    process.env.RGOS_SUPABASE_URL = 'http://mock-supabase';
+    process.env.RGOS_SUPABASE_SERVICE_KEY = 'mock-key';
+    const mockFetch = vi.spyOn(global, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      json: async () => [
+        { id: 'm1', from_agent: 'boris', to_agent: 'nick', body: 'first',  created_at: '2026-04-15T09:00:00Z', message_type: null, reply_to_id: null, payload: null },
+        { id: 'm2', from_agent: 'nick',  to_agent: 'boris', body: 'second', created_at: '2026-04-15T10:00:00Z', message_type: null, reply_to_id: null, payload: null },
+      ],
+    } as Response);
 
     const res = await channel.GET(
       makeRequest('/api/comms/channel/boris--nick'),
@@ -175,6 +181,10 @@ describe('GET /api/comms/channel/[pair]', () => {
     expect(data).toHaveLength(2);
     expect(data[0].id).toBe('m1');
     expect(data[1].id).toBe('m2');
+
+    mockFetch.mockRestore();
+    delete process.env.RGOS_SUPABASE_URL;
+    delete process.env.RGOS_SUPABASE_SERVICE_KEY;
   });
 
   it('rejects malformed pair strings with a 400', async () => {

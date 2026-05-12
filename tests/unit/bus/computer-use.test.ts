@@ -326,7 +326,7 @@ describe('computerUse — logging behavior', () => {
     );
     expect(logCall).toBeDefined();
     const [, logArgs] = logCall!;
-    expect(logArgs).toContain('warn');
+    expect(logArgs).toContain('warning');
   });
 
   it('fires computer_use_fallback info log on successful fallback', async () => {
