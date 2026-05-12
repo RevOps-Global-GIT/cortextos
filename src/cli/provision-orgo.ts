@@ -174,52 +174,10 @@ async function createComputer(
 // Mirrors the OrgoHermesInstaller pattern exactly.
 // ---------------------------------------------------------------------------
 
-function buildPythonInstallScript(
-  installShSource: string,
-  agentName: string
-): string {
-  const bashBase64 = Buffer.from(installShSource, 'utf-8').toString('base64');
-  const agentNameBase64 = Buffer.from(agentName, 'utf-8').toString('base64');
-
-  return `
-import base64
-import json
-import os
-import subprocess
-
-bash_cmd = base64.b64decode("${bashBase64}").decode("utf-8")
-agent_name = base64.b64decode("${agentNameBase64}").decode("utf-8")
-
-try:
-    result = subprocess.run(
-        ["bash", "-c", bash_cmd, "--", agent_name],
-        capture_output=True,
-        text=True,
-        timeout=250,
-        env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
-    )
-    exit_code = result.returncode
-    stdout_tail = result.stdout[-4000:]
-    stderr_tail = result.stderr[-4000:]
-except subprocess.TimeoutExpired as exc:
-    exit_code = -1
-    stdout_tail = (exc.stdout or "")[-4000:] if isinstance(getattr(exc, "stdout", None), str) else ""
-    stderr_tail = "cortextos installer exceeded 250s and was aborted."
-except Exception as exc:
-    exit_code = -1
-    stdout_tail = ""
-    stderr_tail = f"Installer raised: {exc}"
-
-print(json.dumps({
-    "exit_code": exit_code,
-    "stdout_tail": stdout_tail,
-    "stderr_tail": stderr_tail,
-}))
-`.trim();
-}
-
 // ---------------------------------------------------------------------------
 // Run the installer on the target computer via /exec
+// Orgo /exec has a hard ~30s HTTP timeout; the installer takes 2-4 minutes.
+// We launch it in background and poll every 15s until it exits (max 300s).
 // ---------------------------------------------------------------------------
 
 async function runInstaller(
@@ -238,28 +196,134 @@ async function runInstaller(
     );
   }
 
-  const pythonCode = buildPythonInstallScript(installShSource, agentName);
+  // Resolve GH_TOKEN and GitHub release asset ID so the installer can download the tarball.
+  const ghToken = process.env['GH_TOKEN'] ?? '';
+  let assetId = '';
+  if (ghToken) {
+    try {
+      const releaseRes = await fetch(
+        'https://api.github.com/repos/RevOps-Global-GIT/cortextos/releases/tags/v0.1.1',
+        { headers: { Authorization: `token ${ghToken}`, Accept: 'application/vnd.github+json' } }
+      );
+      if (releaseRes.ok) {
+        const releaseData = await releaseRes.json() as { assets?: Array<{ id: number; name: string }> };
+        const asset = (releaseData.assets ?? []).find(a => a.name.endsWith('.tgz'));
+        if (asset) {
+          assetId = String(asset.id);
+          console.log(`  GitHub release asset: ${asset.name} (id: ${assetId})`);
+        }
+      }
+    } catch { /* non-fatal — installer will fail if asset not found */ }
+  }
 
-  // 270s client-side timeout; server-side script timeout is 250s
-  const execResponse = await orgoPost<ExecResponse>(
+  // Orgo /exec has a hard ~30s HTTP timeout, but the installer takes 2-4 minutes.
+  // Strategy: launch installer in background (writes to /tmp/ctx-install.log),
+  // then poll every 15s until process exits or 300s elapses.
+  const pollCodeTemplate = `
+import json, os, subprocess
+
+pid = $PID$
+try:
+    os.kill(pid, 0)
+    still_running = True
+except ProcessLookupError:
+    still_running = False
+
+try:
+    log = open("/tmp/ctx-install.log").read()
+except Exception:
+    log = ""
+
+exit_code = -99
+if not still_running:
+    # Read exit code from sentinel file
+    try:
+        exit_code = int(open("/tmp/ctx-install.exit").read().strip())
+    except Exception:
+        exit_code = -1 if "install complete" not in log.lower() else 0
+
+print(json.dumps({"still_running": still_running, "exit_code": exit_code, "log_tail": log[-4000:]}))
+`.trim();
+
+  // Step 1: launch the installer as a background process
+  const launchPythonCode = `
+import base64, json, os, subprocess
+
+bash_cmd = base64.b64decode("${Buffer.from(installShSource, 'utf-8').toString('base64')}").decode("utf-8")
+agent_name = base64.b64decode("${Buffer.from(agentName, 'utf-8').toString('base64')}").decode("utf-8")
+
+proc = subprocess.Popen(
+    ["bash", "-c", bash_cmd, "--", agent_name],
+    stdout=open("/tmp/ctx-install.log", "w"),
+    stderr=subprocess.STDOUT,
+    env={**os.environ, "DEBIAN_FRONTEND": "noninteractive", "GH_TOKEN": "${ghToken}", "CORTEXTOS_ASSET_ID": "${assetId}"},
+)
+
+# Write PID for polling
+with open("/tmp/ctx-install.pid", "w") as f:
+    f.write(str(proc.pid))
+
+print(json.dumps({"pid": proc.pid, "status": "launched"}))
+`.trim();
+
+  const launchResp = await orgoPost<ExecResponse>(
     `computers/${computerId}/exec`,
     apiKey,
-    { code: pythonCode, timeout: 265 },
-    270_000
+    { code: launchPythonCode, timeout: 20 },
+    30_000
   );
+  if (!launchResp.success) {
+    throw new Error(`Installer launch failed: ${launchResp.output}`);
+  }
+  const launchOut = JSON.parse(launchResp.output?.trim() ?? '{}') as { pid?: number; status?: string };
+  const pid = launchOut.pid;
+  if (!pid) throw new Error(`Installer did not return a PID: ${launchResp.output}`);
+  console.log(`  Installer launched (PID ${pid}) — polling every 15s (max 300s)...`);
 
-  if (!execResponse.success && !execResponse.output) {
-    throw new Error('Orgo /exec returned failure with no output');
+  // Step 2: poll until process exits or timeout
+  const maxWaitMs = 300_000;
+  const pollIntervalMs = 15_000;
+  const pollStart = Date.now();
+
+  const pollCode = pollCodeTemplate.replace('$PID$', String(pid));
+
+  let lastLog = '';
+  while (Date.now() - pollStart < maxWaitMs) {
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    const elapsed = Math.round((Date.now() - pollStart) / 1000);
+
+    let pollResp: ExecResponse;
+    try {
+      pollResp = await orgoPost<ExecResponse>(
+        `computers/${computerId}/exec`,
+        apiKey,
+        { code: pollCode, timeout: 20 },
+        30_000
+      );
+    } catch {
+      console.log(`  [${elapsed}s] Poll exec failed — retrying...`);
+      continue;
+    }
+
+    const pollOut = JSON.parse(pollResp.output?.trim() ?? '{}') as {
+      still_running?: boolean; exit_code?: number; log_tail?: string;
+    };
+    lastLog = pollOut.log_tail ?? '';
+    const lines = lastLog.split('\n');
+    const lastLine = lines.filter(l => l.trim()).slice(-1)[0] ?? '';
+    console.log(`  [${elapsed}s] running=${pollOut.still_running}  last: ${lastLine.slice(0, 80)}`);
+
+    if (!pollOut.still_running) {
+      const exitCode = pollOut.exit_code ?? -1;
+      return {
+        exit_code: exitCode,
+        stdout_tail: lastLog,
+        stderr_tail: '',
+      };
+    }
   }
 
-  // The Python script prints a single JSON line to stdout
-  const raw = (execResponse.output ?? '').trim();
-  const jsonLine = raw.split('\n').reverse().find(l => l.startsWith('{'));
-  if (!jsonLine) {
-    throw new Error(`Unexpected /exec output (no JSON line found):\n${raw.slice(-500)}`);
-  }
-
-  return JSON.parse(jsonLine) as InstallScriptResponse;
+  throw new Error(`Installer timed out after ${maxWaitMs / 1000}s. Last log:\n${lastLog.slice(-500)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +373,7 @@ export const provisionOrgoCommand = new Command('provision-orgo')
 
       let computerId: string;
       let computerName: string;
+      let failed = false;
 
       try {
         if (creating) {
@@ -359,11 +424,12 @@ export const provisionOrgoCommand = new Command('provision-orgo')
             console.error('\n--- stderr (tail) ---');
             console.error(result.stderr_tail);
           }
-          process.exit(1);
+          failed = true;
         }
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);
-        process.exit(1);
+        failed = true;
       }
+      if (failed) process.exit(1);
     }
   );
