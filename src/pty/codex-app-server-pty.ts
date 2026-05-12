@@ -418,7 +418,6 @@ export class CodexAppServerPTY {
       const spawnFn = this._spawnFn!;
       const pty = spawnFn('codex', [
         'app-server',
-        '--enable', 'goals',
         '--listen', this._socketListenArg,
       ], {
         name: 'xterm-256color',
