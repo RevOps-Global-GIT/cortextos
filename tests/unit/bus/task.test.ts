@@ -641,9 +641,18 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
       analyticsDir: join(testDir, 'analytics'),
       heartbeatDir: join(testDir, 'heartbeats'),
     };
+    // Guarantee unique task IDs: createTask uses `task_${Date.now()}_${randomDigits(3)}`
+    // and tests run fast enough that two calls can land in the same ms with the same
+    // 3-digit suffix (1-in-1000 chance), causing detectCycleOrThrow to see a self-loop.
+    // Monotonically incrementing timestamps eliminate the collision entirely.
+    let _ts = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => _ts++);
   });
 
-  afterEach(() => { rmSync(testDir, { recursive: true, force: true }); });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(testDir, { recursive: true, force: true });
+  });
 
   // Helper: age a completed task's completed_at by overwriting the JSON.
   function backdateCompletion(id: string, daysAgo: number) {
