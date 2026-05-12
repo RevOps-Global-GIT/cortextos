@@ -366,6 +366,46 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
       ].join(', ')).first();
 
       if (await deleteBtn.count() > 0) {
+        // PRE-FLIGHT: read the row's displayed hours total before clicking.
+        // TimesheetWeekView has two delete paths:
+        //   >0h row → AlertDialog required (DB write would happen)
+        //    0h row → silent UI-only removal (no DB write, no dialog expected)
+        // We need to know which path we're on BEFORE the click so we can
+        // differentiate a real regression (>0h, no dialog) from the by-design path.
+        const rowHoursBeforeClick = await page.evaluate(() => {
+          const candidates: Element[] = [
+            ...Array.from(document.querySelectorAll('button[aria-label*="delete" i]')),
+            ...Array.from(document.querySelectorAll('button[aria-label*="remove" i]')),
+            ...Array.from(document.querySelectorAll('button[title*="delete" i]')),
+            ...Array.from(document.querySelectorAll('button[title*="remove" i]')),
+            ...Array.from(document.querySelectorAll('button')).filter(b => {
+              const t = b.textContent?.trim() ?? '';
+              return t === '×' || t === '✕' || t === '✗';
+            }),
+          ];
+          const btn = candidates[0] as HTMLElement | undefined;
+          if (!btn) return 0;
+          let ancestor: Element | null = btn.parentElement;
+          for (let i = 0; i < 8 && ancestor; i++) {
+            const childTexts = Array.from(ancestor.querySelectorAll('*'))
+              .map(el => el.textContent?.trim() ?? '')
+              .filter(t => t.length > 10 && /[A-Za-z]/.test(t));
+            const hasProjectName = childTexts.some(t =>
+              !/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Total|Time|Add|Select|No time|Loading|Day|Week|Month|My Hours)/i.test(t)
+            );
+            if (hasProjectName) {
+              // Sum leaf-node numeric values that look like hour counts (0–24 range)
+              const nums = Array.from(ancestor.querySelectorAll('*'))
+                .filter(el => el.children.length === 0)
+                .map(el => parseFloat(el.textContent?.trim() ?? ''))
+                .filter(n => !isNaN(n) && n >= 0 && n <= 24);
+              return nums.reduce((a, b) => a + b, 0);
+            }
+            ancestor = ancestor.parentElement;
+          }
+          return 0;
+        });
+
         await deleteBtn.hover();
         await shot(page, '5-delete-hover');
         const urlBefore = page.url();
@@ -383,9 +423,13 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
         if (dialog) {
           const cancelBtn = page.locator('[role="dialog"] button:has-text("Cancel"), [role="alertdialog"] button:has-text("Cancel")').first();
           await cancelBtn.click().catch(() => page.keyboard.press('Escape'));
-          return { check: 'CHECK 5 Delete entry', status: 'PASS', evidence: 'Delete button opened confirmation dialog. Clicked Cancel — no deletion.' };
+          return { check: 'CHECK 5 Delete entry', status: 'PASS', evidence: `Delete button opened confirmation dialog (row had ${rowHoursBeforeClick}h). Clicked Cancel — no deletion.` };
+        } else if (rowHoursBeforeClick > 0) {
+          // >0h row with no dialog = real regression — AlertDialog should have appeared
+          return { check: 'CHECK 5 Delete entry', status: 'FAIL', evidence: `Delete clicked on row with ${rowHoursBeforeClick}h logged — no confirmation dialog appeared. Expected AlertDialog for non-zero row (TimesheetWeekView regression).` };
         } else {
-          return { check: 'CHECK 5 Delete entry', status: 'FAIL', evidence: 'Delete button clicked — NO confirmation dialog appeared within 2s. Immediate deletion risk.' };
+          // 0h row with no dialog = intentional by-design silent path (no DB write)
+          return { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: `Delete clicked on row with 0h logged — no dialog appeared (intentional: TimesheetWeekView silently removes 0h rows without DB write). By-design safe path.` };
         }
       }
       return { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: 'No delete button found with known selectors.' };
@@ -427,6 +471,30 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
         });
 
         if (taggedDelete !== null) {
+          // PRE-FLIGHT (fallback path): read hours from the tagged row before clicking
+          const fallbackRowHours = await page.evaluate(() => {
+            const btn = document.querySelector('[data-qa-delete-btn="true"]') as HTMLElement | null;
+            if (!btn) return 0;
+            let ancestor: Element | null = btn.parentElement;
+            for (let i = 0; i < 8 && ancestor; i++) {
+              const childTexts = Array.from(ancestor.querySelectorAll('*'))
+                .map(el => el.textContent?.trim() ?? '')
+                .filter(t => t.length > 10 && /[A-Za-z]/.test(t));
+              const hasProjectName = childTexts.some(t =>
+                !/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|Total|Time|Add|Select|No time|Loading|Day|Week|Month|My Hours)/i.test(t)
+              );
+              if (hasProjectName) {
+                const nums = Array.from(ancestor.querySelectorAll('*'))
+                  .filter(el => el.children.length === 0)
+                  .map(el => parseFloat(el.textContent?.trim() ?? ''))
+                  .filter(n => !isNaN(n) && n >= 0 && n <= 24);
+                return nums.reduce((a, b) => a + b, 0);
+              }
+              ancestor = ancestor.parentElement;
+            }
+            return 0;
+          });
+
           const taggedBtn = page.locator('[data-qa-delete-btn="true"]').first();
           await taggedBtn.hover().catch(() => {});
           const urlBeforeFallback = page.url();
@@ -442,9 +510,11 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
             const dialog = await fallbackDialogLoc.count() > 0;
             if (dialog) {
               await page.keyboard.press('Escape');
-              res = { check: 'CHECK 5 Delete entry', status: 'PASS', evidence: `Row delete button (text: "${taggedDelete}") opened confirmation dialog. Escaped — no deletion.` };
+              res = { check: 'CHECK 5 Delete entry', status: 'PASS', evidence: `Row delete button (text: "${taggedDelete}") opened confirmation dialog (row had ${fallbackRowHours}h). Escaped — no deletion.` };
+            } else if (fallbackRowHours > 0) {
+              res = { check: 'CHECK 5 Delete entry', status: 'FAIL', evidence: `Delete clicked on row with ${fallbackRowHours}h logged — no confirmation dialog appeared. Expected AlertDialog for non-zero row (TimesheetWeekView regression).` };
             } else {
-              res = { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: `Row delete button clicked — no confirmation dialog appeared within 2s. May be live-data state (no entries to delete) or product gap.` };
+              res = { check: 'CHECK 5 Delete entry', status: 'DEFERRED', evidence: `Delete clicked on row with 0h logged — no dialog appeared (intentional: TimesheetWeekView silently removes 0h rows without DB write). By-design safe path.` };
             }
           }
         } else {
