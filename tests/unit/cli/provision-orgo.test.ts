@@ -181,14 +181,18 @@ describe('provision-orgo — existing computer path (--computer)', () => {
 
     vi.stubGlobal('fetch', fetchMock);
 
+    // Attach .catch() immediately so the rejection is always handled,
+    // even if it fires during vi.runAllTimersAsync() before the assertion.
+    let caughtError: Error | undefined;
     const parsePromise = provisionOrgoCommand.parseAsync([
       'node', 'cli',
       '--api-key', 'orgo-key-abc',
       '--computer', 'vm-xyz',
-    ]);
+    ]).catch((e: Error) => { caughtError = e; });
 
     await vi.runAllTimersAsync();
-    await expect(parsePromise).rejects.toThrow('__EXIT_1__');
+    await parsePromise;
+    expect(caughtError?.message).toMatch(/__EXIT_1__/);
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
@@ -201,14 +205,16 @@ describe('provision-orgo — existing computer path (--computer)', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
+    let caughtError: Error | undefined;
     const parsePromise = provisionOrgoCommand.parseAsync([
       'node', 'cli',
       '--api-key', 'bad-key',
       '--computer', 'vm-xyz',
-    ]);
+    ]).catch((e: Error) => { caughtError = e; });
 
     await vi.runAllTimersAsync();
-    await expect(parsePromise).rejects.toThrow('__EXIT_1__');
+    await parsePromise;
+    expect(caughtError?.message).toMatch(/__EXIT_1__/);
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
@@ -320,16 +326,18 @@ describe('provision-orgo — create new computer path (--create)', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
+    let caughtError: Error | undefined;
     const parsePromise = provisionOrgoCommand.parseAsync([
       'node', 'cli',
       '--api-key', 'orgo-key',
       '--workspace', 'Nonexistent Workspace',
       '--create',
       '--agent-name', 'dev',
-    ]);
+    ]).catch((e: Error) => { caughtError = e; });
 
     await vi.runAllTimersAsync();
-    await expect(parsePromise).rejects.toThrow('__EXIT_1__');
+    await parsePromise;
+    expect(caughtError?.message).toMatch(/__EXIT_1__/);
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });

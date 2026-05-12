@@ -373,6 +373,7 @@ export const provisionOrgoCommand = new Command('provision-orgo')
 
       let computerId: string;
       let computerName: string;
+      let failed = false;
 
       try {
         if (creating) {
@@ -423,11 +424,12 @@ export const provisionOrgoCommand = new Command('provision-orgo')
             console.error('\n--- stderr (tail) ---');
             console.error(result.stderr_tail);
           }
-          process.exit(1);
+          failed = true;
         }
       } catch (err) {
         console.error(`Error: ${(err as Error).message}`);
-        process.exit(1);
+        failed = true;
       }
+      if (failed) process.exit(1);
     }
   );
