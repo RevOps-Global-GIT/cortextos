@@ -226,12 +226,26 @@ export interface AgentConfig {
    */
   ctx_autoreset_threshold?: number;
   /**
+   * Fallback context window cap (tokens) for codex-app-server agents when the
+   * server's `thread/tokenUsage/updated` event reports `modelContextWindow=null`.
+   * Defaults to 256000 when unset. Only applied to the codex-app-server runtime.
+   */
+  codex_context_cap?: number;
+  /**
    * Agent runtime. Defaults to 'claude-code' when absent.
    * 'hermes' selects the HermesPTY spawn path (Python persistent REPL,
    * NousResearch/hermes-agent) with Hermes-specific bootstrap, session
    * continuity, and exit handling.
    */
-  runtime?: 'claude-code' | 'hermes';
+  runtime?: 'claude-code' | 'hermes' | 'codex-app-server';
+  /**
+   * Whether this agent runs a Telegram poller. Defaults to true when absent
+   * (preserves existing behaviour). Set to false on specialist agents that
+   * should not own a Telegram bot — only the designated orchestrator agent
+   * should poll. Requires BOT_TOKEN + CHAT_ID to already be unset or the
+   * poller will be skipped regardless.
+   */
+  telegram_polling?: boolean;
 }
 
 export interface CronEntry {
