@@ -66,6 +66,12 @@ FLASH_OUTPUT_PRICE_PER_M = 0.60
 TRANSIENT_HTTP_CODES = {429, 500, 503}
 TRANSIENT_STATUS_NAMES = {"UNAVAILABLE", "RESOURCE_EXHAUSTED"}
 
+# Per-image description timeout (seconds). Images are typically small and fast;
+# 30 s is generous. If the API hangs past this (× retries), the image is skipped
+# rather than blocking the entire ingest run. Override via env var.
+_raw_img_timeout = int(os.environ.get("MMRAG_IMAGE_TIMEOUT_SECS", "30"))
+IMAGE_DESCRIPTION_TIMEOUT_SECS = max(5, _raw_img_timeout)
+
 USAGE_FILE = MMRAG_DIR / "usage.json"
 
 # ---------------------------------------------------------------------------
@@ -308,8 +314,13 @@ def embed_query(client, config, query_text):
     return embed_content(client, config, query_text, task_type="RETRIEVAL_QUERY")
 
 
-def describe_media(client, config, file_path, media_type="video"):
-    """Use Gemini Flash to generate a text description of media."""
+def describe_media(client, config, file_path, media_type="video", call_timeout_secs=None):
+    """Use Gemini Flash to generate a text description of media.
+
+    call_timeout_secs: per-attempt timeout passed through to _retry_generate_content.
+    None means the default (90 s). Pass IMAGE_DESCRIPTION_TIMEOUT_SECS for images
+    so that a stuck PNG doesn't block the whole ingest run.
+    """
     from google.genai import types
 
     mime = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
@@ -344,6 +355,10 @@ def describe_media(client, config, file_path, media_type="video"):
         ),
     }
 
+    kwargs = {}
+    if call_timeout_secs is not None:
+        kwargs["call_timeout_secs"] = call_timeout_secs
+
     response = _retry_generate_content(
         client,
         model=config.get("gemini_model", "gemini-2.5-flash"),
@@ -351,6 +366,7 @@ def describe_media(client, config, file_path, media_type="video"):
             types.Part.from_bytes(data=data, mime_type=mime),
             prompts.get(media_type, prompts["video"]),
         ],
+        **kwargs,
     )
     if _tracker:
         _tracker.track_generation(response)
@@ -582,7 +598,17 @@ def ingest_image(client, config, collection, file_path):
         return 0
 
     print(f"  Generating description for {file_path.name}...")
-    description, media_bytes, mime = describe_media(client, config, file_path, "image")
+    try:
+        description, media_bytes, mime = describe_media(
+            client, config, file_path, "image",
+            call_timeout_secs=IMAGE_DESCRIPTION_TIMEOUT_SECS,
+        )
+    except TimeoutError:
+        print(
+            f"  SKIP (description timed out after {IMAGE_DESCRIPTION_TIMEOUT_SECS}s × retries): "
+            f"{file_path.name}"
+        )
+        return 0
 
     # Option B: embed text description + raw image together
     try:
