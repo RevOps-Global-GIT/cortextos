@@ -1263,6 +1263,10 @@ busCommand
   .option('--file <path>', 'Send a document/file with caption (any file type)')
   .option('--plain-text', 'Skip Telegram Markdown parsing entirely. Use this when the message contains unescaped _, *, backtick, or [ that would otherwise trip the Markdown parser. Without this flag, sendMessage still retries once with parse_mode disabled on a parse-entity error — so it is purely an opt-in to save the retry roundtrip.', false)
   .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean }) => {
+    // Codex agents emit literal '\n'/'\t' inside single-quoted bash where bash
+    // does not expand escapes, so they arrive at argv as 2-char literals and
+    // Telegram renders them as visible text. Normalize before send + log.
+    message = message.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
     // Resolve bot token: agent .env first, then process.env
     const env = resolveEnv();
     let botToken = '';
@@ -1337,21 +1341,35 @@ busCommand
       }
 
       console.log('Message sent');
-      // Exit immediately after all local writes complete. The bus-mirror
-      // retry-drain (drainRetryQueue) is launched via setImmediate and uses
-      // long-timeout fetch calls that keep the Node event loop alive
-      // indefinitely when Supabase is slow or unreachable. The drain is
-      // fire-and-forget: the retry queue is persisted to disk and will be
-      // drained on the next bus write or daemon cycle. Calling process.exit(0)
-      // here fires before any setImmediate callbacks, so the drain never runs
-      // in this short-lived process — which is the correct behaviour for a CLI
-      // command. Without this, send-telegram can hang for hours (one 10s
-      // timeout × N queued entries) and leave zombie processes.
-      process.exit(0);
     } catch (err: any) {
       console.error(`Failed to send: ${err.message || err}`);
       process.exit(1);
     }
+    // Exit immediately after all local writes complete. The bus-mirror
+    // retry-drain (drainRetryQueue) is launched via setImmediate and uses
+    // long-timeout fetch calls that keep the Node event loop alive
+    // indefinitely when Supabase is slow or unreachable. The drain is
+    // fire-and-forget: the retry queue is persisted to disk and will be
+    // drained on the next bus write or daemon cycle. Calling process.exit(0)
+    // here fires before any setImmediate callbacks, so the drain never runs
+    // in this short-lived process — which is the correct behaviour for a CLI
+    // command. Without this, send-telegram can hang for hours (one 10s
+    // timeout x N queued entries) and leave zombie processes.
+    process.exit(0);
+  });
+
+busCommand
+  .command('send-telegram-voice')
+  .description('Synthesize text with OpenAI tts-1 and send it as a Telegram voice message')
+  .argument('<chat-id>', 'Telegram chat ID')
+  .argument('<text>', 'Text to speak')
+  .action(async (chatId: string, text: string) => {
+    const result = await sendTelegramVoice(chatId, text);
+    if (!result.ok) {
+      console.error(`send-telegram-voice failed: ${result.error}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify({ ok: true, message_id: result.messageId ?? null }));
   });
 
 busCommand
@@ -2479,6 +2497,8 @@ busCommand
   .argument('<reply>', 'Reply text')
   .argument('[msg-id]', 'Inbox message ID to ACK')
   .action((agent: string, reply: string, msgId?: string) => {
+    // Same literal '\n'/'\t' normalize as send-telegram (codex agent fix).
+    reply = reply.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
     const { mkdirSync, appendFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();

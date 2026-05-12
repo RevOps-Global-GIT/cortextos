@@ -26,6 +26,7 @@ function createMockAgent(name = 'test-agent') {
     isBootstrapped: vi.fn().mockReturnValue(true),
     injectMessage: vi.fn().mockReturnValue(true),
     write: vi.fn(),
+    sessionRefresh: vi.fn().mockResolvedValue(undefined),
   } as any;
 }
 
@@ -772,16 +773,51 @@ describe('FastChecker', () => {
 
       expect(result).toContain('duration: unknowns');
     });
+
+    it('emits a transcript: fenced block when transcript is provided', () => {
+      const result = FastChecker.formatTelegramVoiceMessage(
+        'Alice',
+        '123',
+        '/tmp/voice.ogg',
+        5,
+        'say hi back',
+      );
+
+      expect(result).toContain('=== TELEGRAM VOICE from Alice (chat_id:123) ===');
+      expect(result).toContain('duration: 5s');
+      expect(result).toContain('local_file: /tmp/voice.ogg');
+      expect(result).toContain('transcript:\n```\nsay hi back\n```');
+    });
+
+    it('omits the transcript block when transcript is undefined or empty', () => {
+      const noArg = FastChecker.formatTelegramVoiceMessage('Alice', '123', '/tmp/voice.ogg', 5);
+      const empty = FastChecker.formatTelegramVoiceMessage('Alice', '123', '/tmp/voice.ogg', 5, '   ');
+
+      expect(noArg).not.toContain('transcript:');
+      expect(empty).not.toContain('transcript:');
+    });
   });
 
   describe('heartbeat watchdog', () => {
-    beforeEach(() => { vi.useFakeTimers(); });
+    const heartbeatTestOptions = { pollInterval: 60 * 1000 };
+
+    beforeEach(async () => {
+      vi.useFakeTimers();
+      const { execFile } = await import('child_process');
+      (execFile as ReturnType<typeof vi.fn>).mockImplementation((...args: unknown[]) => {
+        const cb = args[args.length - 1];
+        if (typeof cb === 'function') {
+          cb(null, '{}');
+        }
+        return {} as never;
+      });
+    });
     afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 
     it('fires exec after bootstrap at 50-min interval', async () => {
       const { execFile } = await import('child_process');
       const agent = createMockAgent('my-agent');
-      const checker = new FastChecker(agent, paths, '/tmp/framework');
+      const checker = new FastChecker(agent, paths, '/tmp/framework', heartbeatTestOptions);
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
       expect(execFile).toHaveBeenCalledWith(
@@ -797,7 +833,7 @@ describe('FastChecker', () => {
       const { execFile } = await import('child_process');
       const execMock = execFile as ReturnType<typeof vi.fn>;
       const agent = createMockAgent('my-agent');
-      const checker = new FastChecker(agent, paths, '/tmp/framework');
+      const checker = new FastChecker(agent, paths, '/tmp/framework', heartbeatTestOptions);
       checker.start();
       await vi.advanceTimersByTimeAsync(50 * 60 * 1000);
       const callsBefore = execMock.mock.calls.length;
@@ -812,7 +848,7 @@ describe('FastChecker', () => {
       const { execFile } = await import('child_process');
       const agent = createMockAgent('my-agent');
       agent.isBootstrapped.mockReturnValue(false);
-      const checker = new FastChecker(agent, paths, '/tmp/framework');
+      const checker = new FastChecker(agent, paths, '/tmp/framework', heartbeatTestOptions);
       checker.start();
       await vi.advanceTimersByTimeAsync(20 * 1000);
       expect(execFile).not.toHaveBeenCalledWith(
