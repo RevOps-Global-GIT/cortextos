@@ -32,6 +32,13 @@ interface RgosCredentials {
 }
 
 const ALLOW_VALUES = new Set<OrchGateValue>(['enabled', 'all_enabled', 'check_prefs']);
+const DEFAULT_POLICY_FETCH_TIMEOUT_MS = 750;
+
+function policyFetchTimeoutMs(): number {
+  const raw = Number(process.env.CORTEXTOS_POLICY_FETCH_TIMEOUT_MS ?? '');
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_POLICY_FETCH_TIMEOUT_MS;
+  return Math.min(Math.max(Math.round(raw), 50), 5000);
+}
 
 function loadFileEnv(filePath: string): Record<string, string> {
   return existsSync(filePath) ? parseEnvFile(filePath) : {};
@@ -90,7 +97,7 @@ async function fetchGateValue(gate: string): Promise<string | null> {
       Authorization: `Bearer ${creds.serviceKey}`,
       Accept: 'application/json',
     },
-    signal: AbortSignal.timeout(5000),
+    signal: AbortSignal.timeout(policyFetchTimeoutMs()),
   });
 
   if (!response.ok) {
