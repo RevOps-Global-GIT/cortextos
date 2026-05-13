@@ -57,6 +57,37 @@ export class BrowserManager {
     return this.page;
   }
 
+  private async killLingeringProfileProcesses(): Promise<void> {
+    const profileDir = this.config.profileDir;
+    await new Promise<void>((resolve) => {
+      execFile('pkill', ['-f', profileDir], () => {
+        // Ignore errors — process may already be gone
+        resolve();
+      });
+    });
+  }
+
+  private async resetContext(): Promise<void> {
+    try {
+      if (this.context) {
+        await this.context.close();
+      }
+    } catch (err) {
+      console.error('[browser] Error closing crashed context:', (err as Error).message);
+    } finally {
+      this.context = null;
+      this.page = null;
+    }
+
+    await this.killLingeringProfileProcesses();
+  }
+
+  private async recoverAfterCrash(): Promise<void> {
+    console.warn('[browser] Re-launching persistent context after failed health check');
+    await this.resetContext();
+    await this.init();
+  }
+
   async checkHealth(): Promise<boolean> {
     if (!this.page) return false;
     try {
@@ -72,25 +103,16 @@ export class BrowserManager {
       return healthy;
     } catch (err) {
       console.error('[browser] Health check failed:', (err as Error).message.split('\n')[0]);
+      try {
+        await this.recoverAfterCrash();
+      } catch (recoverErr) {
+        console.error('[browser] Recovery failed:', (recoverErr as Error).message.split('\n')[0]);
+      }
       return false;
     }
   }
 
   async close(): Promise<void> {
-    try {
-      if (this.context) {
-        await this.context.close();
-        this.context = null;
-        this.page = null;
-      }
-    } catch (err) {
-      console.error('[browser] Error closing context:', (err as Error).message);
-    }
-
-    // Kill any lingering Chromium processes that had this profile open
-    const profileDir = this.config.profileDir;
-    execFile('pkill', ['-f', profileDir], () => {
-      // Ignore errors — process may already be gone
-    });
+    await this.resetContext();
   }
 }
