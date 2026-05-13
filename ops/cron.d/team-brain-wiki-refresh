@@ -1,0 +1,14 @@
+# team-brain wiki refresh on the cortextOS VM.
+# Install for the cortextos user with:
+#   crontab ops/cron.d/team-brain-wiki-refresh
+#
+# This VM's cron does not honor CRON_TZ reliably, so schedules are UTC-explicit
+# for current Pacific daylight time:
+# - Fathom ingest: Fridays 22:47 PT = Saturdays 05:47 UTC
+# - Wiki ingest/sync: daily 02:30 PT = daily 09:30 UTC
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin:/home/cortextos/.local/bin
+
+47 5 * * 6 /home/cortextos/cortextos/scripts/team-brain-wiki-refresh.sh fathom
+30 9 * * * /home/cortextos/cortextos/scripts/team-brain-wiki-refresh.sh wiki
