@@ -2,13 +2,14 @@ import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } f
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
+import { createConnection } from 'net';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
 import { logEvent } from '../bus/event.js';
-import { WsUnixJsonRpcClient, type JsonRpcResponse } from '../utils/ws-unix-client.js';
+import { WsUnixJsonRpcClient, type JsonRpcResponse, type WebSocketRpcTarget } from '../utils/ws-unix-client.js';
 
 interface IPty {
   pid: number;
@@ -39,6 +40,15 @@ interface SocketPointer {
   fallback: boolean;
   reason?: string;
   updatedAt: string;
+}
+
+interface AppServerEndpoint {
+  transport: 'ws' | 'unix';
+  listenArg: string;
+  cwd: string;
+  rpcTarget: WebSocketRpcTarget;
+  socketPath?: string;
+  port?: number;
 }
 
 interface ThreadResponse {
@@ -80,6 +90,7 @@ const TURN_PERMISSION_OVERRIDES = {
 const SOCKET_BASENAME = 'codex.sock';
 const SOCKET_PATH_WARN_BYTES = 100;
 const BOOTSTRAP_PATTERN = '[codex-app-server] ready';
+const DEFAULT_WS_HOST = '127.0.0.1';
 
 const SLASH_REWRITE_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
 const LOCAL_SLASH_COMMANDS = new Set(['goal']);
@@ -112,9 +123,7 @@ export class CodexAppServerPTY {
   private _config: AgentConfig;
   private _stateDir: string;
   private _cwd: string;
-  private _socketPath: string;
-  private _socketListenArg: string;
-  private _socketCwd: string;
+  private _endpoint: AppServerEndpoint;
   private _threadStatePath: string;
   private _socketPointerPath: string;
   private _threadId: string | null = null;
@@ -129,10 +138,7 @@ export class CodexAppServerPTY {
     this._stateDir = join(env.ctxRoot, 'state', env.agentName);
     this._threadStatePath = join(this._stateDir, 'codex-app-server-thread.json');
     this._socketPointerPath = join(this._stateDir, 'codex-app-server-socket.json');
-    const socket = this.resolveSocketPath();
-    this._socketPath = socket.path;
-    this._socketListenArg = socket.listenArg;
-    this._socketCwd = socket.cwd;
+    this._endpoint = this.resolveEndpoint();
     this._outputBuffer = new OutputBuffer(1000, logPath, BOOTSTRAP_PATTERN);
   }
 
@@ -196,7 +202,7 @@ export class CodexAppServerPTY {
       }
       this._appServerPty = null;
     }
-    this.removeSocket();
+    this.removeEndpoint();
     this._onExitHandler?.(0, undefined);
     this._onExitHandler = null;
   }
@@ -392,7 +398,7 @@ export class CodexAppServerPTY {
 
     for (let attempt = 0; attempt < delays.length; attempt += 1) {
       try {
-        this.removeSocket();
+        this.removeEndpoint();
         await this.startAppServer();
         return;
       } catch (err) {
@@ -418,12 +424,12 @@ export class CodexAppServerPTY {
       const spawnFn = this._spawnFn!;
       const pty = spawnFn('codex', [
         'app-server',
-        '--listen', this._socketListenArg,
+        '--listen', this._endpoint.listenArg,
       ], {
         name: 'xterm-256color',
         cols: 200,
         rows: 50,
-        cwd: this._socketCwd,
+        cwd: this._endpoint.cwd,
         env: this.buildEnv(),
       });
 
@@ -442,21 +448,25 @@ export class CodexAppServerPTY {
         this._onExitHandler?.(exitCode, signal);
       });
 
-      this.waitForSocket().then(resolve, reject);
+      this.waitForEndpoint().then(resolve, reject);
     });
   }
 
-  private async waitForSocket(timeoutMs = 10000): Promise<void> {
+  private async waitForEndpoint(timeoutMs = 10000): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (existsSync(this._socketPath)) return;
+      if (this._endpoint.transport === 'unix') {
+        if (this._endpoint.socketPath && existsSync(this._endpoint.socketPath)) return;
+      } else if (this._endpoint.port && await this.canConnectTcp(DEFAULT_WS_HOST, this._endpoint.port)) {
+        return;
+      }
       await sleep(100);
     }
-    throw new Error(`Timed out waiting for app-server socket: ${this._socketPath}`);
+    throw new Error(`Timed out waiting for app-server endpoint: ${this._endpoint.listenArg}`);
   }
 
   private async connectRpc(): Promise<void> {
-    this._rpc = new WsUnixJsonRpcClient(this._socketPath);
+    this._rpc = new WsUnixJsonRpcClient(this._endpoint.rpcTarget);
     this._rpc.onMessage((message) => this.handleRpcMessage(message));
     await this._rpc.connect();
   }
@@ -866,6 +876,50 @@ export class CodexAppServerPTY {
     }
   }
 
+  private resolveEndpoint(): AppServerEndpoint {
+    if (this.getTransport() === 'ws') {
+      const port = this.getWsPort();
+      return {
+        transport: 'ws',
+        listenArg: `ws://${DEFAULT_WS_HOST}:${port}`,
+        cwd: this._stateDir,
+        rpcTarget: { host: DEFAULT_WS_HOST, port },
+        port,
+      };
+    }
+
+    const socket = this.resolveSocketPath();
+    return {
+      transport: 'unix',
+      listenArg: socket.listenArg,
+      cwd: socket.cwd,
+      rpcTarget: socket.path,
+      socketPath: socket.path,
+    };
+  }
+
+  private getTransport(): 'ws' | 'unix' {
+    const configured = this._config.codex_app_server_transport || process.env.CODEX_APP_SERVER_TRANSPORT;
+    if (configured === 'ws' || configured === 'unix') return configured;
+
+    // The repo mock still exercises the Unix WebSocket path. Real codex-cli
+    // 0.125.0 responds on ws:// but not on unix:// in live VM validation.
+    return process.env.NODE_ENV === 'test' || process.env.VITEST ? 'unix' : 'ws';
+  }
+
+  private getWsPort(): number {
+    if (Number.isInteger(this._config.codex_app_server_port) && this._config.codex_app_server_port! > 0) {
+      return this._config.codex_app_server_port!;
+    }
+
+    const key = `${this._env.instanceId}:${this._env.org}:${this._env.agentName}`;
+    let hash = 0;
+    for (let i = 0; i < key.length; i += 1) {
+      hash = ((hash << 5) - hash + key.charCodeAt(i)) >>> 0;
+    }
+    return 42000 + (hash % 8000);
+  }
+
   private resolveSocketPath(): { path: string; listenArg: string; cwd: string } {
     const defaultPath = join(this._stateDir, SOCKET_BASENAME);
     if (Buffer.byteLength(defaultPath) < SOCKET_PATH_WARN_BYTES) {
@@ -889,12 +943,34 @@ export class CodexAppServerPTY {
     return { path: fallback, listenArg: `unix://./${fallbackBasename}`, cwd: '/tmp' };
   }
 
-  private removeSocket(): void {
+  private removeEndpoint(): void {
+    if (this._endpoint.transport !== 'unix' || !this._endpoint.socketPath) return;
     try {
-      if (existsSync(this._socketPath)) unlinkSync(this._socketPath);
+      if (existsSync(this._endpoint.socketPath)) unlinkSync(this._endpoint.socketPath);
     } catch {
       // Ignore stale socket cleanup failures.
     }
+  }
+
+  private canConnectTcp(host: string, port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const socket = createConnection({ host, port });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        resolve(false);
+      }, 500);
+
+      socket.once('connect', () => {
+        clearTimeout(timer);
+        socket.end();
+        resolve(true);
+      });
+      socket.once('error', () => {
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(false);
+      });
+    });
   }
 
   private cleanupSpawnAttempt(): void {
@@ -907,7 +983,7 @@ export class CodexAppServerPTY {
         // Ignore failed attempt cleanup errors.
       }
     }
-    this.removeSocket();
+    this.removeEndpoint();
   }
 
   private writeIdleFlag(): void {

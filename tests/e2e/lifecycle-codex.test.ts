@@ -21,11 +21,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { createServer } from 'net';
 import { WsUnixJsonRpcClient } from '../../src/utils/ws-unix-client.js';
 
 const { MockCodexServer } = require('./mock-codex.js') as {
   MockCodexServer: new (options: {
-    socketPath: string;
+    socketPath?: string;
+    host?: string;
+    port?: number;
     skills?: Array<{ name: string; path: string; enabled?: boolean }>;
     turnDeltaText?: string;
     tokenUsage?: Record<string, number>;
@@ -83,6 +86,24 @@ describe('E2E codex lifecycle (mock-codex.js + WsUnixJsonRpcClient)', () => {
     client.notify('initialized');
     await waitFor(() => server.requestLog.some((entry) => entry.method === 'initialized' && entry.notification));
     expect(server.requestLog.find((entry) => entry.method === 'initialized' && entry.notification)).toBeDefined();
+  });
+
+  it('can connect to a localhost TCP WebSocket app-server target', async () => {
+    const port = await getFreePort();
+    const tcpServer = new MockCodexServer({ host: '127.0.0.1', port });
+    await tcpServer.listen();
+    const tcpClient = new WsUnixJsonRpcClient({ host: '127.0.0.1', port });
+    try {
+      await tcpClient.connect();
+      const response = await tcpClient.request<{ capabilities: { experimentalApi: boolean } }>('initialize', {
+        clientInfo: { name: 'cortextos-test', version: '0.0.0' },
+        capabilities: { experimentalApi: true },
+      });
+      expect(response.result?.capabilities.experimentalApi).toBe(true);
+    } finally {
+      tcpClient.close();
+      await tcpServer.close();
+    }
   });
 
   it('thread/start returns a thread id and emits thread/started', async () => {
@@ -196,4 +217,18 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000, stepMs = 10):
     if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
     await new Promise((resolve) => setTimeout(resolve, stepMs));
   }
+}
+
+async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      server.close(() => {
+        if (address && typeof address === 'object') resolve(address.port);
+        else reject(new Error('failed to allocate test port'));
+      });
+    });
+  });
 }

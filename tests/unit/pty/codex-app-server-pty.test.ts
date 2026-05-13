@@ -91,11 +91,13 @@ beforeEach(() => {
   messageHandler = null;
 });
 
-describe('CodexAppServerPTY socket path policy', () => {
-  it('uses codex.sock in the agent state dir by default', () => {
+describe('CodexAppServerPTY endpoint policy', () => {
+  it('uses codex.sock in the agent state dir for unix transport', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
-    expect((pty as unknown as { _socketPath: string })._socketPath).toBe('/tmp/ctx/state/codex-app-agent/codex.sock');
-    expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toBe('unix://./codex.sock');
+    const endpoint = (pty as unknown as { _endpoint: { transport: string; socketPath?: string; listenArg: string } })._endpoint;
+    expect(endpoint.transport).toBe('unix');
+    expect(endpoint.socketPath).toBe('/tmp/ctx/state/codex-app-agent/codex.sock');
+    expect(endpoint.listenArg).toBe('unix://./codex.sock');
   });
 
   it('falls back to /tmp/cas-*.sock when the state socket path is too long', () => {
@@ -104,15 +106,32 @@ describe('CodexAppServerPTY socket path policy', () => {
       ctxRoot: `/tmp/${'x'.repeat(120)}`,
     };
     const pty = new CodexAppServerPTY(longEnv, {});
-    const socketPath = (pty as unknown as { _socketPath: string })._socketPath;
+    const endpoint = (pty as unknown as { _endpoint: { socketPath?: string; listenArg: string; cwd: string } })._endpoint;
+    const socketPath = endpoint.socketPath;
     expect(socketPath).toMatch(/\/cas-[a-f0-9]{8}\.sock$/);
-    expect((pty as unknown as { _socketListenArg: string })._socketListenArg).toMatch(/^unix:\/\/\.\/cas-[a-f0-9]{8}\.sock$/);
-    expect((pty as unknown as { _socketCwd: string })._socketCwd).toBe('/tmp');
+    expect(endpoint.listenArg).toMatch(/^unix:\/\/\.\/cas-[a-f0-9]{8}\.sock$/);
+    expect(endpoint.cwd).toBe('/tmp');
     expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
       expect.stringContaining('codex-app-server-socket.json'),
       expect.stringContaining('"fallback": true'),
       'utf-8',
     );
+  });
+
+  it('uses a localhost WebSocket endpoint when configured for ws transport', () => {
+    const pty = new CodexAppServerPTY(mockEnv, {
+      codex_app_server_transport: 'ws',
+      codex_app_server_port: 45678,
+    });
+    const endpoint = (pty as unknown as {
+      _endpoint: { transport: string; listenArg: string; cwd: string; port?: number; rpcTarget: { host: string; port: number } };
+    })._endpoint;
+
+    expect(endpoint.transport).toBe('ws');
+    expect(endpoint.listenArg).toBe('ws://127.0.0.1:45678');
+    expect(endpoint.cwd).toBe('/tmp/ctx/state/codex-app-agent');
+    expect(endpoint.port).toBe(45678);
+    expect(endpoint.rpcTarget).toEqual({ host: '127.0.0.1', port: 45678 });
   });
 });
 

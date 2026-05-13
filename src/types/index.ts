@@ -232,6 +232,14 @@ export interface AgentConfig {
    */
   codex_context_cap?: number;
   /**
+   * Transport used by the codex-app-server runtime. Defaults to a localhost
+   * WebSocket listener in production because codex-cli 0.125.0 exposes a
+   * responsive app-server over `ws://`; tests may force `unix` for mocks.
+   */
+  codex_app_server_transport?: 'ws' | 'unix';
+  /** Optional fixed localhost port for codex-app-server when using ws transport. */
+  codex_app_server_port?: number;
+  /**
    * Agent runtime. Defaults to 'claude-code' when absent.
    * 'hermes' selects the HermesPTY spawn path (Python persistent REPL,
    * NousResearch/hermes-agent) with Hermes-specific bootstrap, session

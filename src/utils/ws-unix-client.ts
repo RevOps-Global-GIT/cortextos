@@ -31,13 +31,20 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+export type WebSocketRpcTarget =
+  | string
+  | {
+      host: string;
+      port: number;
+      path?: string;
+    };
+
 /**
- * Minimal WebSocket-over-Unix JSON-RPC client.
+ * Minimal WebSocket JSON-RPC client for Codex app-server.
  *
- * Codex app-server's `unix://` transport is WebSocket-framed. The JSON-RPC
- * payloads inside text frames are newline-delimited, matching the stdio
- * transport after the WebSocket layer is removed. This helper intentionally
- * uses Node built-ins only so the app-server adapter adds no runtime deps.
+ * The app-server's `ws://` transport is WebSocket-framed. Older tests also
+ * exercise a WebSocket-over-Unix-socket mock, so this helper supports both
+ * TCP and Unix-domain socket targets while keeping the same JSON-RPC framing.
  */
 export class WsUnixJsonRpcClient {
   private socket: Socket | null = null;
@@ -46,21 +53,27 @@ export class WsUnixJsonRpcClient {
   private pending = new Map<number | string, PendingRequest>();
   private handlers: MessageHandler[] = [];
 
-  constructor(private readonly socketPath: string) {}
+  constructor(private readonly target: WebSocketRpcTarget) {}
 
   async connect(): Promise<void> {
     if (this.socket) return;
 
-    const socket = createConnection(this.socketPath);
+    const socket = typeof this.target === 'string'
+      ? createConnection(this.target)
+      : createConnection({ host: this.target.host, port: this.target.port });
     await new Promise<void>((resolve, reject) => {
       socket.once('connect', resolve);
       socket.once('error', reject);
     });
 
     const key = randomBytes(16).toString('base64');
+    const requestPath = typeof this.target === 'string' ? '/' : (this.target.path || '/');
+    const host = typeof this.target === 'string'
+      ? 'localhost'
+      : `${this.target.host}:${this.target.port}`;
     socket.write([
-      'GET / HTTP/1.1',
-      'Host: localhost',
+      `GET ${requestPath} HTTP/1.1`,
+      `Host: ${host}`,
       'Upgrade: websocket',
       'Connection: Upgrade',
       `Sec-WebSocket-Key: ${key}`,
@@ -88,7 +101,7 @@ export class WsUnixJsonRpcClient {
     socket.on('data', (chunk) => this.parseFrames(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
     socket.on('error', (err) => this.rejectAll(err));
     socket.on('close', () => {
-      this.rejectAll(new Error('WebSocket Unix socket closed'));
+      this.rejectAll(new Error('WebSocket JSON-RPC socket closed'));
       this.socket = null;
     });
 
@@ -107,7 +120,7 @@ export class WsUnixJsonRpcClient {
         socket.destroy();
       }
     }
-    this.rejectAll(new Error('WebSocket Unix socket closed'));
+    this.rejectAll(new Error('WebSocket JSON-RPC socket closed'));
   }
 
   onMessage(handler: MessageHandler): () => void {
@@ -119,7 +132,7 @@ export class WsUnixJsonRpcClient {
 
   request<T = unknown>(method: string, params?: unknown, timeoutMs = 30000): Promise<JsonRpcResponse<T>> {
     if (!this.socket || this.socket.destroyed) {
-      return Promise.reject(new Error('WebSocket Unix socket is not connected'));
+      return Promise.reject(new Error('WebSocket JSON-RPC socket is not connected'));
     }
 
     const id = this.nextId++;
@@ -152,7 +165,7 @@ export class WsUnixJsonRpcClient {
 
   private send(message: JsonRpcMessage): void {
     if (!this.socket || this.socket.destroyed) {
-      throw new Error('WebSocket Unix socket is not connected');
+      throw new Error('WebSocket JSON-RPC socket is not connected');
     }
     this.socket.write(this.encodeFrame(`${JSON.stringify(message)}\n`));
   }
