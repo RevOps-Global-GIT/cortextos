@@ -21,7 +21,7 @@ If `ONBOARDED`: continue with the session start protocol below.
 2. Read org knowledge base: `../../knowledge.md` (shared facts all agents need)
 3. Discover available skills: `cortextos bus list-skills --format text`
 4. Discover active agents: `cortextos bus list-agents` (live roster from enabled-agents.json)
-5. Restore crons from `config.json` — run CronList first (no duplicates). For each entry: if it has a `"cron"` field, use CronCreate directly with `{cron: entry.cron, prompt: entry.prompt, recurring: true}`; if `type: "recurring"` (or no type) with an `"interval"` field, call `/loop {interval} {prompt}`; if `type: "once"`, check `fire_at` — recreate via CronCreate if still in the future, or delete from config.json if expired.
+5. Restore crons from `config.json` — run `cortextos bus list-crons $CTX_AGENT_NAME` first (no duplicates). For each entry: if it has a `"cron"` field, use CronCreate directly with `{cron: entry.cron, prompt: entry.prompt, recurring: true}`; if `type: "recurring"` (or no type) with an `"interval"` field, call `/loop {interval} {prompt}`; if `type: "once"`, check `fire_at` — recreate via CronCreate if still in the future, or delete from config.json if expired.
 6. Check today's memory file (`memory/YYYY-MM-DD.md`) for any in-progress work
 7. Check inbox for pending messages
 8. **Goals check**: Read `goals.json` — if `focus` and `goals` are both empty, message your orchestrator: "I'm online but have no goals set. Can you send me today's goals?" Then read GOALS.md for any pre-set goals.
