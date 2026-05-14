@@ -286,73 +286,9 @@ async function main(): Promise<void> {
     });
   }
 
-  const botToken = process.env.BOT_TOKEN;
-  const chatId = process.env.CHAT_ID;
-  if (!botToken || !chatId) return;
-
-  // Synthetic / test agents (name matches ^test-) must never route crash alerts
-  // to the operator chat. These agents are ephemeral and may share a real bot
-  // token — their spawn-compact-stop cycles produce false alarms.
-  if (agentName && SYNTHETIC_AGENT_PATTERNS.some(re => re.test(agentName))) {
-    return;
-  }
-
-  let message = '';
-  switch (endType) {
-    case 'planned-restart':
-      // CONTEXT-FORCE-RESTART is a planned context-window reset — always silent
-      // (same behaviour as ctx-autoreset). Only surface other planned restarts.
-      if (reason?.startsWith('CONTEXT-FORCE-RESTART')) return;
-      message = `🔄 ${agentName} restarted (planned): ${reason || 'no reason given'}`;
-      break;
-    case 'session-refresh':
-      message = `♻️ ${agentName} session refresh (context exhaustion). Restarting with fresh session.`;
-      break;
-    case 'user-restart':
-      message = `🔄 ${agentName} restarted by user: ${reason || 'no reason given'}`;
-      break;
-    case 'user-disable':
-      message = `⏸️ ${agentName} disabled by user.`;
-      if (reason) message += ` (${reason})`;
-      break;
-    case 'user-stop':
-      message = `⏹️ ${agentName} stopped by user.`;
-      if (reason) message += ` (${reason})`;
-      break;
-    case 'daemon-stop':
-      message = `🛑 ${agentName} stopped (daemon shutdown).`;
-      if (reason) message += ` (${reason})`;
-      break;
-    case 'daemon-crashed':
-      // Deliberately NOT suppressed during quiet hours — a daemon crash at
-      // 3am is genuinely worth waking for (historically it has preceded
-      // fleet-wide restart storms). Crash-loop alerts from the daemon
-      // itself add operator-level urgency; this is the per-agent variant
-      // that replaces the misleading "🚨 agent crashed" message users
-      // were getting on every daemon respawn.
-      message = `🚨 ${agentName} — daemon crashed, session was interrupted. Resuming.`;
-      if (reason) message += `\nCrash time: ${reason}`;
-      break;
-    case 'rate-limited':
-      message = `⏳ ${agentName} paused — Anthropic rate limit hit. Will resume when the window resets.`;
-      break;
-    case 'crash':
-      message = `🚨 CRASH: ${agentName} died unexpectedly.`;
-      if (crashCount > 0) message += ` Crashes today: ${crashCount}.`;
-      if (lastTask) message += `\nLast status: ${lastTask}`;
-      break;
-  }
-
-  if (message) {
-    try {
-      const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
-      await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text: message }),
-      });
-    } catch { /* ignore send failures */ }
-  }
+  // Telegram crash alerts fully muted per operator directive (2026-05-14).
+  // All session-end events are logged to crashes.log (above) and real crashes
+  // also notify chief + analyst via the agent bus (above). No Telegram sends.
 }
 
 main().catch(() => process.exit(0));
