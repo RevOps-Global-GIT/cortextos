@@ -765,7 +765,7 @@ describe('FastChecker', () => {
       expect(result).toContain('=== TELEGRAM VOICE from Alice (chat_id:123456789) ===');
       expect(result).toContain('duration: 12s');
       expect(result).toContain('local_file: /tmp/telegram-images/voice_1743718313.ogg');
-      expect(result).toContain("cortextos bus send-telegram 123456789 '<your reply>'");
+      expect(result).toContain("cortextos bus send-telegram-voice 123456789 '<your reply>'");
     });
 
     it('uses "unknown" when duration is undefined', () => {

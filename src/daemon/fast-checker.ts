@@ -787,7 +787,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     return `=== TELEGRAM VOICE from ${from} (chat_id:${chatId}) ===
 duration: ${dur}s
 local_file: ${filePath}
-${transcriptBlock}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${transcriptBlock}Reply using: cortextos bus send-telegram-voice ${chatId} '<your reply>'
 
 `;
   }
