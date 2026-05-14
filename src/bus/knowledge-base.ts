@@ -8,11 +8,17 @@ import { normalizeOrgName } from '../utils/org.js';
 /**
  * Knowledge base integration.
  *
- * Chroma/MMRAG/Gemini embeddings were deprecated on 2026-05-14. Runtime
- * retrieval is now deterministic text search over the version-controlled
+ * Chroma/MMRAG/Gemini embeddings are dormant by default as of 2026-05-14.
+ * Runtime retrieval uses deterministic text search over the version-controlled
  * team-brain wiki, including the Open Brain thought mirror under
- * `wiki/sources/thoughts`.
+ * `wiki/sources/thoughts`. KB_VECTOR_ENABLED is reserved for a future revival
+ * path, but there are no active Chroma calls in this runtime module while the
+ * flag is false.
  */
+
+function vectorSearchEnabled(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.KB_VECTOR_ENABLED || '');
+}
 
 export interface KBQueryResult {
   content: string;
@@ -119,6 +125,12 @@ export function queryKnowledgeBase(
   void paths;
   // Normalize once at the top so result metadata uses canonical org casing.
   const org = normalizeOrgName(frameworkRoot, options.org);
+
+  if (vectorSearchEnabled()) {
+    console.warn(
+      '[kb] KB_VECTOR_ENABLED is set, but the Chroma vector path is dormant in this build; using wiki-grep.',
+    );
+  }
 
   const wikiResults = wikiGrepFallback(question, org, topK);
   return { results: wikiResults, total: wikiResults.length, query: question, collection: 'wiki-grep' };
