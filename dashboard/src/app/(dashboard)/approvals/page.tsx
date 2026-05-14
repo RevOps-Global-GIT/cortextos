@@ -1,13 +1,15 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 import { useOrg } from '@/hooks/use-org';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { ApprovalCard } from '@/components/approvals/approval-card';
 import { ApprovalDetailDialog } from '@/components/approvals/approval-detail-dialog';
 import { ApprovalHistoryList } from '@/components/approvals/approval-history-list';
-import { IconUser, IconCheck, IconClock } from '@tabler/icons-react';
+import { IconUser, IconCheck, IconClock, IconClipboardList, IconShieldCheck } from '@tabler/icons-react';
 import { Button } from '@/components/ui/button';
+import { buttonVariants } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { PriorityBadge, TimeAgo } from '@/components/shared';
 import type { Approval, Task } from '@/lib/types';
@@ -145,9 +147,16 @@ export default function ApprovalsPage() {
         {/* Human Tasks tab */}
         <TabsContent value="human">
           {humanTasks.length === 0 ? (
-            <p className="py-12 text-center text-sm text-muted-foreground">
-              No tasks assigned to you right now.
-            </p>
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <IconClipboardList size={48} className="text-muted-foreground/30 mb-4" />
+              <h3 className="text-lg font-medium mb-1">No tasks for you right now</h3>
+              <p className="text-sm text-muted-foreground mb-4 max-w-sm">
+                When agents need your input or sign-off, tasks will appear here.
+              </p>
+              <Link href="/tasks" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+                View all tasks
+              </Link>
+            </div>
           ) : (
             <div className="grid gap-2 max-w-2xl">
               {humanTasks.map((task) => (
@@ -191,9 +200,13 @@ export default function ApprovalsPage() {
         {/* Pending tab */}
         <TabsContent value="pending">
           {pending.length === 0 ? (
-            <p className="py-12 text-center text-sm text-muted-foreground">
-              No pending approvals - you are all caught up.
-            </p>
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <IconShieldCheck size={48} className="text-muted-foreground/30 mb-4" />
+              <h3 className="text-lg font-medium mb-1">All caught up</h3>
+              <p className="text-sm text-muted-foreground max-w-sm">
+                No pending approvals. Check the History tab to review past decisions.
+              </p>
+            </div>
           ) : (
             <div className="grid gap-2 max-w-2xl">
               {pending.map((approval) => (
