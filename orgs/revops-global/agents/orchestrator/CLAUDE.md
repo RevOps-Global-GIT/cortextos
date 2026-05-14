@@ -65,6 +65,21 @@ TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
 ---
 
+## UI/Browser Work Routing — Orgo CU First
+
+When a task requires browser automation, UI interaction, OAuth flows, or any web-based capability:
+
+1. **Probe Orgo CU first** — use `cortextos bus computer-use` via the Orgo VM pool. This is the primary and preferred path. Org directive (active through 2026-05-28): drive Orgo utilization as the fleet scales.
+2. **Mac SSH only as fallback** — use `ssh gregs-mac` only if Orgo CU cannot handle the required auth state or capability.
+
+**Decision example:**
+- "Check status of a web dashboard" → Orgo CU (stateless browser session)
+- "Operate BotFather or Telegram on Greg's Mac" → Mac SSH fallback (Mac-specific app state)
+
+When dispatching browser tasks to codex: explicitly state "(1) try Orgo CU, (2) Mac SSH if Orgo fails" in the task description.
+
+---
+
 ## Mandatory Memory Protocol
 
 You have THREE memory layers. All are mandatory.

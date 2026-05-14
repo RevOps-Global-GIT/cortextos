@@ -1,4 +1,4 @@
-import { execFileSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
@@ -112,8 +112,65 @@ export interface KBQueryResponse {
 }
 
 /**
+ * Resolve the wiki directory path.
+ * Uses WIKI_PATH env var, then ~/work/team-brain default.
+ */
+function resolveWikiPath(): string {
+  if (process.env.WIKI_PATH) return process.env.WIKI_PATH;
+  return join(homedir(), 'work', 'team-brain');
+}
+
+/**
+ * Fall back to git grep across the team-brain wiki when the embedding
+ * provider is unavailable (429, network error, auth failure).
+ * Returns results formatted as KBQueryResult so callers get a consistent shape.
+ */
+function wikiGrepFallback(
+  query: string,
+  org: string,
+  topK: number,
+): KBQueryResult[] {
+  const wikiDir = resolveWikiPath();
+  if (!existsSync(wikiDir)) return [];
+
+  try {
+    // -i: case-insensitive, -r: recursive, -n: line numbers, -C 2: 2 lines context
+    // Escape query for shell safety — use only the first "word" portion for grep
+    const safeQuery = query.replace(/[^a-zA-Z0-9 _-]/g, '').trim().split(/\s+/).slice(0, 4).join(' ');
+    if (!safeQuery) return [];
+
+    const output = execSync(
+      `git grep -i -r -n -C 2 --max-count=50 -- ${JSON.stringify(safeQuery)} .`,
+      { cwd: wikiDir, encoding: 'utf-8', timeout: 10000 },
+    );
+
+    // Each match block is separated by '--'; within a block lines are: file:linenum-context or file:linenum:match
+    const blocks = output.split(/^--$/m).slice(0, topK);
+    return blocks.map((block) => {
+      const lines = block.trim().split('\n').filter(Boolean);
+      if (lines.length === 0) return null;
+      // Extract file path from first line (format: filepath:linenum:text or filepath:linenum-text)
+      const firstLine = lines[0];
+      const colonIdx = firstLine.indexOf(':');
+      const sourceFile = colonIdx > -1 ? firstLine.slice(0, colonIdx) : firstLine;
+      const content = lines.join('\n').substring(0, 500);
+      return {
+        content,
+        source_file: join(wikiDir, sourceFile),
+        org,
+        score: 1.0,
+        doc_type: 'wiki-grep',
+      } as KBQueryResult;
+    }).filter((r): r is KBQueryResult => r !== null);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Query the knowledge base.
  * Returns parsed JSON results when --json is used internally.
+ * Pass noEmbed: true to skip the embedding provider entirely and use wiki-grep only.
  */
 export function queryKnowledgeBase(
   paths: BusPaths,
@@ -126,9 +183,10 @@ export function queryKnowledgeBase(
     threshold?: number;
     frameworkRoot: string;
     instanceId: string;
+    noEmbed?: boolean;
   },
 ): KBQueryResponse {
-  const { agent, scope = 'all', topK = 5, threshold = 0.5, frameworkRoot, instanceId } = options;
+  const { agent, scope = 'all', topK = 5, threshold = 0.5, frameworkRoot, instanceId, noEmbed = false } = options;
   // Normalize once at the top so every downstream path join, env var, and
   // ChromaDB collection name uses the canonical filesystem casing. Without
   // this, `shared-acmecorp` and `shared-AcmeCorp` become two
@@ -137,6 +195,13 @@ export function queryKnowledgeBase(
   const org = normalizeOrgName(frameworkRoot, options.org);
 
   const env = buildKBEnv(frameworkRoot, org, instanceId, agent);
+
+  // --no-embed: skip embedding provider entirely, go straight to wiki-grep
+  if (noEmbed) {
+    const wikiResults = wikiGrepFallback(question, org, topK);
+    console.warn(`[kb] --no-embed: using wiki-grep fallback (${wikiResults.length} results)`);
+    return { results: wikiResults, total: wikiResults.length, query: question, collection: 'wiki-grep' };
+  }
 
   // UX safety net: if the KB is not configured for this org (no config.json
   // on disk yet), skip the python probe entirely and return empty results
@@ -170,9 +235,12 @@ export function queryKnowledgeBase(
       break;
   }
 
-  const runQuery = (col: string): string | null => {
+  // Track whether any collection hit a provider error so we can fall back to wiki-grep.
+  // runQuery returns { output, failed } — failed=true means the embedding provider
+  // threw (429, network error, auth failure, timeout) rather than returning empty results.
+  const runQuery = (col: string): { output: string | null; failed: boolean } => {
     try {
-      return execFileSync(pythonPath, [
+      const output = execFileSync(pythonPath, [
         mmragPath, 'query', question,
         '--collection', col,
         '--top-k', String(topK),
@@ -183,8 +251,9 @@ export function queryKnowledgeBase(
         timeout: 30000,
         env,
       });
+      return { output, failed: false };
     } catch {
-      return null;
+      return { output: null, failed: true };
     }
   };
 
@@ -217,9 +286,14 @@ export function queryKnowledgeBase(
   try {
     let allResults: KBQueryResult[] = [];
     let lastCollection = `shared-${org}`;
+    let providerFailed = false;
     for (const col of collections) {
-      const output = runQuery(col);
-      allResults = allResults.concat(parseOutput(output));
+      const { output, failed } = runQuery(col);
+      if (failed) {
+        providerFailed = true;
+      } else {
+        allResults = allResults.concat(parseOutput(output));
+      }
       lastCollection = col;
     }
 
@@ -231,8 +305,25 @@ export function queryKnowledgeBase(
         collection: collections.length === 1 ? lastCollection : `shared-${org}`,
       };
     }
+
+    // Provider failed (429, network, auth) with no results — fall back to wiki-grep
+    if (providerFailed) {
+      console.warn('[kb] Embedding provider error — falling back to wiki-grep');
+      // Log warning event (fire-and-forget, best effort)
+      try {
+        execSync(
+          `cortextos bus log-event action provider_fallback warn --meta '{"reason":"embedding_provider_error","fallback":"wiki-grep"}'`,
+          { timeout: 5000 },
+        );
+      } catch { /* non-fatal */ }
+      const wikiResults = wikiGrepFallback(question, org, topK);
+      return { results: wikiResults, total: wikiResults.length, query: question, collection: 'wiki-grep' };
+    }
   } catch {
-    // Failed — return empty
+    // Outer failure — fall back to wiki-grep
+    console.warn('[kb] Unexpected error in kb-query — falling back to wiki-grep');
+    const wikiResults = wikiGrepFallback(question, org, topK);
+    return { results: wikiResults, total: wikiResults.length, query: question, collection: 'wiki-grep' };
   }
 
   return { results: [], total: 0, query: question, collection: `shared-${org}` };
