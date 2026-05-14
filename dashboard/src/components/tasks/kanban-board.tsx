@@ -15,9 +15,10 @@ interface KanbanBoardProps {
   tasks: Task[];
   completedTodayTasks: Task[];
   onTaskClick: (task: Task) => void;
+  onStatusChange?: (taskId: string, status: TaskStatus) => Promise<void>;
 }
 
-export function KanbanBoard({ tasks, completedTodayTasks, onTaskClick }: KanbanBoardProps) {
+export function KanbanBoard({ tasks, completedTodayTasks, onTaskClick, onStatusChange }: KanbanBoardProps) {
   const columns: KanbanColumn[] = [
     {
       status: 'pending',
@@ -65,6 +66,7 @@ export function KanbanBoard({ tasks, completedTodayTasks, onTaskClick }: KanbanB
                     key={task.id}
                     task={task}
                     onClick={onTaskClick}
+                    onStatusChange={onStatusChange}
                   />
                 ))
               )}

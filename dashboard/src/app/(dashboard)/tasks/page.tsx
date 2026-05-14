@@ -116,6 +116,19 @@ export default function TasksPage() {
     }
   }
 
+  async function handleQuickStatusChange(taskId: string, status: TaskStatus) {
+    try {
+      const res = await fetch(`/api/tasks/${taskId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      });
+      if (res.ok) fetchTasks();
+    } catch {
+      // Silently fail
+    }
+  }
+
   async function handleDelete(taskId: string) {
     try {
       const res = await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
@@ -226,9 +239,10 @@ export default function TasksPage() {
           tasks={displayTasks}
           completedTodayTasks={completedToday}
           onTaskClick={handleTaskClick}
+          onStatusChange={handleQuickStatusChange}
         />
       ) : (
-        <TaskListTable tasks={displayTasks} onTaskClick={handleTaskClick} />
+        <TaskListTable tasks={displayTasks} onTaskClick={handleTaskClick} onStatusChange={handleQuickStatusChange} />
       )}
 
       {/* Task detail sheet */}
