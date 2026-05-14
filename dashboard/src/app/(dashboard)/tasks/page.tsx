@@ -134,6 +134,8 @@ export default function TasksPage() {
     ? tasks.filter((t) => t.status !== 'completed')
     : tasks;
 
+  const hasActiveFilters = Object.values(filters).some((v) => v !== 'all');
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -194,18 +196,31 @@ export default function TasksPage() {
 
       {/* Content */}
       {tasks.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-center">
-          <IconChecklist size={48} className="text-muted-foreground/30 mb-4" />
-          <h3 className="text-lg font-medium mb-1">No tasks yet</h3>
-          <p className="text-sm text-muted-foreground mb-4 max-w-sm">
-            Create your first task to start tracking work across your agents.
-          </p>
-          <CreateTaskDialog
-            agents={agents}
-            projects={projects}
-            onCreated={fetchTasks}
-          />
-        </div>
+        hasActiveFilters ? (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <IconChecklist size={48} className="text-muted-foreground/30 mb-4" />
+            <h3 className="text-lg font-medium mb-1">No tasks match your filters</h3>
+            <p className="text-sm text-muted-foreground mb-4 max-w-sm">
+              Your current view is scoped to specific agents, projects, or statuses. Clear filters to see all tasks.
+            </p>
+            <Button variant="outline" size="sm" onClick={handleClearFilters}>
+              Clear filters
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-16 text-center">
+            <IconChecklist size={48} className="text-muted-foreground/30 mb-4" />
+            <h3 className="text-lg font-medium mb-1">No tasks yet</h3>
+            <p className="text-sm text-muted-foreground mb-4 max-w-sm">
+              Create your first task to start tracking work across your agents.
+            </p>
+            <CreateTaskDialog
+              agents={agents}
+              projects={projects}
+              onCreated={fetchTasks}
+            />
+          </div>
+        )
       ) : view === 'kanban' ? (
         <KanbanBoard
           tasks={displayTasks}
