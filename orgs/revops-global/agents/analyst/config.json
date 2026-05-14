@@ -132,7 +132,7 @@
       "name": "heartbeat-health-watch",
       "type": "recurring",
       "interval": "30m",
-      "prompt": "Run heartbeat health watch: cd /home/cortextos/cortextos && cortextos bus heartbeat-health-watch --threshold-minutes 90 --restart --notify-agent orchestrator. Review the report in analyst/output and only escalate externally through orchestrator."
+      "prompt": "Run bus inbox/heartbeat health watch: cd /home/cortextos/cortextos && cortextos bus heartbeat-health-watch --threshold-minutes 120 --notify-agent orchestrator. Alert orchestrator if any enabled+running agent has been silent for more than 2h; do not message Greg directly."
     }
   ],
   "ctx_autoreset_threshold": 45,
