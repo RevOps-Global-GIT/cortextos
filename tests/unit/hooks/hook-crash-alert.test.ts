@@ -8,7 +8,22 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
-import { readMaxCrashesPerDay, notifyAgents } from '../../../src/hooks/hook-crash-alert';
+import { readMaxCrashesPerDay, notifyAgents, isSyntheticAgent } from '../../../src/hooks/hook-crash-alert';
+
+describe('isSyntheticAgent', () => {
+  it('matches test- prefix (case-insensitive)', () => {
+    expect(isSyntheticAgent('test-agent')).toBe(true);
+    expect(isSyntheticAgent('Test-Foo')).toBe(true);
+    expect(isSyntheticAgent('TEST-bar')).toBe(true);
+  });
+
+  it('does not match real agent names', () => {
+    expect(isSyntheticAgent('dev')).toBe(false);
+    expect(isSyntheticAgent('orchestrator')).toBe(false);
+    expect(isSyntheticAgent('analyst')).toBe(false);
+    expect(isSyntheticAgent('mytest-agent')).toBe(false); // no leading test-
+  });
+});
 
 describe('readMaxCrashesPerDay', () => {
   let tmp: string;

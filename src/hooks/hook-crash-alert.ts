@@ -42,6 +42,10 @@ const QUIET_SUPPRESSED_TYPES = new Set([
 // alert noise from spawn-compact-stop cycles is a known false-alarm source.
 const SYNTHETIC_AGENT_PATTERNS = [/^test-/i];
 
+export function isSyntheticAgent(name: string): boolean {
+  return SYNTHETIC_AGENT_PATTERNS.some(p => p.test(name));
+}
+
 function isQuietHoursLA(now: Date): boolean {
   const laString = now.toLocaleString('en-US', {
     timeZone: 'America/Los_Angeles',
@@ -271,7 +275,10 @@ async function main(): Promise<void> {
   // for clean exits / planned restarts / rate-limit pauses. Hoisted above the
   // Telegram-credential gate so agents without BOT_TOKEN/CHAT_ID still reach
   // the bus (issue #317).
-  if (endType === 'crash' || endType === 'daemon-crashed') {
+  // Synthetic / test agents must never route crash alerts to the operator bus —
+  // they are ephemeral, may share a real bot token, and produce false-alarm noise
+  // from spawn-compact-stop cycles.
+  if (!isSyntheticAgent(agentName) && (endType === 'crash' || endType === 'daemon-crashed')) {
     const agentDir = process.env.CTX_AGENT_DIR || process.cwd();
     const maxCrashes = readMaxCrashesPerDay(agentDir);
     const restartAttempted = maxCrashes === null || crashCount < maxCrashes;
