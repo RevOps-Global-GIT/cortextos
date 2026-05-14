@@ -42,6 +42,10 @@ const QUIET_SUPPRESSED_TYPES = new Set([
 // alert noise from spawn-compact-stop cycles is a known false-alarm source.
 const SYNTHETIC_AGENT_PATTERNS = [/^test-/i];
 
+export function isSyntheticAgent(name: string): boolean {
+  return SYNTHETIC_AGENT_PATTERNS.some(p => p.test(name));
+}
+
 function isQuietHoursLA(now: Date): boolean {
   const laString = now.toLocaleString('en-US', {
     timeZone: 'America/Los_Angeles',
@@ -158,6 +162,11 @@ async function main(): Promise<void> {
   const agentName = process.env.CTX_AGENT_NAME;
   const instanceId = process.env.CTX_INSTANCE_ID || 'default';
   if (!agentName) return;
+
+  // Suppress all alerts for synthetic / test agents — they are ephemeral and
+  // may share a real bot token, so crash noise from spawn-compact-stop cycles
+  // is a known false-alarm source.
+  if (isSyntheticAgent(agentName)) return;
 
   const ctxRoot = join(homedir(), '.cortextos', instanceId);
   const stateDir = join(ctxRoot, 'state', agentName);
