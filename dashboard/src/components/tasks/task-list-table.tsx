@@ -9,9 +9,16 @@ import {
   TableRow,
   TableCell,
 } from '@/components/ui/table';
+import { Button } from '@/components/ui/button';
 import { PriorityBadge, StatusBadge, OrgBadge, TimeAgo } from '@/components/shared';
 import { IconArrowsSort, IconSortAscending, IconSortDescending } from '@tabler/icons-react';
-import type { Task } from '@/lib/types';
+import type { Task, TaskStatus } from '@/lib/types';
+
+const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatus }>> = {
+  pending:     { label: 'Start',    next: 'in_progress' },
+  in_progress: { label: 'Complete', next: 'completed' },
+  blocked:     { label: 'Unblock',  next: 'in_progress' },
+};
 
 type SortField = 'title' | 'status' | 'priority' | 'assignee' | 'org' | 'created_at';
 type SortDir = 'asc' | 'desc';
@@ -22,9 +29,10 @@ const STATUS_ORDER = { blocked: 0, in_progress: 1, pending: 2, completed: 3 };
 interface TaskListTableProps {
   tasks: Task[];
   onTaskClick: (task: Task) => void;
+  onStatusChange?: (taskId: string, status: TaskStatus) => Promise<void>;
 }
 
-export function TaskListTable({ tasks, onTaskClick }: TaskListTableProps) {
+export function TaskListTable({ tasks, onTaskClick, onStatusChange }: TaskListTableProps) {
   const [sortField, setSortField] = useState<SortField>('created_at');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
@@ -85,6 +93,8 @@ export function TaskListTable({ tasks, onTaskClick }: TaskListTableProps) {
     { field: 'created_at', label: 'Created' },
   ];
 
+  const colSpan = onStatusChange ? 7 : 6;
+
   return (
     <Table>
       <TableHeader>
@@ -101,42 +111,60 @@ export function TaskListTable({ tasks, onTaskClick }: TaskListTableProps) {
               </span>
             </TableHead>
           ))}
+          {onStatusChange && <TableHead />}
         </TableRow>
       </TableHeader>
       <TableBody>
         {sorted.length === 0 ? (
           <TableRow>
-            <TableCell colSpan={6} className="text-center text-muted-foreground py-8">
+            <TableCell colSpan={colSpan} className="text-center text-muted-foreground py-8">
               No tasks found
             </TableCell>
           </TableRow>
         ) : (
-          sorted.map((task) => (
-            <TableRow
-              key={task.id}
-              className="cursor-pointer"
-              onClick={() => onTaskClick(task)}
-            >
-              <TableCell className="max-w-[300px] truncate font-medium">
-                {task.title}
-              </TableCell>
-              <TableCell>
-                <StatusBadge status={task.status} />
-              </TableCell>
-              <TableCell>
-                <PriorityBadge priority={task.priority} />
-              </TableCell>
-              <TableCell className="text-muted-foreground">
-                {task.assignee ?? '-'}
-              </TableCell>
-              <TableCell>
-                <OrgBadge org={task.org} />
-              </TableCell>
-              <TableCell>
-                <TimeAgo date={task.created_at} />
-              </TableCell>
-            </TableRow>
-          ))
+          sorted.map((task) => {
+            const action = QUICK_ACTIONS[task.status];
+            return (
+              <TableRow
+                key={task.id}
+                className="cursor-pointer"
+                onClick={() => onTaskClick(task)}
+              >
+                <TableCell className="max-w-[300px] truncate font-medium">
+                  {task.title}
+                </TableCell>
+                <TableCell>
+                  <StatusBadge status={task.status} />
+                </TableCell>
+                <TableCell>
+                  <PriorityBadge priority={task.priority} />
+                </TableCell>
+                <TableCell className="text-muted-foreground">
+                  {task.assignee ?? '-'}
+                </TableCell>
+                <TableCell>
+                  <OrgBadge org={task.org} />
+                </TableCell>
+                <TableCell>
+                  <TimeAgo date={task.created_at} />
+                </TableCell>
+                {onStatusChange && (
+                  <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                    {action && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => onStatusChange(task.id, action.next)}
+                      >
+                        {action.label}
+                      </Button>
+                    )}
+                  </TableCell>
+                )}
+              </TableRow>
+            );
+          })
         )}
       </TableBody>
     </Table>
