@@ -163,11 +163,6 @@ async function main(): Promise<void> {
   const instanceId = process.env.CTX_INSTANCE_ID || 'default';
   if (!agentName) return;
 
-  // Suppress all alerts for synthetic / test agents — they are ephemeral and
-  // may share a real bot token, so crash noise from spawn-compact-stop cycles
-  // is a known false-alarm source.
-  if (isSyntheticAgent(agentName)) return;
-
   const ctxRoot = join(homedir(), '.cortextos', instanceId);
   const stateDir = join(ctxRoot, 'state', agentName);
   const logDir = join(ctxRoot, 'logs', agentName);
@@ -280,7 +275,10 @@ async function main(): Promise<void> {
   // for clean exits / planned restarts / rate-limit pauses. Hoisted above the
   // Telegram-credential gate so agents without BOT_TOKEN/CHAT_ID still reach
   // the bus (issue #317).
-  if (endType === 'crash' || endType === 'daemon-crashed') {
+  // Synthetic / test agents must never route crash alerts to the operator bus —
+  // they are ephemeral, may share a real bot token, and produce false-alarm noise
+  // from spawn-compact-stop cycles.
+  if (!isSyntheticAgent(agentName) && (endType === 'crash' || endType === 'daemon-crashed')) {
     const agentDir = process.env.CTX_AGENT_DIR || process.cwd();
     const maxCrashes = readMaxCrashesPerDay(agentDir);
     const restartAttempted = maxCrashes === null || crashCount < maxCrashes;
