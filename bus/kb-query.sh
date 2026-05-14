@@ -14,7 +14,8 @@
 #   --json             Output JSON instead of plain text
 #   --instance ID      Instance ID (default: default)
 #
-# Env: CTX_ORG, CTX_AGENT_NAME, CTX_INSTANCE_ID, CTX_FRAMEWORK_ROOT, GEMINI_API_KEY
+# Env: CTX_ORG, CTX_AGENT_NAME, CTX_INSTANCE_ID, CTX_FRAMEWORK_ROOT,
+#      OPENAI_API_KEY, GEMINI_API_KEY, MMRAG_EMBEDDING_PROVIDER
 
 set -euo pipefail
 
@@ -94,8 +95,8 @@ if [[ -f "$SECRETS_FILE" ]]; then
   set -o allexport && source "$SECRETS_FILE" && set +o allexport
 fi
 
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "ERROR: GEMINI_API_KEY not set. Add it to orgs/$ORG/secrets.env"
+if [[ -z "${OPENAI_API_KEY:-}" && -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "ERROR: no embedding API key set. Add OPENAI_API_KEY or GEMINI_API_KEY to orgs/$ORG/secrets.env"
   exit 1
 fi
 
@@ -107,7 +108,11 @@ fi
 export MMRAG_DIR="$KB_ROOT"
 export MMRAG_CHROMADB_DIR="$CHROMADB_DIR"
 export MMRAG_CONFIG="$KB_ROOT/config.json"
-export GEMINI_API_KEY
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+export GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+export MMRAG_EMBEDDING_PROVIDER="${MMRAG_EMBEDDING_PROVIDER:-}"
+export MMRAG_EMBEDDING_MODEL="${MMRAG_EMBEDDING_MODEL:-}"
+export MMRAG_EMBEDDING_DIMENSIONS="${MMRAG_EMBEDDING_DIMENSIONS:-}"
 
 run_query() {
   local col="$1"

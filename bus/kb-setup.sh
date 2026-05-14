@@ -3,7 +3,7 @@
 # Creates the Python venv and ChromaDB directory structure.
 #
 # Usage: bash bus/kb-setup.sh [--org ORG] [--instance ID]
-# Env:   CTX_ORG, CTX_INSTANCE_ID, CTX_FRAMEWORK_ROOT, GEMINI_API_KEY
+# Env:   CTX_ORG, CTX_INSTANCE_ID, CTX_FRAMEWORK_ROOT, OPENAI_API_KEY, GEMINI_API_KEY
 
 set -euo pipefail
 
@@ -83,7 +83,8 @@ CONFIG_FILE="$KB_ROOT/config.json"
 if [[ ! -f "$CONFIG_FILE" ]]; then
   cat > "$CONFIG_FILE" << 'EOF'
 {
-  "embedding_model": "gemini-embedding-2-preview",
+  "embedding_provider": "openai",
+  "embedding_model": "text-embedding-3-large",
   "embedding_dimensions": 3072,
   "gemini_model": "gemini-2.5-flash",
   "text_chunk_size": 1000,
@@ -98,9 +99,9 @@ else
 
   # Migrate stale embedding model names (text-embedding-004 was shut down 2026-01-14)
   if grep -qE '"embedding_model"\s*:\s*"(models/text-embedding-004|text-embedding-004)"' "$CONFIG_FILE" 2>/dev/null; then
-    sed -i.bak 's/"models\/text-embedding-004"/"gemini-embedding-001"/g; s/"text-embedding-004"/"gemini-embedding-001"/g' "$CONFIG_FILE"
+    sed -i.bak 's/"models\/text-embedding-004"/"text-embedding-3-large"/g; s/"text-embedding-004"/"text-embedding-3-large"/g' "$CONFIG_FILE"
     rm -f "${CONFIG_FILE}.bak"
-    echo "  [MIGRATED] embedding_model updated to gemini-embedding-001 (text-embedding-004 was shut down)"
+    echo "  [MIGRATED] embedding_model updated to text-embedding-3-large (text-embedding-004 was shut down)"
   fi
 fi
 
@@ -115,6 +116,7 @@ echo ""
 echo "Knowledge base ready for org: $ORG"
 echo ""
 echo "  Next steps:"
-echo "    1. Add GEMINI_API_KEY to orgs/$ORG/secrets.env"
+echo "    1. Add OPENAI_API_KEY to orgs/$ORG/secrets.env"
+echo "       Add GEMINI_API_KEY only if ingesting images, audio, video, PDFs, or Office docs"
 echo "    2. Run: bash bus/kb-ingest.sh /path/to/docs --org $ORG"
 echo "    3. Query: bash bus/kb-query.sh 'your question' --org $ORG"

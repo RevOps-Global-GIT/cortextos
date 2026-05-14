@@ -3,8 +3,8 @@
 mmrag - Multimodal RAG Knowledge Base CLI
 
 Ingest videos, images, audio, documents into a local ChromaDB vector database
-using Gemini Embedding 2 for multimodal embeddings and Gemini Flash for
-generating text descriptions of non-text media.
+using a configurable embedding provider and Gemini Flash for generating text
+descriptions of non-text media.
 
 Usage:
     mmrag.py ingest <path> [<path>...] [--collection NAME]
@@ -57,7 +57,9 @@ DEFAULT_MAX_TOKENS = 0  # 0 = unlimited
 DEFAULT_PREVIEW_CHARS = 300
 
 # Pricing (per 1M tokens)
-EMBEDDING_PRICE_PER_M = 0.20
+EMBEDDING_PRICE_PER_M = 0.13
+GEMINI_EMBEDDING_PRICE_PER_M = 0.20
+OPENAI_EMBEDDING_PRICE_PER_M = 0.13
 FLASH_INPUT_PRICE_PER_M = 0.15
 FLASH_OUTPUT_PRICE_PER_M = 0.60
 
@@ -173,12 +175,57 @@ def load_config():
         return json.load(f)
 
 
-def get_api_key(config):
+def get_gemini_api_key(config):
     key = os.environ.get("GEMINI_API_KEY") or config.get("gemini_api_key")
     if not key:
         print("ERROR: No Gemini API key. Set GEMINI_API_KEY or run setup.")
         sys.exit(1)
     return key
+
+
+def get_embedding_provider(config):
+    provider = os.environ.get("MMRAG_EMBEDDING_PROVIDER") or config.get("embedding_provider")
+    if provider:
+        provider = str(provider).strip().lower()
+    else:
+        model = str(os.environ.get("MMRAG_EMBEDDING_MODEL") or config.get("embedding_model", "gemini-embedding-2-preview")).lower()
+        provider = "openai" if model.startswith("text-embedding-") or model.startswith("openai/") else "gemini"
+    if provider not in {"gemini", "openai"}:
+        print(f"ERROR: Unsupported embedding_provider {provider!r}. Use 'gemini' or 'openai'.")
+        sys.exit(1)
+    return provider
+
+
+def get_embedding_api_key(config):
+    provider = get_embedding_provider(config)
+    if provider == "openai":
+        key = os.environ.get("OPENAI_API_KEY") or config.get("openai_api_key")
+        if not key:
+            print("ERROR: No OpenAI API key. Set OPENAI_API_KEY or configure openai_api_key.")
+            sys.exit(1)
+        return key
+    return get_gemini_api_key(config)
+
+
+def get_embedding_model(config, provider=None):
+    provider = provider or get_embedding_provider(config)
+    model = os.environ.get("MMRAG_EMBEDDING_MODEL") or config.get("embedding_model")
+    if provider == "openai":
+        if not model or str(model).startswith("gemini-"):
+            return "text-embedding-3-large"
+        return str(model).replace("openai/", "", 1)
+    if not model or str(model).startswith("text-embedding-") or str(model).startswith("openai/"):
+        return "gemini-embedding-2-preview"
+    return str(model)
+
+
+def get_embedding_dimensions(config, provider=None):
+    raw = os.environ.get("MMRAG_EMBEDDING_DIMENSIONS") or config.get("embedding_dimensions")
+    if raw:
+        return int(raw)
+    if (provider or get_embedding_provider(config)) == "gemini":
+        return DEFAULT_EMBEDDING_DIMENSIONS
+    return None
 
 # ---------------------------------------------------------------------------
 # Gemini clients
@@ -223,6 +270,54 @@ def get_genai_client(api_key):
         return _load_factory(factory_path)(api_key)
     from google import genai
     return genai.Client(api_key=api_key)
+
+
+class EmbeddingClient:
+    def __init__(self, provider, api_key):
+        self.provider = provider
+        self.api_key = api_key
+        self._gemini = None
+
+    @property
+    def gemini(self):
+        if self._gemini is None:
+            self._gemini = get_genai_client(self.api_key)
+        return self._gemini
+
+
+class LazyGeminiClient:
+    """Defer Gemini client construction until media/PDF extraction needs it."""
+
+    def __init__(self, config):
+        self.config = config
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = get_genai_client(get_gemini_api_key(self.config))
+        return self._client
+
+    @property
+    def models(self):
+        return self.client.models
+
+
+def get_embedding_client(config):
+    return EmbeddingClient(get_embedding_provider(config), get_embedding_api_key(config))
+
+
+def split_ingest_clients(client):
+    """Return (embedding_client, generation_client) for ingest handlers.
+
+    Most text-like ingest paths only need embeddings. Media/PDF paths need
+    Gemini Flash for extraction/description, then the configured provider for
+    embeddings. Older tests pass a single Gemini client, so keep that shape
+    supported.
+    """
+    if isinstance(client, tuple):
+        return client
+    return client, client
 
 
 def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45), call_timeout_secs=90):
@@ -280,14 +375,71 @@ def _retry_generate_content(client, *, model, contents, backoffs=(5, 15, 45), ca
     raise last_err if last_err else RuntimeError("retry loop completed without response or error")
 
 
+def _content_to_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        pieces = []
+        for part in content:
+            if isinstance(part, str):
+                pieces.append(part)
+            else:
+                mime_type = getattr(part, "mime_type", None) or getattr(part, "mimeType", None)
+                if mime_type:
+                    pieces.append(f"[media omitted from text embedding: {mime_type}]")
+                else:
+                    pieces.append("[non-text content omitted from text embedding]")
+        return "\n\n".join(pieces)
+    return str(content)
+
+
+def _embed_content_openai(api_key, config, content):
+    import urllib.error
+    import urllib.request
+
+    model = get_embedding_model(config, "openai")
+    payload = {
+        "model": model,
+        "input": _content_to_text(content),
+    }
+    dimensions = get_embedding_dimensions(config, "openai")
+    if dimensions:
+        payload["dimensions"] = int(dimensions)
+
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/embeddings",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI embeddings request failed HTTP {e.code}: {body}") from e
+
+    return data["data"][0]["embedding"]
+
+
 def embed_content(client, config, content, task_type="RETRIEVAL_DOCUMENT"):
-    """Embed content using Gemini Embedding 2. Content can be text string or list of Parts."""
+    """Embed content using the configured provider. Content can be text or media Parts."""
+    if getattr(client, "provider", "gemini") == "openai":
+        embedding = _embed_content_openai(client.api_key, config, content)
+        if _tracker:
+            _tracker.track_embedding(content)
+        return embedding
+
     from google.genai import types
-    result = client.models.embed_content(
-        model=config.get("embedding_model", "gemini-embedding-2-preview"),
+    gemini_client = client.gemini if isinstance(client, EmbeddingClient) else client
+    result = gemini_client.models.embed_content(
+        model=get_embedding_model(config, "gemini"),
         contents=content,
         config=types.EmbedContentConfig(
-            output_dimensionality=config.get("embedding_dimensions", DEFAULT_EMBEDDING_DIMENSIONS),
+            output_dimensionality=get_embedding_dimensions(config, "gemini"),
             task_type=task_type,
         ),
     )
@@ -550,6 +702,7 @@ def already_exists(collection, doc_id):
 
 def ingest_text_file(client, config, collection, file_path):
     """Ingest a text-based file."""
+    embedding_client, _ = split_ingest_clients(client)
     file_path = Path(file_path)
     text = file_path.read_text(errors="replace")
     if not text.strip():
@@ -568,7 +721,7 @@ def ingest_text_file(client, config, collection, file_path):
         if already_exists(collection, doc_id):
             continue
 
-        embedding = embed_content(client, config, chunk)
+        embedding = embed_content(embedding_client, config, chunk)
         collection.upsert(
             ids=[doc_id],
             embeddings=[embedding],
@@ -590,6 +743,7 @@ def ingest_text_file(client, config, collection, file_path):
 
 def ingest_image(client, config, collection, file_path):
     """Ingest an image: Gemini Flash describes it, then embed description + raw image together."""
+    embedding_client, generation_client = split_ingest_clients(client)
     file_path = Path(file_path)
     doc_id = file_id(file_path)
 
@@ -600,7 +754,7 @@ def ingest_image(client, config, collection, file_path):
     print(f"  Generating description for {file_path.name}...")
     try:
         description, media_bytes, mime = describe_media(
-            client, config, file_path, "image",
+            generation_client, config, file_path, "image",
             call_timeout_secs=IMAGE_DESCRIPTION_TIMEOUT_SECS,
         )
     except TimeoutError:
@@ -612,10 +766,10 @@ def ingest_image(client, config, collection, file_path):
 
     # Option B: embed text description + raw image together
     try:
-        embedding = embed_multimodal(client, config, description, media_bytes, mime)
+        embedding = embed_multimodal(embedding_client, config, description, media_bytes, mime)
     except Exception:
         # Fallback to text-only embedding if multimodal fails (e.g., file too large)
-        embedding = embed_content(client, config, description)
+        embedding = embed_content(embedding_client, config, description)
 
     collection.upsert(
         ids=[doc_id],
@@ -651,6 +805,7 @@ def ingest_video(client, config, collection, file_path):
     since the video bytes would be too large for the embedding API.
     For small chunks, uses full multimodal embedding (description + video).
     """
+    embedding_client, generation_client = split_ingest_clients(client)
     file_path = Path(file_path)
     size_mb = file_path.stat().st_size / (1024 * 1024)
     duration = get_media_duration(file_path)
@@ -690,7 +845,7 @@ def ingest_video(client, config, collection, file_path):
         if chunk_size_mb <= 20:
             # Small enough for full video analysis
             try:
-                description, media_bytes, mime = describe_media(client, config, chunk_path, "video")
+                description, media_bytes, mime = describe_media(generation_client, config, chunk_path, "video")
                 print(f"    Described via video")
             except Exception as e:
                 print(f"    Video description failed ({e}), trying audio...")
@@ -704,7 +859,7 @@ def ingest_video(client, config, collection, file_path):
 
             if audio_path.exists() and audio_path.stat().st_size > 0:
                 try:
-                    description, media_bytes, mime = describe_media(client, config, audio_path, "audio")
+                    description, media_bytes, mime = describe_media(generation_client, config, audio_path, "audio")
                     # Prefix so the agent knows this came from a video's audio
                     description = (
                         f"[Audio extracted from video: {file_path.name}, "
@@ -724,11 +879,11 @@ def ingest_video(client, config, collection, file_path):
         # Embed: try multimodal if we have small media bytes, else text-only
         if media_bytes and mime and len(media_bytes) < 20 * 1024 * 1024:
             try:
-                embedding = embed_multimodal(client, config, description, media_bytes, mime)
+                embedding = embed_multimodal(embedding_client, config, description, media_bytes, mime)
             except Exception:
-                embedding = embed_content(client, config, description)
+                embedding = embed_content(embedding_client, config, description)
         else:
-            embedding = embed_content(client, config, description)
+            embedding = embed_content(embedding_client, config, description)
 
         collection.upsert(
             ids=[doc_id],
@@ -755,6 +910,7 @@ def ingest_video(client, config, collection, file_path):
 
 def ingest_audio(client, config, collection, file_path):
     """Ingest audio: chunk if needed, describe, embed description + audio together."""
+    embedding_client, generation_client = split_ingest_clients(client)
     file_path = Path(file_path)
     duration = get_media_duration(file_path)
     if duration <= 0:
@@ -770,12 +926,12 @@ def ingest_audio(client, config, collection, file_path):
             return 0
 
         print(f"  Transcribing {file_path.name}...")
-        description, media_bytes, mime = describe_media(client, config, file_path, "audio")
+        description, media_bytes, mime = describe_media(generation_client, config, file_path, "audio")
 
         try:
-            embedding = embed_multimodal(client, config, description, media_bytes, mime)
+            embedding = embed_multimodal(embedding_client, config, description, media_bytes, mime)
         except Exception:
-            embedding = embed_content(client, config, description)
+            embedding = embed_content(embedding_client, config, description)
 
         collection.upsert(
             ids=[doc_id],
@@ -806,7 +962,7 @@ def ingest_audio(client, config, collection, file_path):
 
             print(f"  Transcribing chunk {chunk['index'] + 1}/{total_chunks}...")
             try:
-                description, media_bytes, mime = describe_media(client, config, chunk["path"], "audio")
+                description, media_bytes, mime = describe_media(generation_client, config, chunk["path"], "audio")
             except Exception as e:
                 print(f"  WARNING: Failed to transcribe chunk {chunk['index']}: {e}")
                 description = f"Audio chunk from {file_path.name}, {chunk['start']:.0f}s to {chunk['end']:.0f}s"
@@ -815,11 +971,11 @@ def ingest_audio(client, config, collection, file_path):
 
             if media_bytes and mime:
                 try:
-                    embedding = embed_multimodal(client, config, description, media_bytes, mime)
+                    embedding = embed_multimodal(embedding_client, config, description, media_bytes, mime)
                 except Exception:
-                    embedding = embed_content(client, config, description)
+                    embedding = embed_content(embedding_client, config, description)
             else:
-                embedding = embed_content(client, config, description)
+                embedding = embed_content(embedding_client, config, description)
 
             collection.upsert(
                 ids=[doc_id],
@@ -844,6 +1000,7 @@ def ingest_audio(client, config, collection, file_path):
 
 def ingest_pdf(client, config, collection, file_path):
     """Ingest a PDF page-by-page using Gemini to extract content including visual elements."""
+    embedding_client, generation_client = split_ingest_clients(client)
     file_path = Path(file_path)
     from google.genai import types
 
@@ -870,7 +1027,7 @@ def ingest_pdf(client, config, collection, file_path):
         "Be thorough - this will be used for search and retrieval."
     )
     response = _retry_generate_content(
-        client,
+        generation_client,
         model=config.get("gemini_model", "gemini-2.5-flash"),
         contents=[
             types.Part.from_bytes(data=data, mime_type="application/pdf"),
@@ -903,7 +1060,7 @@ def ingest_pdf(client, config, collection, file_path):
         if already_exists(collection, doc_id):
             continue
 
-        embedding = embed_content(client, config, page_content)
+        embedding = embed_content(embedding_client, config, page_content)
         collection.upsert(
             ids=[doc_id],
             embeddings=[embedding],
@@ -992,6 +1149,7 @@ def extract_xlsx_text(file_path):
 
 def ingest_office_doc(client, config, collection, file_path):
     """Ingest Office documents (.docx, .pptx, .xlsx) by extracting text locally."""
+    embedding_client, _ = split_ingest_clients(client)
     file_path = Path(file_path)
     ext = file_path.suffix.lower()
 
@@ -1043,7 +1201,7 @@ def ingest_office_doc(client, config, collection, file_path):
         if already_exists(collection, doc_id):
             continue
 
-        embedding = embed_content(client, config, section)
+        embedding = embed_content(embedding_client, config, section)
         meta = {
             "source": str(file_path.resolve()),
             "type": type_name,
@@ -1128,7 +1286,8 @@ def cmd_ingest(args):
     _tracker = UsageTracker("ingest")
 
     config = load_config()
-    client = get_genai_client(get_api_key(config))
+    embedding_client = get_embedding_client(config)
+    generation_client = LazyGeminiClient(config)
     collection_name = args.collection or config.get("default_collection", "default")
     collection = get_chroma_collection(collection_name)
 
@@ -1148,7 +1307,7 @@ def cmd_ingest(args):
                 for f in files:
                     print(f"  Processing: {f.relative_to(p)}")
                     try:
-                        count = ingest_file(client, config, collection, f)
+                        count = ingest_file((embedding_client, generation_client), config, collection, f)
                         total += count
                         if count > 0:
                             print(f"    Added {count} chunk(s)")
@@ -1160,7 +1319,7 @@ def cmd_ingest(args):
             elif p.is_file():
                 print(f"Ingesting: {p.name}")
                 try:
-                    count = ingest_file(client, config, collection, p)
+                    count = ingest_file((embedding_client, generation_client), config, collection, p)
                     total += count
                     if count > 0:
                         print(f"  Added {count} chunk(s)")
@@ -1210,7 +1369,7 @@ def cmd_query(args):
     _tracker = UsageTracker("query")
 
     config = load_config()
-    client = get_genai_client(get_api_key(config))
+    client = get_embedding_client(config)
     collection_name = args.collection or config.get("default_collection", "default")
     collection = get_chroma_collection(collection_name)
 
@@ -1453,7 +1612,10 @@ def cmd_status(args):
     print(f"  Text: {config.get('text_chunk_size', DEFAULT_TEXT_CHUNK_SIZE)} chars, {config.get('text_chunk_overlap', DEFAULT_TEXT_CHUNK_OVERLAP)} overlap")
     print(f"  Video: {config.get('video_chunk_seconds', DEFAULT_VIDEO_CHUNK_SECONDS)}s, {config.get('video_overlap_seconds', DEFAULT_VIDEO_OVERLAP_SECONDS)}s overlap")
     print(f"  Audio: {config.get('audio_chunk_seconds', DEFAULT_AUDIO_CHUNK_SECONDS)}s, {config.get('audio_overlap_seconds', DEFAULT_AUDIO_OVERLAP_SECONDS)}s overlap")
-    print(f"  Embedding dims: {config.get('embedding_dimensions', DEFAULT_EMBEDDING_DIMENSIONS)}")
+    embedding_provider = get_embedding_provider(config)
+    print(f"  Embedding provider: {embedding_provider}")
+    print(f"  Embedding model: {get_embedding_model(config, embedding_provider)}")
+    print(f"  Embedding dims: {get_embedding_dimensions(config, embedding_provider) or 'provider default'}")
 
     if count > 0:
         all_data = collection.get(include=["metadatas"])
