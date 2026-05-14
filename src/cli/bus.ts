@@ -9,6 +9,7 @@ import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTa
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
+import { pollWatchdog } from '../bus/watchdog.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
@@ -779,6 +780,61 @@ busCommand
       const label = hb.display_name ? `${hb.display_name} (${hb.agent})` : hb.agent;
       console.log(`${label} (${hb.org}) — ${hb.status}${staleFlag} — last seen ${hb.last_heartbeat}`);
       if (hb.current_task) console.log(`  task: ${hb.current_task}`);
+    }
+  });
+
+busCommand
+  .command('poll-watchdog')
+  .description('Check all agent heartbeats against their lease thresholds and emit alerts for expired agents')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .option('--lease <seconds>', 'Default lease threshold in seconds (overridden per-agent by config.json watchdog.lease_seconds)', String(14400))
+  .option('--restart', 'Auto soft-restart expired agents via daemon IPC')
+  .action(async (opts: { format?: string; lease?: string; restart?: boolean }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const defaultLeaseSeconds = Math.max(60, parseInt(opts.lease ?? '14400', 10) || 14400);
+
+    const results = pollWatchdog(paths, env.agentName, env.org, {
+      projectRoot: env.projectRoot,
+      defaultLeaseSeconds,
+    });
+
+    const expired = results.filter(r => r.expired);
+
+    if (opts.restart && expired.length > 0) {
+      const ipc = new IPCClient(env.ctxRoot);
+      for (const r of expired) {
+        try {
+          await ipc.send({ type: 'restart-agent', agent: r.agent, source: 'poll-watchdog' });
+          console.log(`Restart signal sent for ${r.agent}`);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Failed to restart ${r.agent}: ${msg}`);
+        }
+      }
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    if (results.length === 0) {
+      console.log('No agents found.');
+      return;
+    }
+
+    for (const r of results) {
+      const flag = r.expired ? ' [EXPIRED]' : ' [OK]';
+      const label = r.org ? `${r.agent} (${r.org})` : r.agent;
+      const ageMin = Math.round(r.age_seconds / 60);
+      const leaseMin = Math.round(r.lease_seconds / 60);
+      console.log(`${label}${flag} — last seen ${r.last_heartbeat} (${ageMin}m ago, lease ${leaseMin}m)`);
+    }
+    if (expired.length > 0) {
+      console.log(`\n${expired.length} agent(s) expired.`);
+    } else {
+      console.log('\nAll agents within lease.');
     }
   });
 
