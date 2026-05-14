@@ -15,6 +15,7 @@ import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHi
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
+import { transcribeVoice } from '../bus/transcribe-voice.js';
 
 type LogFn = (msg: string) => void;
 
@@ -344,7 +345,7 @@ export class AgentManager {
 
         if (isMedia && telegramApi) {
           const downloadDir = join(agentDir, 'telegram-images');
-          processMediaMessage(msg, telegramApi, downloadDir).then((media) => {
+          processMediaMessage(msg, telegramApi, downloadDir).then(async (media) => {
             if (!media) {
               log('Media processing returned null - falling back to text format');
               const text = stripControlChars(msg.caption || '');
@@ -370,7 +371,17 @@ export class AgentManager {
             } else if (media.type === 'document') {
               formatted = FastChecker.formatTelegramDocumentMessage(from, effectiveChatId, media.text, relFilePath, media.file_name!);
             } else if (media.type === 'voice' || media.type === 'audio') {
-              formatted = FastChecker.formatTelegramVoiceMessage(from, effectiveChatId, relFilePath, media.duration);
+              // STT: transcribe the voice file before injecting so the agent
+              // reads text rather than a raw file path. Best-effort — an empty
+              // transcript still produces a usable message with the file path.
+              const absoluteVoicePath = media.file_path ?? '';
+              const transcript = absoluteVoicePath
+                ? await transcribeVoice(absoluteVoicePath).catch(() => '')
+                : '';
+              if (transcript) {
+                log(`[voice-stt] transcribed ${absoluteVoicePath}: "${transcript.slice(0, 80)}..."`);
+              }
+              formatted = FastChecker.formatTelegramVoiceMessage(from, effectiveChatId, relFilePath, media.duration, transcript);
             } else {
               // video or video_note
               formatted = FastChecker.formatTelegramVideoMessage(from, effectiveChatId, media.text, relFilePath, media.file_name || '', media.duration);
