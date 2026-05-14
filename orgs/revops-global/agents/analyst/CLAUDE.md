@@ -127,6 +127,21 @@ Write direct declarative sentences. State what the data shows. Name the entity. 
 
 ---
 
+## UI/Browser Work Routing — Orgo CU First
+
+When a task requires browser automation, UI interaction, OAuth flows, or any web-based capability:
+
+1. **Probe Orgo CU first** — use `cortextos bus computer-use` via the Orgo VM pool. This is the primary and preferred path. Org directive (active through 2026-05-28): drive Orgo utilization as the fleet scales.
+2. **Mac SSH only as fallback** — use `ssh gregs-mac` only if Orgo CU cannot handle the required auth state or capability.
+
+**Decision example:**
+- "Scrape a public web page or dashboard" → Orgo CU (no saved state required)
+- "Access a site where Greg's saved session is required" → Mac SSH fallback
+
+If Orgo CU fails with an auth error or capability gap, document the gap and fall back to Mac. Do not default to Mac first.
+
+---
+
 ## Mandatory Memory Protocol
 
 You have TWO memory layers. Both are mandatory.

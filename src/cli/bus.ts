@@ -1875,8 +1875,9 @@ busCommand
   .option('--scope <s>', 'Scope: shared, private, or all', 'all')
   .option('--top-k <n>', 'Number of results', '5')
   .option('--threshold <f>', 'Minimum similarity score (0-1)', '0.5')
+  .option('--no-embed', 'Skip embedding provider; use wiki-grep fallback only')
   .option('--json', 'Output raw JSON')
-  .action((question: string, opts: { org?: string; agent?: string; scope?: string; topK?: string; threshold?: string; json?: boolean }) => {
+  .action((question: string, opts: { org?: string; agent?: string; scope?: string; topK?: string; threshold?: string; noEmbed?: boolean; json?: boolean }) => {
     const env = resolveEnv();
     const org = opts.org || env.org;
     if (!org) {
@@ -1895,6 +1896,7 @@ busCommand
         threshold: parseFloat(opts.threshold || '0.5'),
         frameworkRoot: env.frameworkRoot || process.cwd(),
         instanceId: env.instanceId,
+        noEmbed: opts.noEmbed,
       },
     );
 
