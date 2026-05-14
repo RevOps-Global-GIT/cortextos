@@ -11,7 +11,6 @@ import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
 import { pollWatchdog } from '../bus/watchdog.js';
 import { runCodebaseScan } from '../bus/codebase-scan.js';
-import { runSecurityAudit } from '../bus/security-audit.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
@@ -873,49 +872,6 @@ busCommand
       resolvePaths(env.agentName, env.instanceId, env.org),
       env.agentName, env.org, 'action', 'codebase_scan_complete', 'info',
       { hits: result.hits.length, large_files: result.largeFiles.length, output: outputPath },
-    );
-  });
-
-busCommand
-  .command('security-audit')
-  .description('Run npm audit in the framework root, write daily report, and create RGOS tasks for critical/high vulns')
-  .option('--output <path>', 'Override output file path (default: agent output dir)')
-  .option('--dry-run', 'Print report path but do not create RGOS tasks')
-  .option('--cwd <dir>', 'Directory to audit (default: framework root)')
-  .action(async (opts: { output?: string; dryRun?: boolean; cwd?: string }) => {
-    const env = resolveEnv();
-    const auditCwd = opts.cwd ?? env.frameworkRoot;
-    const today = new Date().toISOString().slice(0, 10);
-    const outputPath = opts.output ??
-      join(env.agentDir ?? join(env.projectRoot ?? env.frameworkRoot, 'orgs', env.org, 'agents', env.agentName),
-        'output', `${today}-npm-audit.md`);
-
-    console.log(`[security-audit] Running npm audit in ${auditCwd} ...`);
-    const result = runSecurityAudit(auditCwd, outputPath);
-    console.log(`[security-audit] Report written → ${outputPath}`);
-    console.log(`[security-audit] Critical: ${result.criticalCount}, High: ${result.highCount}, Actionable: ${result.actionable.length}`);
-
-    if (!opts.dryRun && result.actionable.length > 0) {
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-      for (const vuln of result.actionable) {
-        const fix = typeof vuln.fixAvailable === 'object'
-          ? `→ upgrade to ${vuln.fixAvailable.name}@${vuln.fixAvailable.version}`
-          : '(fix available)';
-        const taskId = createTask(paths, env.agentName, env.org,
-          `[security] ${vuln.severity} vuln in ${vuln.name} ${fix}`, {
-            description: `Detected by security-audit loop on ${today}. See ${outputPath}.`,
-            priority: vuln.severity === 'critical' ? 'high' : 'medium',
-          });
-        console.log(`[security-audit] Created task ${taskId}: ${vuln.name} (${vuln.severity})`);
-        logEvent(paths, env.agentName, env.org, 'action', 'security_vuln_task_created', 'info',
-          { task_id: taskId, package: vuln.name, severity: vuln.severity });
-      }
-    }
-
-    logEvent(
-      resolvePaths(env.agentName, env.instanceId, env.org),
-      env.agentName, env.org, 'action', 'security_audit_complete', 'info',
-      { critical: result.criticalCount, high: result.highCount, actionable: result.actionable.length, output: outputPath },
     );
   });
 
