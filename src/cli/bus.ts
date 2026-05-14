@@ -13,6 +13,7 @@ import { pollWatchdog } from '../bus/watchdog.js';
 import { runPrStuckWatcher } from '../bus/pr-stuck-watcher.js';
 import { runDocDriftChecker } from '../bus/doc-drift-checker.js';
 import { runGoalProgressProbe } from '../bus/goal-progress-probe.js';
+import { runHeartbeatHealthWatch } from '../bus/heartbeat-health-watch.js';
 import { runCodebaseScan } from '../bus/codebase-scan.js';
 import { runSecurityAudit } from '../bus/security-audit.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
@@ -1023,6 +1024,68 @@ busCommand
     console.log(`Stalled agents: ${result.stalledAgents.length}`);
     if (result.reportPath) console.log(`Report: ${result.reportPath}`);
     if (result.memoryPath) console.log(`Memory: ${result.memoryPath}`);
+  });
+
+busCommand
+  .command('heartbeat-health-watch')
+  .description('Detect agents the daemon reports as running while their heartbeat is stale')
+  .option('--threshold-minutes <n>', 'Stale heartbeat threshold for running agents', '90')
+  .option('--restart', 'Attempt daemon restart for stale running agents')
+  .option('--notify-agent <agent>', 'Agent to notify when stale running agents are found', 'orchestrator')
+  .option('--dry-run', 'Do not send notifications or restart agents')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action(async (opts: { thresholdMinutes?: string; restart?: boolean; notifyAgent?: string; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const ipc = new IPCClient(env.instanceId);
+    const runningAgents = new Set<string>();
+    const status = await ipc.send({ type: 'status', source: 'heartbeat-health-watch' });
+    if (status.success && Array.isArray(status.data)) {
+      for (const item of status.data as Array<{ name?: string; status?: string }>) {
+        if (item.name && item.status === 'running') runningAgents.add(item.name);
+      }
+    }
+
+    const threshold = Number(opts.thresholdMinutes ?? 90);
+    const report = runHeartbeatHealthWatch(paths, env.agentName, env.org, projectRoot, runningAgents, {
+      thresholdMinutes: Number.isFinite(threshold) && threshold >= 1 ? threshold : 90,
+      outputDir,
+    });
+
+    const restartAttempts: Array<{ agent: string; success: boolean; error?: string }> = [];
+    if (!opts.dryRun && opts.restart) {
+      for (const agent of report.staleRunningAgents) {
+        try {
+          const response = await ipc.send({ type: 'restart-agent', agent: agent.agent, source: 'heartbeat-health-watch' });
+          restartAttempts.push({ agent: agent.agent, success: response.success, error: response.error });
+        } catch (err) {
+          restartAttempts.push({ agent: agent.agent, success: false, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    }
+
+    if (!opts.dryRun && report.staleRunningAgents.length > 0 && opts.notifyAgent) {
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
+      sendMessage(
+        targetPaths,
+        env.agentName,
+        opts.notifyAgent,
+        'high',
+        `Heartbeat-health watch found ${report.staleRunningAgents.length} running agent(s) with heartbeat >${report.thresholdMinutes}m stale: ${report.staleRunningAgents.map(a => a.agent).join(', ')}. Restart attempts: ${restartAttempts.length}. Report: ${report.reportPath || 'not written'}`,
+      );
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify({ ...report, restartAttempts }, null, 2));
+      return;
+    }
+
+    console.log(`Agents checked: ${report.agents.length}`);
+    console.log(`Stale running agents: ${report.staleRunningAgents.length}`);
+    if (restartAttempts.length > 0) console.log(`Restart attempts: ${restartAttempts.length}`);
+    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
   });
 
 busCommand
