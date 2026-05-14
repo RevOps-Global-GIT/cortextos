@@ -10,6 +10,7 @@ import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
 import { pollWatchdog } from '../bus/watchdog.js';
+import { runPrStuckWatcher } from '../bus/pr-stuck-watcher.js';
 import { runCodebaseScan } from '../bus/codebase-scan.js';
 import { runSecurityAudit } from '../bus/security-audit.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
@@ -187,6 +188,12 @@ function isRegisteredAgent(frameworkRoot: string, target: string): boolean {
     }
   } catch { /* fall through */ }
   return false;
+}
+
+function parseNonNegativeNumber(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 function isLocalVoiceEndpoint(target: string): boolean {
@@ -899,6 +906,56 @@ busCommand
       const label = hb.display_name ? `${hb.display_name} (${hb.agent})` : hb.agent;
       console.log(`${label} (${hb.org}) — ${hb.status}${staleFlag} — last seen ${hb.last_heartbeat}`);
       if (hb.current_task) console.log(`  task: ${hb.current_task}`);
+    }
+  });
+
+busCommand
+  .command('pr-stuck-watcher')
+  .description('Scan watched GitHub repositories for open PRs that are stuck past age thresholds')
+  .option('--repos <repos>', 'Comma-separated repo list. Defaults to grandamenium/cortextos + RevOps-Global-GIT/*')
+  .option('--stuck-hours <hours>', 'Report open PRs older than this many hours', '2')
+  .option('--alert-hours <hours>', 'Notify orchestrator when PRs exceed this many hours', '24')
+  .option('--notify-agent <agent>', 'Agent to notify when alert threshold is exceeded', 'orchestrator')
+  .option('--dry-run', 'Do not send alert messages')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { repos?: string; stuckHours?: string; alertHours?: string; notifyAgent?: string; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const result = runPrStuckWatcher(paths, env.agentName, env.org, {
+      repos: opts.repos ? opts.repos.split(',') : undefined,
+      stuckHours: parseNonNegativeNumber(opts.stuckHours, 2),
+      alertHours: parseNonNegativeNumber(opts.alertHours, 24),
+      outputDir,
+    });
+
+    if (!opts.dryRun && result.alertPrs.length > 0 && opts.notifyAgent) {
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
+      const sample = result.alertPrs.slice(0, 8).map(pr => `${pr.repo}#${pr.number} (${pr.ageHours.toFixed(1)}h)`).join(', ');
+      sendMessage(
+        targetPaths,
+        env.agentName,
+        opts.notifyAgent,
+        'high',
+        `PR-stuck watcher alert: ${result.alertPrs.length} PR(s) open >${result.alertThresholdHours}h. ${sample}. Report: ${result.reportPath || 'not written'}`,
+      );
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.log(`Checked ${result.checkedRepos.length}/${result.watchedRepos.length} repos.`);
+    console.log(`Open PRs >${result.stuckThresholdHours}h: ${result.stuckPrs.length}`);
+    console.log(`Open PRs >${result.alertThresholdHours}h: ${result.alertPrs.length}`);
+    if (result.reportPath) console.log(`Report: ${result.reportPath}`);
+    if (result.failedRepos.length > 0) {
+      console.log(`Repo errors: ${result.failedRepos.length}`);
+      for (const failure of result.failedRepos.slice(0, 10)) {
+        console.log(`- ${failure.repo}: ${failure.error.split('\n')[0]}`);
+      }
     }
   });
 
