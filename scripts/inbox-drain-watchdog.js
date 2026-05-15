@@ -39,7 +39,9 @@ const CLI             = path.join(CTX_FRAMEWORK, 'dist', 'cli.js');
 
 // Inboxes that exist for system/legacy reasons but have no live consumer agent.
 // Messages here are not actionable — suppress alerts rather than spam orchestrator.
-const SKIP_INBOXES = new Set(['root']);
+// 'cortextos' is a pseudo-agent (no session, no agent dir) used by the daemon
+// for drift-monitor STOP signals. Its inbox has no live consumer — skip it.
+const SKIP_INBOXES = new Set(['root', 'cortextos']);
 
 // State file to track which alerts have been sent (avoid spam)
 const STATE_FILE      = path.join(CTX_ROOT, 'state', CTX_AGENT, 'inbox-watchdog-state.json');
