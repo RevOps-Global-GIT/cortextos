@@ -65,9 +65,7 @@ export default async function AnalyticsPage({
       <TaskThroughput data={taskData} />
 
       {/* Agent Effectiveness */}
-      <AgentEffectiveness agents={agentStats.filter(a =>
-        !['human', 'dashboard', 'orchestrator', 'user'].includes(a.name)
-      )} />
+      <AgentEffectiveness agents={agentStats} />
 
       {/* Cost Tracking */}
       <CostTracking
