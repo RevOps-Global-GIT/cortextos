@@ -34,7 +34,7 @@ export function scanTodoMarkers(srcDir: string): CodebaseHit[] {
   if (!existsSync(srcDir)) return [];
   try {
     const raw = execSync(
-      `grep -rn "TODO\\|FIXME\\|HACK\\|XXX" "${srcDir}" --include="*.ts" --include="*.js" 2>/dev/null || true`,
+      `grep -rn "TODO\\|FIXME\\|HACK\\|XXX" "${srcDir}" --include="*.ts" --include="*.js" --exclude="codebase-scan.ts" 2>/dev/null || true`,
       { encoding: 'utf-8', timeout: 30000, maxBuffer: 4 * 1024 * 1024 },
     );
     const hits: CodebaseHit[] = [];
@@ -95,7 +95,7 @@ export function findLargeFiles(srcDir: string, threshold = LARGE_FILE_THRESHOLD)
 export function deriveTopActionable(hits: CodebaseHit[], largeFiles: LargeFile[]): string[] {
   const actionable: string[] = [];
 
-  // FIXMEs and HACs are highest priority
+  // FIXMEs and HACKs are highest priority
   const fixmes = hits.filter(h => h.tag === 'FIXME' || h.tag === 'HACK');
   if (fixmes.length > 0) {
     const sample = fixmes[0];
