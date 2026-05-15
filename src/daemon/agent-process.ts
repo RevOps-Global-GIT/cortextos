@@ -368,6 +368,13 @@ export class AgentProcess implements ManagedAgent {
 
   /**
    * Inject a message into the agent's PTY.
+   *
+   * For Hermes agents bracketed paste is buggy (NousResearch/hermes-agent
+   * issue #7316 — ESC[200~/ESC[201~ markers leak and corrupt input). We use
+   * the same file-based approach as the startup injection: write the prompt
+   * to .cortextos-cron.md in the agent dir, then send a plain
+   * `Read .cortextos-cron.md and follow the instructions there.\r`
+   * without any bracketed paste wrapper.
    */
   injectMessage(content: string): boolean {
     if (!this.pty || this.status !== 'running') {
@@ -377,6 +384,19 @@ export class AgentProcess implements ManagedAgent {
     if (this.dedup.isDuplicate(content)) {
       this.log('Dedup: skipping duplicate message');
       return false;
+    }
+
+    if (this.config.runtime === 'hermes') {
+      // File-based injection avoids bracketed paste corruption in Hermes.
+      const cronFile = join(this.env.agentDir, '.cortextos-cron.md');
+      try {
+        writeFileSync(cronFile, content, 'utf-8');
+      } catch (err) {
+        this.log(`[hermes inject] failed to write cron file: ${err}`);
+        return false;
+      }
+      this.pty.write('Read .cortextos-cron.md and follow the instructions there.\r');
+      return true;
     }
 
     injectMessage((data) => this.pty?.write(data), content);
