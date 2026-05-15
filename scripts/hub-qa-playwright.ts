@@ -2379,6 +2379,8 @@ async function main() {
       results = await runWithTimeout(() => runProjectsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/reports') {
       results = await runWithTimeout(() => runReportsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+    } else if (targetPage === '/pipeline') {
+      results = await runWithTimeout(() => runPipelineChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/tasks') {
       results = await runWithTimeout(() => runFleetTasksChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/agents') {
@@ -2396,7 +2398,7 @@ async function main() {
     } else if (targetPage === '/app/signals' || targetPage === '/signals') {
       results = await runWithTimeout(() => runSignalsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
