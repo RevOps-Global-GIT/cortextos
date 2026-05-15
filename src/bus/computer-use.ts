@@ -248,6 +248,7 @@ export async function computerUse(
   //   ServerAliveInterval/CountMax — detect dead connections after ~60s instead
   //     of hanging silently for the full (timeoutSec+30) wall-clock window.
   const sshArgs = [
+    '-n',  // do not read from stdin — prevents codex exec from blocking on piped stdin
     '-o', 'StrictHostKeyChecking=accept-new',
     '-o', 'ConnectTimeout=10',
     '-o', 'ServerAliveInterval=30',
