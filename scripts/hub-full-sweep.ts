@@ -277,7 +277,7 @@ async function interactTable(page: Page): Promise<{ status: string; note: string
 }
 
 async function interactTabs(page: Page): Promise<{ status: string; note: string }> {
-  const tabs = page.locator('[role="tab"], button[data-state]').all();
+  const tabs = page.locator('[role="tab"]').all();
   const tabList = await tabs;
   if (tabList.length > 1) {
     try {
