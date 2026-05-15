@@ -555,7 +555,8 @@ busCommand
     for (const e of entries) {
       const transition = e.from && e.to ? `${e.from} -> ${e.to}` : e.to || '';
       const note = e.note ? ` | ${e.note}` : '';
-      console.log(`  ${e.ts}  ${e.event.padEnd(8)}  ${e.agent.padEnd(16)}  ${transition}${note}`);
+      const agent = (e.agent ?? 'unknown').padEnd(16);
+      console.log(`  ${e.ts}  ${e.event.padEnd(8)}  ${agent}  ${transition}${note}`);
     }
   });
 

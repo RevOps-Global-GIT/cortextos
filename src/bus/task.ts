@@ -417,7 +417,14 @@ export function readTaskAudit(
   for (const line of readFileSync(path, 'utf-8').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    try { entries.push(JSON.parse(trimmed) as TaskAuditEntry); } catch { /* skip corrupt */ }
+    try {
+      const raw = JSON.parse(trimmed) as Record<string, unknown>;
+      // Entries written by external tools (e.g. monitor scripts) may omit
+      // `agent` or use `source` instead. Normalise to avoid downstream crashes
+      // from code that calls `entry.agent.padEnd()` without null-checking.
+      if (!raw['agent']) raw['agent'] = (raw['source'] as string | undefined) ?? 'unknown';
+      entries.push(raw as unknown as TaskAuditEntry);
+    } catch { /* skip corrupt */ }
   }
   return entries;
 }
