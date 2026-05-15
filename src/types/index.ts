@@ -499,6 +499,12 @@ export interface CronExecutionLogEntry {
   duration_ms: number;
   /** Error message if status is "retried" or "failed"; null otherwise. */
   error: string | null;
+  /** Optional phase marker for agent-reported results after scheduler injection. */
+  phase?: 'fire' | 'result';
+  /** Optional human-readable result summary for the run. */
+  result?: string;
+  /** Optional artifact path produced by the run. */
+  artifact?: string;
 }
 
 export interface OrgContext {

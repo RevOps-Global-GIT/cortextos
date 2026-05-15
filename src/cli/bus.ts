@@ -3517,9 +3517,9 @@ busCommand
       return;
     }
 
-    // Human-readable table: ts | cron | status | attempt | duration | error
+    // Human-readable table: ts | cron | status | attempt | duration | result/artifact/error
     const pad = (s: string, w: number) => s.padEnd(w);
-    const header = `  ${pad('Timestamp', 20)}  ${pad('Cron', 22)}  ${pad('Status', 7)}  ${pad('Att', 3)}  ${pad('ms', 7)}  Error`;
+    const header = `  ${pad('Timestamp', 20)}  ${pad('Cron', 22)}  ${pad('Status', 7)}  ${pad('Att', 3)}  ${pad('ms', 7)}  Result / Artifact / Error`;
     const sep = '-'.repeat(header.length);
 
     console.log(`\nExecution log for ${agent}${name ? ` / ${name}` : ''} (${entries.length} entries)\n`);
@@ -3531,10 +3531,10 @@ busCommand
       const status = e.status;
       const att = String(e.attempt);
       const ms = String(e.duration_ms);
-      const error = e.error ?? '';
+      const detail = String((e as any).artifact ?? (e as any).result ?? e.error ?? '');
       const cronPad = pad(e.cron.length > 22 ? e.cron.slice(0, 19) + '...' : e.cron, 22);
       console.log(
-        `  ${pad(ts, 20)}  ${cronPad}  ${pad(status, 7)}  ${pad(att, 3)}  ${pad(ms, 7)}  ${error}`
+        `  ${pad(ts, 20)}  ${cronPad}  ${pad(status, 7)}  ${pad(att, 3)}  ${pad(ms, 7)}  ${detail.slice(0, 90)}`
       );
     }
     console.log('');

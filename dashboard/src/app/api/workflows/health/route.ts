@@ -52,6 +52,9 @@ interface CronExecutionLogEntry {
   attempt: number;
   duration_ms: number;
   error: string | null;
+  phase?: 'fire' | 'result';
+  result?: string;
+  artifact?: string;
 }
 
 export type CronHealthState = 'healthy' | 'warning' | 'failure' | 'never-fired';
