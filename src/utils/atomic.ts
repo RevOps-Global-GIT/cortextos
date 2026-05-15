@@ -27,7 +27,7 @@ export function atomicWriteSync(filePath: string, data: string, keepBak = false)
 
   const tmpPath = join(dir, `.tmp.${randomBytes(6).toString('hex')}`);
   try {
-    writeFileSync(tmpPath, data + '\n', { encoding: 'utf-8', mode: 0o600 });
+    writeFileSync(tmpPath, data + '\n', { encoding: 'utf-8', mode: 0o644 });
     renameSync(tmpPath, filePath);
   } catch (err) {
     // Clean up temp file on failure
