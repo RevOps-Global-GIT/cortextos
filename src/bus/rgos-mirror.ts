@@ -445,8 +445,10 @@ const PRIORITY_MAP: Record<string, string> = {
 };
 
 // RGOS orch_tasks.status accepts: proposed | approved | in_progress | completed | cancelled | blocked | review
+// Bus `pending` maps to `proposed` (not `approved`) so Hub can distinguish newly-created
+// tasks from explicitly approved ones. Reverse sync maps `proposed` → `pending` in bus.
 const STATUS_MAP: Record<string, string> = {
-  pending: 'approved',
+  pending: 'proposed',
   in_progress: 'in_progress',
   completed: 'completed',
   cancelled: 'cancelled',
@@ -586,9 +588,13 @@ export async function mirrorEventToRgos(event: {
   metadata: Record<string, unknown>;
 }): Promise<void> {
   if (!isEnabled()) return;
+  // ID unification: accept both RGOS UUIDs (passthrough) and raw bus task IDs
+  // (convert to the same uuidv5 the task row uses) so orch_events.task_id always
+  // resolves to the canonical RGOS UUID for the task, enabling drawer history lookups.
+  const rawTaskId = event.metadata.task_id;
   const taskId =
-    typeof event.metadata.task_id === 'string' && isUuid(event.metadata.task_id)
-      ? (event.metadata.task_id as string)
+    typeof rawTaskId === 'string' && rawTaskId.length > 0
+      ? (isUuid(rawTaskId) ? rawTaskId : uuidv5(rawTaskId))
       : null;
   const row = {
     id: uuidv5(event.id),

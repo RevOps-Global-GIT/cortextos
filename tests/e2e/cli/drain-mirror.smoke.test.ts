@@ -119,8 +119,10 @@ describe('drain-mirror CLI smoke', () => {
   // -------------------------------------------------------------------------
 
   it('exits 0 with disabled message when mirror env vars are absent', () => {
-    // Default env in runDrainMirror strips SUPABASE_RGOS_URL + SUPABASE_RGOS_SERVICE_KEY
-    const result = runDrainMirror();
+    // Use BUS_RGOS_MIRROR_DISABLED=1 as the canonical kill-switch.
+    // Stripping SUPABASE_* is no longer sufficient because the applySecretsToEnv
+    // preAction hook re-loads them from the org secrets.env on real machines.
+    const result = runDrainMirror([], { BUS_RGOS_MIRROR_DISABLED: '1' });
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/disabled/i);
@@ -131,7 +133,7 @@ describe('drain-mirror CLI smoke', () => {
   // -------------------------------------------------------------------------
 
   it('exits 0 with {ok:true,skipped:true} when --json and mirror is disabled', () => {
-    const result = runDrainMirror(['--json']);
+    const result = runDrainMirror(['--json'], { BUS_RGOS_MIRROR_DISABLED: '1' });
 
     expect(result.exitCode).toBe(0);
     expect(result.json).not.toBeNull();
