@@ -329,6 +329,12 @@ export class CronScheduler {
     this.onFire    = opts.onFire;
     this.logger    = opts.logger ?? ((msg: string) => process.stdout.write(msg + '\n'));
     this.timezone  = opts.timezone;
+    // Diagnostic: log timezone on construction so daemon logs confirm whether
+    // it arrives non-empty. Helps triage the "cron expressions fire in UTC"
+    // bug (Goal #2) where timezone may silently be undefined at fire time.
+    this.logger(
+      `[cron-scheduler] agent="${opts.agentName}" timezone="${opts.timezone ?? '(none — will use UTC)'}"`,
+    );
   }
 
   // -------------------------------------------------------------------------
