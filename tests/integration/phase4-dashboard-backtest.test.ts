@@ -457,7 +457,7 @@ describe('Scenario 3 — View history (GET executions, pagination + filter + exp
     const res = await callGet('format=csv&limit=0');
     const body = await res.text();
     const lines = body.split('\n').filter(l => l.trim());
-    expect(lines[0]).toBe('timestamp,cron,status,attempt,duration_ms,error');
+    expect(lines[0]).toBe('timestamp,cron,status,attempt,duration_ms,phase,result,artifact,error');
     expect(lines.length).toBe(TOTAL + 1); // header + TOTAL rows
   });
 

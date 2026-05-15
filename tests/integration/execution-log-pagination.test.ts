@@ -165,7 +165,7 @@ describe('entriesToCsv — format validation', () => {
     );
     const csv = entriesToCsv([]);
     const firstLine = csv.split('\n')[0];
-    expect(firstLine).toBe('timestamp,cron,status,attempt,duration_ms,error');
+    expect(firstLine).toBe('timestamp,cron,status,attempt,duration_ms,phase,result,artifact,error');
   });
 
   it('produces one data row per entry', async () => {

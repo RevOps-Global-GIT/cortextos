@@ -16,6 +16,7 @@
 
 import { existsSync, readFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
+import { homedir } from 'os';
 import type { CronDefinition, CronExecutionLogEntry } from '../types/index.js';
 import { CRONS_DIRECTORY, CRONS_FILENAME, cronExecutionLogPathFor } from './crons-schema.js';
 import { atomicWriteSync } from '../utils/atomic.js';
@@ -39,7 +40,7 @@ interface CronsFile {
  * process.env.CTX_ROOT pointing to a tempdir.
  */
 function cronsFilePath(agentName: string): string {
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const ctxRoot = process.env.CTX_ROOT ?? join(homedir(), '.cortextos', process.env.CTX_INSTANCE_ID ?? 'default');
   return join(ctxRoot, CRONS_DIRECTORY, agentName, CRONS_FILENAME);
 }
 
@@ -346,7 +347,7 @@ export function getExecutionLogPage(
   offset = 0,
   statusFilter: ExecutionLogStatusFilter = 'all',
 ): ExecutionLogPage {
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const ctxRoot = process.env.CTX_ROOT ?? join(homedir(), '.cortextos', process.env.CTX_INSTANCE_ID ?? 'default');
   const filePath = join(ctxRoot, cronExecutionLogPathFor(agentName));
 
   if (!existsSync(filePath)) {

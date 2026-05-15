@@ -1,6 +1,7 @@
 import { createServer, Server, Socket } from 'net';
 import { existsSync, unlinkSync, chmodSync, readFileSync } from 'fs';
 import { join, resolve as pathResolve } from 'path';
+import { homedir } from 'os';
 import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
@@ -11,6 +12,10 @@ import { parseDurationMs } from '../bus/cron-state.js';
 import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
+
+function resolveCtxRoot(): string {
+  return process.env.CTX_ROOT ?? join(homedir(), '.cortextos', process.env.CTX_INSTANCE_ID ?? 'default');
+}
 
 // ---------------------------------------------------------------------------
 // Manual fire cooldown — Subtask 4.5
@@ -151,7 +156,7 @@ export function computeNextFire(
  * and cron execution log, and return a combined summary array.
  */
 function listAllCrons(): CronSummaryRow[] {
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const ctxRoot = resolveCtxRoot();
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
 
   let enabledAgents: Record<string, { enabled?: boolean; org?: string }> = {};
@@ -221,7 +226,7 @@ export function computeFleetHealth(
     return _fleetHealthCache.result;
   }
 
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const ctxRoot = resolveCtxRoot();
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
 
   let enabledAgents: Record<string, { enabled?: boolean; org?: string }> = {};
@@ -304,7 +309,7 @@ export function isValidSchedule(schedule: string): boolean {
  * Read the list of enabled agent names from enabled-agents.json.
  */
 function getEnabledAgents(): string[] {
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const ctxRoot = resolveCtxRoot();
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
   if (!existsSync(enabledFile)) return [];
   try {
