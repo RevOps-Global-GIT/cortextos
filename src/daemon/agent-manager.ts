@@ -878,6 +878,7 @@ export class AgentManager {
       agentName,
       onFire,
       logger: (msg) => console.log(`[daemon] ${msg}`),
+      timezone: entry.process.timezone,
     });
 
     scheduler.start();
