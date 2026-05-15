@@ -42,7 +42,7 @@ import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeas
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveEnv } from '../utils/env.js';
+import { resolveEnv, applySecretsToEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
@@ -85,7 +85,13 @@ function checkDeliverableRequirement(taskId: string, frameworkRoot: string, org:
 }
 
 export const busCommand = new Command('bus')
-  .description('Bus commands for agent messaging, tasks, and events');
+  .description('Bus commands for agent messaging, tasks, and events')
+  .hook('preAction', () => {
+    // Load org secrets.env + agent .env into process.env so all bus modules
+    // can access SUPABASE_RGOS_URL, SUPABASE_RGOS_SERVICE_KEY, etc. without
+    // requiring the parent shell to manually source them.
+    applySecretsToEnv(resolveEnv());
+  });
 
 // ---------------------------------------------------------------------------
 // Reply-mode helpers
