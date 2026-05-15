@@ -160,6 +160,66 @@ function pingAgentChatId(
 }
 
 /**
+ * Best-effort: send the approval notification WITH inline Approve/Deny buttons
+ * directly to the orchestrator's primary Telegram chat.
+ *
+ * The activity-channel post (above) also carries buttons, but that is a
+ * separate bot/chat that operators may not be watching. The orchestrator's
+ * own bot chat is the primary surface Greg uses — this ensures inline buttons
+ * appear there so he can tap Approve/Deny without leaving the conversation.
+ *
+ * Skips silently when:
+ *   - frameworkRoot is not available (cannot resolve orchestrator agent dir)
+ *   - org is empty (multi-org ambiguity)
+ *   - orchestratorName resolves to the requesting agent (would duplicate pingAgentChatId)
+ *   - BOT_TOKEN or CHAT_ID missing from orchestrator .env
+ *
+ * Errors from the network round-trip are suppressed — Telegram outage must
+ * not block approval creation.
+ */
+function pingOrchestratorChat(
+  frameworkRoot: string | undefined,
+  org: string,
+  orchestratorName: string,
+  requestingAgent: string,
+  approvalId: string,
+  title: string,
+  category: ApprovalCategory,
+  context: string | undefined,
+): Promise<void> {
+  if (!frameworkRoot || !org) return Promise.resolve();
+  // Don't duplicate if the orchestrator itself created the approval
+  if (orchestratorName === requestingAgent) return Promise.resolve();
+
+  const orchEnvPath = join(frameworkRoot, 'orgs', org, 'agents', orchestratorName, '.env');
+  if (!existsSync(orchEnvPath)) {
+    console.warn(`[approval] Orchestrator .env not found at ${orchEnvPath} — skipping orchestrator chat ping for ${approvalId}.`);
+    return Promise.resolve();
+  }
+  const env = parseEnvFile(orchEnvPath);
+  const botToken = env.BOT_TOKEN;
+  const chatId = env.CHAT_ID;
+  if (!botToken || !chatId) {
+    console.warn(`[approval] BOT_TOKEN or CHAT_ID missing in orchestrator .env — skipping orchestrator chat ping for ${approvalId}.`);
+    return Promise.resolve();
+  }
+
+  const lines = [
+    `🔔 Approval needed: ${title}`,
+    `Category: ${category}`,
+    `Requested by: ${requestingAgent}`,
+  ];
+  if (context) lines.push('', context);
+  lines.push('', `id: ${approvalId}`);
+  const message = lines.join('\n');
+
+  const api = new TelegramAPI(botToken);
+  return api.sendMessage(chatId, message, buildApprovalKeyboard(approvalId), { parseMode: null })
+    .then(() => undefined)
+    .catch(() => undefined); // Telegram outage must not block approval creation.
+}
+
+/**
  * Create an approval request.
  * Identical to bash create-approval.sh format.
  *
@@ -224,6 +284,14 @@ export async function createApproval(
   // operators not in the activity channel would miss approvals entirely
   // (the 50h+ Repo-B-style stall). Errors suppressed — see helper.
   await pingAgentChatId(agentDir, approvalId, title, category, agentName, context);
+
+  // Best-effort: send inline Approve/Deny buttons directly to the orchestrator's
+  // primary Telegram chat. The operator expects to act from the orchestrator
+  // conversation — without this, the message text says "Approve via orchestrator
+  // chat" but no buttons are present there. The orchestrator fast-checker's
+  // handleCallback already handles appr_allow|deny_* so callbacks route correctly.
+  const orchName = process.env.CTX_ORCHESTRATOR || 'orchestrator';
+  await pingOrchestratorChat(frameworkRoot, org, orchName, agentName, approvalId, title, category, context);
 
   return approvalId;
 }
