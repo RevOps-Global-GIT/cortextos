@@ -393,7 +393,7 @@ function appendTaskAudit(
       ts: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
       ...entry,
     };
-    appendFileSync(join(auditDir, `${taskId}.jsonl`), JSON.stringify(line) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    appendFileSync(join(auditDir, `${taskId}.jsonl`), JSON.stringify(line) + '\n', { encoding: 'utf-8', mode: 0o644 });
   } catch {
     // Never block a real operation on audit-log write failure.
   }
@@ -885,7 +885,7 @@ export function compactTasks(
 
     if (!dryRun) {
       try {
-        appendFileSync(archivePath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+        appendFileSync(archivePath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o644 });
         unlinkSync(join(taskDir, `${task.id}.json`));
       } catch (err) {
         report.skipped.push({ id: task.id, reason: `archive write failed: ${err}` });
