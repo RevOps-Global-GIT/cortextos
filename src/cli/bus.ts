@@ -16,6 +16,7 @@ import { runGoalProgressProbe } from '../bus/goal-progress-probe.js';
 import { runHeartbeatHealthWatch } from '../bus/heartbeat-health-watch.js';
 import { runCustomerSurfaceQa } from '../bus/customer-surface-qa.js';
 import { runCodebaseScan } from '../bus/codebase-scan.js';
+import { computeUvd, writeUvdResult } from '../bus/compute-uvd.js';
 import { runSecurityAudit } from '../bus/security-audit.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
@@ -1250,6 +1251,27 @@ busCommand
       resolvePaths(env.agentName, env.instanceId, env.org),
       env.agentName, env.org, 'action', 'codebase_scan_complete', 'info',
       { hits: result.hits.length, large_files: result.largeFiles.length, output: outputPath },
+    );
+  });
+
+busCommand
+  .command('compute-uvd')
+  .description('Compute UVD/w (Unsupervised Value Deliverables per week) for the org and write to metrics dir')
+  .option('--days <n>', 'Rolling window in days (default: 7)', '7')
+  .action((opts: { days: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const days = parseInt(opts.days, 10) || 7;
+    const result = computeUvd(paths.taskDir, { days });
+    const metricsDir = join(paths.analyticsDir, '..', 'metrics');
+    const outPath = writeUvdResult(metricsDir, result);
+    console.log(`[compute-uvd] UVD/${days}d: ${result.uvd_count} (${result.uvd_per_day}/day)`);
+    console.log(`[compute-uvd] Evaluated: ${result.tasks_evaluated} completed tasks`);
+    console.log(`[compute-uvd] Excluded: ${result.excluded_outside_window} outside window, ${result.excluded_human_created} human-created, ${result.excluded_no_result} no result, ${result.excluded_housekeeping} housekeeping`);
+    console.log(`[compute-uvd] Written → ${outPath}`);
+    logEvent(
+      paths, env.agentName, env.org, 'action', 'uvd_computed', 'info',
+      { uvd_count: result.uvd_count, uvd_per_day: result.uvd_per_day, window_days: days, output: outPath },
     );
   });
 
