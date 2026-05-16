@@ -306,10 +306,25 @@ export class AgentProcess implements ManagedAgent {
       // which can send SIGHUP (exit code 129) to a process that was in the
       // middle of flushing. Polling first eliminates the remaining SIGHUP risk.
       if (pty.isAlive()) {
+        // Capture PID before pty.kill() zeros AgentPTY.pty internally.
+        const osPid = pty.getPid();
         try {
           pty.kill();
         } catch {
           // PTY may have exited between the check and the kill — ignore
+        }
+        // SIGKILL fallback: node-pty's kill() sends SIGHUP, which Claude Code
+        // ignores when it is mid-turn (blocked on tool I/O). If the OS process
+        // is still alive 2 seconds after pty.kill(), force-kill it so a new
+        // session can start without leaving a zombie Claude process running.
+        if (osPid) {
+          await sleep(2000);
+          try {
+            process.kill(osPid, 'SIGKILL');
+            this.log(`SIGKILL sent to PID ${osPid} — process did not exit after pty.kill()`);
+          } catch {
+            // ESRCH = process already dead — happy path, no action needed
+          }
         }
       }
 
