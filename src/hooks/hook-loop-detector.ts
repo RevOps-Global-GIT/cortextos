@@ -285,24 +285,25 @@ async function main(): Promise<void> {
   const state = loadState(stateDir);
   const argsHash = hashArgs(tool_input);
 
-  // Append current call to history (before threshold checks so the blocking
-  // call is counted — prevents "block at 15, record nothing, retry forever")
+  // --- Essential command bypass ---
+  // Essential operations are never blocked and are NOT recorded in history.
+  // Recording them caused false ping-pong positives when lifecycle tools
+  // (e.g. mcp__rgos__cortex_list_tasks) naturally alternated with Bash calls.
+  const isEssential = checkEssential(tool_name, tool_input);
+  if (isEssential) {
+    process.exit(0);
+    return;
+  }
+
+  // Append current call to history (after essential check so blocked calls
+  // are counted but lifecycle tools are not — prevents ping-pong false positives
+  // from cron-driven polling tools while still tracking non-essential patterns).
   state.history.push({ toolName: tool_name, argsHash, ts: Date.now() });
   // Trim to sliding window
   if (state.history.length > HISTORY_SIZE) {
     state.history = state.history.slice(-HISTORY_SIZE);
   }
   saveState(stateDir, state);
-
-  // --- Essential command bypass ---
-  // Essential operations are never blocked. They are still recorded in history
-  // so they contribute to pattern detection of non-essential calls, but the
-  // block decision is skipped for them.
-  const isEssential = checkEssential(tool_name, tool_input);
-  if (isEssential) {
-    process.exit(0);
-    return;
-  }
 
   // --- Strategy 1: Repetition ---
   const reps = countRepetitions(state.history, tool_name, argsHash);
