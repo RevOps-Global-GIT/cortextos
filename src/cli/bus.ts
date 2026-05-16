@@ -38,6 +38,7 @@ import { generateSkill } from '../bus/generate-skill.js';
 import { syncSkills } from '../bus/sync-skills.js';
 import { runWorkflow } from '../bus/run-workflow.js';
 import { computerUse } from '../bus/computer-use.js';
+import { spawnCodex } from '../bus/spawn-codex.js';
 import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeaseStatus, releaseOrgoLease } from '../bus/orgo-lease.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
@@ -4406,6 +4407,75 @@ busCommand
       console.log('[via cortex VM fallback — Mac SSH was unreachable]');
     }
     console.log(result.output);
+  });
+
+// --- spawn-codex ---
+busCommand
+  .command('spawn-codex <prompt-file>')
+  .description('Run a scoped Codex session locally, capture output to agents/<agent>/output/, optionally post artifact path to Telegram')
+  .option('--workdir <dir>', 'Working directory for the Codex process (default: cwd)')
+  .option('--timeout <seconds>', 'Max wait time in seconds (default: 300)', '300')
+  .option('--agent <name>', 'Agent name for output path (defaults to CTX_AGENT_NAME)')
+  .option('--agents-root <path>', 'Root of the agents/ tree (defaults to CTX_AGENT_DIR/../..)')
+  .option('--telegram <chat_id>', 'Send artifact path to this Telegram chat after completion')
+  .option('--model <model>', 'Codex model override (e.g. o4-mini)')
+  .action(async (
+    promptFile: string,
+    opts: {
+      workdir?: string;
+      timeout?: string;
+      agent?: string;
+      agentsRoot?: string;
+      telegram?: string;
+      model?: string;
+    },
+  ) => {
+    const env = resolveEnv();
+    const agentName = opts.agent ?? env.agentName;
+    // Default agentsRoot: CTX_AGENT_DIR/../../  (orgs/<org>) or fall back to cwd
+    let agentsRoot = opts.agentsRoot;
+    if (!agentsRoot) {
+      const agentDir = process.env.CTX_AGENT_DIR;
+      if (agentDir) {
+        agentsRoot = join(agentDir, '..', '..');
+      }
+    }
+
+    const result = spawnCodex(promptFile, {
+      workdir: opts.workdir,
+      timeout: parseInt(opts.timeout ?? '300', 10),
+      agentName,
+      agentsRoot,
+      telegramChatId: opts.telegram,
+      model: opts.model,
+    });
+
+    if (!result.ok) {
+      console.error(`spawn-codex failed: ${result.error}`);
+      process.exit(1);
+    }
+
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    logEvent(paths, env.agentName, env.org, 'action', 'spawn_codex_task', 'info', {
+      prompt_file: promptFile,
+      output_path: result.outputPath,
+      duration_ms: result.durationMs,
+      agent: agentName,
+    });
+
+    console.log(result.outputPath);
+
+    // Optional Telegram callback — send artifact path so dispatcher can pick it up
+    if (opts.telegram) {
+      const { resolve: resolvePath } = await import('path');
+      const { execFileSync: exec } = await import('child_process');
+      try {
+        exec('cortextos', ['bus', 'send-telegram', opts.telegram, `artifact: ${result.outputPath}`], {
+          encoding: 'utf-8',
+          timeout: 30_000,
+        });
+      } catch { /* non-fatal — artifact path already printed to stdout */ }
+    }
   });
 
 function sleepMs(ms: number): Promise<void> {
