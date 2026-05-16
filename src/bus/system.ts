@@ -93,6 +93,19 @@ export function hardRestart(paths: BusPaths, agentName: string, reason?: string)
   // Also create restart marker so crash-alert knows it was planned
   writeFileSync(join(paths.stateDir, '.restart-planned'), resolvedReason + '\n', 'utf-8');
 
+  // Reset context_status.json to 0% so the incoming session's FastChecker does not
+  // immediately re-trigger Tier 0/2 off a stale high-context value written by the
+  // session that is about to exit. Without this, a cooperative hard-restart (agent
+  // calls `bus hard-restart` from Tier 2) causes the new session to boot, see the
+  // old high %, and fire Tier 2 again — producing the 6-restarts-in-110s loop.
+  try {
+    writeFileSync(
+      join(paths.stateDir, 'context_status.json'),
+      JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }),
+      'utf-8',
+    );
+  } catch { /* non-fatal — FastChecker will skip on missing file */ }
+
   // Append to restarts.log
   ensureDir(paths.logDir);
   const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
