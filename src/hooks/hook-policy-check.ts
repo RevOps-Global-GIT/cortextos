@@ -65,13 +65,22 @@ function checkP1(command: string, agent: string): void {
 function checkP2(command: string, agent: string): void {
   // Strip heredoc content — everything from <<'MARKER' or <<MARKER onward.
   // This prevents "git push" in commit message bodies from triggering P2.
-  const skeleton = command.replace(/<<['"]?\w+['"]?[\s\S]*/g, '');
+  let skeleton = command.replace(/<<['"]?\w+['"]?[\s\S]*/g, '');
 
-  // Only check the command skeleton for git push
-  if (!/git push/.test(skeleton)) return;
+  // Strip double-quoted and single-quoted strings so that "git push" appearing
+  // inside --body "..." arguments or other quoted values is ignored.
+  skeleton = skeleton.replace(/"[^"\\]*(?:\\.[^"\\]*)*"/g, '""');
+  skeleton = skeleton.replace(/'[^'\\]*(?:\\.[^'\\]*)*'/g, "''");
 
-  // Allow if 'fork' is the explicit remote in the skeleton
-  if (/git push\s+fork/.test(skeleton)) return;
+  // Only check the skeleton when "git push" appears at a command boundary:
+  // start-of-string, after &&, ||, ;, |, (, or newline — optionally with whitespace.
+  // This prevents "git push" mentioned inside arguments from triggering the check.
+  const GIT_PUSH = /(?:^|&&|\|\||;|\||\(|\n)\s*git push/;
+  if (!GIT_PUSH.test(skeleton)) return;
+
+  // Allow if 'fork' is the explicit remote.
+  // Flags like -u, --set-upstream, --force-with-lease may appear before the remote name.
+  if (/git push(?:\s+--?\S+)*\s+fork/.test(skeleton)) return;
 
   // Allow --delete on any remote (branch deletion is low-risk)
   if (/git push\s+\S+\s+--delete/.test(skeleton) || /git push\s+--delete/.test(skeleton)) return;
