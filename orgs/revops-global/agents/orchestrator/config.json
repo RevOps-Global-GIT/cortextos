@@ -51,7 +51,8 @@
       "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator — compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
     }
   ],
-  "ctx_autoreset_threshold": 90,
+  "ctx_handoff_threshold": 88,
+  "ctx_autoreset_threshold": 92,
   "ecosystem": {
     "local_version_control": {
       "enabled": true
