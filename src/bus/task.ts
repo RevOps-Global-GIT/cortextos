@@ -250,13 +250,17 @@ export function checkTaskDependencies(
  * cross-org assignment required a manual workaround dance where the filer
  * ran update/complete on behalf of the assignee.
  *
- * This helper fixes that by using a two-tier lookup:
+ * This helper fixes that by using a three-tier lookup:
  *
  *   1. Fast path: check the caller's OWN org tasks dir first. Most tasks
  *      live there and this check pays zero scan cost when it hits.
  *   2. Fallback: scan every sibling org under `<ctxRoot>/orgs/*` for a
  *      matching task file. Only runs when the fast path missed, so
  *      same-org operations take no perf hit.
+ *   3. Instance-root fallback: check `<ctxRoot>/tasks/` for tasks created
+ *      without an org (e.g. by daemon-level agents that run at instance
+ *      root rather than under an org subdirectory). This prevents
+ *      complete-task from throwing "not found in any org" for system tasks.
  *
  * Task IDs are generated as `task_<epoch_ms>_<3digit_random>` so real
  * collisions are effectively impossible — but if the scan ever finds the
@@ -296,7 +300,12 @@ export function findTaskFile(paths: BusPaths, taskId: string): string | null {
     return null; // orgs/ missing or unreadable
   }
 
-  if (matches.length === 0) return null;
+  if (matches.length === 0) {
+    // Instance-root fallback: tasks created without an org land directly at
+    // <ctxRoot>/tasks/ rather than <ctxRoot>/orgs/<org>/tasks/.
+    const instanceRoot = join(paths.ctxRoot, 'tasks', `${taskId}.json`);
+    return existsSync(instanceRoot) ? instanceRoot : null;
+  }
   if (matches.length > 1) {
     const orgList = matches.map((m) => m.org).join(', ');
     console.warn(
@@ -384,7 +393,7 @@ function appendTaskAudit(
       ts: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
       ...entry,
     };
-    appendFileSync(join(auditDir, `${taskId}.jsonl`), JSON.stringify(line) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    appendFileSync(join(auditDir, `${taskId}.jsonl`), JSON.stringify(line) + '\n', { encoding: 'utf-8', mode: 0o644 });
   } catch {
     // Never block a real operation on audit-log write failure.
   }
@@ -408,7 +417,14 @@ export function readTaskAudit(
   for (const line of readFileSync(path, 'utf-8').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    try { entries.push(JSON.parse(trimmed) as TaskAuditEntry); } catch { /* skip corrupt */ }
+    try {
+      const raw = JSON.parse(trimmed) as Record<string, unknown>;
+      // Entries written by external tools (e.g. monitor scripts) may omit
+      // `agent` or use `source` instead. Normalise to avoid downstream crashes
+      // from code that calls `entry.agent.padEnd()` without null-checking.
+      if (!raw['agent']) raw['agent'] = (raw['source'] as string | undefined) ?? 'unknown';
+      entries.push(raw as unknown as TaskAuditEntry);
+    } catch { /* skip corrupt */ }
   }
   return entries;
 }
@@ -876,7 +892,7 @@ export function compactTasks(
 
     if (!dryRun) {
       try {
-        appendFileSync(archivePath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+        appendFileSync(archivePath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o644 });
         unlinkSync(join(taskDir, `${task.id}.json`));
       } catch (err) {
         report.skipped.push({ id: task.id, reason: `archive write failed: ${err}` });

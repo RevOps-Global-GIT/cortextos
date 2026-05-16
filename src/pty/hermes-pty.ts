@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from 'fs';
+import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
@@ -16,6 +16,11 @@ const HERMES_BOOTSTRAP_PATTERN = '❯';
 // (NousResearch/hermes-agent issue #7316 — leaked markers corrupt input).
 const STARTUP_PROMPT_FILE = '.cortextos-startup.md';
 
+// Idle watcher: polls for ❯ and writes last_idle.flag so the daemon's
+// isIdle() check works for Hermes agents (which have no Claude Code Stop hook).
+const IDLE_POLL_INTERVAL_MS = 5_000;   // check every 5 s
+const IDLE_WRITE_DEBOUNCE_MS = 30_000; // write at most every 30 s
+
 /**
  * PTY wrapper for Hermes agents (NousResearch/hermes-agent, Python REPL).
  *
@@ -32,6 +37,9 @@ const STARTUP_PROMPT_FILE = '.cortextos-startup.md';
 export class HermesPTY extends AgentPTY {
   private startupPrompt: string = '';
   private agentDir: string;
+  private stateDir: string;
+  private lastIdleWrittenAt = 0;
+  private idleWatcherTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(env: CtxEnv, config: AgentConfig, logPath?: string) {
     super(env, config, logPath, HERMES_BOOTSTRAP_PATTERN);
@@ -41,6 +49,9 @@ export class HermesPTY extends AgentPTY {
       config.working_directory,
       (msg) => console.warn(`[hermes-pty:${env.agentName}] ${msg}`),
     );
+    // Compute state dir for last_idle.flag writes (mirrors hook-idle-flag.ts logic)
+    const instanceId = env.instanceId || 'default';
+    this.stateDir = join(homedir(), '.cortextos', instanceId, 'state', env.agentName);
   }
 
   /**
@@ -91,6 +102,9 @@ export class HermesPTY extends AgentPTY {
     // as soon as the PTY is set up, not when Hermes is ready. We schedule
     // the injection asynchronously so spawn() can return quickly.
     this.scheduleStartupInjection();
+    // Start background idle watcher to keep last_idle.flag current.
+    // Hermes has no Claude Code Stop hook, so we poll for ❯ instead.
+    this.startIdleWatcher();
   }
 
   /**
@@ -115,6 +129,39 @@ export class HermesPTY extends AgentPTY {
     this.waitForPromptThenInject().catch(err => {
       console.error(`[hermes-pty] Startup injection failed (non-fatal): ${err}`);
     });
+  }
+
+  /**
+   * Background idle watcher: writes last_idle.flag whenever Hermes is at the
+   * ❯ prompt, with a 30 s debounce to avoid thrashing.
+   *
+   * Without this, isIdle() in agent-process.ts always returns false after the
+   * first cron injection (last_idle.flag predates lastInjectedAt), causing the
+   * cron-scheduler to defer every subsequent cron by MAX_DEFER_MS (15 min) and
+   * making the effective heartbeat interval ~45 min instead of the configured
+   * 30 min.
+   *
+   * Claude Code agents handle this via the Stop hook (hook-idle-flag.ts).
+   * Hermes agents do not run Claude Code, so we replicate the same write here.
+   */
+  private startIdleWatcher(): void {
+    if (this.idleWatcherTimer !== null) return; // already running
+    const flagPath = join(this.stateDir, 'last_idle.flag');
+    this.idleWatcherTimer = setInterval(() => {
+      if (!this.isAlive()) {
+        clearInterval(this.idleWatcherTimer!);
+        this.idleWatcherTimer = null;
+        return;
+      }
+      if (!this.getOutputBuffer().isBootstrapped()) return; // ❯ not visible
+      const now = Date.now();
+      if (now - this.lastIdleWrittenAt < IDLE_WRITE_DEBOUNCE_MS) return; // debounce
+      try {
+        mkdirSync(this.stateDir, { recursive: true });
+        writeFileSync(flagPath, String(Math.floor(now / 1000)), 'utf-8');
+        this.lastIdleWrittenAt = now;
+      } catch { /* non-fatal — daemon still falls back to force-inject after MAX_DEFER_MS */ }
+    }, IDLE_POLL_INTERVAL_MS);
   }
 
   private async waitForPromptThenInject(timeoutMs = 30000): Promise<void> {

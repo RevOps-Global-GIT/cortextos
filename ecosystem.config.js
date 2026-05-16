@@ -11,6 +11,11 @@ const INSTANCE_ID = process.env.CTX_INSTANCE_ID || 'default';
 const CTX_ROOT = process.env.CTX_ROOT || path.join(os.homedir(), '.cortextos', INSTANCE_ID);
 const CTX_ORG = process.env.CTX_ORG || '';
 
+// RGOS L2 voice scaffold — separate project with its own node_modules.
+// Override RGOS_VOICE_SCAFFOLD_DIR if the scaffold lives elsewhere.
+const VOICE_SCAFFOLD_DIR = process.env.RGOS_VOICE_SCAFFOLD_DIR ||
+  path.join(os.homedir(), 'work', 'rgos-l2-voice-scaffold');
+
 module.exports = {
   apps: [
     {
@@ -46,6 +51,37 @@ module.exports = {
       // fleet-wide outage.
       max_restarts: 10,
       restart_delay: 5000,
+      autorestart: true,
+    },
+    {
+      // RGOS L2 voice worker — LiveKit agents process that handles voice rooms.
+      // Runs from VOICE_SCAFFOLD_DIR so its node_modules (@livekit/agents, etc.)
+      // are resolved correctly. The scaffold is a separate project at
+      // ~/work/rgos-l2-voice-scaffold (override via RGOS_VOICE_SCAFFOLD_DIR).
+      //
+      // Required env vars (read from shell environment at `pm2 start/reload` time):
+      //   LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET  — LiveKit cloud
+      //   OPENAI_API_KEY                                      — LLM (gpt-4.1-mini)
+      //   DEEPGRAM_API_KEY                                    — STT + TTS (nova-3 / aura-2)
+      //
+      // To update the worker after rebuilding the scaffold:
+      //   cd ~/work/rgos-l2-voice-scaffold && npm run build
+      //   pm2 restart livekit-agent-worker
+      name: 'livekit-agent-worker',
+      script: path.join(VOICE_SCAFFOLD_DIR, 'dist', 'voice', 'livekit-agent.cjs'),
+      args: 'start',
+      cwd: VOICE_SCAFFOLD_DIR,
+      env: {
+        LIVEKIT_URL: process.env.LIVEKIT_URL || '',
+        LIVEKIT_API_KEY: process.env.LIVEKIT_API_KEY || '',
+        LIVEKIT_API_SECRET: process.env.LIVEKIT_API_SECRET || '',
+        OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
+        DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY || '',
+        LIVEKIT_AGENT_NAME: process.env.LIVEKIT_AGENT_NAME || 'cortextos-agent',
+        LIVEKIT_ROOM_NAME: process.env.LIVEKIT_ROOM_NAME || 'rgos-l2-voice',
+      },
+      max_restarts: 5,
+      restart_delay: 10000,
       autorestart: true,
     },
   ],

@@ -296,6 +296,7 @@ describe('AgentManager.discoverAndStart - unscaffolded agent dir guard', () => {
   });
 });
 
+
 describe('AgentManager Telegram poller preference', () => {
   let testDir: string;
   let ctxRoot: string;

@@ -1,7 +1,10 @@
 // cortextOS Dashboard - Analytics data queries
 // Aggregated metrics for charts on the analytics page.
 
+import fs from 'fs';
+import path from 'path';
 import { db } from '@/lib/db';
+import { getAllAgents, getFrameworkRoot } from '@/lib/config';
 import type { AgentStat } from '@/components/analytics/agent-effectiveness';
 
 /**
@@ -38,8 +41,24 @@ export function getTaskThroughput(
   }
 }
 
+/** Returns true if the agent's config.json has enabled: false */
+function isAgentDisabled(agentName: string, orgName: string): boolean {
+  try {
+    const frameworkRoot = getFrameworkRoot();
+    const configPath = path.join(frameworkRoot, 'orgs', orgName, 'agents', agentName, 'config.json');
+    if (!fs.existsSync(configPath)) return false;
+    const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    return cfg.enabled === false;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Get per-agent effectiveness stats.
+ * Includes ALL heartbeat-registered and filesystem-discovered enabled agents,
+ * showing 0 done / 0% rate for agents with no completed tasks rather than
+ * hiding them from the panel.
  */
 export function getAgentEffectiveness(org?: string): AgentStat[] {
   const conditions: string[] = [];
@@ -101,7 +120,6 @@ export function getAgentEffectiveness(org?: string): AgentStat[] {
       if (!trendMap.has(row.name)) {
         trendMap.set(row.name, new Array(7).fill(0));
       }
-      // Figure out which index (0-6) this date falls into
       const dayDiff = Math.floor(
         (Date.now() - new Date(row.date).getTime()) / (86400 * 1000),
       );
@@ -110,13 +128,39 @@ export function getAgentEffectiveness(org?: string): AgentStat[] {
       arr[idx] = row.count;
     }
 
-    return rows.map((row) => ({
-      name: row.name,
-      completionRate: row.total > 0 ? (row.completed / row.total) * 100 : 0,
-      errorCount: errorMap.get(row.name) ?? 0,
-      tasksCompleted: row.completed,
-      recentTrend: trendMap.get(row.name) ?? [0, 0, 0, 0, 0, 0, 0],
-    }));
+    const statsMap = new Map(
+      rows.map((row) => [
+        row.name,
+        {
+          name: row.name,
+          completionRate: row.total > 0 ? (row.completed / row.total) * 100 : 0,
+          errorCount: errorMap.get(row.name) ?? 0,
+          tasksCompleted: row.completed,
+          recentTrend: trendMap.get(row.name) ?? [0, 0, 0, 0, 0, 0, 0],
+        } satisfies AgentStat,
+      ]),
+    );
+
+    // Merge in all enabled agents that have no tasks yet — show them with 0 stats
+    const EXCLUDED_NAMES = new Set(['human', 'dashboard', 'orchestrator', 'user']);
+    for (const { name, org: agentOrg } of getAllAgents()) {
+      if (statsMap.has(name)) continue;
+      if (EXCLUDED_NAMES.has(name)) continue;
+      if (org && agentOrg && agentOrg !== org) continue;
+      if (isAgentDisabled(name, agentOrg || org || '')) continue;
+      statsMap.set(name, {
+        name,
+        completionRate: 0,
+        errorCount: 0,
+        tasksCompleted: 0,
+        recentTrend: [0, 0, 0, 0, 0, 0, 0],
+      });
+    }
+
+    // Sort: most tasks completed first, then alphabetical for ties
+    return Array.from(statsMap.values()).sort(
+      (a, b) => b.tasksCompleted - a.tasksCompleted || a.name.localeCompare(b.name),
+    );
   } catch {
     return [];
   }

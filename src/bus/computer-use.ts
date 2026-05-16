@@ -25,6 +25,12 @@
  *   plugin (screen capture, mouse, macOS GUI) fail fast with a clear error —
  *   running them locally would silently degrade without display access.
  *
+ * Orgo-first gate:
+ *   Mac SSH is now a fallback path, not the default path for browser/UI work.
+ *   Calls targeting Greg's Mac must include a recent (<10 minutes) failed Orgo
+ *   lease attempt artifact via --orgo-failure-artifact or
+ *   CORTEXTOS_ORGO_FAILURE_ARTIFACT before SSH is attempted.
+ *
  * Notes on Computer Use via SSH:
  *   Screen-capture and mouse tools require a macOS display session. When invoked
  *   over SSH, those specific calls fail gracefully and Codex falls back to shell
@@ -34,7 +40,7 @@
  */
 
 import { execFileSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 
 /**
  * Shell-safe single-quote escape for a string value used inside a remote
@@ -86,6 +92,8 @@ export interface ComputerUseOptions {
   dispatchScript?: string;
   /** Disable localhost codex exec fallback when Mac SSH is unreachable (default: fallback enabled) */
   noFallback?: boolean;
+  /** Path to recent failed Orgo lease attempt artifact required before Mac SSH fallback */
+  orgoFailureArtifact?: string;
 }
 
 export interface ComputerUseResult {
@@ -100,6 +108,8 @@ export interface ComputerUseResult {
 const DEFAULT_SSH_HOST = 'gregs-mac';
 const DEFAULT_DISPATCH_SCRIPT = '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh';
 const DEFAULT_MAC_CODEX_BIN = '/Applications/Codex.app/Contents/Resources/codex';
+const GREGS_MAC_TAILSCALE_IP = '100.84.86.6';
+const ORGO_FAILURE_ARTIFACT_MAX_AGE_MS = 10 * 60 * 1000;
 
 /**
  * Patterns that indicate an SSH connection-level failure (not a task failure).
@@ -120,6 +130,35 @@ const SSH_CONNECTION_ERROR_PATTERNS = [
 
 function isSshConnectionError(msg: string): boolean {
   return SSH_CONNECTION_ERROR_PATTERNS.some((re) => re.test(msg));
+}
+
+function isMacSshHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return normalized === DEFAULT_SSH_HOST || normalized === GREGS_MAC_TAILSCALE_IP;
+}
+
+function validateRecentOrgoFailureArtifact(artifactPath?: string): string | null {
+  if (!artifactPath) {
+    return 'Mac SSH fallback blocked — provide --orgo-failure-artifact <path> pointing to a failed Orgo lease attempt from the last 10 minutes.';
+  }
+
+  try {
+    const stat = statSync(artifactPath);
+    if (!stat.isFile()) {
+      return `Mac SSH fallback blocked — Orgo failure artifact is not a file: ${artifactPath}`;
+    }
+
+    const ageMs = Date.now() - stat.mtimeMs;
+    if (ageMs > ORGO_FAILURE_ARTIFACT_MAX_AGE_MS) {
+      const ageMinutes = Math.round(ageMs / 60_000);
+      return `Mac SSH fallback blocked — Orgo failure artifact is ${ageMinutes} minutes old; maximum age is 10 minutes: ${artifactPath}`;
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return `Mac SSH fallback blocked — cannot read Orgo failure artifact ${artifactPath}: ${msg}`;
+  }
+
+  return null;
 }
 
 function resolveLocalCodexBin(): string {
@@ -186,6 +225,19 @@ export async function computerUse(
   const dispatchScript = opts.dispatchScript ?? DEFAULT_DISPATCH_SCRIPT;
   const timeoutSec = opts.timeout ?? 300;
   const start = Date.now();
+  const orgoFailureArtifact = opts.orgoFailureArtifact ?? process.env.CORTEXTOS_ORGO_FAILURE_ARTIFACT;
+
+  if (isMacSshHost(sshHost)) {
+    const artifactError = validateRecentOrgoFailureArtifact(orgoFailureArtifact);
+    if (artifactError) {
+      return {
+        ok: false,
+        error: artifactError,
+        durationMs: Date.now() - start,
+        usedFallback: false,
+      };
+    }
+  }
 
   // Build the remote command with base64-encoded prompt (see buildRemoteCommand).
   const remoteCmd = buildRemoteCommand(dispatchScript, opts, prompt);
@@ -194,8 +246,9 @@ export async function computerUse(
   //   StrictHostKeyChecking=accept-new — TOFU semantics (accepts new host keys,
   //     rejects changed ones); safer than =no which silently accepts MITM keys.
   //   ServerAliveInterval/CountMax — detect dead connections after ~60s instead
-  //     of hanging silently for the full (timeoutSec+30) wall-clock window.
+  //     of hanging silently for the full timeoutSec wall-clock window.
   const sshArgs = [
+    '-n',  // do not read from stdin — prevents codex exec from blocking on piped stdin
     '-o', 'StrictHostKeyChecking=accept-new',
     '-o', 'ConnectTimeout=10',
     '-o', 'ServerAliveInterval=30',
@@ -206,7 +259,7 @@ export async function computerUse(
 
   try {
     const output = execFileSync('ssh', sshArgs, {
-      timeout: (timeoutSec + 30) * 1000, // extra 30s for SSH overhead
+      timeout: timeoutSec * 1000, // honour caller's --timeout exactly
       encoding: 'utf-8',
       maxBuffer: 10 * 1024 * 1024,
     });
@@ -217,7 +270,28 @@ export async function computerUse(
       durationMs: Date.now() - start,
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const errObj = err as NodeJS.ErrnoException;
+    const msg = errObj instanceof Error ? errObj.message : String(err);
+
+    // Node execFileSync fires ETIMEDOUT when the caller-specified timeout expires.
+    // This is a clean timeout, not an SSH connection error — return immediately
+    // with a descriptive message so callers can distinguish timeout from failure.
+    if (errObj.code === 'ETIMEDOUT' || msg.includes('ETIMEDOUT')) {
+      // Best-effort: kill orphaned codex-dispatch.sh + codex exec on the remote host.
+      // Non-fatal — if SSH is unavailable the orphans will die when the Mac session ends.
+      try {
+        execFileSync('ssh', [
+          '-n', '-o', 'ConnectTimeout=5', '-o', 'StrictHostKeyChecking=accept-new', sshHost,
+          'pkill -f "codex-dispatch.sh" 2>/dev/null; pkill -f "codex exec --dangerously" 2>/dev/null; true',
+        ], { timeout: 8_000, encoding: 'utf-8' });
+      } catch { /* non-fatal */ }
+
+      return {
+        ok: false,
+        error: `computer-use timed out after ${timeoutSec}s — remote codex exec may still be running on ${sshHost}`,
+        durationMs: Date.now() - start,
+      };
+    }
 
     // Only attempt fallback on connection-level SSH failures
     if (!isSshConnectionError(msg)) {

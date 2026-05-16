@@ -12,7 +12,8 @@
 #   --force            Re-ingest even if already indexed
 #   --instance ID      Instance ID (default: default)
 #
-# Env: CTX_ORG, CTX_AGENT_NAME, CTX_INSTANCE_ID, CTX_FRAMEWORK_ROOT, GEMINI_API_KEY
+# Env: CTX_ORG, CTX_AGENT_NAME, CTX_INSTANCE_ID, CTX_FRAMEWORK_ROOT,
+#      OPENAI_API_KEY, GEMINI_API_KEY, MMRAG_EMBEDDING_PROVIDER
 
 set -euo pipefail
 
@@ -75,14 +76,14 @@ CHROMADB_DIR="$KB_ROOT/chromadb"
 VENV_DIR="$FRAMEWORK_ROOT/knowledge-base/venv"
 MMRAG_PY="$FRAMEWORK_ROOT/knowledge-base/scripts/mmrag.py"
 
-# Source org secrets for GEMINI_API_KEY
+# Source org secrets for embedding/media API keys.
 SECRETS_FILE="$FRAMEWORK_ROOT/orgs/$ORG/secrets.env"
 if [[ -f "$SECRETS_FILE" ]]; then
   set -o allexport && source "$SECRETS_FILE" && set +o allexport
 fi
 
-if [[ -z "${GEMINI_API_KEY:-}" ]]; then
-  echo "ERROR: GEMINI_API_KEY not set. Add it to orgs/$ORG/secrets.env"
+if [[ -z "${OPENAI_API_KEY:-}" && -z "${GEMINI_API_KEY:-}" ]]; then
+  echo "ERROR: no embedding API key set. Add OPENAI_API_KEY or GEMINI_API_KEY to orgs/$ORG/secrets.env"
   exit 1
 fi
 
@@ -106,7 +107,11 @@ fi
 export MMRAG_DIR="$KB_ROOT"
 export MMRAG_CHROMADB_DIR="$CHROMADB_DIR"
 export MMRAG_CONFIG="$CONFIG_FILE"
-export GEMINI_API_KEY
+export OPENAI_API_KEY="${OPENAI_API_KEY:-}"
+export GEMINI_API_KEY="${GEMINI_API_KEY:-}"
+export MMRAG_EMBEDDING_PROVIDER="${MMRAG_EMBEDDING_PROVIDER:-}"
+export MMRAG_EMBEDDING_MODEL="${MMRAG_EMBEDDING_MODEL:-}"
+export MMRAG_EMBEDDING_DIMENSIONS="${MMRAG_EMBEDDING_DIMENSIONS:-}"
 
 echo "Ingesting into collection: $COLLECTION"
 for path in "${PATHS[@]}"; do

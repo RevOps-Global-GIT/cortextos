@@ -31,6 +31,18 @@ const INSTANCE_ID = process.env.CTX_INSTANCE_ID || "default";
 const CTX_ROOT = path.join(os.homedir(), ".cortextos", INSTANCE_ID);
 const STATE_DIR = path.join(CTX_ROOT, "state");
 const TASKS_DIR = path.join(CTX_ROOT, "tasks");
+// Org-scoped task directories (e.g. orgs/revops-global/tasks) are the canonical
+// store for agents running with CTX_ORG set.  We collect all of them so the
+// vm-sync payload includes org-scoped tasks alongside root-level tasks.
+const ORG_TASKS_DIRS = (() => {
+  const orgsDir = path.join(CTX_ROOT, "orgs");
+  if (!fs.existsSync(orgsDir)) return [];
+  try {
+    return fs.readdirSync(orgsDir)
+      .map((org) => path.join(orgsDir, org, "tasks"))
+      .filter((d) => fs.existsSync(d));
+  } catch { return []; }
+})();
 const EVENTS_DIR = path.join(CTX_ROOT, "analytics", "events");
 const LOGS_DIR = path.join(CTX_ROOT, "logs");
 const WATERMARK_FILE = path.join(STATE_DIR, "vm-sync-watermark.json");
@@ -266,35 +278,37 @@ function readHeartbeat(agentName) {
 
 /** Read all tasks and find transitions since watermark */
 function readTaskTransitions(sinceTsStr) {
-  // Group transitions by agent
+  // Group transitions by agent — scan root tasks dir + all org-scoped dirs
   const byAgent = {};
-  if (!fs.existsSync(TASKS_DIR)) return byAgent;
-
   const sinceTs = new Date(sinceTsStr).getTime();
-  const files = fs
-    .readdirSync(TASKS_DIR)
-    .filter((f) => f.startsWith("task_") && f.endsWith(".json"));
+  const allDirs = [TASKS_DIR, ...ORG_TASKS_DIRS].filter(fs.existsSync);
 
-  for (const file of files) {
-    const task = safeReadJson(path.join(TASKS_DIR, file));
-    if (!task) continue;
+  for (const dir of allDirs) {
+    const files = fs
+      .readdirSync(dir)
+      .filter((f) => f.startsWith("task_") && f.endsWith(".json"));
 
-    const updatedAt = task.updated_at || task.created_at;
-    if (!updatedAt) continue;
+    for (const file of files) {
+      const task = safeReadJson(path.join(dir, file));
+      if (!task) continue;
 
-    const updatedTs = new Date(updatedAt).getTime();
-    if (updatedTs <= sinceTs) continue;
+      const updatedAt = task.updated_at || task.created_at;
+      if (!updatedAt) continue;
 
-    const agent = task.assigned_to || "unknown";
-    if (!byAgent[agent]) byAgent[agent] = [];
+      const updatedTs = new Date(updatedAt).getTime();
+      if (updatedTs <= sinceTs) continue;
 
-    byAgent[agent].push({
-      task_id: task.id,
-      from_status: null, // cortextOS tasks don't store previous status
-      to_status: task.status || "unknown",
-      at: updatedAt,
-      note: task.title ? task.title.slice(0, 120) : null,
-    });
+      const agent = task.assigned_to || "unknown";
+      if (!byAgent[agent]) byAgent[agent] = [];
+
+      byAgent[agent].push({
+        task_id: task.id,
+        from_status: null, // cortextOS tasks don't store previous status
+        to_status: task.status || "unknown",
+        at: updatedAt,
+        note: task.title ? task.title.slice(0, 120) : null,
+      });
+    }
   }
 
   return byAgent;
@@ -303,26 +317,28 @@ function readTaskTransitions(sinceTsStr) {
 /** Count tasks completed/failed today per agent */
 function readTaskCountsToday() {
   const byAgent = {};
-  if (!fs.existsSync(TASKS_DIR)) return byAgent;
-
   const today = todayDateStr();
-  const files = fs
-    .readdirSync(TASKS_DIR)
-    .filter((f) => f.startsWith("task_") && f.endsWith(".json"));
+  const allDirs = [TASKS_DIR, ...ORG_TASKS_DIRS].filter(fs.existsSync);
 
-  for (const file of files) {
-    const task = safeReadJson(path.join(TASKS_DIR, file));
-    if (!task) continue;
+  for (const dir of allDirs) {
+    const files = fs
+      .readdirSync(dir)
+      .filter((f) => f.startsWith("task_") && f.endsWith(".json"));
 
-    const completedAt = task.completed_at || task.updated_at || "";
-    if (!completedAt.startsWith(today)) continue;
+    for (const file of files) {
+      const task = safeReadJson(path.join(dir, file));
+      if (!task) continue;
 
-    const agent = task.assigned_to || "unknown";
-    if (!byAgent[agent]) byAgent[agent] = { completed: 0, failed: 0 };
+      const completedAt = task.completed_at || task.updated_at || "";
+      if (!completedAt.startsWith(today)) continue;
 
-    if (task.status === "completed") byAgent[agent].completed++;
-    else if (task.status === "failed" || task.status === "cancelled")
-      byAgent[agent].failed++;
+      const agent = task.assigned_to || "unknown";
+      if (!byAgent[agent]) byAgent[agent] = { completed: 0, failed: 0 };
+
+      if (task.status === "completed") byAgent[agent].completed++;
+      else if (task.status === "failed" || task.status === "cancelled")
+        byAgent[agent].failed++;
+    }
   }
 
   return byAgent;

@@ -9,6 +9,14 @@ import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTa
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
+import { pollWatchdog } from '../bus/watchdog.js';
+import { runPrStuckWatcher } from '../bus/pr-stuck-watcher.js';
+import { runDocDriftChecker } from '../bus/doc-drift-checker.js';
+import { runGoalProgressProbe } from '../bus/goal-progress-probe.js';
+import { runHeartbeatHealthWatch } from '../bus/heartbeat-health-watch.js';
+import { runCustomerSurfaceQa } from '../bus/customer-surface-qa.js';
+import { runCodebaseScan } from '../bus/codebase-scan.js';
+import { runSecurityAudit } from '../bus/security-audit.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
@@ -30,10 +38,11 @@ import { generateSkill } from '../bus/generate-skill.js';
 import { syncSkills } from '../bus/sync-skills.js';
 import { runWorkflow } from '../bus/run-workflow.js';
 import { computerUse } from '../bus/computer-use.js';
+import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeaseStatus, releaseOrgoLease } from '../bus/orgo-lease.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveEnv } from '../utils/env.js';
+import { resolveEnv, applySecretsToEnv } from '../utils/env.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
@@ -76,7 +85,13 @@ function checkDeliverableRequirement(taskId: string, frameworkRoot: string, org:
 }
 
 export const busCommand = new Command('bus')
-  .description('Bus commands for agent messaging, tasks, and events');
+  .description('Bus commands for agent messaging, tasks, and events')
+  .hook('preAction', () => {
+    // Load org secrets.env + agent .env into process.env so all bus modules
+    // can access SUPABASE_RGOS_URL, SUPABASE_RGOS_SERVICE_KEY, etc. without
+    // requiring the parent shell to manually source them.
+    applySecretsToEnv(resolveEnv());
+  });
 
 // ---------------------------------------------------------------------------
 // Reply-mode helpers
@@ -185,6 +200,16 @@ function isRegisteredAgent(frameworkRoot: string, target: string): boolean {
   return false;
 }
 
+function parseNonNegativeNumber(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function isLocalVoiceEndpoint(target: string): boolean {
+  return target === 'voice-orch-talk' || target.startsWith('voice-session-');
+}
+
 // Extensions that are safe to publish to {ctxRoot}/dashboard-uploads so the
 // dashboard bus channel can link or render them. Media types render inline
 // (image/audio/video); document types render as a download chip. We avoid
@@ -258,7 +283,7 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
-    const agentExists = isRegisteredAgent(projectRoot, to);
+    const agentExists = isRegisteredAgent(projectRoot, to) || isLocalVoiceEndpoint(to);
     if (!agentExists) {
       // If target isn't a known agent, it's the user (dashboard/Telegram identity).
       // Fall through to user-destination handling below — no warning.
@@ -530,7 +555,8 @@ busCommand
     for (const e of entries) {
       const transition = e.from && e.to ? `${e.from} -> ${e.to}` : e.to || '';
       const note = e.note ? ` | ${e.note}` : '';
-      console.log(`  ${e.ts}  ${e.event.padEnd(8)}  ${e.agent.padEnd(16)}  ${transition}${note}`);
+      const agent = (e.agent ?? 'unknown').padEnd(16);
+      console.log(`  ${e.ts}  ${e.event.padEnd(8)}  ${agent}  ${transition}${note}`);
     }
   });
 
@@ -755,6 +781,118 @@ busCommand
   });
 
 busCommand
+  .command('orgo-lease-claim')
+  .description('Claim an Orgo fleet node lease in Supabase orch_fleet_nodes')
+  .requiredOption('--node <node_key>', 'Orgo node_key to claim')
+  .requiredOption('--focus <text>', 'Current focus/workload for the lease')
+  .option('--holder <agent>', 'Lease holder (defaults to CTX_AGENT_NAME)')
+  .option('--preconditions <json>', 'Required app/session/tool preconditions as JSON object', '{}')
+  .option('--artifact <text>', 'Expected artifact/deliverable')
+  .option('--release <text>', 'Release condition')
+  .option('--escalation <text>', 'Escalation rule')
+  .option('--ttl <minutes>', 'Artifact TTL / lease expiry in minutes', '60')
+  .option('--value <text>', 'Throughput/cost/value signal')
+  .option('--task <id>', 'Linked task id')
+  .option('--force', 'Claim even when node is already busy or leased')
+  .option('--json', 'Emit JSON')
+  .action(async (opts: { node: string; focus: string; holder?: string; preconditions?: string; artifact?: string; release?: string; escalation?: string; ttl?: string; value?: string; task?: string; force?: boolean; json?: boolean }) => {
+    try {
+      const result = await claimOrgoLease({
+        node: opts.node,
+        focus: opts.focus,
+        holder: opts.holder,
+        preconditions: opts.preconditions,
+        artifact: opts.artifact,
+        release: opts.release,
+        escalation: opts.escalation,
+        ttl: parseInt(opts.ttl ?? '60', 10),
+        value: opts.value,
+        task: opts.task,
+        force: opts.force ?? false,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Claimed ${result.node.node_key} lease ${result.lease.lease_id}`);
+        console.log(`  holder: ${result.lease.holder}`);
+        console.log(`  focus: ${result.lease.focus}`);
+        console.log(`  expires_at: ${result.lease.expires_at}`);
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('orgo-lease-release')
+  .description('Release an active Orgo fleet node lease')
+  .option('--lease <uuid>', 'Lease id to release')
+  .option('--node <node_key>', 'Node key whose active lease should be released')
+  .option('--result <text>', 'Result or produced artifact summary')
+  .option('--json', 'Emit JSON')
+  .action(async (opts: { lease?: string; node?: string; result?: string; json?: boolean }) => {
+    if (!opts.lease && !opts.node) {
+      console.error('Either --lease or --node is required');
+      process.exit(1);
+    }
+    try {
+      const result = await releaseOrgoLease({ lease: opts.lease, node: opts.node, result: opts.result });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Released ${result.node.node_key} lease ${result.released.lease_id}`);
+        if (result.released.result) console.log(`  result: ${result.released.result}`);
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('orgo-lease-status')
+  .description('Show Orgo fleet lease status from Supabase orch_fleet_nodes')
+  .option('--node <node_key>', 'Filter to a node')
+  .option('--status <status>', 'busy, idle, or all', 'all')
+  .option('--json', 'Emit JSON')
+  .action(async (opts: { node?: string; status?: string; json?: boolean }) => {
+    if (opts.status && !['busy', 'idle', 'all'].includes(opts.status)) {
+      console.error('--status must be one of: busy, idle, all');
+      process.exit(1);
+    }
+    try {
+      const nodes = await listOrgoLeaseStatus({ node: opts.node, status: opts.status as 'busy' | 'idle' | 'all' });
+      console.log(opts.json ? JSON.stringify(nodes, null, 2) : formatLeaseStatus(nodes));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('orgo-lease-watchdog')
+  .description('List expired Orgo leases that need escalation')
+  .option('--json', 'Emit JSON')
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const expired = await checkOrgoLeaseWatchdog();
+      if (opts.json) {
+        console.log(JSON.stringify(expired, null, 2));
+      } else if (expired.length === 0) {
+        console.log('No expired Orgo leases.');
+      } else {
+        for (const item of expired) {
+          console.log(`${item.node_key} expired at ${item.expired_at}: ${item.lease.escalation_rule}`);
+        }
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
   .command('read-all-heartbeats')
   .description('Read heartbeat files for all agents in the system')
   .option('--format <fmt>', 'Output format: json or text', 'text')
@@ -780,6 +918,381 @@ busCommand
       console.log(`${label} (${hb.org}) — ${hb.status}${staleFlag} — last seen ${hb.last_heartbeat}`);
       if (hb.current_task) console.log(`  task: ${hb.current_task}`);
     }
+  });
+
+busCommand
+  .command('pr-stuck-watcher')
+  .description('Scan watched GitHub repositories for open PRs that are stuck past age thresholds')
+  .option('--repos <repos>', 'Comma-separated repo list. Defaults to grandamenium/cortextos + RevOps-Global-GIT/*')
+  .option('--stuck-hours <hours>', 'Report open PRs older than this many hours', '2')
+  .option('--alert-hours <hours>', 'Notify orchestrator when PRs exceed this many hours', '24')
+  .option('--notify-agent <agent>', 'Agent to notify when alert threshold is exceeded', 'orchestrator')
+  .option('--auto-merge', 'Auto-merge eligible stuck PRs under RevOps blanket policy')
+  .option('--create-tasks', 'Create local/RGOS tasks for stuck PRs that are not auto-merged')
+  .option('--dry-run', 'Do not send alert messages')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { repos?: string; stuckHours?: string; alertHours?: string; notifyAgent?: string; autoMerge?: boolean; createTasks?: boolean; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const result = runPrStuckWatcher(paths, env.agentName, env.org, {
+      repos: opts.repos ? opts.repos.split(',') : undefined,
+      stuckHours: parseNonNegativeNumber(opts.stuckHours, 2),
+      alertHours: parseNonNegativeNumber(opts.alertHours, 24),
+      outputDir,
+    });
+    const actions: Array<{ pr: string; action: string; ok: boolean; detail?: string }> = [];
+
+    for (const pr of result.stuckPrs) {
+      const prRef = `${pr.repo}#${pr.number}`;
+      if (!opts.dryRun && opts.autoMerge && pr.autoMergeEligible) {
+        try {
+          execFileSync('gh', ['pr', 'merge', String(pr.number), '--repo', pr.repo, '--squash', '--delete-branch'], { encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+          logEvent(paths, env.agentName, env.org, 'action', 'pr_stuck_watcher_auto_merged', 'info', { repo: pr.repo, number: pr.number, url: pr.url });
+          actions.push({ pr: prRef, action: 'auto_merge', ok: true });
+        } catch (err) {
+          actions.push({ pr: prRef, action: 'auto_merge', ok: false, detail: err instanceof Error ? err.message : String(err) });
+        }
+        continue;
+      }
+
+      if (!opts.dryRun && opts.createTasks) {
+        const title = `PR stuck: ${prRef} ${pr.title}`;
+        const existing = listTasks(paths).some(task => task.title === title && !['completed', 'cancelled'].includes(task.status));
+        if (!existing) {
+          const taskId = createTask(paths, env.agentName, env.org, title, {
+            description: `PR ${pr.url} has been idle for ${pr.updatedHoursAgo.toFixed(1)}h. CI: ${pr.ciState}. Merge: ${pr.mergeState}. Last review: ${pr.lastReview}.`,
+            assignee: pr.author === 'app/github-actions' ? 'orchestrator' : env.agentName,
+            priority: 'normal',
+            project: 'maintenance',
+            meta: { source: 'pr-stuck-watcher', repo: pr.repo, pr_number: pr.number, url: pr.url },
+          });
+          actions.push({ pr: prRef, action: 'create_task', ok: true, detail: taskId });
+        } else {
+          actions.push({ pr: prRef, action: 'create_task', ok: true, detail: 'deduped_existing_task' });
+        }
+      }
+    }
+
+    if (!opts.dryRun && result.alertPrs.length > 0 && opts.notifyAgent) {
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
+      const sample = result.alertPrs.slice(0, 8).map(pr => `${pr.repo}#${pr.number} (${pr.ageHours.toFixed(1)}h)`).join(', ');
+      sendMessage(
+        targetPaths,
+        env.agentName,
+        opts.notifyAgent,
+        'high',
+        `PR-stuck watcher alert: ${result.alertPrs.length} PR(s) open >${result.alertThresholdHours}h. ${sample}. Report: ${result.reportPath || 'not written'}`,
+      );
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify({ ...result, actions }, null, 2));
+      return;
+    }
+
+    console.log(`Checked ${result.checkedRepos.length}/${result.watchedRepos.length} repos.`);
+    console.log(`Open PRs >${result.stuckThresholdHours}h: ${result.stuckPrs.length}`);
+    console.log(`Open PRs >${result.alertThresholdHours}h: ${result.alertPrs.length}`);
+    if (actions.length > 0) console.log(`Actions: ${actions.length}`);
+    if (result.reportPath) console.log(`Report: ${result.reportPath}`);
+    if (result.failedRepos.length > 0) {
+      console.log(`Repo errors: ${result.failedRepos.length}`);
+      for (const failure of result.failedRepos.slice(0, 10)) {
+        console.log(`- ${failure.repo}: ${failure.error.split('\n')[0]}`);
+      }
+    }
+  });
+
+busCommand
+  .command('doc-drift-checker')
+  .description('Compare cortextOS docs against actual project, skill, and cron structure')
+  .option('--threshold-lines <n>', 'Create a task when drift findings exceed this count', '5')
+  .option('--no-create-tasks', 'Write the report without creating a follow-up task')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { thresholdLines?: string; createTasks?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const threshold = Number(opts.thresholdLines ?? 5);
+    const report = runDocDriftChecker(paths, env.agentName, env.org, projectRoot, {
+      thresholdLines: Number.isFinite(threshold) && threshold >= 0 ? threshold : 5,
+      outputDir,
+      createTasks: opts.createTasks,
+    });
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    console.log(`Doc drift findings: ${report.findings.length}`);
+    console.log(`Threshold: ${report.thresholdLines}`);
+    console.log(`Task created: ${report.taskCreated ? report.taskId : 'no'}`);
+    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
+  });
+
+busCommand
+  .command('goal-progress-probe')
+  .description('Check whether each agent memory mentions its active goals in the last 24h')
+  .option('--notify-agent <agent>', 'Agent to notify when more than two agents appear stalled', 'orchestrator')
+  .option('--dry-run', 'Do not send stall notifications')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { notifyAgent?: string; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const result = runGoalProgressProbe(paths, env.agentName, env.org, projectRoot, { outputDir });
+
+    if (!opts.dryRun && result.stalledAgents.length > 2 && opts.notifyAgent) {
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
+      sendMessage(
+        targetPaths,
+        env.agentName,
+        opts.notifyAgent,
+        'normal',
+        `Goal-progress probe flagged ${result.stalledAgents.length} agents with no goal mentions in last 24h memory: ${result.stalledAgents.map(a => a.agent).join(', ')}. Report: ${result.reportPath || 'not written'}`,
+      );
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.log(`Agents checked: ${result.agentsChecked}`);
+    console.log(`Stalled agents: ${result.stalledAgents.length}`);
+    if (result.reportPath) console.log(`Report: ${result.reportPath}`);
+    if (result.memoryPath) console.log(`Memory: ${result.memoryPath}`);
+  });
+
+busCommand
+  .command('heartbeat-health-watch')
+  .description('Detect agents the daemon reports as running while their heartbeat is stale')
+  .option('--threshold-minutes <n>', 'Stale heartbeat threshold for running agents', '90')
+  .option('--restart', 'Attempt daemon restart for stale running agents')
+  .option('--notify-agent <agent>', 'Agent to notify when stale running agents are found', 'orchestrator')
+  .option('--dry-run', 'Do not send notifications or restart agents')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action(async (opts: { thresholdMinutes?: string; restart?: boolean; notifyAgent?: string; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const ipc = new IPCClient(env.instanceId);
+    const runningAgents = new Set<string>();
+    const status = await ipc.send({ type: 'status', source: 'heartbeat-health-watch' });
+    if (status.success && Array.isArray(status.data)) {
+      for (const item of status.data as Array<{ name?: string; status?: string }>) {
+        if (item.name && item.status === 'running') runningAgents.add(item.name);
+      }
+    }
+
+    const threshold = Number(opts.thresholdMinutes ?? 90);
+    const report = runHeartbeatHealthWatch(paths, env.agentName, env.org, projectRoot, runningAgents, {
+      thresholdMinutes: Number.isFinite(threshold) && threshold >= 1 ? threshold : 90,
+      outputDir,
+    });
+
+    const restartAttempts: Array<{ agent: string; success: boolean; error?: string }> = [];
+    if (!opts.dryRun && opts.restart) {
+      for (const agent of report.staleRunningAgents) {
+        try {
+          const response = await ipc.send({ type: 'restart-agent', agent: agent.agent, source: 'heartbeat-health-watch' });
+          restartAttempts.push({ agent: agent.agent, success: response.success, error: response.error });
+        } catch (err) {
+          restartAttempts.push({ agent: agent.agent, success: false, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    }
+
+    if (!opts.dryRun && report.staleRunningAgents.length > 0 && opts.notifyAgent) {
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
+      sendMessage(
+        targetPaths,
+        env.agentName,
+        opts.notifyAgent,
+        'high',
+        `Heartbeat-health watch found ${report.staleRunningAgents.length} running agent(s) with heartbeat >${report.thresholdMinutes}m stale: ${report.staleRunningAgents.map(a => a.agent).join(', ')}. Restart attempts: ${restartAttempts.length}. Report: ${report.reportPath || 'not written'}`,
+      );
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify({ ...report, restartAttempts }, null, 2));
+      return;
+    }
+
+    console.log(`Agents checked: ${report.agents.length}`);
+    console.log(`Stale running agents: ${report.staleRunningAgents.length}`);
+    if (restartAttempts.length > 0) console.log(`Restart attempts: ${restartAttempts.length}`);
+    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
+  });
+
+busCommand
+  .command('customer-surface-qa')
+  .description('Run customer-surface Playwright QA and create tasks for failures')
+  .option('--pages <pages>', 'Comma-separated hub pages to check. Defaults to core customer surfaces')
+  .option('--user <email>', 'Hub user email for QA session setup', 'greg@revopsglobal.com')
+  .option('--no-create-tasks', 'Write report without creating tasks for failing pages')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { pages?: string; user?: string; createTasks?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const report = runCustomerSurfaceQa(paths, env.agentName, env.org, projectRoot, {
+      pages: opts.pages ? opts.pages.split(',').map(page => page.trim()).filter(Boolean) : undefined,
+      user: opts.user,
+      outputDir,
+      createTasks: opts.createTasks,
+    });
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    console.log(`Pages checked: ${report.pages.length}`);
+    console.log(`Pages with failures: ${report.failures.length}`);
+    console.log(`Tasks created: ${report.taskIds.length}`);
+    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
+  });
+
+busCommand
+  .command('poll-watchdog')
+  .description('Check all agent heartbeats against their lease thresholds and emit alerts for expired agents')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .option('--lease <seconds>', 'Default lease threshold in seconds (overridden per-agent by config.json watchdog.lease_seconds)', String(14400))
+  .option('--restart', 'Auto soft-restart expired agents via daemon IPC')
+  .action(async (opts: { format?: string; lease?: string; restart?: boolean }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const defaultLeaseSeconds = Math.max(60, parseInt(opts.lease ?? '14400', 10) || 14400);
+
+    const results = pollWatchdog(paths, env.agentName, env.org, {
+      projectRoot: env.projectRoot,
+      defaultLeaseSeconds,
+    });
+
+    const expired = results.filter(r => r.expired);
+
+    if (opts.restart && expired.length > 0) {
+      const ipc = new IPCClient(env.ctxRoot);
+      for (const r of expired) {
+        try {
+          await ipc.send({ type: 'restart-agent', agent: r.agent, source: 'poll-watchdog' });
+          console.log(`Restart signal sent for ${r.agent}`);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Failed to restart ${r.agent}: ${msg}`);
+        }
+      }
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    if (results.length === 0) {
+      console.log('No agents found.');
+      return;
+    }
+
+    for (const r of results) {
+      const flag = r.expired ? ' [EXPIRED]' : ' [OK]';
+      const label = r.org ? `${r.agent} (${r.org})` : r.agent;
+      const ageMin = Math.round(r.age_seconds / 60);
+      const leaseMin = Math.round(r.lease_seconds / 60);
+      console.log(`${label}${flag} — last seen ${r.last_heartbeat} (${ageMin}m ago, lease ${leaseMin}m)`);
+    }
+    if (expired.length > 0) {
+      console.log(`\n${expired.length} agent(s) expired.`);
+    } else {
+      console.log('\nAll agents within lease.');
+    }
+  });
+
+busCommand
+  .command('codebase-scan')
+  .description('Scan src/ for TODO/FIXME/HACK/XXX markers and large files; write daily report and create RGOS tasks')
+  .option('--output <path>', 'Override output file path (default: agent output dir)')
+  .option('--dry-run', 'Print report path but do not create RGOS tasks')
+  .action(async (opts: { output?: string; dryRun?: boolean }) => {
+    const env = resolveEnv();
+    const today = new Date().toISOString().slice(0, 10);
+    const outputPath = opts.output ??
+      join(env.agentDir ?? join(env.projectRoot ?? env.frameworkRoot, 'orgs', env.org, 'agents', env.agentName),
+        'output', `${today}-codebase-scan.md`);
+
+    console.log(`[codebase-scan] Scanning ${env.frameworkRoot}/src ...`);
+    const result = runCodebaseScan(env.frameworkRoot, outputPath);
+    console.log(`[codebase-scan] Report written → ${outputPath}`);
+    console.log(`[codebase-scan] Hits: ${result.hits.length} markers, ${result.largeFiles.length} large files`);
+
+    if (!opts.dryRun && result.topActionable.length > 0) {
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      for (const item of result.topActionable) {
+        const taskId = createTask(paths, env.agentName, env.org, `[codebase-scan] ${item}`, {
+          description: `Auto-generated by codebase-scan loop on ${today}. See ${outputPath} for full report.`,
+          priority: 'low',
+        });
+        console.log(`[codebase-scan] Created task ${taskId}: ${item}`);
+        logEvent(paths, env.agentName, env.org, 'action', 'codebase_scan_task_created', 'info', { task_id: taskId });
+      }
+    }
+
+    logEvent(
+      resolvePaths(env.agentName, env.instanceId, env.org),
+      env.agentName, env.org, 'action', 'codebase_scan_complete', 'info',
+      { hits: result.hits.length, large_files: result.largeFiles.length, output: outputPath },
+    );
+  });
+
+busCommand
+  .command('security-audit')
+  .description('Run npm audit, write daily report, and create RGOS tasks for critical/high vulns with fixes')
+  .option('--output <path>', 'Override output file path (default: agent output dir)')
+  .option('--dry-run', 'Write report but do not create RGOS tasks')
+  .option('--cwd <dir>', 'Directory to audit (default: framework root)')
+  .action(async (opts: { output?: string; dryRun?: boolean; cwd?: string }) => {
+    const env = resolveEnv();
+    const auditCwd = opts.cwd ?? env.frameworkRoot;
+    const today = new Date().toISOString().slice(0, 10);
+    const outputPath = opts.output ??
+      join(env.agentDir ?? join(env.projectRoot ?? env.frameworkRoot, 'orgs', env.org, 'agents', env.agentName),
+        'output', `${today}-npm-audit.md`);
+
+    console.log(`[security-audit] Running npm audit in ${auditCwd} ...`);
+    const result = runSecurityAudit(auditCwd, outputPath);
+    console.log(`[security-audit] Report written → ${outputPath}`);
+    console.log(`[security-audit] Critical: ${result.criticalCount}, High: ${result.highCount}, Actionable: ${result.actionable.length}`);
+
+    if (!opts.dryRun && result.actionable.length > 0) {
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      for (const vuln of result.actionable) {
+        const fix = typeof vuln.fixAvailable === 'object'
+          ? `upgrade to ${vuln.fixAvailable.name}@${vuln.fixAvailable.version}`
+          : 'fix available';
+        const taskId = createTask(paths, env.agentName, env.org,
+          `[security] ${vuln.severity} vuln in ${vuln.name} — ${fix}`, {
+            description: `Detected by security-audit loop on ${today}. See ${outputPath}.`,
+            priority: vuln.severity === 'critical' ? 'high' : 'normal',
+          });
+        console.log(`[security-audit] Created task ${taskId}: ${vuln.name} (${vuln.severity})`);
+        logEvent(paths, env.agentName, env.org, 'action', 'security_vuln_task_created', 'info',
+          { task_id: taskId, package: vuln.name, severity: vuln.severity });
+      }
+    }
+
+    logEvent(
+      resolvePaths(env.agentName, env.instanceId, env.org),
+      env.agentName, env.org, 'action', 'security_audit_complete', 'info',
+      { critical: result.criticalCount, high: result.highCount, actionable: result.actionable.length, output: outputPath },
+    );
   });
 
 busCommand
@@ -1875,8 +2388,9 @@ busCommand
   .option('--scope <s>', 'Scope: shared, private, or all', 'all')
   .option('--top-k <n>', 'Number of results', '5')
   .option('--threshold <f>', 'Minimum similarity score (0-1)', '0.5')
+  .option('--no-embed', 'Skip embedding provider; use wiki-grep fallback only')
   .option('--json', 'Output raw JSON')
-  .action((question: string, opts: { org?: string; agent?: string; scope?: string; topK?: string; threshold?: string; json?: boolean }) => {
+  .action((question: string, opts: { org?: string; agent?: string; scope?: string; topK?: string; threshold?: string; noEmbed?: boolean; json?: boolean }) => {
     const env = resolveEnv();
     const org = opts.org || env.org;
     if (!org) {
@@ -1895,6 +2409,7 @@ busCommand
         threshold: parseFloat(opts.threshold || '0.5'),
         frameworkRoot: env.frameworkRoot || process.cwd(),
         instanceId: env.instanceId,
+        noEmbed: opts.noEmbed,
       },
     );
 
@@ -1957,68 +2472,40 @@ busCommand
       process.exit(1);
     }
 
-    const { execFileSync } = require('child_process');
-    const { existsSync, readFileSync } = require('fs');
+    const { execSync } = require('child_process');
+    const { existsSync } = require('fs');
     const { join: pjoin } = require('path');
     const { homedir: hdir } = require('os');
 
-    const frameworkRoot = env.frameworkRoot || process.cwd();
-    const instanceId = env.instanceId;
-    const kbRoot = pjoin(hdir(), '.cortextos', instanceId, 'orgs', org, 'knowledge-base');
-    const chromaDir = pjoin(kbRoot, 'chromadb');
-    const isWin = process.platform === 'win32';
-    const venvBin = isWin ? 'Scripts' : 'bin';
-    const pythonExe = isWin ? 'python.exe' : 'python3';
-    const pythonPath = pjoin(frameworkRoot, 'knowledge-base', 'venv', venvBin, pythonExe);
-    const mmragPath = pjoin(frameworkRoot, 'knowledge-base', 'scripts', 'mmrag.py');
+    const wikiDir = process.env.WIKI_PATH || pjoin(hdir(), 'work', 'team-brain');
+    if (!existsSync(wikiDir)) {
+      console.log('Collection        Count');
+      console.log('---------------- -----');
+      console.log('wiki-grep         0');
+      console.log('open-brain        0');
+      return;
+    }
 
-    // Load .env and secrets.env (same as bash `source`)
-    const envFiles = [
-      pjoin(frameworkRoot, '.env'),
-      pjoin(frameworkRoot, 'orgs', org, 'secrets.env'),
-    ];
-    const extraVars: Record<string, string> = {};
-    for (const ef of envFiles) {
-      if (existsSync(ef)) {
-        for (const line of readFileSync(ef, 'utf-8').split('\n')) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith('#')) continue;
-          const idx = trimmed.indexOf('=');
-          if (idx > 0) {
-            let val = trimmed.slice(idx + 1);
-            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-              val = val.slice(1, -1);
-            }
-            extraVars[trimmed.slice(0, idx)] = val;
-          }
-        }
+    const countFiles = (pattern: string): number => {
+      try {
+        const out = execSync(`find ${pattern} -type f -name '*.md' 2>/dev/null | wc -l`, {
+          cwd: wikiDir,
+          encoding: 'utf-8',
+          timeout: 10000,
+        });
+        return parseInt(out.trim(), 10) || 0;
+      } catch {
+        return 0;
       }
-    }
-
-    if (!existsSync(chromaDir)) {
-      console.log('No collections found. Run kb-ingest first.');
-      process.exit(0);
-    }
-
-    const envVars: Record<string, string | undefined> = {
-      ...process.env,
-      ...extraVars,
-      CTX_ORG: org,
-      CTX_INSTANCE_ID: instanceId,
-      CTX_FRAMEWORK_ROOT: frameworkRoot,
-      MMRAG_DIR: kbRoot,
-      MMRAG_CHROMADB_DIR: chromaDir,
-      MMRAG_CONFIG: pjoin(kbRoot, 'config.json'),
     };
-    try {
-      execFileSync(pythonPath, [mmragPath, 'collections'], {
-        stdio: 'inherit',
-        env: envVars,
-      });
-    } catch {
-      // python printed error already
-      process.exit(1);
-    }
+
+    const wikiCount = countFiles('docs wiki .claude');
+    const openBrainCount = countFiles('wiki/sources/thoughts');
+    console.log('Collection        Count');
+    console.log('---------------- -----');
+    console.log(`wiki-grep         ${wikiCount}`);
+    console.log(`open-brain        ${openBrainCount}`);
+    console.log(`[kb] ChromaDB collections are deprecated for org ${org}; retrieval uses team-brain wiki-grep.`);
   });
 
 // ---------------------------------------------------------------------------
@@ -3037,9 +3524,9 @@ busCommand
       return;
     }
 
-    // Human-readable table: ts | cron | status | attempt | duration | error
+    // Human-readable table: ts | cron | status | attempt | duration | result/artifact/error
     const pad = (s: string, w: number) => s.padEnd(w);
-    const header = `  ${pad('Timestamp', 20)}  ${pad('Cron', 22)}  ${pad('Status', 7)}  ${pad('Att', 3)}  ${pad('ms', 7)}  Error`;
+    const header = `  ${pad('Timestamp', 20)}  ${pad('Cron', 22)}  ${pad('Status', 7)}  ${pad('Att', 3)}  ${pad('ms', 7)}  Result / Artifact / Error`;
     const sep = '-'.repeat(header.length);
 
     console.log(`\nExecution log for ${agent}${name ? ` / ${name}` : ''} (${entries.length} entries)\n`);
@@ -3051,10 +3538,10 @@ busCommand
       const status = e.status;
       const att = String(e.attempt);
       const ms = String(e.duration_ms);
-      const error = e.error ?? '';
+      const detail = String((e as any).artifact ?? (e as any).result ?? e.error ?? '');
       const cronPad = pad(e.cron.length > 22 ? e.cron.slice(0, 19) + '...' : e.cron, 22);
       console.log(
-        `  ${pad(ts, 20)}  ${cronPad}  ${pad(status, 7)}  ${pad(att, 3)}  ${pad(ms, 7)}  ${error}`
+        `  ${pad(ts, 20)}  ${cronPad}  ${pad(status, 7)}  ${pad(att, 3)}  ${pad(ms, 7)}  ${detail.slice(0, 90)}`
       );
     }
     console.log('');
@@ -3880,6 +4367,7 @@ busCommand
   .option('--timeout <seconds>', 'Max wait time in seconds (default: 300)', '300')
   .option('--ssh-host <host>', 'SSH host (default: gregs-mac)', 'gregs-mac')
   .option('--dispatch-script <path>', 'Path to codex-dispatch.sh on the Mac', '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh')
+  .option('--orgo-failure-artifact <path>', 'Recent failed Orgo lease attempt artifact required before Mac SSH fallback')
   .option('--disable-fallback', 'Disable localhost codex exec fallback when Mac SSH is unreachable')
   .action(async (
     prompt: string,
@@ -3890,6 +4378,7 @@ busCommand
       timeout?: string;
       sshHost?: string;
       dispatchScript?: string;
+      orgoFailureArtifact?: string;
       disableFallback?: boolean;
     },
   ) => {
@@ -3899,6 +4388,7 @@ busCommand
       timeout: parseInt(opts.timeout ?? '300', 10),
       sshHost: opts.sshHost,
       dispatchScript: opts.dispatchScript,
+      orgoFailureArtifact: opts.orgoFailureArtifact,
       noFallback: opts.disableFallback,
     });
 

@@ -82,12 +82,22 @@ if [[ -z "${CTX_ORCHESTRATOR:-}" ]]; then
 fi
 
 # ── .env sourcing helper ────────────────────────────────────────────────
+# Sources org-level secrets.env first (shared keys: SUPABASE_RGOS_URL,
+# SUPABASE_RGOS_SERVICE_KEY, OPENAI_KEY, etc.), then agent .env (agent-
+# specific keys win on conflict). Mirrors the loading order in agent-pty.ts.
 ctx_source_env() {
+    { set +x; } 2>/dev/null
+    # 1. Org-level secrets (orgs/{org}/secrets.env)
+    if [[ -n "${CTX_ORG:-}" && -n "${CTX_PROJECT_ROOT:-}" ]]; then
+        local _secrets_env="${CTX_PROJECT_ROOT}/orgs/${CTX_ORG}/secrets.env"
+        if [[ -f "${_secrets_env}" ]]; then
+            set -a; source "${_secrets_env}"; set +a
+        fi
+    fi
+    # 2. Agent .env (overrides org secrets for same keys)
     if [[ -n "${CTX_AGENT_DIR:-}" && -f "${CTX_AGENT_DIR}/.env" ]]; then
-        { set +x; } 2>/dev/null
         set -a; source "${CTX_AGENT_DIR}/.env"; set +a
     elif [[ -f ".env" ]]; then
-        { set +x; } 2>/dev/null
         set -a; source ".env"; set +a
     fi
 }

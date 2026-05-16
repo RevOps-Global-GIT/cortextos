@@ -1,0 +1,62 @@
+{
+  "agent_name": "orchestrator",
+  "enabled": true,
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "working_directory": "/home/cortextos/cortextos/orgs/revops-global/agents/orchestrator",
+  "timezone": "America/Los_Angeles",
+  "day_mode_start": "07:00",
+  "day_mode_end": "20:00",
+  "communication_style": "technical",
+  "approval_rules": {
+    "always_ask": [
+      "external-comms",
+      "financial",
+      "deployment",
+      "data-deletion"
+    ],
+    "never_ask": []
+  },
+  "crons_tz": "All cron expressions use local timezone (America/Los_Angeles). 0 7 = 7 AM PT = 14:00 UTC.",
+  "crons": [
+    {
+      "name": "morning-review",
+      "type": "recurring",
+      "cron": "3 7 * * *",
+      "prompt": "Read .claude/skills/morning-review/SKILL.md and execute the full morning review workflow. Include goal cascade from .claude/skills/goal-management/SKILL.md. ALSO update heartbeat (cortextos bus update-heartbeat online) and check approvals (cortextos bus list-approvals)."
+    },
+    {
+      "name": "evening-review",
+      "type": "recurring",
+      "cron": "3 18 * * *",
+      "prompt": "Read .claude/skills/evening-review/SKILL.md and execute the full evening review workflow. Summarize the day, propose overnight tasks, queue nighttime work. ALSO update heartbeat and surface any pending approvals to Greg."
+    },
+    {
+      "name": "weekly-review",
+      "type": "recurring",
+      "cron": "7 8 * * 0",
+      "prompt": "Read .claude/skills/weekly-review/SKILL.md and run the full weekly review. Review all agent outputs, evaluate performance, plan next week."
+    },
+    {
+      "name": "rgos-task-poll",
+      "type": "recurring",
+      "interval": "15m",
+      "prompt": "Check for tasks assigned to you in the RGOS kanban: use mcp__rgos__cortex_list_tasks with assigned_to=\"orchestrator\" and status=\"approved\". If any tasks are found, claim each one with mcp__rgos__cortex_claim_task (agent_id=\"orchestrator\"), then work them in priority order. Log a cortextos bus log-event for each claimed task. ALSO update heartbeat (cortextos bus update-heartbeat online). If no tasks AND heartbeat already fresh, do nothing."
+    },
+    {
+      "name": "kanban-sync",
+      "type": "recurring",
+      "cron": "17,47 * * * *",
+      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator — compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
+    }
+  ],
+  "ctx_autoreset_threshold": 90,
+  "ecosystem": {
+    "local_version_control": {
+      "enabled": true
+    }
+  },
+  "model": "claude-opus-4-7",
+  "telegram_polling": true
+}

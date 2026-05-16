@@ -1,0 +1,165 @@
+{
+  "agent_name": "analyst",
+  "enabled": true,
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "working_directory": "/home/cortextos/cortextos/orgs/revops-global/agents/analyst",
+  "timezone": "America/Los_Angeles",
+  "day_mode_start": "07:00",
+  "day_mode_end": "20:00",
+  "communication_style": "technical",
+  "approval_rules": {
+    "always_ask": [
+      "external-comms",
+      "financial",
+      "deployment",
+      "data-deletion"
+    ],
+    "never_ask": []
+  },
+  "crons_tz": "All cron expressions use local timezone (America/Los_Angeles). 0 7 = 7 AM PT = 14:00 UTC.",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task. Piggyback goal-progress probe: cd /home/cortextos/cortextos && cortextos bus goal-progress-probe --notify-agent orchestrator. Review stale-goal flags in the report; do not create a separate cron for this probe."
+    },
+    {
+      "name": "nightly-metrics",
+      "type": "recurring",
+      "interval": "24h",
+      "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Review the output and report any anomalies via Telegram to the orchestrator."
+    },
+    {
+      "name": "auto-commit",
+      "type": "recurring",
+      "interval": "24h",
+      "prompt": "Read .claude/skills/local-version-control/SKILL.md and execute the daily version control workflow. Stage, review, and commit changes."
+    },
+    {
+      "name": "catalog-browse",
+      "type": "recurring",
+      "interval": "7d",
+      "prompt": "Read .claude/skills/catalog-browse/SKILL.md and execute the catalog browse workflow. Check for new community skills and recommend useful ones."
+    },
+    {
+      "name": "theta-wave",
+      "type": "recurring",
+      "cron": "0 22 * * *",
+      "prompt": "Read .claude/skills/theta-wave/SKILL.md. Initiate the theta wave cycle. First action: message the orchestrator that theta wave is starting and share your initial system scan."
+    },
+    {
+      "name": "rgos-task-poll",
+      "type": "recurring",
+      "interval": "15m",
+      "prompt": "Check for tasks assigned to you in the RGOS kanban: use mcp__rgos__cortex_list_tasks with assigned_to=\"analyst\" and status=\"approved\". If any tasks are found, claim each one with mcp__rgos__cortex_claim_task (agent_id=\"analyst\"), then work them in priority order. If no tasks, do nothing."
+    },
+    {
+      "name": "upstream-sync",
+      "type": "recurring",
+      "interval": "24h",
+      "prompt": "Check for CortextOS upstream updates by running: bash /home/cortextos/cortextos/scripts/upgrade.sh --dry-run 2>&1. If output shows commits behind, run: bash /home/cortextos/cortextos/scripts/upgrade.sh 2>&1. Send Greg a Telegram summary of what was pulled and whether the upgrade succeeded. If the rebase had conflicts, send the error details so Greg can resolve manually. If already up to date, do nothing silently."
+    },
+    {
+      "name": "morning-brief",
+      "type": "recurring",
+      "cron": "0 7 * * 1-5",
+      "prompt": "Compile Greg\\'s daily morning brief. Do this exactly once, then stop.\n\nSTEP 1 \u2014 GATHER CONTEXT (five sources):\n\na) Market scan: 2 targeted web searches \u2014 RevOps/MarOps/GTM trends or competitor moves in 2026, and AI-native sales/marketing ops tools gaining traction. Only concrete, citable signals.\n\nb) RGOS: mcp__rgos__rgos_dashboard and mcp__rgos__rgos_pipeline_summary. Flag at-risk, overdue, or no-recent-update items.\n\nc) Fathom action items: python3 $CTX_FRAMEWORK_ROOT/scripts/fathom-brief-digest.py \u2014 include the output in the Delivery section.\n\nd) Open Brain: search for high-signal captures from the last 7 days. Queries: \"product idea\", \"client pain\", \"market signal\". Include only if genuinely novel.\n\ne) Today\\'s external meetings (ABSORBED FROM RETIRED MEETING-PREP AGENT):\n   Run this bash to get today\\'s calendar:\n   TODAY=$(date -u +%Y-%m-%dT00:00:00Z)\n   TOMORROW=$(date -u -d \\'+1 day\\' +%Y-%m-%dT00:00:00Z 2>/dev/null || date -u -v+1d +%Y-%m-%dT00:00:00Z)\n   gws calendar:v3 events list --params \"{\\\"calendarId\\\":\\\"primary\\\",\\\"timeMin\\\":\\\"$TODAY\\\",\\\"timeMax\\\":\\\"$TOMORROW\\\",\\\"singleEvents\\\":true,\\\"orderBy\\\":\\\"startTime\\\"}\" --format json\n\n   Filter for prep-worthy meetings: at least one attendee with email domain NOT @revopsglobal.com, NOT @supremeopti.com, NOT @gmail.com. Not all-day. Not a recurring internal sync. Title suggests business context (BD, discovery, intro, review, QBR, kickoff, proposal, demo, sales, partnership).\n\n   For each qualifying meeting, brief enrichment: check mcp__rgos__list_clients / search for existing client context, search knowledge-base for the company, check recent Gmail with attendees. 2\u20133 sentences of intel per meeting is enough \u2014 this is a one-line-per-meeting summary, not a full prep deck.\n\nSTEP 2 \u2014 COMPOSE THE BRIEF (one message, keep under 400 words total):\n\n*Morning Brief \u2014 [Month D, YYYY]*\n\n*Today\\'s Meetings*\n- [H:MM AM \u2014 Name, Company] [1\u20132 sentence context + what to watch for]\n- (skip this section if no external meetings)\n\n*Product Ideas* \u2014 [One specific idea, grounded in a real signal, with source]\n\n*Growth Angles* \u2014 [One GTM or positioning angle worth Greg\\'s consideration]\n\n*Delivery* \u2014 [Fathom meeting follow-ups if any. Specific client risk or opportunity only if real.]\n\nSTEP 2.5 \u2014 COMPETITOR LINK VALIDATION (fail-closed, mandatory before send):\n\nBefore sending, grep the entire brief text against these blocked domains: skaled.com, winningbydesign.com, gonimbly.com, revpartners.io, elefanterevops.com, cs2marketing.com, sixandflow.com, icebergrevops.com, domestiqueconsulting.com, carabinergroup.com, aptitude8.com, newbreedrevenue.com, saleshive.com, memoryblue.com, cience.com, cloudtask.com, callbox.com, operatix.net, martal.ca, belkins.io, leadium.com, revenue.io, gong.io, outreach.io, salesloft.com, 6sense.com, demandbase.com, chorus.ai, tractioncomplete.com. Also check reference_saleshive_competitors.md for any additions. If ANY blocked domain appears in the brief text (URLs, citations, or plain-text mentions), remove or replace the reference before proceeding. Do not send a brief containing competitor links.\n\nSTEP 3 \u2014 SEND via Slack DM using the Analyst bot identity:\n\ncortextos bus send-slack $GREG_SLACK_USER_ID \"<the brief text>\"\n\nThe send-slack CLI uses the Analyst app\\'s own bot token \u2014 the DM will appear from @Analyst in Greg\\'s Slack. If GREG_SLACK_USER_ID is not set in env, fall back to Telegram: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \"<the brief text>\"\n\nAfter sending, you are done. Stop."
+    },
+    {
+      "name": "task-archive",
+      "type": "recurring",
+      "interval": "7d",
+      "prompt": "Run task archival: cortextos bus archive-tasks. If any tasks were archived, message orchestrator with the count. If none, do nothing."
+    },
+    {
+      "name": "competitor-monitoring",
+      "type": "recurring",
+      "cron": "0 15 * * 1",
+      "prompt": "Run weekly competitor monitoring: python3 $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/agents/analyst/workflows/competitor-monitor.py. The script fetches pages, diffs snapshots, scans for news, and sends the digest to Greg via Telegram automatically. Review the output for any errors and report to orchestrator if the script fails."
+    },
+    {
+      "name": "activity-sync",
+      "type": "recurring",
+      "interval": "15m",
+      "prompt": "Run the activity sync to push local agent messages and Telegram outbound to RGOS Supabase: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/prototype/sync_activity_to_supabase.py. If output shows >0 synced, do nothing further. If errors, report to orchestrator."
+    },
+    {
+      "name": "weekly-content-drafts",
+      "type": "recurring",
+      "cron": "0 8 * * 1",
+      "prompt": "Generate LinkedIn content drafts for the upcoming week. Write to Supabase content_drafts via PostgREST.\n\nRULES (hard, non-negotiable):\n- 3 voices x 3 slots = 9 drafts minimum per week\n- Voices: Greg (b27f4501-22ae-4dc2-97bb-982bd7a098b2), Rachit (bc5c2b72-edd5-45fc-892d-3fe49c04e87f), Kristina (e653d332-6ac4-4fdb-83f6-a2c8fb87fabb)\n- Slots: thought_leadership, client_pattern, signal_driven (one per voice per week)\n- Every stat MUST have an inline [source](url) with a direct, verifiable URL. No secondhand citations. If you cannot find a direct URL, do not include the stat.\n- No theme repeats with the prior 2 weeks. Check existing drafts first.\n- Greg voice: direct, declarative, insight-led, names structural problems. No pleasantries.\n- Rachit voice: ops practitioner, peer-to-peer, technical but accessible, practical diagnostic framing.\n- Kristina voice: warm, collaborative, growth/marketing perspective, problem-solving tone.\n\nCOMPETITOR LINK GUARDRAIL (fail-closed, zero tolerance):\n- NEVER link to competitor websites in draft_body, rationale, source_refs, or key_quote.\n- BLOCKED DOMAINS: skaled.com, winningbydesign.com, gonimbly.com, revpartners.io, elefanterevops.com, cs2marketing.com, sixandflow.com, icebergrevops.com, domestiqueconsulting.com, carabinergroup.com, aptitude8.com, newbreedrevenue.com, saleshive.com, memoryblue.com, cience.com, cloudtask.com, callbox.com, operatix.net, martal.ca, belkins.io, leadium.com, revenue.io, gong.io, outreach.io, salesloft.com, 6sense.com, demandbase.com, chorus.ai, tractioncomplete.com\n- If a topic seeds from a competitor post, paraphrase the insight WITHOUT citing their URL. Find a non-competitor primary source (industry analyst, academic, primary research) if the stat needs sourcing.\n- After inserting all drafts, scan every draft_body + rationale + key_quote for blocked domains. If any match, mark that draft status=rejected with reason=competitor_link.\n\nURL VALIDATION:\n- Before inserting, fetch each cited URL and verify HTTP 200. Dead links get replaced or removed.\n- Check each URL domain against the competitor blocklist above. Fail closed.\n\nSTEPS:\n1. Query content_drafts for the last 2 weeks to avoid theme repeats.\n2. Query mcp__rgos__rgos_list_signals (severity warning+) for fresh signal grounding.\n3. Run 2 web searches for current RevOps/GTM/AI-sales trends with citable sources.\n4. Write 9 drafts: 3 per voice, one per topic_slot, all for next Monday's week_of date.\n5. Insert all 9 via PostgREST to content_drafts table.\n6. POST-INSERT SCAN: query all 9 inserted drafts, check draft_body + rationale + key_quote against competitor domain blocklist. Any match -> PATCH status=rejected, reason=competitor_link.\n7. Verify final count of status=pending drafts = 9. If any rejected, generate replacements.\n8. Log event: cortextos bus log-event action content_drafts_generated info --meta '{\"count\":9,\"week_of\":\"YYYY-MM-DD\"}'"
+    },
+    {
+      "name": "autoresearch",
+      "type": "recurring",
+      "cron": "47 22 * * *",
+      "prompt": "Run one autoresearch experiment cycle. Read .claude/skills/autoresearch/SKILL.md and follow the experiment loop. Check experiments/config.json for active cycles, read experiments/state.json for current state, then execute the next iteration: evaluate previous run if pending, form hypothesis, make targeted change, measure outcome against baseline, record result to experiments/history/. Update state.json atomically. If no active cycle exists, do nothing."
+    },
+    {
+      "name": "ai-tooling-watch-daily",
+      "type": "recurring",
+      "cron": "3 9 * * *",
+      "prompt": "AI Tooling Watch — daily light scan (~5-10 min). RGOS task 945f065f.\n\nScan these sources for new releases, changes, or announcements from the last 24h:\n1. Claude Code release notes (web search: \"Claude Code release notes site:docs.anthropic.com OR site:github.com/anthropics\")\n2. Anthropic blog/news (web search: \"site:anthropic.com/news OR site:anthropic.com/blog\" last 24h)\n3. OpenAI Codex changelog (web search: \"OpenAI Codex changelog OR codex release notes\")\n4. claude_agent_sdk commits: curl -s 'https://api.github.com/repos/anthropics/claude-code/commits?since=YESTERDAY_ISO&per_page=20'\n5. OpenAI cookbook commits: curl -s 'https://api.github.com/repos/openai/openai-cookbook/commits?since=YESTERDAY_ISO&per_page=20'\n6. Relevant MCP server releases (web search: \"MCP server release 2026\" last 24h)\n\nFor every item found, tag bake-in applicability against our stack:\n- cortextos wrapper (src/pty/codex-app-server-pty.ts, src/bus/, dashboard/)\n- hub.revopsglobal.com (RGOS platform)\n- team-brain wiki pipeline\n- recipe app (ob1-parents)\n- charlie-holstine site\n\nIf actionable: create RGOS task via mcp__rgos__cortex_create_task assigned to codex (or dev for bus internals) with description including tag 'ai-tooling-bake-in'.\n\nWrite summary memo to analyst/output/YYYY-MM-DD-ai-tooling-watch.md. Ingest to shared-revops-global KB.\n\nIf nothing new found, write a one-line 'no new items' memo and skip KB ingest."
+    },
+    {
+      "name": "ai-tooling-watch-weekly",
+      "type": "recurring",
+      "cron": "7 9 * * 1",
+      "prompt": "AI Tooling Watch — weekly Monday synthesis. RGOS task 945f065f.\n\nConsolidate the past 7 days of daily AI Tooling Watch memos (analyst/output/*-ai-tooling-watch.md) into a single weekly summary.\n\nStructure:\n- What shipped (new releases/features across Claude Code, Codex, Agent SDK, MCP servers)\n- What we ported (items that became RGOS tasks and were completed)\n- What we deferred and why (items tagged but not yet acted on)\n\nWrite to analyst/output/YYYY-MM-DD-ai-tooling-weekly-synth.md.\nSend the synthesis to orchestrator via cortextos bus send-message orchestrator normal '<summary>' for distribution.\nIngest to shared-revops-global KB."
+    },
+    {
+      "name": "brief-watchdog",
+      "type": "recurring",
+      "cron": "30 7 * * 1-5",
+      "prompt": "Brief watchdog: check if today's morning brief output file exists. Run: ls /home/cortextos/cortextos/orgs/revops-global/agents/analyst/output/$(date +%Y-%m-%d)-morning-brief*.md 2>/dev/null. If no file found, log error event: cortextos bus log-event error missing_morning_brief error --meta '{\"date\":\"'$(date +%Y-%m-%d)'\",\"agent\":\"analyst\"}' and send inbox message to orchestrator: cortextos bus send-message orchestrator normal 'Missing morning brief for today. No output file produced by 7:30 AM PT. Possible session instability or cron misfire.'"
+    },
+    {
+      "name": "memory-decay-sweep",
+      "type": "recurring",
+      "cron": "0 5 * * 0",
+      "prompt": "Memory-decay sweep. Read all entries in MEMORY.md (auto-memory index). For each entry >30 days old: verify the referenced file/function/config still exists by grepping/globbing. Flag entries where the claim is no longer true. Update or remove stale entries. Write a one-line summary to daily memory noting how many entries checked, how many updated, how many removed."
+    },
+    {
+      "name": "doc-drift-checker",
+      "type": "recurring",
+      "cron": "0 6 * * 6",
+      "prompt": "Doc drift checker. Compare key documentation files against actual codebase state. Check: (1) CLAUDE.md references to file paths — verify each path exists. (2) AGENTS.md role descriptions — verify against current enabled-agents.json. (3) knowledge.md tool/command references — verify commands exist in bus/. (4) README or SYSTEM.md references to architecture — verify against actual directory structure. Write results to analyst/output/YYYY-MM-DD-doc-drift.md. For each drift found: file, line, claim, actual state. If >3 drifts found, create one RGOS task to fix them. If 0 drifts, write one-line 'no drift detected' and skip task creation."
+    },
+    {
+      "name": "heartbeat-health-watch",
+      "type": "recurring",
+      "interval": "30m",
+      "prompt": "Run bus inbox/heartbeat health watch: cd /home/cortextos/cortextos && cortextos bus heartbeat-health-watch --threshold-minutes 120 --notify-agent orchestrator. Alert orchestrator if any enabled+running agent has been silent for more than 2h; do not message Greg directly."
+    },
+    {
+      "name": "pr-stuck-watcher",
+      "type": "recurring",
+      "interval": "1h",
+      "prompt": "Run PR stuck watcher: cd /home/cortextos/cortextos && cortextos bus pr-stuck-watcher --stuck-hours 2 --alert-hours 2 --auto-merge --create-tasks --notify-agent orchestrator. It watches the 5 RevOps repos, auto-merges eligible green PRs under blanket policy, and creates RGOS tasks for stuck PRs that cannot auto-merge."
+    },
+    {
+      "name": "customer-surface-deep-qa",
+      "type": "recurring",
+      "interval": "6h",
+      "prompt": "Run customer-surface deep QA: cd /home/cortextos/cortextos && cortextos bus customer-surface-qa --user greg@revopsglobal.com. This runs the Playwright harness against core customer surfaces, writes a report, and creates a task for each failing page. If tasks are created or the command errors, notify orchestrator with the report path; otherwise stay silent."
+    }
+  ],
+  "ctx_autoreset_threshold": 45,
+  "ecosystem": {
+    "local_version_control": {
+      "enabled": true
+    },
+    "upstream_sync": {
+      "enabled": true
+    },
+    "catalog_browse": {
+      "enabled": true
+    },
+    "community_publish": {
+      "enabled": false
+    }
+  }
+}

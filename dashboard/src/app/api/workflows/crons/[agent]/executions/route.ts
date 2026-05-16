@@ -33,6 +33,9 @@ export interface CronExecutionLogEntry {
   attempt: number;
   duration_ms: number;
   error: string | null;
+  phase?: 'fire' | 'result';
+  result?: string;
+  artifact?: string;
 }
 
 export interface ExecutionLogPage {
@@ -110,15 +113,18 @@ export function readExecutionLogPage(
 // ---------------------------------------------------------------------------
 
 export function entriesToCsv(entries: CronExecutionLogEntry[]): string {
-  const header = 'timestamp,cron,status,attempt,duration_ms,error';
+  const header = 'timestamp,cron,status,attempt,duration_ms,phase,result,artifact,error';
   const rows = entries.map(e => {
     const ts = e.ts;
     const cron = csvEscape(e.cron);
     const status = e.status;
     const attempt = e.attempt;
     const duration = e.duration_ms;
+    const phase = csvEscape(e.phase ?? '');
+    const result = csvEscape(e.result ?? '');
+    const artifact = csvEscape(e.artifact ?? '');
     const error = csvEscape(e.error ?? '');
-    return `${ts},${cron},${status},${attempt},${duration},${error}`;
+    return `${ts},${cron},${status},${attempt},${duration},${phase},${result},${artifact},${error}`;
   });
   return [header, ...rows].join('\n') + '\n';
 }

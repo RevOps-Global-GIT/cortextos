@@ -106,6 +106,47 @@ export function resolveEnv(overrides?: Partial<CtxEnv>): CtxEnv {
 }
 
 /**
+ * Load org secrets.env and agent .env into process.env.
+ *
+ * Mirrors the loading order of `ctx_source_env()` in bus/_ctx-env.sh:
+ *   1. Org-level secrets.env (shared keys: SUPABASE_RGOS_URL, etc.)
+ *   2. Agent .env (agent-specific keys win on conflict)
+ *   3. Existing process.env values are never overwritten.
+ *
+ * Call once at bus CLI startup so all TypeScript bus modules can read
+ * SUPABASE_RGOS_URL, SUPABASE_RGOS_SERVICE_KEY, OPENAI_KEY, etc. from
+ * process.env without requiring the parent shell to manually source them.
+ */
+export function applySecretsToEnv(env: CtxEnv): void {
+  const sources: string[] = [];
+
+  // 1. Org-level secrets
+  if (env.org && env.projectRoot) {
+    sources.push(join(env.projectRoot, 'orgs', env.org, 'secrets.env'));
+  }
+
+  // 2. Agent .env (wins over org secrets for same keys)
+  if (env.agentDir) {
+    sources.push(join(env.agentDir, '.env'));
+  }
+
+  // Snapshot keys already present in process.env before we touch anything.
+  // Parent-shell vars are never overwritten. Keys set by earlier sources
+  // (org secrets) CAN be overwritten by later sources (agent .env).
+  const preExisting = new Set(Object.keys(process.env));
+
+  for (const filePath of sources) {
+    if (!existsSync(filePath)) continue;
+    const vars = parseEnvFile(filePath);
+    for (const [key, value] of Object.entries(vars)) {
+      if (!preExisting.has(key)) {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+/**
  * Write .cortextos-env file for backward compatibility with bash bus scripts.
  * Per D6: maintain this pattern.
  */

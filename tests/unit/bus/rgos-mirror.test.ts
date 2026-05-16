@@ -216,7 +216,7 @@ describe('rgos-mirror — buildTaskRow()', () => {
     const row = buildTaskRow(task);
     expect(row.org_id).toBe('00000000-0000-0000-0000-000000000001');
     expect(row.title).toBe(task.title);
-    expect(row.status).toBe('approved'); // pending → approved via STATUS_MAP
+    expect(row.status).toBe('proposed'); // pending → proposed via STATUS_MAP
     expect(row.priority).toBe('medium'); // normal → medium via PRIORITY_MAP
     expect(row.assigned_to).toBe('dev');
     expect(row.created_by).toBe('orchestrator');
@@ -346,7 +346,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     const body = JSON.parse(opts?.body as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.id).toBe(uuidv5(task.id));
-    expect(body.status).toBe('approved'); // pending → approved via STATUS_MAP
+    expect(body.status).toBe('proposed'); // pending → proposed via STATUS_MAP
     expect(body.priority).toBe('medium'); // normal → medium via PRIORITY_MAP
     expect(body.source).toBe('cortextos_bus_mirror');
     expect(body.metadata.bus_task_id).toBe(task.id);
@@ -888,7 +888,7 @@ describe('rgos-mirror — mapPriority()', () => {
 });
 
 describe('rgos-mirror — mapStatus()', () => {
-  it('pending → approved', () => { expect(mapStatus('pending')).toBe('approved'); });
+  it('pending → proposed', () => { expect(mapStatus('pending')).toBe('proposed'); });
   it('in_progress → in_progress', () => { expect(mapStatus('in_progress')).toBe('in_progress'); });
   it('completed → completed', () => { expect(mapStatus('completed')).toBe('completed'); });
   it('cancelled → cancelled', () => { expect(mapStatus('cancelled')).toBe('cancelled'); });
@@ -918,9 +918,9 @@ describe('rgos-mirror — buildTaskRow() constraint smoke tests', () => {
     }
   });
 
-  it('buildTaskRow with bus defaults (pending/normal) produces approved/medium', () => {
+  it('buildTaskRow with bus defaults (pending/normal) produces proposed/medium', () => {
     const row = buildTaskRow(makeTask({ status: 'pending', priority: 'normal' }));
-    expect(row.status).toBe('approved');
+    expect(row.status).toBe('proposed');
     expect(row.priority).toBe('medium');
   });
 });
@@ -941,7 +941,7 @@ describe('rgos-mirror — migrateRetryQueueConstraints()', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('remaps priority=normal to medium and status=pending to approved', () => {
+  it('remaps priority=normal to medium and status=pending to proposed', () => {
     const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
     const entry = {
       table: 'orch_tasks' as const,
@@ -955,7 +955,7 @@ describe('rgos-mirror — migrateRetryQueueConstraints()', () => {
     const entries = readRetryQueue(qPath);
     expect(entries).toHaveLength(1);
     expect(entries[0].row.priority).toBe('medium');
-    expect(entries[0].row.status).toBe('approved');
+    expect(entries[0].row.status).toBe('proposed');
     // Other fields preserved
     expect(entries[0].row.title).toBe('Old task');
   });
@@ -1021,8 +1021,8 @@ describe('rgos-mirror — migrateRetryQueueConstraints()', () => {
 
     const entries = readRetryQueue(qPath);
     expect(entries).toHaveLength(2);
-    expect(entries[0].row.priority).toBe('medium'); // migrated
-    expect(entries[0].row.status).toBe('approved');  // migrated
+    expect(entries[0].row.priority).toBe('medium');   // migrated
+    expect(entries[0].row.status).toBe('proposed');  // migrated (pending→proposed)
     expect(entries[1].row.priority).toBe('high');    // unchanged
     expect(entries[1].row.status).toBe('completed'); // unchanged
   });
@@ -1047,7 +1047,7 @@ describe('rgos-mirror — migrateRetryQueueConstraints()', () => {
 
     const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
     expect(body.priority).toBe('medium');
-    expect(body.status).toBe('approved');
+    expect(body.status).toBe('proposed');
     vi.unstubAllGlobals();
   });
 });
@@ -1588,14 +1588,17 @@ describe('rgos-mirror — mirrorEventToRgos', () => {
     expect(body.task_id).toBe(validUuid);
   });
 
-  it('sets task_id = null when metadata.task_id is a non-UUID string', async () => {
+  it('converts non-UUID bus task_id to uuidv5 for ID unification', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
     vi.stubGlobal('fetch', fetchMock);
 
-    await mirrorEventToRgos(makeEvent({ metadata: { task_id: 'task_1234567890_001' } }));
+    const busTaskId = 'task_1234567890_001';
+    await mirrorEventToRgos(makeEvent({ metadata: { task_id: busTaskId } }));
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-    expect(body.task_id).toBeNull();
+    // Non-UUID bus IDs are converted to the same uuidv5 the task row uses,
+    // so orch_events.task_id resolves to the canonical RGOS UUID.
+    expect(body.task_id).toBe(uuidv5(busTaskId));
   });
 
   it('sets task_id = null when metadata.task_id is absent', async () => {

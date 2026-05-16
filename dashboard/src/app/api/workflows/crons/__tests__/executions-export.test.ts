@@ -152,7 +152,7 @@ describe('GET /api/workflows/crons/[agent]/executions — CSV export', () => {
     const res = await callGet(AGENT, 'format=csv');
     const body = await res.text();
     const firstLine = body.split('\n')[0];
-    expect(firstLine).toBe('timestamp,cron,status,attempt,duration_ms,error');
+    expect(firstLine).toBe('timestamp,cron,status,attempt,duration_ms,phase,result,artifact,error');
   });
 
   it('CSV body contains data rows', async () => {

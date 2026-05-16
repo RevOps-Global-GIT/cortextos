@@ -337,7 +337,7 @@ export class AgentManager {
       }).catch(() => { /* non-fatal */ });
     }
 
-    // Start Telegram poller if credentials are available
+    // Start Telegram poller if credentials are available and enabled.
     if (telegramApi && chatId && this.isTelegramPollingEnabled(config, agentEnv)) {
       const stateDir = join(this.ctxRoot, 'state', name);
       const poller = new TelegramPoller(telegramApi, stateDir, 1000, undefined, name);
@@ -907,6 +907,7 @@ export class AgentManager {
       agentName,
       onFire,
       logger: (msg) => console.log(`[daemon] ${msg}`),
+      timezone: entry.process.timezone,
     });
 
     scheduler.start();
