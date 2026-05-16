@@ -51,7 +51,7 @@ function checkP1(command: string, agent: string): void {
 
   // Match: send-telegram followed by a numeric chat ID (8+ digits)
   if (/send-telegram[^|&\n]*[0-9]{8,}/.test(command)) {
-    blockCall('P1', `External sends must route through orchestrator. Agent "${agent}" cannot send Telegram messages directly. Route via: cortextos bus send-message orchestrator normal '<your message>'`);
+    blockCall('P1', `BLOCKED: specialist agents cannot send-telegram to user; route via cortextos bus send-message orchestrator instead per external-comms-funnel rule. Agent: "${agent}"`);
   }
 }
 
