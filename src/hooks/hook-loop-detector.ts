@@ -49,6 +49,7 @@ const PINGPONG_DOMINANCE = 0.8;
  */
 export const ESSENTIAL_COMMANDS: readonly string[] = [
   'update-heartbeat',
+  'update-cron-fire',
   'check-inbox',
   'ack-inbox',
   'send-message',
