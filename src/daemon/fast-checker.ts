@@ -1587,7 +1587,18 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     }
 
     // Tier 2: handoff (fires once per session lifecycle)
+    // Boot-window guard: skip for 90s after session start. Without this, an agent
+    // that boots with high baseline context (large CLAUDE.md, bootstrap files) will
+    // immediately fire Tier 2, cooperatively call hard-restart, and loop — because
+    // context_status.json showed the old high value even though the new session is fresh.
+    // hardRestart() now zeroes context_status.json, but a 90s guard provides defence-in-depth
+    // and handles the race where the status file is read before hardRestart() writes it.
     if (effectivePct >= handoff && this.ctxHandoffFiredAt === 0) {
+      const sessionAge = this.ctxSessionStartedAt > 0 ? now - this.ctxSessionStartedAt : Infinity;
+      if (sessionAge >= 0 && sessionAge < 90_000) {
+        // Do not latch ctxHandoffFiredAt — allow Tier 2 to fire once the session is settled.
+        return;
+      }
       this.ctxHandoffFiredAt = now;
       this.ctxHandoffDeadlineAt = now + 5 * 60_000; // 5min grace for agent to cooperate
       // Reset context_status.json so the new session doesn't re-trigger immediately
