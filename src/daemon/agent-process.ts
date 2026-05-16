@@ -595,6 +595,14 @@ export class AgentProcess implements ManagedAgent {
       return;
     }
 
+    // Already halted: zombie processes (not SIGKILLed in time) can exit after the crash
+    // ceiling is hit, producing HALTED log entries past max_crashes and potentially
+    // re-entering the crash backoff loop. Skip all processing for late zombie exits.
+    if (this.status === 'halted') {
+      this.log(`Zombie exit ignored — agent already halted (exit_code=${exitCode})`);
+      return;
+    }
+
     // ctx_autoreset (Tier 0): FastChecker writes .silent-restart before triggering
     // forceContextRestart(). Normally stopRequested is set by sessionRefresh() → stop()
     // before handleExit fires, but in edge cases (e.g. Claude Code exits before stop()

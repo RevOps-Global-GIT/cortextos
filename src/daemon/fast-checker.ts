@@ -92,6 +92,7 @@ export class FastChecker {
   private ctxLastSessionId: string | null = null; // detects new session → clears stale deadline
   private ctxCircuitRestarts: number[] = []; // timestamps of recent context-triggered restarts
   private ctxCircuitBrokenAt: number | null = null; // when circuit tripped (null = healthy)
+  private sessionRefreshInProgress: boolean = false; // serialise concurrent forceContextRestart calls
   // Persisted to disk so --continue restarts don't reset the circuit breaker
   private ctxCircuitFile: string = '';
 
@@ -200,9 +201,20 @@ export class FastChecker {
       if (this.watchdogCircuitBroken && now - this.watchdogCircuitBrokenAt > this.WATCHDOG_CIRCUIT_RESET_MS) {
         this.watchdogCircuitBroken = false;
         this.watchdogRestarts = [];
+        // Reset stall clock on circuit reset: the 30-min quiet window would otherwise
+        // appear as a 1800s stall on the very next watchdog tick, immediately firing
+        // another restart and re-entering the cascade that caused the trip.
+        this.lastPollCycleCompletedAt = now;
         this.log('Watchdog circuit breaker reset after 30min quiet window');
       }
       if (this.watchdogCircuitBroken) return;
+
+      // Skip watchdog fire if agent is halted — zombie exits that trickle in after
+      // max_crashes is hit would otherwise stall-detect and fire restarts past the halt gate.
+      if (this.agent.getStatus().status === 'halted') {
+        this.lastPollCycleCompletedAt = now;
+        return;
+      }
 
       const stallMs = now - this.lastPollCycleCompletedAt;
       if (stallMs <= STALL_THRESHOLD_MS) return;
@@ -1664,6 +1676,14 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
    * The circuit breaker prevents runaway restart loops.
    */
   private forceContextRestart(reason: string): void {
+    // Serialise concurrent calls: under burst load the stall watchdog, ctx monitor,
+    // and stdout freeze watchdog can all fire simultaneously, each calling
+    // sessionRefresh(). Multiple concurrent stop()/start() races corrupt PTY state.
+    if (this.sessionRefreshInProgress) {
+      this.log(`forceContextRestart skipped (restart already in progress): ${reason}`);
+      return;
+    }
+    this.sessionRefreshInProgress = true;
     const now = Date.now();
 
     // Update and check circuit breaker window (persisted to disk — survives --continue restarts)
@@ -1720,7 +1740,9 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
 
     // sessionRefresh() does stop() + start(); shouldContinue() will return false
     // because .force-fresh was just written, giving us a clean fresh session.
-    this.agent.sessionRefresh().catch(err => this.log(`Context restart failed: ${err}`));
+    this.agent.sessionRefresh()
+      .catch(err => this.log(`Context restart failed: ${err}`))
+      .finally(() => { this.sessionRefreshInProgress = false; });
   }
 
   /**
