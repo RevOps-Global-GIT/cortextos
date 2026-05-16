@@ -20,6 +20,7 @@ export interface SpawnCodexOptions {
   model?: string;
   effort?: string;
   mcpConfig?: string;
+  sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
   taskId?: string;
   requester?: string;
   replyTo?: string;
@@ -46,6 +47,7 @@ export interface SpawnCodexRunMetadata {
   model: string | null;
   effort: string | null;
   mcp_config: string | null;
+  sandbox: string | null;
   exit_code: number | null;
   timed_out: boolean;
   stdout_chars: number;
@@ -127,6 +129,9 @@ export function spawnCodex(promptFileOrDash: string, opts: SpawnCodexOptions = {
   if (opts.mcpConfig) {
     args.push('--mcp-config', opts.mcpConfig);
   }
+  if (opts.sandbox) {
+    args.push('--sandbox', opts.sandbox);
+  }
 
   args.push(prompt);
 
@@ -175,6 +180,7 @@ export function spawnCodex(promptFileOrDash: string, opts: SpawnCodexOptions = {
     model: opts.model ?? null,
     effort: opts.effort ?? null,
     mcp_config: opts.mcpConfig ?? null,
+    sandbox: opts.sandbox ?? null,
     exit_code: exitCode,
     timed_out: timedOut,
     stdout_chars: stdout.length,
@@ -192,6 +198,7 @@ export function spawnCodex(promptFileOrDash: string, opts: SpawnCodexOptions = {
     `**Requester:** ${opts.requester ?? 'none'}`,
     `**Model:** ${opts.model ?? 'default'}`,
     `**Effort:** ${opts.effort ?? 'default'}`,
+    `**Sandbox:** ${opts.sandbox ?? 'default'}`,
     `**Workdir:** ${workdir}`,
     '',
     '## Prompt',

@@ -41,6 +41,7 @@ describe('spawnCodex', () => {
       agentName: 'codex',
       taskId: 'task-123',
       requester: 'orchestrator',
+      sandbox: 'danger-full-access',
       timeout: 5,
     });
 
@@ -54,6 +55,7 @@ describe('spawnCodex', () => {
     expect(sidecar.ok).toBe(true);
     expect(sidecar.task_id).toBe('task-123');
     expect(sidecar.requester).toBe('orchestrator');
+    expect(sidecar.sandbox).toBe('danger-full-access');
     expect(sidecar.prompt_sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(sidecar.artifact_path).toBe(result.outputPath);
   });

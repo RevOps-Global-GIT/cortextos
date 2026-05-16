@@ -4459,6 +4459,7 @@ busCommand
   .option('--model <model>', 'Model override — passed as --model (e.g. o4-mini, claude-sonnet-4-6)')
   .option('--effort <level>', 'Effort level — passed as --effort (e.g. high, medium, low)')
   .option('--mcp-config <path>', 'MCP config file path — passed as --mcp-config')
+  .option('--sandbox <mode>', 'Codex sandbox mode (read-only, workspace-write, danger-full-access)')
   .option('--json-output', 'Print the run metadata JSON instead of only the artifact path')
   .action(async (
     promptFile: string,
@@ -4475,6 +4476,7 @@ busCommand
       model?: string;
       effort?: string;
       mcpConfig?: string;
+      sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
       jsonOutput?: boolean;
     },
   ) => {
@@ -4498,6 +4500,7 @@ busCommand
       model: opts.model,
       effort: opts.effort,
       mcpConfig: opts.mcpConfig,
+      sandbox: opts.sandbox,
       taskId: opts.taskId,
       requester: opts.requester,
       replyTo: opts.replyTo,

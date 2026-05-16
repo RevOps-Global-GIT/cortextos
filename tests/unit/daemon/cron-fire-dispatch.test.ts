@@ -85,6 +85,7 @@ describe('dispatchCronFire', () => {
         task_id: '755920d9',
         model: 'gpt-5.4',
         effort: 'medium',
+        sandbox: 'workspace-write',
       },
     }), {
       agentName: 'orchestrator',
@@ -103,6 +104,7 @@ describe('dispatchCronFire', () => {
       model: 'gpt-5.4',
       effort: 'medium',
       mcpConfig: undefined,
+      sandbox: 'workspace-write',
       taskId: '755920d9',
       requester: 'orchestrator',
       priority: 'cron',
@@ -119,5 +121,23 @@ describe('dispatchCronFire', () => {
       injectAgent: vi.fn(),
       spawnCodexImpl: vi.fn().mockReturnValue(result(false)),
     })).toThrow(/spawn-codex cron "evening-review" failed/);
+  });
+
+  it('defaults daemon spawn-codex crons to danger-full-access sandbox', () => {
+    const spawnCodexImpl = vi.fn().mockReturnValue(result(true));
+
+    dispatchCronFire(cron({
+      metadata: { runner: 'spawn-codex', prompt_file: 'prompts/evening-review.md' },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent: vi.fn(),
+      spawnCodexImpl,
+    });
+
+    expect(spawnCodexImpl).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      sandbox: 'danger-full-access',
+    }));
   });
 });
