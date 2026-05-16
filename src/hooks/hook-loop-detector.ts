@@ -56,7 +56,6 @@ export const ESSENTIAL_COMMANDS: readonly string[] = [
   'send-telegram',
   'log-event',
   'read-all-heartbeats',
-  'list-tasks',
 ];
 
 // ---------------------------------------------------------------------------
