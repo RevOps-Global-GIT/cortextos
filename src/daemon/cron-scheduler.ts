@@ -25,6 +25,7 @@
  * New or modified crons get a freshly computed nextFireAt.
  */
 
+import { execFileSync } from 'child_process';
 import { homedir } from 'os';
 import { join } from 'path';
 import { parseDurationMs, readCronState } from '../bus/cron-state.js';
@@ -168,6 +169,14 @@ interface ScheduledCron {
   firing?: boolean;
   /** Epoch ms when idle-deferral began (null = not deferring). */
   deferStart: number | null;
+  /**
+   * Number of post-dispatch-failure miss-retries already scheduled.
+   * When a cron's onFire exhausts all short retries we give it one 5-minute
+   * grace window before permanently advancing nextFireAt.  This counter tracks
+   * how many grace windows have been consumed so we don't loop forever.
+   * Reset to 0 on a successful fire.
+   */
+  missRetryCount?: number;
 }
 
 function changeKeyFor(c: CronDefinition): string {
@@ -621,6 +630,9 @@ export class CronScheduler {
           );
         }
 
+        // Successful fire — reset miss-retry counter.
+        sc.missRetryCount = 0;
+
         // Advance in-memory nextFireAt
         const next = computeNextFireAt(cron, now, this.timezone);
         if (!isNaN(next)) {
@@ -633,21 +645,51 @@ export class CronScheduler {
           continue; // sc is gone, skip clearing firing flag
         }
       } else {
-        // Dispatch failed (all retries exhausted). Advance nextFireAt anyway so
-        // we don't re-fire the same scheduled slot on every subsequent tick —
-        // that produced a busy-loop when an agent was unreachable. Treat the
-        // failed window as a missed slot and schedule the next normal fire.
-        const next = computeNextFireAt(cron, now, this.timezone);
-        if (!isNaN(next)) {
-          sc.nextFireAt = next;
+        // Dispatch failed (all short retries exhausted).
+        //
+        // MISS-RETRY POLICY
+        // -----------------
+        // Before permanently skipping to the next cron slot we allow one
+        // 5-minute grace window.  This handles transient failures such as an
+        // agent cascade-restart (real incident: 2026-05-16 orchestrator restart
+        // caused morning-review to miss its slot with no alert).  After the
+        // grace window is consumed we advance nextFireAt as before — and emit
+        // a cron_missed_fire log-event so the Activity feed surfaces the miss.
+        const MAX_MISS_RETRIES = 1;
+        const MISS_RETRY_DELAY_MS = 5 * 60_000; // 5 minutes
+        const missCount = (sc.missRetryCount ?? 0) + 1;
+
+        if (missCount <= MAX_MISS_RETRIES) {
+          sc.missRetryCount = missCount;
+          sc.nextFireAt = now + MISS_RETRY_DELAY_MS;
           this.logger(
-            `[cron-scheduler] WARNING: "${name}" dispatch failed — advancing to next slot ${new Date(next).toISOString()} ` +
-            `to avoid busy-loop (no last_fired_at update; failure recorded in execution log)`
+            `[cron-scheduler] WARNING: "${name}" dispatch failed — scheduling miss-retry ` +
+            `in 5min (grace attempt ${missCount}/${MAX_MISS_RETRIES})`
           );
         } else {
-          this.scheduled.delete(name);
-          this.logger(`[cron-scheduler] WARNING: removed "${name}" from schedule after failure — schedule unparseable`);
-          continue;
+          // Grace window(s) consumed — advance to the next normal slot.
+          sc.missRetryCount = 0;
+          const next = computeNextFireAt(cron, now, this.timezone);
+          if (!isNaN(next)) {
+            sc.nextFireAt = next;
+            this.logger(
+              `[cron-scheduler] ERROR: "${name}" dispatch failed after all miss-retries — ` +
+              `advancing to next slot ${new Date(next).toISOString()} and emitting missed-fire event`
+            );
+            // Emit a log-event so the Activity feed records this miss.
+            try {
+              execFileSync('cortextos', [
+                'bus', 'log-event', 'cron', 'cron_missed_fire', 'warn',
+                '--meta', JSON.stringify({ cron: name, agent: this.agentName }),
+              ], { timeout: 3000, stdio: 'ignore' });
+            } catch {
+              this.logger(`[cron-scheduler] WARNING: failed to emit cron_missed_fire event for "${name}"`);
+            }
+          } else {
+            this.scheduled.delete(name);
+            this.logger(`[cron-scheduler] WARNING: removed "${name}" from schedule after failure — schedule unparseable`);
+            continue;
+          }
         }
       }
       sc.firing = false;
