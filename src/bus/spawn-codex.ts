@@ -7,7 +7,7 @@
  */
 
 import { createHash } from 'crypto';
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { basename, join, resolve } from 'path';
 
@@ -273,4 +273,134 @@ export function spawnCodex(promptFileOrDash: string, opts: SpawnCodexOptions = {
     durationMs,
     metadata,
   };
+}
+
+/**
+ * Async variant of spawnCodex — identical behaviour but uses child_process.spawn
+ * instead of spawnSync so the Node.js event loop is NOT blocked while Codex runs.
+ *
+ * Use this from the daemon (cron-fire-dispatch) where blocking the main event loop
+ * causes fleet-wide stall watchdog false-positives and IPC timeouts.
+ */
+export async function spawnCodexAsync(promptFileOrDash: string, opts: SpawnCodexOptions = {}): Promise<SpawnCodexResult> {
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
+  const { prompt, promptPath } = readPrompt(promptFileOrDash);
+
+  if (!prompt.trim()) {
+    throw new Error('Prompt file is empty');
+  }
+
+  const timeoutSecs = opts.timeout ?? 300;
+  const workdir = opts.workdir ?? process.cwd();
+  const args = ['exec'];
+
+  if (opts.model) args.push('--model', opts.model);
+  if (opts.effort) args.push('--effort', opts.effort);
+  if (opts.mcpConfig) args.push('--mcp-config', opts.mcpConfig);
+  if (opts.sandbox) args.push('--sandbox', opts.sandbox);
+
+  args.push(prompt);
+
+  const { stdout, stderr, exitCode, exitSignal, timedOut } = await new Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number | null;
+    exitSignal: NodeJS.Signals | null;
+    timedOut: boolean;
+  }>((resolve) => {
+    let stdoutBuf = '';
+    let stderrBuf = '';
+    let settled = false;
+
+    const child = spawn(codexBin(), args, {
+      cwd: workdir,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env },
+    });
+
+    child.stdin.end('');
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', (d: string) => { stdoutBuf += d; });
+    child.stderr.on('data', (d: string) => { stderrBuf += d; });
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        child.kill('SIGTERM');
+        resolve({ stdout: stdoutBuf, stderr: stderrBuf, exitCode: null, exitSignal: null, timedOut: true });
+      }
+    }, timeoutSecs * 1000);
+
+    child.on('close', (code, signal) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve({
+          stdout: stdoutBuf,
+          stderr: stderrBuf,
+          exitCode: code,
+          exitSignal: signal as NodeJS.Signals | null,
+          timedOut: false,
+        });
+      }
+    });
+
+    child.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        stderrBuf += `\nspawn error: ${err.message}`;
+        resolve({ stdout: stdoutBuf, stderr: stderrBuf, exitCode: null, exitSignal: null, timedOut: false });
+      }
+    });
+  });
+
+  const completedAtMs = Date.now();
+  const durationMs = completedAtMs - startedAtMs;
+  const ok = !timedOut && exitCode === 0;
+  const status: SpawnCodexRunMetadata['status'] = timedOut ? 'timed_out' : ok ? 'success' : 'failed';
+  const id = runId(startedAtMs, prompt);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const slug = promptFileOrDash === '-' ? 'stdin' : slugFromPath(promptFileOrDash);
+  const suffix = `${date}-spawn-codex-${slug}-${id}`;
+  const outputDir = resolveOutputDir(opts.agentsRoot, opts.agentName);
+  const { outputPath, sidecarPath, guard } = outputPaths(outputDir, suffix);
+
+  const metadata: SpawnCodexRunMetadata = {
+    ok, status, run_id: id, started_at: startedAt,
+    completed_at: new Date(completedAtMs).toISOString(), duration_ms: durationMs,
+    prompt_file: promptPath, prompt_sha256: sha256(prompt), prompt_chars: prompt.length,
+    artifact_path: outputPath, sidecar_path: sidecarPath, workdir,
+    agent: opts.agentName ?? null, task_id: opts.taskId ?? null,
+    requester: opts.requester ?? null, reply_to: opts.replyTo ?? null,
+    priority: opts.priority ?? null, model: opts.model ?? null,
+    effort: opts.effort ?? null, mcp_config: opts.mcpConfig ?? null,
+    sandbox: opts.sandbox ?? null, exit_code: exitCode, exit_signal: exitSignal,
+    exit: { code: exitCode, signal: exitSignal, timed_out: timedOut },
+    timed_out: timedOut, stdout_chars: stdout.length, stdout, stderr,
+    stderr_excerpt: stderr.trim() ? stderr.trim().slice(0, 1000) : null,
+    output_collision_guard: guard,
+  };
+
+  const artifact = [
+    `# Codex Output - ${slug}`, '',
+    `**Status:** ${status}`, `**Spawned:** ${metadata.started_at}`,
+    `**Completed:** ${metadata.completed_at}`,
+    `**Duration:** ${(durationMs / 1000).toFixed(1)}s`,
+    `**Task:** ${opts.taskId ?? 'none'}`, `**Requester:** ${opts.requester ?? 'none'}`,
+    `**Model:** ${opts.model ?? 'default'}`, `**Effort:** ${opts.effort ?? 'default'}`,
+    `**Sandbox:** ${opts.sandbox ?? 'default'}`, `**Workdir:** ${workdir}`, '',
+    '## Prompt', '',
+    prompt.length > 2000 ? `${prompt.slice(0, 2000)}\n\n_(truncated; see prompt file for full text)_` : prompt,
+    '', '## Output', '', stdout.trim() || '(no stdout)', '',
+    ...(stderr.trim() ? ['## Stderr', '', stderr.trim().slice(0, 4000)] : []),
+  ].join('\n');
+
+  writeFileSync(outputPath, `${artifact}\n`, 'utf-8');
+  writeFileSync(sidecarPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf-8');
+
+  return { ok, status, outputPath, sidecarPath, output: stdout.trim(), stderr, exitCode, timedOut, durationMs, metadata };
 }

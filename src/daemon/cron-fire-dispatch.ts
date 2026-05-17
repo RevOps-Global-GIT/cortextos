@@ -1,8 +1,8 @@
 import { join, resolve } from 'path';
 import type { CronDefinition } from '../types/index.js';
-import { spawnCodex, type SpawnCodexResult } from '../bus/spawn-codex.js';
+import { spawnCodexAsync, type SpawnCodexResult } from '../bus/spawn-codex.js';
 
-type SpawnCodexFn = typeof spawnCodex;
+type SpawnCodexFn = typeof spawnCodexAsync;
 
 export interface CronFireDispatchOptions {
   agentName: string;
@@ -12,6 +12,9 @@ export interface CronFireDispatchOptions {
   spawnCodexImpl?: SpawnCodexFn;
   now?: () => Date;
 }
+
+// Re-export for consumers that only need the async path
+export { spawnCodexAsync };
 
 function metadataString(cron: CronDefinition, key: string): string | undefined {
   const value = cron.metadata?.[key];
@@ -34,7 +37,7 @@ function resolveOrgPath(frameworkRoot: string, org: string, pathValue: string): 
   return resolve(frameworkRoot, 'orgs', org, pathValue);
 }
 
-export function dispatchCronFire(cron: CronDefinition, opts: CronFireDispatchOptions): SpawnCodexResult | void {
+export async function dispatchCronFire(cron: CronDefinition, opts: CronFireDispatchOptions): Promise<SpawnCodexResult | void> {
   const runner = metadataString(cron, 'runner') ?? 'pty';
 
   if (runner === 'spawn-codex') {
@@ -48,8 +51,10 @@ export function dispatchCronFire(cron: CronDefinition, opts: CronFireDispatchOpt
     const timeout = metadataNumber(cron, 'timeout_seconds');
     const resolvedPrompt = resolveOrgPath(opts.frameworkRoot, opts.org, promptFile);
     const resolvedWorkdir = workdir ? resolveOrgPath(opts.frameworkRoot, opts.org, workdir) : undefined;
-    const spawn = opts.spawnCodexImpl ?? spawnCodex;
-    const result = spawn(resolvedPrompt, {
+    // Use spawnCodexAsync so the daemon event loop is NOT blocked while Codex
+    // runs (which can take 50–120 s). spawnSync here caused fleet-wide watchdog
+    // false-positives and IPC timeouts (root-cause: 2026-05-17 audit M2).
+    const result = await spawnCodexAsync(resolvedPrompt, {
       agentName: targetAgent,
       agentsRoot: join(opts.frameworkRoot, 'orgs', opts.org),
       workdir: resolvedWorkdir,

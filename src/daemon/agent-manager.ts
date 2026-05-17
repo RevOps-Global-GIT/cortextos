@@ -891,7 +891,7 @@ export class AgentManager {
     }
 
     const onFire = async (cron: CronDefinition): Promise<void> => {
-      dispatchCronFire(cron, {
+      await dispatchCronFire(cron, {
         agentName,
         frameworkRoot: this.frameworkRoot,
         org: this.resolveAgentOrg(agentName),
