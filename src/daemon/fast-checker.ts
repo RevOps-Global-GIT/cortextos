@@ -54,6 +54,11 @@ export class FastChecker {
   // Poll-cycle stall watchdog + circuit breaker
   private pollCycleWatchdog: NodeJS.Timeout | null = null;
   private lastPollCycleCompletedAt: number = 0;
+  // Wall-clock time of the previous stall-watchdog tick. The watchdog runs on a
+  // fixed 30s setInterval; a tick landing far later than that means the daemon
+  // event loop was blocked, which the lag-guard in start() uses to distinguish
+  // a true pollCycle wedge from a daemon-wide freeze.
+  private lastWatchdogTickAt: number = 0;
   private watchdogRestarts: number[] = [];
   private watchdogCircuitBroken: boolean = false;
   private watchdogCircuitBrokenAt: number = 0;
@@ -192,8 +197,44 @@ export class FastChecker {
     this.lastPollCycleCompletedAt = Date.now();
     const WATCHDOG_INTERVAL_MS = 30_000;
     const STALL_THRESHOLD_MS = 90_000;
+    // A watchdog tick landing more than this much later than its 30s schedule
+    // means the daemon event loop was blocked for the overshoot — see guard.
+    const EVENT_LOOP_LAG_TOLERANCE_MS = 20_000;
+    this.lastWatchdogTickAt = Date.now();
     this.pollCycleWatchdog = setInterval(() => {
       const now = Date.now();
+
+      // Event-loop-lag guard.
+      // The stall watchdog, the poll loop, and pollCycle's own 30s race-timeout
+      // all run on the daemon's single shared event loop. When something blocks
+      // that loop synchronously, all of them freeze together: the poll loop
+      // cannot reach its end-of-iteration clock update, the 30s race-timeout
+      // cannot fire, and lastPollCycleCompletedAt goes stale — not because
+      // pollCycle is wedged, but because the whole loop was frozen. A per-agent
+      // hard-restart cannot unblock a daemon-wide event-loop block, and firing
+      // one per agent on every tick is the false-positive cascade behind the
+      // hundreds of restarts and the Telegram spam.
+      //
+      // Detect it from the watchdog's own lateness: this setInterval is
+      // scheduled every 30s, so a tick landing >50s after the previous one
+      // means the loop was blocked for the overshoot. The stall reading is then
+      // an artifact — absorb the gap (reset the stall clock), log the block for
+      // diagnosis, and skip the restart. A genuine pollCycle wedge that leaves
+      // the event loop responsive keeps watchdog ticks on-schedule, so the real
+      // restart path below still fires for it.
+      const tickGap = now - this.lastWatchdogTickAt;
+      this.lastWatchdogTickAt = now;
+      if (tickGap > WATCHDOG_INTERVAL_MS + EVENT_LOOP_LAG_TOLERANCE_MS) {
+        const blockedSec = Math.round((tickGap - WATCHDOG_INTERVAL_MS) / 1000);
+        this.log(
+          `[watchdog] daemon event loop was blocked ~${blockedSec}s ` +
+          `(watchdog tick ${Math.round(tickGap / 1000)}s late) — stall reading unreliable, ` +
+          `skipping false-positive hard-restart`,
+        );
+        this.lastPollCycleCompletedAt = now;
+        return;
+      }
+
       if (this.bootstrappedAt === 0) return;
       if (now - this.bootstrappedAt < STALL_THRESHOLD_MS) return;
 
@@ -335,6 +376,20 @@ export class FastChecker {
    * Single poll cycle: check inbox + queued Telegram messages.
    */
   private async pollCycle(): Promise<void> {
+    // Per-step timing. The watchdog lag-guard in start() suppresses the
+    // false-positive restart when the daemon event loop is blocked, but it
+    // cannot remove the block. A synchronous block surfaces here as a single
+    // step with a multi-second delta, naming the call that has to be fixed.
+    const SLOW_STEP_MS = 8_000;
+    let stepStartedAt = Date.now();
+    const mark = (label: string): void => {
+      const dt = Date.now() - stepStartedAt;
+      if (dt > SLOW_STEP_MS) {
+        this.log(`[pollCycle] slow step "${label}" took ${dt}ms — event-loop blocker candidate`);
+      }
+      stepStartedAt = Date.now();
+    };
+
     let messageBlock = '';
     const ackIds: string[] = [];
 
@@ -352,10 +407,12 @@ export class FastChecker {
       messageBlock += this.formatInboxMessage(msg);
       ackIds.push(msg.id);
     }
+    mark('checkInbox');
 
     // Inject if there's anything
     if (messageBlock) {
       const injected = this.agent.injectMessage(messageBlock);
+      mark('injectMessage');
       if (injected) {
         // ACK inbox messages
         for (const id of ackIds) {
@@ -368,8 +425,9 @@ export class FastChecker {
         if (hasTelegramMessage) {
           this.lastMessageInjectedAt = Date.now();
         }
-        // Cooldown after injection
+        // Cooldown after injection (deliberate delay — not a blocker, not timed).
         await sleep(5000);
+        stepStartedAt = Date.now();
       }
     }
 
@@ -377,18 +435,23 @@ export class FastChecker {
     if (this.chatId && this.telegramApi && this.isAgentActive()) {
       await this.sendTyping(this.telegramApi, this.chatId);
     }
+    mark('sendTyping');
 
     // Watchdog: detect ctx-exhaustion survey + frozen stdout
     this.watchdogCheck();
+    mark('watchdogCheck');
 
     // Gmail watch: check on configured interval (default 15 min)
     await this.checkGmailWatch();
+    mark('checkGmailWatch');
 
     // Usage rate-limit guard: check every 15 min
     await this.checkUsageTier();
+    mark('checkUsageTier');
 
     // Context monitor: check usage thresholds and fire warnings/handoffs
     await this.checkContextStatus();
+    mark('checkContextStatus');
   }
 
   /**
