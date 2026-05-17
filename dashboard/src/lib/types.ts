@@ -194,6 +194,7 @@ export interface SSEEvent {
 
 export interface TaskFilters {
   org?: string;
+  scope?: 'root';
   agent?: string;
   priority?: string;
   status?: string;
