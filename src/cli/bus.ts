@@ -4444,6 +4444,42 @@ busCommand
   });
 
 // --- spawn-codex ---
+function bestEffortTaskStatus(
+  paths: ReturnType<typeof resolvePaths>,
+  taskId: string | undefined,
+  status: TaskStatus,
+): { ok: boolean; error?: string } {
+  if (!taskId) return { ok: false, error: 'no task id' };
+  try {
+    updateTask(paths, taskId, status);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function routeTelegramFallback(
+  paths: ReturnType<typeof resolvePaths>,
+  env: ReturnType<typeof resolveEnv>,
+  targetChat: string,
+  artifactPath: string,
+  error: unknown,
+): void {
+  const fallbackAgent = env.orchestrator || 'orchestrator';
+  const reason = error instanceof Error ? error.message : String(error);
+  try {
+    sendMessage(
+      paths,
+      env.agentName,
+      fallbackAgent,
+      'normal',
+      `spawn-codex Telegram delivery blocked or failed for chat ${targetChat}. Artifact: ${artifactPath}. Error: ${reason.slice(0, 500)}`,
+    );
+  } catch {
+    // Non-fatal: artifact path and sidecar were already persisted.
+  }
+}
+
 busCommand
   .command('spawn-codex <prompt-file>')
   .description('Run a scoped Codex session locally, capture output to agents/<agent>/output/, and write a JSON sidecar')
@@ -4491,6 +4527,8 @@ busCommand
       }
     }
 
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const startedTaskUpdate = bestEffortTaskStatus(paths, opts.taskId, 'in_progress');
     const result = spawnCodex(promptFile, {
       workdir: opts.workdir,
       timeout: parseInt(opts.timeout ?? '300', 10),
@@ -4507,9 +4545,16 @@ busCommand
       priority: opts.priority,
     });
 
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const completedTaskUpdate = opts.taskId
+      ? bestEffortTaskStatus(paths, opts.taskId, result.ok ? 'completed' : 'blocked')
+      : { ok: false, error: 'no task id' };
+
     logEvent(paths, env.agentName, env.org, 'action', 'spawn_codex_task', result.ok ? 'info' : 'error', {
       ...result.metadata,
+      task_status_update: {
+        started: startedTaskUpdate,
+        completed: completedTaskUpdate,
+      },
     });
 
     console.log(opts.jsonOutput ? JSON.stringify(result.metadata, null, 2) : result.outputPath);
@@ -4522,7 +4567,9 @@ busCommand
           encoding: 'utf-8',
           timeout: 30_000,
         });
-      } catch { /* non-fatal — artifact path already printed to stdout */ }
+      } catch (err) {
+        routeTelegramFallback(paths, env, opts.telegram, result.outputPath, err);
+      }
     }
 
     if (!result.ok) {
