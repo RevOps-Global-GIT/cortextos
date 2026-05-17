@@ -65,10 +65,10 @@ function result(ok = true): SpawnCodexResult {
 }
 
 describe('dispatchCronFire', () => {
-  it('keeps default PTY cron injection behavior', () => {
+  it('keeps default PTY cron injection behavior', async () => {
     const injectAgent = vi.fn().mockReturnValue(true);
 
-    dispatchCronFire(cron(), {
+    await dispatchCronFire(cron(), {
       agentName: 'orchestrator',
       frameworkRoot: '/repo',
       org: 'revops-global',
@@ -82,11 +82,11 @@ describe('dispatchCronFire', () => {
     );
   });
 
-  it('runs spawn-codex crons without injecting into the long-running PTY', () => {
+  it('runs spawn-codex crons without injecting into the long-running PTY', async () => {
     const injectAgent = vi.fn();
-    const spawnCodexImpl = vi.fn().mockReturnValue(result(true));
+    const spawnCodexImpl = vi.fn().mockResolvedValue(result(true));
 
-    dispatchCronFire(cron({
+    await dispatchCronFire(cron({
       metadata: {
         runner: 'spawn-codex',
         prompt_file: 'prompts/evening-review.md',
@@ -124,22 +124,22 @@ describe('dispatchCronFire', () => {
     });
   });
 
-  it('throws when a spawn-codex cron fails', () => {
-    expect(() => dispatchCronFire(cron({
+  it('throws when a spawn-codex cron fails', async () => {
+    await expect(dispatchCronFire(cron({
       metadata: { runner: 'spawn-codex', prompt_file: 'prompts/evening-review.md' },
     }), {
       agentName: 'orchestrator',
       frameworkRoot: '/repo',
       org: 'revops-global',
       injectAgent: vi.fn(),
-      spawnCodexImpl: vi.fn().mockReturnValue(result(false)),
-    })).toThrow(/spawn-codex cron "evening-review" failed/);
+      spawnCodexImpl: vi.fn().mockResolvedValue(result(false)),
+    })).rejects.toThrow(/spawn-codex cron "evening-review" failed/);
   });
 
-  it('defaults daemon spawn-codex crons to danger-full-access sandbox', () => {
-    const spawnCodexImpl = vi.fn().mockReturnValue(result(true));
+  it('defaults daemon spawn-codex crons to danger-full-access sandbox', async () => {
+    const spawnCodexImpl = vi.fn().mockResolvedValue(result(true));
 
-    dispatchCronFire(cron({
+    await dispatchCronFire(cron({
       metadata: { runner: 'spawn-codex', prompt_file: 'prompts/evening-review.md' },
     }), {
       agentName: 'orchestrator',

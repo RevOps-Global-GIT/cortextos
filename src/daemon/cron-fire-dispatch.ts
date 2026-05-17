@@ -54,7 +54,9 @@ export async function dispatchCronFire(cron: CronDefinition, opts: CronFireDispa
     // Use spawnCodexAsync so the daemon event loop is NOT blocked while Codex
     // runs (which can take 50–120 s). spawnSync here caused fleet-wide watchdog
     // false-positives and IPC timeouts (root-cause: 2026-05-17 audit M2).
-    const result = await spawnCodexAsync(resolvedPrompt, {
+    // opts.spawnCodexImpl allows test injection; production uses spawnCodexAsync.
+    const spawnFn = opts.spawnCodexImpl ?? spawnCodexAsync;
+    const result = await spawnFn(resolvedPrompt, {
       agentName: targetAgent,
       agentsRoot: join(opts.frameworkRoot, 'orgs', opts.org),
       workdir: resolvedWorkdir,
