@@ -8,6 +8,19 @@ import { withRetry, isTransientError } from '../utils/retry.js';
 export type MessageHandler = (msg: TelegramMessage) => void;
 export type CallbackHandler = (query: TelegramCallbackQuery) => void;
 export type ReactionHandler = (reaction: TelegramMessageReaction) => void;
+export type ConflictHandler = () => void;
+
+/** True when `err` is Telegram's getUpdates "Conflict" — another poller is
+ *  already long-polling this bot token. Telegram permits exactly one. */
+export function isConflictError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('Conflict') || msg.includes('terminated by other getUpdates');
+}
+
+/** Consecutive conflict cycles before a poller notifies its persistent-
+ *  conflict handlers. ~8 one-second cycles is long enough to be sure this
+ *  poller is a superseded orphan rather than a transient overlap. */
+const PERSISTENT_CONFLICT_STREAK = 8;
 
 /**
  * Telegram polling loop. Replaces the Telegram portion of fast-checker.sh.
@@ -35,6 +48,14 @@ export class TelegramPoller {
   private reactionHandlers: ReactionHandler[] = [];
   private pollInterval: number;
   private label: string;
+  // Persistent-conflict self-heal. Telegram allows one getUpdates long-poll
+  // per bot token; a second poller makes every getUpdates fail with
+  // "Conflict". A poller losing getUpdates for a sustained streak is almost
+  // certainly a superseded orphan. After PERSISTENT_CONFLICT_STREAK
+  // consecutive conflict cycles it notifies conflictHandlers — the
+  // agent-manager uses that to terminate orphans (incident 2026-05-17).
+  private consecutiveConflictCycles: number = 0;
+  private conflictHandlers: ConflictHandler[] = [];
 
   /**
    * @param api Telegram API client scoped to a single bot token.
@@ -86,6 +107,16 @@ export class TelegramPoller {
   }
 
   /**
+   * Register a handler invoked when this poller has lost getUpdates to a
+   * Conflict for PERSISTENT_CONFLICT_STREAK consecutive cycles — i.e. another
+   * poller holds this bot token. The agent-manager uses this to stop orphaned
+   * pollers so exactly one poller per token survives.
+   */
+  onPersistentConflict(handler: ConflictHandler): void {
+    this.conflictHandlers.push(handler);
+  }
+
+  /**
    * Start the polling loop.
    *
    * @param initialDelayMs Optional delay before the first getUpdates call.
@@ -118,9 +149,31 @@ export class TelegramPoller {
     while (this.running) {
       try {
         await this.pollOnce();
+        // A clean cycle clears the conflict streak.
+        this.consecutiveConflictCycles = 0;
       } catch (err) {
-        // Log error but continue polling
-        console.error(`[${this.label}] Poll error:`, err);
+        if (isConflictError(err)) {
+          this.consecutiveConflictCycles++;
+          console.warn(
+            `[${this.label}] getUpdates Conflict (streak ${this.consecutiveConflictCycles}) — ` +
+            `another poller is using this bot token`,
+          );
+          // Notify handlers at the streak threshold and every multiple
+          // thereafter. The agent-manager's handler stops this poller if it
+          // is a superseded orphan (no longer the registered poller).
+          if (
+            this.consecutiveConflictCycles >= PERSISTENT_CONFLICT_STREAK &&
+            this.consecutiveConflictCycles % PERSISTENT_CONFLICT_STREAK === 0
+          ) {
+            for (const handler of this.conflictHandlers) {
+              try { handler(); } catch { /* handler failure must not break the loop */ }
+            }
+          }
+        } else {
+          // Non-conflict error: log and continue polling.
+          this.consecutiveConflictCycles = 0;
+          console.error(`[${this.label}] Poll error:`, err);
+        }
       }
       await sleep(this.pollInterval);
     }
@@ -146,21 +199,23 @@ export class TelegramPoller {
    * update so a crash mid-batch does not drop confirmed state.
    */
   async pollOnce(): Promise<void> {
-    const isConflict = (err: unknown) => {
-      const msg = err instanceof Error ? err.message : String(err);
-      return msg.includes('Conflict') || msg.includes('terminated by other getUpdates');
-    };
+    // Conflict errors are deliberately NOT retried here. A Conflict means
+    // another poller holds this bot token; 8-30s retry backoff would keep a
+    // superseded orphan calling getUpdates for ~70s after stop(), and that
+    // overlap window is exactly how orphaned pollers stacked into the
+    // Conflict storm (incident 2026-05-17). Letting the Conflict throw
+    // immediately returns control to start()'s loop, which re-checks the
+    // running flag every cycle and counts the conflict streak for self-heal.
     const result = await withRetry(
       () => this.api.getUpdates(this.offset, 1),
       {
         maxAttempts: 3,
         baseDelayMs: 8_000,
         maxDelayMs: 30_000,
-        isRetryable: (err) => isConflict(err) || isTransientError(err),
+        isRetryable: (err) => !isConflictError(err) && isTransientError(err),
         onRetry: (attempt, err) => {
           const msg = err instanceof Error ? err.message : String(err);
-          const reason = isConflict(err) ? 'Conflict (another poller active)' : 'transient error';
-          console.warn(`[${this.label}] getUpdates attempt ${attempt} failed (${reason}), retrying: ${msg}`);
+          console.warn(`[${this.label}] getUpdates attempt ${attempt} failed (transient error), retrying: ${msg}`);
         },
       },
     );

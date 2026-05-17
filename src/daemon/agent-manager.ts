@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync } from 'fs';
 import { join, relative } from 'path';
 import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, TelegramMessage } from '../types/index.js';
 import { AgentProcess } from './agent-process.js';
@@ -25,10 +25,19 @@ type LogFn = (msg: string) => void;
  * Manages all agents in a cortextOS instance.
  */
 export class AgentManager {
-  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; telegramRejectCount?: number; telegramLastRejectAlertAt?: number }> = new Map();
+  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; pollerToken?: string; activityPollerToken?: string; telegramRejectCount?: number; telegramLastRejectAlertAt?: number }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
   /** Daemon-level cron scheduler registry: one CronScheduler per enabled agent. */
   private cronSchedulers: Map<string, CronScheduler> = new Map();
+  /**
+   * Process-wide registry of live Telegram pollers, keyed by bot token.
+   * Telegram permits exactly one getUpdates long-poll per token; a second
+   * poller triggers permanent "Conflict (terminated by other getUpdates)"
+   * errors. registerPoller() enforces the one-poller-per-token invariant by
+   * stopping any stale poller before recording a new one — the structural
+   * guarantee against the orphaned-poller Conflict storm (incident 2026-05-17).
+   */
+  private pollersByToken: Map<string, TelegramPoller> = new Map();
   // Tracks agents that received a start request while still stopping.
   // stopAgent() honors these after cleanup completes so restart-all is race-free.
   private pendingRestarts: Set<string> = new Set();
@@ -401,6 +410,17 @@ export class AgentManager {
     // Start agent
     await agentProcess.start();
 
+    // Clear stale stop sentinels now the agent is running again. A leftover
+    // .user-stop / .daemon-stop would otherwise mis-classify a later crash as
+    // an intentional stop and suppress the crash alert. (.daemon-stop also
+    // self-expires after 60s; .user-stop has no expiry of its own.)
+    for (const marker of ['.user-stop', '.daemon-stop']) {
+      try {
+        const markerPath = join(this.ctxRoot, 'state', name, marker);
+        if (existsSync(markerPath)) rmSync(markerPath);
+      } catch { /* non-fatal — marker cleanup must not block startup */ }
+    }
+
     // Subtask 2.2: Auto-migrate crons from config.json → crons.json before
     // starting the scheduler, so the scheduler always has a populated crons.json
     // to read from.  The migration is idempotent (marker file prevents re-runs).
@@ -626,69 +646,31 @@ export class AgentManager {
         checker.queueTelegramMessage(formatted);
       });
 
-      // Wrap poller.start() in a restart-on-Conflict loop. The poller's
-      // internal Conflict-self-die (see TelegramPoller.start) yields the
-      // Telegram getUpdates lock when a duplicate poller is detected — but
-      // without a restart layer above, the agent loses Telegram input
-      // permanently. After a daemon crash, the old getUpdates connections
-      // can hold the lock for ~60s in Telegram's cloud, so this loop
-      // sleeps and retries on 'conflict-self-die' until the lock clears.
-      // Intentional stops (stopAgent → poller.stop()) set
-      // lastExitReason='stopped-externally' and exit the loop cleanly.
-      const startPrimaryPollerWithRestart = async () => {
-        // 5min hard cap measured against CONSECUTIVE Conflict failures,
-        // not total wrapper lifetime. A long-running successful poll
-        // (>1min) resets the counter — without this reset, a poller that
-        // runs cleanly for hours and then hits a single Conflict would
-        // give up immediately because total runtime already exceeds 5min.
-        const MAX_CONSECUTIVE_CONFLICT_MS = 5 * 60 * 1000;
-        const LONG_RUN_RESET_MS = 60_000;
-        let consecutiveConflictStart: number | null = null;
-        while (true) {
-          // Pre-check: agent may have been deleted from registry during
-          // a previous sleep window. Skip the start() call entirely.
-          if (!this.agents.has(name)) return;
-          const runStart = Date.now();
-          try {
-            await poller.start();
-          } catch (err) {
-            log(`Telegram poller threw (will not restart): ${err}`);
-            return;
-          }
-          const runDuration = Date.now() - runStart;
-          if (poller.lastExitReason === 'stopped-externally') return;
-          if (!this.agents.has(name)) return;
-          // A poll session that ran for >LONG_RUN_RESET_MS proves the
-          // Conflict lock is no longer chronic — reset the retry budget.
-          if (runDuration > LONG_RUN_RESET_MS) consecutiveConflictStart = null;
-          if (consecutiveConflictStart === null) consecutiveConflictStart = Date.now();
-          if (Date.now() - consecutiveConflictStart > MAX_CONSECUTIVE_CONFLICT_MS) {
-            log(`Telegram poller for ${name} could not clear Conflict within 5min of consecutive failures — giving up. Inspect for duplicate bot instance.`);
-            return;
-          }
-          log(`Telegram poller for ${name} exited (${poller.lastExitReason}). Sleeping 30s then restarting to retake getUpdates lock.`);
-          await new Promise(r => setTimeout(r, 30_000));
-        }
-      };
-      startPrimaryPollerWithRestart().catch(err => {
-        log(`Telegram poller wrapper crashed: ${err}`);
-        // Best-effort operator alert via the agent's own bot. The wrapper
-        // crashing is rare (the only catchable path is a throw from
-        // poller.start() before its own try/catch), but when it happens the
-        // agent silently loses Telegram input — exactly the failure class
-        // the 2026-05-16 audit flagged. Surface it to the operator chat so
-        // they see "X poller crashed" instead of mysterious silence.
-        if (telegramApi && chatId) {
-          telegramApi.sendMessage(
-            String(chatId),
-            `${name}: Telegram poller wrapper crashed. Inbound messages may be dropped until restart. Check daemon log.`,
-          ).catch(() => { /* swallow alert failure; original log already captured */ });
-        }
+      // Single-poller-per-token invariant + conflict self-heal. Registering
+      // the poller stops any stale poller still holding this bot token; the
+      // persistent-conflict handler makes an orphan self-terminate instead of
+      // joining a Conflict storm. This replaces the earlier
+      // startPrimaryPollerWithRestart wrapper: that wrapper restarted the
+      // poller on a `conflict-self-die` exit reason the poller never emitted,
+      // and a restart-on-Conflict loop re-creates the very duplicate pollers
+      // that caused the 2026-05-17 storm. The registry handles stale
+      // getUpdates locks instead — the poller keeps polling and simply starts
+      // winning once a crashed daemon's server-side long-poll times out.
+      if (botToken) {
+        poller.onPersistentConflict(this.makeConflictHandler(botToken, poller, name));
+        this.registerPoller(botToken, poller);
+      }
+
+      poller.start().catch(err => {
+        log(`Telegram poller error: ${err}`);
       });
 
       // Store poller reference so stopAgent() can clean it up
       const entry = this.agents.get(name);
-      if (entry) entry.poller = poller;
+      if (entry) {
+        entry.poller = poller;
+        entry.pollerToken = botToken;
+      }
 
       log(`Telegram poller started (${name})`);
 
@@ -789,44 +771,75 @@ export class AgentManager {
       log(`[activity-channel inbound] from ${from}: ${text.slice(0, 120)}`);
     });
 
-    // Same Conflict-restart wrapper as the primary poller — activity
-    // channel can lose its getUpdates lock after a daemon crash too.
-    // 5min retry budget measured against CONSECUTIVE failures; resets
-    // after a >1min successful run. See primary poller wrapper for rationale.
-    const startActivityPollerWithRestart = async () => {
-      const MAX_CONSECUTIVE_CONFLICT_MS = 5 * 60 * 1000;
-      const LONG_RUN_RESET_MS = 60_000;
-      let consecutiveConflictStart: number | null = null;
-      while (true) {
-        if (!this.agents.has(name)) return;
-        const runStart = Date.now();
-        try {
-          await activityPoller.start();
-        } catch (err) {
-          log(`Activity-channel poller threw (will not restart): ${err}`);
-          return;
-        }
-        const runDuration = Date.now() - runStart;
-        if (activityPoller.lastExitReason === 'stopped-externally') return;
-        if (!this.agents.has(name)) return;
-        if (runDuration > LONG_RUN_RESET_MS) consecutiveConflictStart = null;
-        if (consecutiveConflictStart === null) consecutiveConflictStart = Date.now();
-        if (Date.now() - consecutiveConflictStart > MAX_CONSECUTIVE_CONFLICT_MS) {
-          log(`Activity-channel poller for ${name} could not clear Conflict within 5min of consecutive failures — giving up.`);
-          return;
-        }
-        log(`Activity-channel poller for ${name} exited (${activityPoller.lastExitReason}). Sleeping 30s then restarting.`);
-        await new Promise(r => setTimeout(r, 30_000));
-      }
-    };
-    startActivityPollerWithRestart().catch((err) => {
-      log(`Activity-channel poller wrapper crashed: ${err}`);
+    // Single-poller-per-token invariant + conflict self-heal for the
+    // activity-channel bot — same guarantee as the agent's primary poller.
+    // Replaces the earlier startActivityPollerWithRestart wrapper (see the
+    // primary poller above for why the restart-on-Conflict loop was removed).
+    activityPoller.onPersistentConflict(
+      this.makeConflictHandler(activityBotToken, activityPoller, `${name}:activity`),
+    );
+    this.registerPoller(activityBotToken, activityPoller);
+
+    activityPoller.start().catch((err) => {
+      log(`Activity-channel poller error: ${err}`);
     });
 
     const entry = this.agents.get(name);
-    if (entry) entry.activityPoller = activityPoller;
+    if (entry) {
+      entry.activityPoller = activityPoller;
+      entry.activityPollerToken = activityBotToken;
+    }
 
     log(`Activity-channel poller started (chat ${activityChatId}, with Conflict-restart wrapper)`);
+  }
+
+  /**
+   * Register `poller` as the sole poller for `botToken`, stopping any
+   * poller already registered for the same token first. The eviction is the
+   * structural guarantee that two pollers never race on one bot token —
+   * even if a restart path failed to stop the previous poller cleanly.
+   */
+  private registerPoller(botToken: string, poller: TelegramPoller): void {
+    const existing = this.pollersByToken.get(botToken);
+    if (existing && existing !== poller) {
+      console.warn(
+        `[telegram-poller-conflict] duplicate poller for bot token ...${botToken.slice(-6)} — ` +
+        `stopping the stale instance (orphaned-poller guard)`,
+      );
+      existing.stop();
+    }
+    this.pollersByToken.set(botToken, poller);
+  }
+
+  /** Remove `poller` from the token registry, but only if it is still the
+   *  registered one (a superseded poller must not evict its replacement). */
+  private unregisterPoller(botToken: string, poller: TelegramPoller): void {
+    if (this.pollersByToken.get(botToken) === poller) {
+      this.pollersByToken.delete(botToken);
+    }
+  }
+
+  /**
+   * Build the persistent-conflict handler for a poller. When the poller has
+   * lost getUpdates to a Conflict for a sustained streak, this decides its
+   * fate: if it is no longer the registered poller for its token it is a
+   * superseded orphan and stops itself; if it IS the registered poller the
+   * conflict originates outside this process — log loudly so a monitor pages.
+   */
+  private makeConflictHandler(botToken: string, poller: TelegramPoller, label: string): () => void {
+    return () => {
+      if (this.pollersByToken.get(botToken) !== poller) {
+        console.warn(
+          `[telegram-poller-conflict] ${label}: poller superseded by a newer instance — orphan self-terminating`,
+        );
+        poller.stop();
+      } else {
+        console.error(
+          `[telegram-poller-conflict] ${label}: registered poller still losing getUpdates after a ` +
+          `sustained streak — an external getUpdates caller is on bot token ...${botToken.slice(-6)}; investigate`,
+        );
+      }
+    };
   }
 
   /**
@@ -839,8 +852,14 @@ export class AgentManager {
       return;
     }
 
-    if (entry.poller) entry.poller.stop();
-    if (entry.activityPoller) entry.activityPoller.stop();
+    if (entry.poller) {
+      entry.poller.stop();
+      if (entry.pollerToken) this.unregisterPoller(entry.pollerToken, entry.poller);
+    }
+    if (entry.activityPoller) {
+      entry.activityPoller.stop();
+      if (entry.activityPollerToken) this.unregisterPoller(entry.activityPollerToken, entry.activityPoller);
+    }
     entry.checker.stop();
     await entry.process.stop();
     this.agents.delete(name);
