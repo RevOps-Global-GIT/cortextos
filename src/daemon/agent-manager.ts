@@ -683,7 +683,7 @@ export class AgentManager {
       // — follow-up task_1776054009969_099 tracks migrating to a dedicated
       // singleton or Telegram webhook if the coupling ever causes real
       // operator pain. Non-orchestrator agents skip this entirely.
-      await this.maybeStartActivityChannelPoller(name, org, agentDir, log);
+      await this.maybeStartActivityChannelPoller(name, org, agentDir, log, botToken);
     } else if (telegramApi && chatId) {
       log('Telegram poller disabled by config/env; outbound notifications remain enabled');
     }
@@ -704,6 +704,7 @@ export class AgentManager {
     org: string | undefined,
     agentDir: string,
     log: LogFn,
+    primaryBotToken?: string,
   ): Promise<void> {
     if (!org) return;
     const orgDir = join(this.frameworkRoot, 'orgs', org);
@@ -744,6 +745,11 @@ export class AgentManager {
 
     if (!activityBotToken || !activityChatId) {
       log('Activity-channel env present but missing BOT_TOKEN or CHAT_ID — skipping poller');
+      return;
+    }
+
+    if (primaryBotToken && activityBotToken === primaryBotToken) {
+      log("Activity-channel bot token matches primary bot; skipping duplicate activity poller. Primary poller already handles approval callbacks.");
       return;
     }
 
