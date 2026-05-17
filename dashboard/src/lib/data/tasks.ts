@@ -3,6 +3,7 @@
 
 import { db } from '@/lib/db';
 import type { Task, TaskFilters } from '@/lib/types';
+import { appendTaskScopeConditions } from './task-scope';
 
 /**
  * Get tasks with optional filters.
@@ -12,10 +13,7 @@ export function getTasks(filters?: TaskFilters): Task[] {
   const conditions: string[] = [];
   const params: (string | number)[] = [];
 
-  if (filters?.org) {
-    conditions.push('org = ?');
-    params.push(filters.org);
-  }
+  appendTaskScopeConditions(filters, conditions, params);
   if (filters?.agent) {
     // 'human' is a virtual filter: returns tasks assigned to any non-agent human
     // (agents create human tasks with assigned_to 'user', 'human', etc.)

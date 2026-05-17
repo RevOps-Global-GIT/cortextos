@@ -28,6 +28,7 @@ export async function GET(request: NextRequest) {
   try { syncAll(); } catch { /* best-effort */ }
 
   const filters = {
+    scope: searchParams.get('scope') === 'root' ? 'root' as const : undefined,
     org: searchParams.get('org') || undefined,
     agent: searchParams.get('agent') || undefined,
     priority: searchParams.get('priority') || undefined,
