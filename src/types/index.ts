@@ -457,7 +457,7 @@ export interface CronDefinition {
    * Daemon-supported keys:
    * - runner: "pty" | "spawn-codex"
    * - prompt_file: org-relative prompt path for spawn-codex runner
-   * - workdir, agent, timeout_seconds, task_id, model, effort, mcp_config, sandbox
+   * - workdir, agent, timeout_seconds, task_id, reply_to, model, effort, mcp_config, sandbox
    *
    * @example { "priority": "high", "source": "/loop" }
    */

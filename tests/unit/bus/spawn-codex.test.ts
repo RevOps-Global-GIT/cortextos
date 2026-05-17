@@ -1,12 +1,13 @@
-import { mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnCodex } from '../../../src/bus/spawn-codex.js';
 
 const previousCodexBin = process.env.CODEX_BIN;
 
 afterEach(() => {
+  vi.useRealTimers();
   if (previousCodexBin === undefined) {
     delete process.env.CODEX_BIN;
   } else {
@@ -58,6 +59,11 @@ describe('spawnCodex', () => {
     expect(sidecar.sandbox).toBe('danger-full-access');
     expect(sidecar.prompt_sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(sidecar.artifact_path).toBe(result.outputPath);
+    expect(sidecar.run_id).toMatch(/^\d{8}T\d{6}Z-[a-f0-9]{8}$/);
+    expect(sidecar.exit).toEqual({ code: 0, signal: null, timed_out: false });
+    expect(sidecar.stdout).toContain('fake codex ok');
+    expect(sidecar.stderr).toBe('');
+    expect(sidecar.output_collision_guard).toBe('created');
   });
 
   it('writes failure metadata when codex exits non-zero', () => {
@@ -74,7 +80,27 @@ describe('spawnCodex', () => {
     const sidecar = JSON.parse(readFileSync(result.sidecarPath, 'utf-8'));
     expect(sidecar.ok).toBe(false);
     expect(sidecar.exit_code).toBe(7);
+    expect(sidecar.exit.code).toBe(7);
+    expect(sidecar.stdout).toContain('partial output');
+    expect(sidecar.stderr).toContain('boom');
     expect(sidecar.stderr_excerpt).toContain('boom');
+  });
+
+  it('does not overwrite an existing artifact when two runs share the same prompt slug', () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "same slug\\n"\n');
+    const { prompt, agentsRoot } = makePrompt();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-16T12:34:56.789Z'));
+
+    const first = spawnCodex(prompt, { agentsRoot, agentName: 'codex', timeout: 5 });
+    writeFileSync(first.outputPath, 'sentinel\n', 'utf-8');
+    const second = spawnCodex(prompt, { agentsRoot, agentName: 'codex', timeout: 5 });
+
+    expect(existsSync(first.outputPath)).toBe(true);
+    expect(readFileSync(first.outputPath, 'utf-8')).toBe('sentinel\n');
+    expect(second.outputPath).not.toBe(first.outputPath);
+    const sidecar = JSON.parse(readFileSync(second.sidecarPath, 'utf-8'));
+    expect(sidecar.output_collision_guard).toBe('renamed');
   });
 
   it('reports missing prompt files before spawning codex', () => {

@@ -28,6 +28,7 @@ function result(ok = true): SpawnCodexResult {
     metadata: {
       ok,
       status: ok ? 'success' : 'failed',
+      run_id: '20260516T000000Z-deadbeef',
       started_at: '2026-05-16T00:00:00.000Z',
       completed_at: '2026-05-16T00:00:00.012Z',
       duration_ms: 12,
@@ -45,10 +46,20 @@ function result(ok = true): SpawnCodexResult {
       model: null,
       effort: null,
       mcp_config: null,
+      sandbox: 'danger-full-access',
       exit_code: ok ? 0 : 1,
+      exit_signal: null,
+      exit: {
+        code: ok ? 0 : 1,
+        signal: null,
+        timed_out: false,
+      },
       timed_out: false,
       stdout_chars: 4,
+      stdout: 'done',
+      stderr: '',
       stderr_excerpt: null,
+      output_collision_guard: 'created',
     },
   };
 }
@@ -83,6 +94,7 @@ describe('dispatchCronFire', () => {
         agent: 'codex',
         timeout_seconds: 900,
         task_id: '755920d9',
+        reply_to: '1778976581063-orchestrator-00ahy',
         model: 'gpt-5.4',
         effort: 'medium',
         sandbox: 'workspace-write',
@@ -107,6 +119,7 @@ describe('dispatchCronFire', () => {
       sandbox: 'workspace-write',
       taskId: '755920d9',
       requester: 'orchestrator',
+      replyTo: '1778976581063-orchestrator-00ahy',
       priority: 'cron',
     });
   });

@@ -30,6 +30,7 @@ export interface SpawnCodexOptions {
 export interface SpawnCodexRunMetadata {
   ok: boolean;
   status: 'success' | 'failed' | 'timed_out';
+  run_id: string;
   started_at: string;
   completed_at: string;
   duration_ms: number;
@@ -49,9 +50,18 @@ export interface SpawnCodexRunMetadata {
   mcp_config: string | null;
   sandbox: string | null;
   exit_code: number | null;
+  exit_signal: NodeJS.Signals | null;
+  exit: {
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    timed_out: boolean;
+  };
   timed_out: boolean;
   stdout_chars: number;
+  stdout: string;
+  stderr: string;
   stderr_excerpt: string | null;
+  output_collision_guard: 'created' | 'renamed';
 }
 
 export interface SpawnCodexResult {
@@ -93,6 +103,31 @@ function resolveOutputDir(agentsRoot?: string, agentName?: string): string {
   const dir = join(process.cwd(), 'output');
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function runId(startedAtMs: number, prompt: string): string {
+  const timestamp = new Date(startedAtMs).toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d{3}Z$/, 'Z');
+  return `${timestamp}-${sha256(`${timestamp}:${prompt}`).slice(0, 8)}`;
+}
+
+function outputPaths(outputDir: string, suffix: string): { outputPath: string; sidecarPath: string; guard: 'created' | 'renamed' } {
+  let outputPath = join(outputDir, `${suffix}.md`);
+  let sidecarPath = join(outputDir, `${suffix}.json`);
+  if (!existsSync(outputPath) && !existsSync(sidecarPath)) {
+    return { outputPath, sidecarPath, guard: 'created' };
+  }
+
+  for (let i = 2; i < 1000; i += 1) {
+    outputPath = join(outputDir, `${suffix}-${i}.md`);
+    sidecarPath = join(outputDir, `${suffix}-${i}.json`);
+    if (!existsSync(outputPath) && !existsSync(sidecarPath)) {
+      return { outputPath, sidecarPath, guard: 'renamed' };
+    }
+  }
+
+  throw new Error(`Could not allocate unique spawn-codex output path for ${suffix}`);
 }
 
 function readPrompt(promptFileOrDash: string): { prompt: string; promptPath: string } {
@@ -150,19 +185,21 @@ export function spawnCodex(promptFileOrDash: string, opts: SpawnCodexOptions = {
   const stderr = (run.stderr ?? '').toString();
   const timedOut = Boolean(run.error && (run.error as NodeJS.ErrnoException).code === 'ETIMEDOUT');
   const exitCode = typeof run.status === 'number' ? run.status : null;
+  const exitSignal = run.signal ?? null;
   const ok = !timedOut && exitCode === 0;
   const status: SpawnCodexRunMetadata['status'] = timedOut ? 'timed_out' : ok ? 'success' : 'failed';
+  const id = runId(startedAtMs, prompt);
 
   const date = new Date().toISOString().slice(0, 10);
   const slug = promptFileOrDash === '-' ? 'stdin' : slugFromPath(promptFileOrDash);
-  const suffix = `${date}-spawn-codex-${slug}`;
+  const suffix = `${date}-spawn-codex-${slug}-${id}`;
   const outputDir = resolveOutputDir(opts.agentsRoot, opts.agentName);
-  const outputPath = join(outputDir, `${suffix}.md`);
-  const sidecarPath = join(outputDir, `${suffix}.json`);
+  const { outputPath, sidecarPath, guard } = outputPaths(outputDir, suffix);
 
   const metadata: SpawnCodexRunMetadata = {
     ok,
     status,
+    run_id: id,
     started_at: startedAt,
     completed_at: new Date(completedAtMs).toISOString(),
     duration_ms: durationMs,
@@ -182,9 +219,18 @@ export function spawnCodex(promptFileOrDash: string, opts: SpawnCodexOptions = {
     mcp_config: opts.mcpConfig ?? null,
     sandbox: opts.sandbox ?? null,
     exit_code: exitCode,
+    exit_signal: exitSignal,
+    exit: {
+      code: exitCode,
+      signal: exitSignal,
+      timed_out: timedOut,
+    },
     timed_out: timedOut,
     stdout_chars: stdout.length,
+    stdout,
+    stderr,
     stderr_excerpt: stderr.trim() ? stderr.trim().slice(0, 1000) : null,
+    output_collision_guard: guard,
   };
 
   const artifact = [

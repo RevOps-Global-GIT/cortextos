@@ -60,6 +60,7 @@ export function dispatchCronFire(cron: CronDefinition, opts: CronFireDispatchOpt
       sandbox: (metadataString(cron, 'sandbox') as 'read-only' | 'workspace-write' | 'danger-full-access' | undefined) ?? 'danger-full-access',
       taskId: metadataString(cron, 'task_id') ?? `cron:${opts.agentName}:${cron.name}`,
       requester: opts.agentName,
+      replyTo: metadataString(cron, 'reply_to'),
       priority: metadataString(cron, 'priority') ?? 'cron',
     });
 
