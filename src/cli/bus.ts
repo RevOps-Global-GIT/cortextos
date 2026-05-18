@@ -1093,6 +1093,39 @@ function parseFarmTasks(raw: string): FarmDispatchTask[] {
   });
 }
 
+function parseFarmTaskSpec(raw: string): FarmDispatchTask {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error('--task must not be empty');
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const id = typeof record.id === 'string' ? record.id.trim() : '';
+      const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : '';
+      if (!id || !prompt) {
+        throw new Error('--task JSON must include non-empty string id and prompt fields');
+      }
+      return { id, prompt };
+    }
+    if (typeof parsed === 'string' && parsed.trim()) {
+      return { id: `task-${randomString(8)}`, prompt: parsed.trim() };
+    }
+    throw new Error('--task JSON must be an object with id and prompt, or a prompt string');
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      const separator = trimmed.match(/^([^:\s|]+)(?:::|\|)\s*(.+)$/s);
+      if (separator) {
+        return { id: separator[1].trim(), prompt: separator[2].trim() };
+      }
+      return { id: `task-${randomString(8)}`, prompt: trimmed };
+    }
+    throw err;
+  }
+}
+
 async function orgoExec(computerId: string, apiKey: string, code: string): Promise<OrgoExecResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30_000);
@@ -1147,13 +1180,21 @@ print(json.dumps({"ok": True, "job_path": target, "bytes": len(payload)}))
 
 busCommand
   .command('farm-dispatch')
-  .description('Dispatch a batch job to the Codex-CU Claude farm inbox')
-  .requiredOption('--tasks-json <json>', 'JSON array of {id,prompt} tasks, or {"tasks":[...]}')
+  .description('Dispatch a job to the Codex-CU Claude farm inbox')
+  .option('--task <taskspec>', 'Single task as JSON {id,prompt}, id::prompt, or a prompt string')
+  .option('--tasks-json <json>', 'Batch JSON array of {id,prompt} tasks, or {"tasks":[...]}')
   .option('--timeout <seconds>', 'Per-job timeout passed to the farm daemon', '60')
   .option('--computer <id>', 'Codex-CU Orgo computer ID', FARM_ORGO_COMPUTER_ID)
   .option('--api-key <key>', 'Orgo API key (defaults to ORGO_API_KEY)')
-  .action(async (opts: { tasksJson: string; timeout: string; computer: string; apiKey?: string }) => {
+  .action(async (opts: { task?: string; tasksJson?: string; timeout: string; computer: string; apiKey?: string }) => {
     try {
+      if (!opts.task && !opts.tasksJson) {
+        throw new Error('Provide either --task TASKSPEC or --tasks-json JSON');
+      }
+      if (opts.task && opts.tasksJson) {
+        throw new Error('Use either --task or --tasks-json, not both');
+      }
+
       const timeout = parseInt(opts.timeout, 10);
       if (!Number.isFinite(timeout) || timeout <= 0) {
         throw new Error('--timeout must be a positive integer number of seconds');
@@ -1170,7 +1211,7 @@ busCommand
       const jobFileName = `${runId}.json`;
       const job: FarmDispatchJob = {
         run_id: runId,
-        tasks: parseFarmTasks(opts.tasksJson),
+        tasks: opts.task ? [parseFarmTaskSpec(opts.task)] : parseFarmTasks(opts.tasksJson!),
         timeout,
         reply_to: env.agentName,
       };
