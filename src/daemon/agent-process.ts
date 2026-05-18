@@ -392,7 +392,12 @@ export class AgentProcess implements ManagedAgent {
   }
 
   /**
-   * Inject a message into the agent's PTY.
+   * Inject a message into the agent's PTY — structured outcome.
+   *
+   * Distinguishes NOT_RUNNING (agent registered but no live PTY) from
+   * DEDUPED (content collapsed against the in-process MessageDedup window).
+   * See issue #346 — both used to surface as a bare `false` and got mistaken
+   * for "agent not found" by operators investigating restart/cron failures.
    *
    * For Hermes agents bracketed paste is buggy (NousResearch/hermes-agent
    * issue #7316 — ESC[200~/ESC[201~ markers leak and corrupt input). We use
@@ -401,14 +406,14 @@ export class AgentProcess implements ManagedAgent {
    * `Read .cortextos-cron.md and follow the instructions there.\r`
    * without any bracketed paste wrapper.
    */
-  injectMessage(content: string): boolean {
+  injectMessageDetailed(content: string): { ok: true } | { ok: false; code: 'NOT_RUNNING' | 'DEDUPED'; message: string } {
     if (!this.pty || this.status !== 'running') {
-      return false;
+      return { ok: false, code: 'NOT_RUNNING', message: `agent "${this.name}" is registered but not running (status: ${this.status})` };
     }
 
     if (this.dedup.isDuplicate(content)) {
       this.log('Dedup: skipping duplicate message');
-      return false;
+      return { ok: false, code: 'DEDUPED', message: `inject for "${this.name}" deduped — content matches MessageDedup hash window` };
     }
 
     if (this.config.runtime === 'hermes') {
@@ -425,7 +430,16 @@ export class AgentProcess implements ManagedAgent {
     }
 
     injectMessage((data) => this.pty?.write(data), content);
-    return true;
+    return { ok: true };
+  }
+
+  /**
+   * Inject a message into the agent's PTY (back-compat boolean wrapper).
+   * New callers that need to distinguish DEDUPED from NOT_RUNNING should use
+   * `injectMessageDetailed()` instead.
+   */
+  injectMessage(content: string): boolean {
+    return this.injectMessageDetailed(content).ok;
   }
 
   /**
