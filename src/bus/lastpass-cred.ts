@@ -49,7 +49,6 @@ export class LastPassCredFetchError extends LastPassCredError {
   }
 }
 
-const DEFAULT_SSH_HOST = 'gregs-mac';
 const DEFAULT_REMOTE_SCRIPT = '/Users/gregharned/.cortextos/bin/lastpass-cred-fetch.sh';
 
 function normalizeService(service: string): string {
@@ -144,7 +143,12 @@ function shellSingleQuote(value: string): string {
 }
 
 function fetchFromMac(service: string, opts: LastPassCredOptions): string {
-  const host = opts.sshHost || process.env.MAC_SSH_HOST || DEFAULT_SSH_HOST;
+  const host = opts.sshHost || process.env.MAC_SSH_HOST;
+  if (!host) {
+    throw new LastPassCredFetchError(
+      'Mac LastPass credential fetch is a guarded legacy path. Provide --ssh-host explicitly after approval, or use a non-Mac credential lane.',
+    );
+  }
   const remoteScript = opts.remoteScript || process.env.LASTPASS_CRED_REMOTE_SCRIPT || DEFAULT_REMOTE_SCRIPT;
   const remoteCommand = `${shellSingleQuote(remoteScript)} ${shellSingleQuote(service)}`;
   const result = spawnSync('ssh', [host, remoteCommand], {

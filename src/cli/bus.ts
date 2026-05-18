@@ -3027,9 +3027,9 @@ busCommand
 
 busCommand
   .command('lastpass-cred')
-  .description('Fetch one approved LastPass credential via Greg Mac proxy')
+  .description('Fetch one approved LastPass credential via an explicit legacy Mac proxy')
   .argument('<service>', 'LastPass service/item key')
-  .option('--ssh-host <host>', 'SSH host for Greg Mac', 'gregs-mac')
+  .option('--ssh-host <host>', 'Explicit SSH host for the guarded legacy Mac credential proxy')
   .option('--remote-script <path>', 'Remote fetcher path on Mac', '/Users/gregharned/.cortextos/bin/lastpass-cred-fetch.sh')
   .action(async (service: string, opts: { sshHost?: string; remoteScript?: string }) => {
     const env = resolveEnv();

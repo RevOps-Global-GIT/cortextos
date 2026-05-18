@@ -148,11 +148,16 @@ function yesterdayDateStr() {
 
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
-// Agents whose Claude Code sessions run on Greg's Mac rather than this VM.
-// Their ~/.claude/projects/ data lives on the Mac and must be fetched via SSH.
-// NOTE: codex-2 runs OpenAI Codex CLI (not Claude Code) — no JSONL to read; its $0 Anthropic spend is correct.
-const MAC_AGENTS = ["codex"];
-const MAC_SSH_HOST = secrets.MAC_SSH_HOST || process.env.MAC_SSH_HOST || "gregs-mac";
+// Guarded legacy path for agents whose Claude Code sessions still run on a Mac
+// rather than this VM. STACK-12 moved Codex browser/runtime work to Codex-CU,
+// so this defaults empty and only runs when explicitly enabled.
+// Example:
+//   ALLOW_MAC_TOKEN_SYNC=1 CORTEXTOS_VM_SYNC_MAC_AGENTS=codex MAC_SSH_HOST=gregs-mac node scripts/cortextos-vm-sync-push.js
+const MAC_AGENTS = (process.env.CORTEXTOS_VM_SYNC_MAC_AGENTS || "")
+  .split(",")
+  .map((agent) => agent.trim())
+  .filter(Boolean);
+const MAC_SSH_HOST = process.env.MAC_SSH_HOST || "";
 // Temp dir for rsync'd Mac project JSONL files (recreated on each run).
 const MAC_PROJECTS_CACHE = path.join(os.tmpdir(), "cortextos-mac-projects");
 
@@ -162,6 +167,9 @@ const MAC_PROJECTS_CACHE = path.join(os.tmpdir(), "cortextos-mac-projects");
  * readDailyTokensForAgent. Returns the same shape or null on failure.
  */
 function readDailyTokensFromMac(agentName) {
+  if (process.env.ALLOW_MAC_TOKEN_SYNC !== "1") return null;
+  if (!MAC_SSH_HOST) return null;
+
   const { spawnSync } = require("child_process");
   const today = todayDateStr();
 
