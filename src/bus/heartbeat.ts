@@ -3,6 +3,7 @@ import { join } from 'path';
 import { hostname } from 'os';
 import type { Heartbeat, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import { broadcastPresence } from './rgos-mirror.js';
 
 /**
  * Update heartbeat for the current agent.
@@ -46,6 +47,22 @@ export function updateHeartbeat(
   pushHeartbeatToSupabase(agentName, heartbeat).catch(() => {
     // Intentionally swallowed: Supabase unavailability must not affect local operation.
   });
+
+  // Fire-and-forget presence broadcast so the live-presence widget stays populated
+  // between task events. PRESENCE_TTL_MS on the Hub side is 90s; heartbeat fires
+  // every 10m so this keeps the board non-empty while agents are active.
+  broadcastPresence({
+    actor_id: agentName,
+    kind: 'agent',
+    name: agentName,
+    avatar_url: null,
+    task_id: null,
+    task_title: null,
+    status: 'idle',
+    action_label: status || 'online',
+    updated_at: ts,
+    source: 'cortextos-bus',
+  }).catch(() => {});
 }
 
 /**
