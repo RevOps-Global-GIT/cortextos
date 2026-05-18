@@ -194,6 +194,15 @@ export type ApprovalCategory =
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
+export interface EmailMeta {
+  to: string;
+  subject: string;
+  body: string;
+  reply_to?: string;
+  cc?: string;
+  from?: string;
+}
+
 export interface Approval {
   id: string;
   title: string;
@@ -206,6 +215,7 @@ export interface Approval {
   updated_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
+  email_meta?: EmailMeta;
 }
 
 // Agent Config Types (config.json)

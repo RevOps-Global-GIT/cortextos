@@ -1,6 +1,7 @@
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { join } from 'path';
-import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths } from '../types/index.js';
+import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths, EmailMeta } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { parseEnvFile } from '../utils/env.js';
 import { randomString } from '../utils/random.js';
@@ -244,6 +245,7 @@ export async function createApproval(
   context?: string,
   frameworkRoot?: string,
   agentDir?: string,
+  emailMeta?: EmailMeta,
 ): Promise<string> {
   validateApprovalCategory(category);
 
@@ -264,6 +266,7 @@ export async function createApproval(
     updated_at: now,
     resolved_at: null,
     resolved_by: null,
+    ...(emailMeta ? { email_meta: emailMeta } : {}),
   };
 
   const pendingDir = join(paths.approvalDir, 'pending');
@@ -390,4 +393,110 @@ export function listPendingApprovals(paths: BusPaths): Approval[] {
   return approvals.sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   );
+}
+
+/**
+ * Read a single approval by id. Searches resolved/ first, then pending/.
+ * Returns null if not found.
+ */
+export function readApproval(paths: BusPaths, approvalId: string): Approval | null {
+  const resolvedPath = join(paths.approvalDir, 'resolved', `${approvalId}.json`);
+  const pendingPath = join(paths.approvalDir, 'pending', `${approvalId}.json`);
+  for (const p of [resolvedPath, pendingPath]) {
+    if (existsSync(p)) {
+      try {
+        return JSON.parse(readFileSync(p, 'utf-8')) as Approval;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a base64url-encoded RFC 2822 email message suitable for the Gmail
+ * API `users.messages.send` body: `{ "raw": "<base64url>" }`.
+ */
+function buildRawEmail(opts: {
+  from: string;
+  to: string;
+  subject: string;
+  body: string;
+  replyTo?: string;
+  cc?: string;
+}): string {
+  const headers: string[] = [
+    `From: ${opts.from}`,
+    `To: ${opts.to}`,
+    `Subject: ${opts.subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+  ];
+  if (opts.replyTo) headers.push(`Reply-To: ${opts.replyTo}`);
+  if (opts.cc) headers.push(`Cc: ${opts.cc}`);
+  const raw = `${headers.join('\r\n')}\r\n\r\n${opts.body}`;
+  return Buffer.from(raw).toString('base64url');
+}
+
+/**
+ * Send an approved email by approval id.
+ *
+ * Validates:
+ *   - approval exists and status === 'approved'
+ *   - approval has email_meta (to, subject, body)
+ *
+ * Sends via `gws gmail users messages send` using the configured
+ * GOOGLE_REFRESH_TOKEN / gws credentials.
+ *
+ * The `from` address defaults to the AGENT_EMAIL env var, falling back to
+ * support@revopsglobal.ai — override in email_meta.from if needed.
+ *
+ * Writes a send-audit entry to approvals/resolved/<id>-sent.json.
+ */
+export function sendApprovedEmail(
+  paths: BusPaths,
+  approvalId: string,
+  opts: { dryRun?: boolean } = {},
+): { id: string; threadId?: string } {
+  const approval = readApproval(paths, approvalId);
+  if (!approval) {
+    throw new Error(`Approval ${approvalId} not found`);
+  }
+  if (approval.status !== 'approved') {
+    throw new Error(`Approval ${approvalId} is ${approval.status}, not approved`);
+  }
+  if (!approval.email_meta) {
+    throw new Error(`Approval ${approvalId} has no email_meta — use create-approval with --email-meta`);
+  }
+
+  const { to, subject, body, reply_to, cc, from } = approval.email_meta;
+  const fromAddress = from || process.env.AGENT_EMAIL || 'support@revopsglobal.ai';
+
+  const raw = buildRawEmail({ from: fromAddress, to, subject, body, replyTo: reply_to, cc });
+
+  if (opts.dryRun) {
+    return { id: 'dry-run' };
+  }
+
+  const result = execFileSync('gws', [
+    'gmail', 'users', 'messages', 'send',
+    '--json', JSON.stringify({ raw }),
+    '--format', 'json',
+  ], { encoding: 'utf-8' });
+
+  const parsed = JSON.parse(result) as { id: string; threadId?: string };
+
+  // Write audit record so the approval is traceable
+  const auditPath = join(paths.approvalDir, 'resolved', `${approvalId}-sent.json`);
+  writeFileSync(auditPath, JSON.stringify({
+    approval_id: approvalId,
+    sent_at: new Date().toISOString(),
+    message_id: parsed.id,
+    thread_id: parsed.threadId ?? null,
+    to,
+    subject,
+  }));
+
+  return parsed;
 }
