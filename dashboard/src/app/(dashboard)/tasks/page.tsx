@@ -170,12 +170,13 @@ export default function TasksPage() {
       {/* Header */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-semibold">Tasks</h1>
-        <div className="flex items-center gap-2">
-          <div className="flex items-center rounded-lg border bg-muted/30 p-0.5">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="grid grid-cols-2 items-center rounded-lg border bg-muted/30 p-0.5 sm:flex">
             <Button
               variant={view === 'kanban' ? 'secondary' : 'ghost'}
               size="xs"
               onClick={() => setView('kanban')}
+              className="justify-center"
             >
               <IconLayoutKanban className="size-3.5" />
               Board
@@ -184,28 +185,33 @@ export default function TasksPage() {
               variant={view === 'list' ? 'secondary' : 'ghost'}
               size="xs"
               onClick={() => setView('list')}
+              className="justify-center"
             >
               <IconList className="size-3.5" />
               List
             </Button>
           </div>
-          <CreateTaskDialog
-            agents={agents}
-            projects={projects}
-            onCreated={fetchTasks}
-          />
+          <div className="sm:shrink-0">
+            <CreateTaskDialog
+              agents={agents}
+              projects={projects}
+              onCreated={fetchTasks}
+            />
+          </div>
         </div>
       </div>
 
       {/* Filters */}
-      <TaskFilters
-        orgs={orgs}
-        agents={agents}
-        projects={projects}
-        filters={filters}
-        onChange={handleFilterChange}
-        onClearAll={handleClearFilters}
-      />
+      <div className="-mx-4 overflow-x-auto px-4 pb-1 sm:mx-0 sm:overflow-visible sm:px-0 sm:pb-0">
+        <TaskFilters
+          orgs={orgs}
+          agents={agents}
+          projects={projects}
+          filters={filters}
+          onChange={handleFilterChange}
+          onClearAll={handleClearFilters}
+        />
+      </div>
 
       {/* Content */}
       {tasks.length === 0 ? (
