@@ -91,7 +91,7 @@ describe('computerUse — SSH success path', () => {
   it('returns ok result when SSH succeeds', async () => {
     mockExecFileSync.mockReturnValueOnce('Task complete: wrote 42 lines\n');
 
-    const result = await computerUse('summarize /tmp/file.txt', { noPlugin: true });
+    const result = await computerUse('summarize /tmp/file.txt', { noPlugin: true, sshHost: 'custom-mac' });
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe('Task complete: wrote 42 lines');
@@ -118,7 +118,7 @@ describe('computerUse — SSH success path', () => {
   it('passes --workdir flag to dispatch script (embedded in command string)', async () => {
     mockExecFileSync.mockReturnValueOnce('done\n');
 
-    await computerUse('build', { noPlugin: true, workdir: '/tmp/project' });
+    await computerUse('build', { noPlugin: true, sshHost: 'custom-mac', workdir: '/tmp/project' });
 
     // The remote command is a single string — the last element of the args array.
     const [, args] = mockExecFileSync.mock.calls[0];
@@ -130,7 +130,7 @@ describe('computerUse — SSH success path', () => {
   it('passes --no-plugin when noPlugin=true (embedded in command string)', async () => {
     mockExecFileSync.mockReturnValueOnce('done\n');
 
-    await computerUse('code task', { noPlugin: true });
+    await computerUse('code task', { noPlugin: true, sshHost: 'custom-mac' });
 
     const [, args] = mockExecFileSync.mock.calls[0];
     const remoteCmd = args[args.length - 1] as string;
@@ -140,7 +140,7 @@ describe('computerUse — SSH success path', () => {
   it('omits --no-plugin when noPlugin is false/default', async () => {
     mockExecFileSync.mockReturnValueOnce('done\n');
 
-    await computerUse('screenshot task');
+    await computerUse('screenshot task', { sshHost: 'custom-mac' });
 
     const [, args] = mockExecFileSync.mock.calls[0];
     const remoteCmd = args[args.length - 1] as string;
@@ -150,7 +150,7 @@ describe('computerUse — SSH success path', () => {
   it('does not fire log-event when SSH succeeds', async () => {
     mockExecFileSync.mockReturnValueOnce('success\n');
 
-    await computerUse('task', { noPlugin: true });
+    await computerUse('task', { noPlugin: true, sshHost: 'custom-mac' });
 
     // Only the SSH call — no log-event
     expect(mockExecFileSync).toHaveBeenCalledTimes(1);
@@ -195,6 +195,33 @@ describe('computerUse — Orgo-first Mac SSH gate', () => {
   });
 });
 
+describe('computerUse — no SSH host default', () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it('runs code-only tasks through local Codex when no SSH host is provided', async () => {
+    mockExecFileSync
+      .mockReturnValueOnce(JSON.stringify({ message: 'local ok', exit_code: 0 }))
+      .mockReturnValueOnce('');
+
+    const result = await computerUse('summarize code', { noPlugin: true });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toBe('local ok');
+    expect(result.usedFallback).toBe(true);
+    const [cmd, args] = mockExecFileSync.mock.calls[0];
+    expect(cmd).toBe('codex');
+    expect(args).toEqual(['exec', '--json', 'summarize code']);
+  });
+
+  it('refuses browser/plugin tasks when no SSH host is provided', async () => {
+    const result = await computerUse('open Chrome and inspect the page');
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/no longer defaults to Greg's Mac/i);
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+  });
+});
+
 describe('computerUse — SSH task-level failure (no fallback)', () => {
   beforeEach(() => vi.resetAllMocks());
 
@@ -203,7 +230,7 @@ describe('computerUse — SSH task-level failure (no fallback)', () => {
     async (errorMsg) => {
       mockExecFileSync.mockImplementationOnce(() => { throw new Error(errorMsg); });
 
-      const result = await computerUse('some task', { noPlugin: true });
+      const result = await computerUse('some task', { noPlugin: true, sshHost: 'custom-mac' });
 
       expect(result.ok).toBe(false);
       expect(result.error).toContain(errorMsg);
@@ -230,7 +257,7 @@ describe('computerUse — SSH connection failure, computer-use task (noPlugin=fa
     async (errorMsg) => {
       mockSshConnectionError(errorMsg); // SSH throw + log-event mock
 
-      const result = await computerUse('take a screenshot', { noPlugin: false });
+      const result = await computerUse('take a screenshot', { noPlugin: false, sshHost: 'gregs-mac' });
 
       expect(result.ok).toBe(false);
       expect(result.error).toMatch(/Mac SSH unreachable.*computer-use tasks require Mac display session/i);
@@ -244,7 +271,7 @@ describe('computerUse — SSH connection failure, computer-use task (noPlugin=fa
   it('fails fast when noPlugin is omitted (defaults to computer-use mode)', async () => {
     mockSshConnectionError('ConnectTimeout: connection timed out');
 
-    const result = await computerUse('move the mouse');
+    const result = await computerUse('move the mouse', { sshHost: 'gregs-mac' });
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/computer-use tasks require Mac display session/i);
@@ -271,7 +298,7 @@ describe('computerUse — SSH connection failure, code-only task (noPlugin=true)
       .mockReturnValueOnce(JSON.stringify({ message: 'Refactored 3 functions', exit_code: 0 })) // codex exec
       .mockReturnValueOnce(''); // fallback log-event
 
-    const result = await computerUse('refactor utils.ts', { noPlugin: true });
+    const result = await computerUse('refactor utils.ts', { noPlugin: true, sshHost: 'custom-mac' });
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe('Refactored 3 functions');
@@ -284,7 +311,7 @@ describe('computerUse — SSH connection failure, code-only task (noPlugin=true)
       .mockReturnValueOnce(JSON.stringify({ message: 'done', exit_code: 0 }))
       .mockReturnValueOnce(''); // fallback log-event
 
-    await computerUse('build project', { noPlugin: true, workdir: '/tmp/repo' });
+    await computerUse('build project', { noPlugin: true, sshHost: 'custom-mac', workdir: '/tmp/repo' });
 
     const codexCall = mockExecFileSync.mock.calls.find(([cmd]) => cmd === 'codex');
     expect(codexCall).toBeDefined();
@@ -300,7 +327,7 @@ describe('computerUse — SSH connection failure, code-only task (noPlugin=true)
       .mockReturnValueOnce(JSON.stringify({ message: 'compilation failed', exit_code: 1 }));
     // No fallback log-event since it's a failure
 
-    const result = await computerUse('compile', { noPlugin: true });
+    const result = await computerUse('compile', { noPlugin: true, sshHost: 'custom-mac' });
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/exited with code 1/);
@@ -313,7 +340,7 @@ describe('computerUse — SSH connection failure, code-only task (noPlugin=true)
       .mockReturnValueOnce('plain text output from codex') // codex exec — non-JSON
       .mockReturnValueOnce(''); // fallback log-event
 
-    const result = await computerUse('run script', { noPlugin: true });
+    const result = await computerUse('run script', { noPlugin: true, sshHost: 'custom-mac' });
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe('plain text output from codex');
@@ -332,7 +359,7 @@ describe('computerUse — SSH connection failure, code-only task (noPlugin=true)
       ].join('\n')) // codex exec — JSONL
       .mockReturnValueOnce(''); // fallback log-event
 
-    const result = await computerUse('smoke', { noPlugin: true });
+    const result = await computerUse('smoke', { noPlugin: true, sshHost: 'custom-mac' });
 
     expect(result.ok).toBe(true);
     expect(result.output).toBe('CORTEXTOS_CODEX_BUS_OK');
@@ -343,10 +370,10 @@ describe('computerUse — SSH connection failure, code-only task (noPlugin=true)
     mockSshConnectionError('ConnectTimeout: connection timed out');
     mockExecFileSync.mockImplementationOnce(() => { throw new Error('codex: command not found'); });
 
-    const result = await computerUse('run task', { noPlugin: true });
+    const result = await computerUse('run task', { noPlugin: true, sshHost: 'custom-mac' });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/localhost codex exec also failed/i);
+    expect(result.error).toMatch(/localhost codex exec failed/i);
     expect(result.usedFallback).toBe(true);
   });
 });
@@ -366,7 +393,7 @@ describe('computerUse — noFallback opt-out', () => {
   it('skips fallback when noFallback=true even for code-only tasks', async () => {
     mockSshConnectionError('ConnectTimeout: connection timed out');
 
-    const result = await computerUse('run task', { noPlugin: true, noFallback: true });
+    const result = await computerUse('run task', { noPlugin: true, sshHost: 'custom-mac', noFallback: true });
 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/fallback disabled/i);
@@ -395,7 +422,7 @@ describe('computerUse — logging behavior', () => {
       .mockReturnValueOnce(JSON.stringify({ message: 'ok', exit_code: 0 })) // codex exec
       .mockReturnValueOnce(''); // log-event (fallback)
 
-    await computerUse('task', { noPlugin: true });
+    await computerUse('task', { noPlugin: true, sshHost: 'custom-mac' });
 
     const logCall = mockExecFileSync.mock.calls.find(
       ([cmd, args]) => cmd === 'cortextos' && Array.isArray(args) && args.includes('computer_use_ssh_failure'),
@@ -412,7 +439,7 @@ describe('computerUse — logging behavior', () => {
       .mockReturnValueOnce(JSON.stringify({ message: 'done', exit_code: 0 })) // codex exec
       .mockReturnValueOnce(''); // log-event (fallback info)
 
-    await computerUse('task', { noPlugin: true });
+    await computerUse('task', { noPlugin: true, sshHost: 'custom-mac' });
 
     const fallbackLog = mockExecFileSync.mock.calls.find(
       ([cmd, args]) => cmd === 'cortextos' && Array.isArray(args) && args.includes('computer_use_fallback'),
@@ -425,7 +452,7 @@ describe('computerUse — logging behavior', () => {
   it('does not fire any log-event when SSH succeeds', async () => {
     mockExecFileSync.mockReturnValueOnce('success\n');
 
-    await computerUse('task', { noPlugin: true });
+    await computerUse('task', { noPlugin: true, sshHost: 'custom-mac' });
 
     const cortextosCalls = mockExecFileSync.mock.calls.filter(([cmd]) => cmd === 'cortextos');
     expect(cortextosCalls).toHaveLength(0);
@@ -471,7 +498,7 @@ describe('computerUse — prompt shell escaping (base64 encoding)', () => {
     async (_label, prompt) => {
       mockExecFileSync.mockReturnValueOnce('done\n');
 
-      await computerUse(prompt, { noPlugin: true });
+      await computerUse(prompt, { noPlugin: true, sshHost: 'custom-mac' });
 
       const [cmd, args] = mockExecFileSync.mock.calls[0];
       expect(cmd).toBe('ssh');
@@ -492,7 +519,7 @@ describe('computerUse — prompt shell escaping (base64 encoding)', () => {
     mockExecFileSync.mockReturnValueOnce('done\n');
 
     const prompt = 'analyze { type: "object", properties: { id: { type: "string" } } }';
-    await computerUse(prompt, { noPlugin: true });
+    await computerUse(prompt, { noPlugin: true, sshHost: 'custom-mac' });
 
     const [, args] = mockExecFileSync.mock.calls[0];
     const remoteCmd = args[args.length - 1] as string;
@@ -514,7 +541,7 @@ describe('computerUse — prompt shell escaping (base64 encoding)', () => {
     mockExecFileSync.mockReturnValueOnce('done\n');
 
     const prompt = 'summarize the changes in the last 5 commits';
-    await computerUse(prompt, { noPlugin: true });
+    await computerUse(prompt, { noPlugin: true, sshHost: 'custom-mac' });
 
     const [, args] = mockExecFileSync.mock.calls[0];
     const remoteCmd = args[args.length - 1] as string;
@@ -525,7 +552,7 @@ describe('computerUse — prompt shell escaping (base64 encoding)', () => {
   it('sets maxBuffer=10MB on the SSH execFileSync call', async () => {
     mockExecFileSync.mockReturnValueOnce('done\n');
 
-    await computerUse('task', { noPlugin: true });
+    await computerUse('task', { noPlugin: true, sshHost: 'custom-mac' });
 
     const [, , opts] = mockExecFileSync.mock.calls[0];
     expect(opts?.maxBuffer).toBe(10 * 1024 * 1024);
@@ -538,7 +565,7 @@ describe('computerUse — prompt shell escaping (base64 encoding)', () => {
       .mockReturnValueOnce(JSON.stringify({ message: 'done', exit_code: 0 })) // codex
       .mockReturnValueOnce(''); // fallback log-event
 
-    await computerUse('task', { noPlugin: true });
+    await computerUse('task', { noPlugin: true, sshHost: 'custom-mac' });
 
     const codexCall = mockExecFileSync.mock.calls.find(([cmd]) => cmd === 'codex');
     expect(codexCall).toBeDefined();
