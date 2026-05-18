@@ -89,6 +89,28 @@ if (!SUPABASE_URL || !INTERNAL_SECRET) {
 
 const EDGE_URL = `${SUPABASE_URL}/functions/v1/cortextos-vm-sync`;
 
+// ── Budget config ─────────────────────────────────────────────────────────────
+
+const BUDGETS_FILE = path.join(
+  os.homedir(),
+  "cortextos",
+  "orgs",
+  "revops-global",
+  "budgets.json",
+);
+
+function loadUsdBudgets() {
+  try {
+    if (fs.existsSync(BUDGETS_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(BUDGETS_FILE, "utf8"));
+      return raw.monthly_budgets_usd || {};
+    }
+  } catch (_) {}
+  return {};
+}
+
+const USD_BUDGETS = loadUsdBudgets();
+
 // ── Watermark ─────────────────────────────────────────────────────────────────
 
 function loadWatermark() {
@@ -472,6 +494,8 @@ function buildPayload(watermark) {
     if (transitions.length > 0) agentPayload.task_transitions = transitions;
     if (counts.completed > 0) agentPayload.tasks_completed_today = counts.completed;
     if (counts.failed > 0) agentPayload.tasks_failed_today = counts.failed;
+    const usdBudget = USD_BUDGETS[agentName];
+    if (usdBudget !== undefined) agentPayload.monthly_usd_budget = usdBudget;
 
     agents.push(agentPayload);
   }
