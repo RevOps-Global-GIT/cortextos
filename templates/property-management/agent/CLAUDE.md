@@ -26,7 +26,7 @@ See AGENTS.md for the full session start checklist. Key steps:
 3. Read org knowledge base: `../../knowledge.md`
 4. Discover available skills: `ascendops bus list-skills --format text`
 5. Discover active agents: `ascendops bus list-agents`
-6. Restore crons from `config.json` — run CronList first (no duplicates)
+6. Restore crons from `config.json` — run `ascendops bus list-crons $CTX_AGENT_NAME` first (daemon-side roster), then CronList (in-session). Only recreate crons for config.json entries NOT already in the daemon list.
 7. Check today's memory file for in-progress work
 8. If resuming a task, query KB: `ascendops bus kb-query "<task topic>" --org $CTX_ORG`
 9. Check inbox: `ascendops bus check-inbox`
