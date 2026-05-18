@@ -62,10 +62,16 @@ export class FastChecker {
   private watchdogRestarts: number[] = [];
   private watchdogCircuitBroken: boolean = false;
   private watchdogCircuitBrokenAt: number = 0;
+  // Consecutive stall counter: only hard-restart after N consecutive watchdog ticks
+  // that each detect a stall. Resets to 0 on any successful pollCycle completion.
+  // Prevents a single transient stall (brief GC pause, slow Telegram call) from
+  // triggering an immediate restart.
+  private consecutiveStalls: number = 0;
   private readonly POLL_CYCLE_TIMEOUT_MS = 30_000;
   private readonly WATCHDOG_MAX_RESTARTS = 3;
   private readonly WATCHDOG_WINDOW_MS = 15 * 60 * 1000;   // 15 min
   private readonly WATCHDOG_CIRCUIT_RESET_MS = 30 * 60 * 1000; // 30 min
+  private readonly WATCHDOG_CONSECUTIVE_THRESHOLD = 3;
 
   // Gmail watch state
   private gmailWatch?: { query: string; intervalMs: number };
@@ -258,7 +264,22 @@ export class FastChecker {
       }
 
       const stallMs = now - this.lastPollCycleCompletedAt;
-      if (stallMs <= STALL_THRESHOLD_MS) return;
+      if (stallMs <= STALL_THRESHOLD_MS) {
+        this.consecutiveStalls = 0; // reset on healthy tick
+        return;
+      }
+
+      // Require N consecutive stall detections before restarting.
+      // A single transient stall (slow network call, brief GC) does not restart.
+      this.consecutiveStalls++;
+      if (this.consecutiveStalls < this.WATCHDOG_CONSECUTIVE_THRESHOLD) {
+        this.log(
+          `[watchdog] pollCycle stalled for ${Math.round(stallMs / 1000)}s — ` +
+          `consecutive stall ${this.consecutiveStalls}/${this.WATCHDOG_CONSECUTIVE_THRESHOLD} (not restarting yet)`,
+        );
+        return;
+      }
+      this.consecutiveStalls = 0; // reset before restart so a re-trip counts fresh
 
       // Prune restart history older than the window
       this.watchdogRestarts = this.watchdogRestarts.filter(t => now - t < this.WATCHDOG_WINDOW_MS);
@@ -330,6 +351,7 @@ export class FastChecker {
       // A genuine synchronous freeze never lets control reach this line, so the
       // watchdog still detects a truly wedged loop.
       this.lastPollCycleCompletedAt = Date.now();
+      this.consecutiveStalls = 0; // any completed cycle (success, timeout, or throw) resets stall count
       await this.sleepInterruptible(this.pollInterval);
     }
 
