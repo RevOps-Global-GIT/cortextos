@@ -1,0 +1,30 @@
+{
+  "version": "1.0",
+  "description": "Terms from approved policy memos. PRs adding these terms in diff lines are flagged and blocked from auto-merge. Maintain this file alongside memos in orgs/revops-global/memo/.",
+  "terms": [
+    {
+      "id": "mac-launchd-startinterval",
+      "term": "StartInterval",
+      "policy": "Q3: Mac-side monitors capped at 2x/day max ceiling",
+      "memo": "2026-05-17-long-term-config.md",
+      "reason": "A new StartInterval key in a plist creates a Mac-side polling automation. Q3 memo caps these at 2x/day max (StartInterval must be ≥43200 seconds = 12h). Verify the interval meets the cap or get a memo override from Greg.",
+      "severity": "block"
+    },
+    {
+      "id": "ical-freq-hourly",
+      "term": "FREQ=HOURLY",
+      "policy": "Q3: Mac-side monitors capped at 2x/day max ceiling",
+      "memo": "2026-05-17-long-term-config.md",
+      "reason": "FREQ=HOURLY in an iCal/recurrence rule exceeds the Q3 2x/day monitor cap. Use FREQ=DAILY or set an explicit INTERVAL to stay within the 2x/day ceiling.",
+      "severity": "block"
+    },
+    {
+      "id": "mac-monitor-new-cron",
+      "term": "Mac monitor",
+      "policy": "Q3: Mac-side monitors capped at 2x/day max ceiling",
+      "memo": "2026-05-17-long-term-config.md",
+      "reason": "Adding a new 'Mac monitor' label may introduce a polling automation that violates the Q3 2x/day cap. Confirm the new monitor is within budget or remove it.",
+      "severity": "warn"
+    }
+  ]
+}

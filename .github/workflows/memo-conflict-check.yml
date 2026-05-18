@@ -1,0 +1,126 @@
+name: memo-conflict-check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  check-memo-conflicts:
+    name: Memo conflict check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: git fetch origin ${{ github.base_ref }}
+
+      - name: Extract added lines from PR diff
+        run: |
+          git diff "origin/${{ github.base_ref }}...HEAD" -- \
+            | grep '^+[^+]' \
+            | sed 's/^+//' \
+            > /tmp/added-lines.txt || true
+          echo "$(wc -l < /tmp/added-lines.txt) added lines to scan"
+
+      - name: Load memo-conflicts.json from base branch (bypass-proof)
+        run: |
+          # Always read from the base branch so a PR cannot bypass the gate
+          # by modifying memo-conflicts.json in the same diff.
+          git show "origin/${{ github.base_ref }}:.github/memo-conflicts.json" \
+            > /tmp/memo-conflicts.json 2>/dev/null || echo '{"terms":[]}' > /tmp/memo-conflicts.json
+          echo "Loaded $(jq '.terms | length' /tmp/memo-conflicts.json) conflict term(s)"
+
+      - name: Check memo conflicts
+        id: conflicts
+        run: |
+          MEMO_CONFLICTS="/tmp/memo-conflicts.json"
+          if [ "$(jq '.terms | length' "$MEMO_CONFLICTS")" = "0" ]; then
+            echo "No conflict terms defined — skipping check"
+            echo "block_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BLOCK_COUNT=0
+          WARN_COUNT=0
+          REPORT_BODY=""
+
+          while IFS= read -r entry; do
+            TERM=$(echo "$entry" | jq -r '.term')
+            POLICY=$(echo "$entry" | jq -r '.policy')
+            MEMO=$(echo "$entry" | jq -r '.memo')
+            REASON=$(echo "$entry" | jq -r '.reason')
+            SEVERITY=$(echo "$entry" | jq -r '.severity')
+
+            if grep -qF "$TERM" /tmp/added-lines.txt 2>/dev/null; then
+              MATCH_COUNT=$(grep -cF "$TERM" /tmp/added-lines.txt || true)
+              if [ "$SEVERITY" = "block" ]; then
+                BLOCK_COUNT=$((BLOCK_COUNT + 1))
+                echo "::error::Memo conflict [block]: '$TERM' conflicts with $POLICY"
+                BADGE=":no_entry: BLOCKED"
+              else
+                WARN_COUNT=$((WARN_COUNT + 1))
+                echo "::warning::Memo conflict [warn]: '$TERM' may conflict with $POLICY"
+                BADGE=":warning: WARNING"
+              fi
+
+              REPORT_BODY="${REPORT_BODY}
+
+          ### ${BADGE} — \`${TERM}\` (${MATCH_COUNT} occurrence(s))
+          **Policy:** ${POLICY}
+          **Memo:** \`${MEMO}\` (see \`orgs/revops-global/memo/\`)
+          **Why:** ${REASON}"
+            fi
+          done < <(jq -c '.terms[]' "$MEMO_CONFLICTS")
+
+          echo "block_count=$BLOCK_COUNT" >> "$GITHUB_OUTPUT"
+          echo "warn_count=$WARN_COUNT" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$REPORT_BODY" ]; then
+            OVERRIDE_NOTE=""
+            if [ "$BLOCK_COUNT" -gt 0 ]; then
+              OVERRIDE_NOTE="
+
+          ---
+          **To override a block:** add \`[memo-conflict-override: TERM]\` to the PR description and confirm with Greg. Auto-merge remains disabled until the override is present."
+            fi
+
+            cat > /tmp/conflict-report.md << EOF
+          ## :memo: Memo Conflict Gate
+
+          This PR introduces changes that may conflict with approved policy memos.
+          ${REPORT_BODY}
+          ${OVERRIDE_NOTE}
+
+          ---
+          *Source: \`.github/memo-conflicts.json\` — update to add new policy terms.*
+          EOF
+            echo "report_written=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post conflict comment
+        if: steps.conflicts.outputs.block_count != '0' || steps.conflicts.outputs.warn_count != '0'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('/tmp/conflict-report.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report,
+            });
+
+      - name: Fail on blocking conflicts
+        if: steps.conflicts.outputs.block_count != '0'
+        run: |
+          echo "Blocking memo conflicts found: ${{ steps.conflicts.outputs.block_count }}."
+          echo "Auto-merge blocked until conflicts are resolved or overridden."
+          exit 1
