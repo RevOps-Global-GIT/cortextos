@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { useOrg } from '@/hooks/use-org';
 import { Button } from '@/components/ui/button';
 import { IconLayoutKanban, IconList, IconChecklist } from '@tabler/icons-react';
@@ -23,6 +24,7 @@ const DEFAULT_FILTERS = {
 
 export default function TasksPage() {
   const { currentOrg } = useOrg();
+  const searchParams = useSearchParams();
 
   const [view, setView] = useState<ViewMode>('kanban');
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -97,6 +99,38 @@ export default function TasksPage() {
     setSelectedTask(task);
     setSheetOpen(true);
   }
+
+  const selectedTaskId = searchParams.get('task');
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+
+    const matchingTask = tasks.find((task) => task.id === selectedTaskId);
+    if (matchingTask) {
+      setSelectedTask(matchingTask);
+      setSheetOpen(true);
+      return;
+    }
+
+    let cancelled = false;
+    async function fetchSelectedTask() {
+      try {
+        const res = await fetch(`/api/tasks/${selectedTaskId}`);
+        if (!cancelled && res.ok) {
+          const task = await res.json();
+          setSelectedTask(task);
+          setSheetOpen(true);
+        }
+      } catch {
+        // Deep-link selection is best-effort; the board still renders normally.
+      }
+    }
+
+    fetchSelectedTask();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTaskId, tasks]);
 
   async function handleStatusChange(taskId: string, status: TaskStatus, note?: string) {
     try {

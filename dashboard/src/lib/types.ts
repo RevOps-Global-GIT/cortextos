@@ -56,6 +56,18 @@ export interface TaskOutput {
   label?: string;
 }
 
+export interface TaskBrief {
+  success_criteria?: string | string[];
+  out_of_scope?: string | string[];
+  escalation_triggers?: string | string[];
+  source_hierarchy?: string | string[];
+  preferred_runtime?: string | string[];
+  required_capabilities?: string | string[];
+  fallback_proof?: string | string[];
+  artifact_expectations?: string | string[];
+  goal_ancestry?: string | string[];
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -72,6 +84,10 @@ export interface Task {
   notes?: string;
   source_file?: string;
   outputs?: TaskOutput[];
+  meta?: {
+    brief?: TaskBrief;
+    [key: string]: unknown;
+  };
 }
 
 // -- Approval Types --
