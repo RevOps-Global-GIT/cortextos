@@ -120,6 +120,28 @@ export interface Task {
   meta?: Record<string, unknown>;
 }
 
+/**
+ * One replay fixture for a feedback rule. Pairs the rule's check function
+ * with the exact scenario from the original incident so the test suite can
+ * prove the rule would have prevented it.
+ */
+export interface FeedbackRuleFixture {
+  /** Slug matching the feedback memory file name (without .md). */
+  ruleName: string;
+  /** One-line description of the original incident. */
+  incidentSummary: string;
+  /**
+   * The raw input from the original incident (PR body text, command string,
+   * agent heartbeat message, etc.) that should be flagged by the rule.
+   */
+  originalInput: string;
+  /**
+   * Run the rule check against `input`. Returns a non-null violation message
+   * if the input would have been flagged; null if the input is clean.
+   */
+  check: (input: string) => string | null;
+}
+
 // Event Types
 
 export type EventCategory =
