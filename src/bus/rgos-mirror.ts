@@ -526,6 +526,47 @@ export function buildMessageRow(msg: InboxMessage): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Realtime presence broadcast (STACK-11)
+// ---------------------------------------------------------------------------
+
+const PRESENCE_CHANNEL = 'agent-presence';
+
+export interface AgentPresencePayload {
+  agent_id: string;
+  current_action: 'task_created' | 'task_updated' | 'task_completed' | 'idle';
+  current_task_id: string | null;
+  cursor_position_hint: string | null;
+  ts: string;
+}
+
+/**
+ * Broadcast agent presence via Supabase Realtime REST API. Fire-and-forget —
+ * never throws, never retries. Presence is ephemeral; gaps are acceptable.
+ * Hub side subscribes to the `agent-presence` channel for `presence_update` events.
+ */
+export async function broadcastPresence(payload: AgentPresencePayload): Promise<void> {
+  if (!isEnabled()) return;
+  const url = process.env.SUPABASE_RGOS_URL!;
+  const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
+  try {
+    await fetch(`${url}/realtime/v1/api/broadcast`, {
+      method: 'POST',
+      headers: {
+        'apikey': serviceKey,
+        'Authorization': `Bearer ${serviceKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messages: [{ topic: PRESENCE_CHANNEL, event: 'presence_update', payload }],
+      }),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    // Presence is best-effort; swallow all errors silently
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -535,10 +576,24 @@ export function buildMessageRow(msg: InboxMessage): Record<string, unknown> {
  */
 export async function mirrorTaskToRgos(
   task: Task,
-  _event: 'create' | 'update' | 'complete',
+  event: 'create' | 'update' | 'complete',
 ): Promise<void> {
   if (!isEnabled()) return;
   const row = buildTaskRow(task);
+  const agentId = task.assigned_to ?? process.env.CTX_AGENT_NAME ?? 'unknown';
+  const action = event === 'create' ? 'task_created'
+    : event === 'complete' ? 'task_completed'
+    : 'task_updated';
+  const hint = event === 'create' ? `Creating: ${task.title.slice(0, 60)}`
+    : event === 'complete' ? `Completed: ${task.title.slice(0, 60)}`
+    : `Working: ${task.title.slice(0, 60)}`;
+  setImmediate(() => broadcastPresence({
+    agent_id: agentId,
+    current_action: action,
+    current_task_id: task.id,
+    cursor_position_hint: hint,
+    ts: new Date().toISOString(),
+  }).catch(() => { /* already swallowed inside broadcastPresence */ }));
   try {
     await postgrestUpsert('orch_tasks', row);
     // Async drain: never await, never block the write path
