@@ -1077,51 +1077,59 @@ async function runCompaniesChecks(page: Page): Promise<CheckResult[]> {
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECKs 2-5: DEFERRED — /companies uses real-time Supabase subscriptions that saturate
-  // the JS engine and block all subsequent Playwright evaluation calls (locator, screenshot,
-  // waitForTimeout) indefinitely. Navigation and auth are verified by CHECK 1.
-  results.push({ check: 'CHECK 2 Company list visible', status: 'DEFERRED', evidence: 'Skipped — real-time subscriptions block Playwright eval on this page.' });
-  results.push({ check: 'CHECK 3 Search filter works', status: 'DEFERRED', evidence: 'Skipped — real-time subscriptions block Playwright eval on this page.' });
-  results.push({ check: 'CHECK 4 Row click → detail', status: 'DEFERRED', evidence: 'Skipped — real-time subscriptions block Playwright eval on this page.' });
-  results.push({ check: 'CHECK 5 Add company modal', status: 'DEFERRED', evidence: 'Skipped — real-time subscriptions block Playwright eval on this page.' });
-  return results;
-
-  // CHECK 2: Company list count — how many rows/cards are visible
+  // CHECK 2: Company list count — use page.evaluate() to avoid actionability polling loop
+  // (WS is blocked before nav so locators should be safe, but evaluate is cheaper here)
   try {
-    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    // Wait briefly for rows to render (short timeout — empty state is valid)
-    await page.locator('table tbody tr, [class*="company-row"], [class*="companyRow"], [role="row"]:not([role="columnheader"])').first().waitFor({ state: 'visible', timeout: 4000 }).catch(() => {});
-    await page.waitForTimeout(500);
+    await new Promise<void>(r => setTimeout(r, 1500));
     await shot(page, `${sp}-2-list`);
-    // Try table rows first, then cards
-    const rowCount = await page.locator('table tbody tr, [class*="company-row"], [class*="companyRow"]').count();
-    const cardCount = await page.locator('[class*="company-card"], [class*="companyCard"], [class*="client-card"]').count();
-    const listItemCount = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
-    const total = rowCount || cardCount || listItemCount;
+    const counts = await Promise.race([
+      page.evaluate(() => {
+        const rows = document.querySelectorAll('table tbody tr').length;
+        const roleRows = document.querySelectorAll('[role="row"]:not([role="columnheader"])').length;
+        const cards = document.querySelectorAll('[class*="company-card"],[class*="companyCard"],[class*="client-card"]').length;
+        const empty = /no companies|no results|no clients/i.test(document.body.textContent ?? '');
+        return { rows, roleRows, cards, empty };
+      }),
+      new Promise<{ rows: number; roleRows: number; cards: number; empty: boolean }>(r =>
+        setTimeout(() => r({ rows: -1, roleRows: -1, cards: -1, empty: false }), 6000)
+      ),
+    ]);
+    const total = counts.rows || counts.roleRows || counts.cards;
     if (total > 0) {
-      results.push({ check: 'CHECK 2 Company list visible', status: 'PASS', evidence: `${total} company row(s)/card(s) visible (rows:${rowCount}, cards:${cardCount}, listitems:${listItemCount}).` });
+      results.push({ check: 'CHECK 2 Company list visible', status: 'PASS', evidence: `${total} company row(s)/card(s) visible (tbody:${counts.rows}, role-row:${counts.roleRows}, cards:${counts.cards}).` });
+    } else if (counts.empty) {
+      results.push({ check: 'CHECK 2 Company list visible', status: 'DEFERRED', evidence: 'Empty state shown — no companies in dataset.' });
     } else {
-      // Check for empty-state text
-      const emptyText = await page.getByText(/no companies|empty|no results|no clients/i).count();
-      results.push({ check: 'CHECK 2 Company list visible', status: emptyText > 0 ? 'DEFERRED' : 'DEFERRED', evidence: emptyText > 0 ? 'Empty state shown — no companies in dataset.' : 'No company rows/cards found — page may use unrecognized layout.' });
+      results.push({ check: 'CHECK 2 Company list visible', status: 'DEFERRED', evidence: `No rows/cards found (tbody:${counts.rows}, role-row:${counts.roleRows}, cards:${counts.cards}). Page may use unrecognized layout.` });
     }
   } catch (e) {
     results.push({ check: 'CHECK 2 Company list visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 3: Search / filter — type in search box, verify list changes or input works
+  // CHECK 3: Search input present and functional
   try {
     await shot(page, `${sp}-3-before-search`);
-    const searchInput = page.locator('input[type="search"], input[placeholder*="search" i], input[placeholder*="filter" i], input[aria-label*="search" i], input[name*="search" i]').first();
-    if (await searchInput.count() > 0) {
-      const beforeCount = await page.locator('table tbody tr, [role="row"]:not([role="columnheader"]), [role="listitem"], [class*="company"]').count();
+    const inputInfo = await Promise.race([
+      page.evaluate(() => {
+        const sel = 'input[type="search"], input[placeholder*="search" i], input[placeholder*="filter" i], input[aria-label*="search" i]';
+        const el = document.querySelector<HTMLInputElement>(sel);
+        if (!el) return null;
+        const before = document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"])').length;
+        return { placeholder: el.placeholder, before };
+      }),
+      new Promise<null>(r => setTimeout(() => r(null), 5000)),
+    ]);
+    if (inputInfo) {
+      const searchInput = page.locator('input[type="search"], input[placeholder*="search" i], input[placeholder*="filter" i], input[aria-label*="search" i]').first();
       await searchInput.fill('zzznomatch');
-      await page.waitForTimeout(800);
+      await new Promise<void>(r => setTimeout(r, 800));
       await shot(page, `${sp}-3-after-search`);
-      const afterCount = await page.locator('table tbody tr, [role="row"]:not([role="columnheader"]), [role="listitem"], [class*="company"]').count();
+      const afterCount = await Promise.race([
+        page.evaluate(() => document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"])').length),
+        new Promise<number>(r => setTimeout(() => r(-1), 4000)),
+      ]);
       await searchInput.clear();
-      await page.waitForTimeout(500);
-      results.push({ check: 'CHECK 3 Search filter works', status: 'PASS', evidence: `Search input found. Before: ${beforeCount} items, after "zzznomatch": ${afterCount} items. Cleared.` });
+      results.push({ check: 'CHECK 3 Search filter works', status: 'PASS', evidence: `Search input found (placeholder="${inputInfo.placeholder}"). Before: ${inputInfo.before} rows, after "zzznomatch": ${afterCount}. Cleared.` });
     } else {
       results.push({ check: 'CHECK 3 Search filter works', status: 'DEFERRED', evidence: 'No search input found on page.' });
     }
@@ -1131,28 +1139,33 @@ async function runCompaniesChecks(page: Page): Promise<CheckResult[]> {
 
   // CHECK 4: Click first company row → detail view loads
   try {
-    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
     const urlBefore = page.url();
-    // Try table row click, then card click
-    const firstRow = page.locator('table tbody tr, [class*="company-row"], [class*="companyRow"], [role="row"]:not([role="columnheader"])').first();
-    const firstCard = page.locator('[class*="company-card"], [class*="companyCard"], [class*="client-card"], [role="listitem"]').first();
-    const clickTarget = await firstRow.count() > 0 ? firstRow : firstCard;
-    if (await clickTarget.count() > 0) {
-      const rowText = (await clickTarget.textContent().catch(() => ''))?.trim().slice(0, 50) ?? '';
-      await clickTarget.click();
-      await page.waitForTimeout(1200);
+    const rowInfo = await Promise.race([
+      page.evaluate(() => {
+        const row = document.querySelector<HTMLElement>('table tbody tr, [role="row"]:not([role="columnheader"])');
+        if (!row) return null;
+        const rect = row.getBoundingClientRect();
+        return { text: (row.textContent ?? '').trim().slice(0, 50), x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      }),
+      new Promise<null>(r => setTimeout(() => r(null), 5000)),
+    ]);
+    if (rowInfo && rowInfo.x > 0 && rowInfo.y > 0) {
+      await page.mouse.click(rowInfo.x, rowInfo.y);
+      await new Promise<void>(r => setTimeout(r, 1200));
       await shot(page, `${sp}-4-detail`);
       const urlAfter = page.url();
-      const detailVisible = await page.locator('[class*="detail"], [class*="profile"], [class*="company-header"], [class*="companyHeader"], h1, h2').count() > 0;
-      if (urlAfter !== urlBefore || detailVisible) {
-        // Navigate back
-        await page.goto(`https://hub.revopsglobal.com/companies`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
-        results.push({ check: 'CHECK 4 Row click → detail', status: 'PASS', evidence: `Clicked "${rowText.slice(0,40)}". URL: ${urlBefore} → ${urlAfter}. Detail content visible: ${detailVisible}. Returned.` });
+      const hasDetail = await Promise.race([
+        page.evaluate(() => document.querySelectorAll('h1, h2, [class*="detail"], [class*="profile"]').length > 0),
+        new Promise<boolean>(r => setTimeout(() => r(false), 4000)),
+      ]);
+      if (urlAfter !== urlBefore || hasDetail) {
+        await page.goto(`${HUB_URL}/companies`, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        results.push({ check: 'CHECK 4 Row click → detail', status: 'PASS', evidence: `Clicked "${rowInfo.text.slice(0, 40)}". URL: ${urlBefore} → ${urlAfter}. Detail content: ${hasDetail}. Returned.` });
       } else {
-        results.push({ check: 'CHECK 4 Row click → detail', status: 'DEFERRED', evidence: `Clicked row but URL/content unchanged. Row text: "${rowText.slice(0,40)}". May need double-click or different target.` });
+        results.push({ check: 'CHECK 4 Row click → detail', status: 'DEFERRED', evidence: `Clicked row but URL/content unchanged. Row: "${rowInfo.text.slice(0, 40)}".` });
       }
     } else {
-      results.push({ check: 'CHECK 4 Row click → detail', status: 'DEFERRED', evidence: 'No company rows/cards to click.' });
+      results.push({ check: 'CHECK 4 Row click → detail', status: 'DEFERRED', evidence: 'No clickable company rows found.' });
     }
   } catch (e) {
     results.push({ check: 'CHECK 4 Row click → detail', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
@@ -1160,9 +1173,11 @@ async function runCompaniesChecks(page: Page): Promise<CheckResult[]> {
 
   // CHECK 5: Key columns present — name, domain/website, and at least one relational column
   try {
-    await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
     await shot(page, `${sp}-5-columns`);
-    const pageText = (await page.locator('body').textContent().catch(() => '')) ?? '';
+    const pageText = await Promise.race([
+      page.evaluate(() => document.body.textContent ?? ''),
+      new Promise<string>(r => setTimeout(() => r(''), 5000)),
+    ]);
     const hasName     = /company|name|client/i.test(pageText);
     const hasDomain   = /domain|website|url/i.test(pageText);
     const hasRelation = /contact|deal|pipeline|revenue|owner/i.test(pageText);
@@ -2333,6 +2348,13 @@ async function main() {
       'linkedin-presence': '/app/presence',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
+
+    // Block Supabase Realtime WebSocket on /companies before page load — live subscriptions
+    // saturate the JS engine and make all subsequent Playwright eval hang indefinitely.
+    // Initial data loads via REST, so blocking WS doesn't affect rendered content.
+    if (navPath === '/companies') {
+      await page.routeWebSocket(/supabase\.co\/realtime/, ws => ws.close());
+    }
 
     console.log(`Navigating to ${HUB_URL}${navPath}...`);
     await page.goto(`${HUB_URL}${navPath}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
