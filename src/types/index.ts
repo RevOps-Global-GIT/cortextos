@@ -41,6 +41,20 @@ export interface TaskOutput {
 }
 
 /**
+ * Blocker context — stored at `task.meta.blocker` on every task with
+ * `status: "blocked"`. Both fields are required; use
+ * `"field-not-applicable: <reason>"` when a field genuinely does not apply
+ * so the Fleet Tasks UI can render a consistent view instead of "No blocking
+ * reason recorded".
+ */
+export interface TaskBlockerContext {
+  /** Human-readable explanation of what is preventing progress. */
+  blocker_reason: string;
+  /** Observable evidence or artifact that proves the blocker is resolved. */
+  next_proof_required: string;
+}
+
+/**
  * Structured task brief — stored at `task.meta.brief`. All 9 fields are
  * required; use `"field-not-applicable: <reason>"` for fields not relevant
  * to a given task rather than omitting them, so the Fleet Tasks UI can
