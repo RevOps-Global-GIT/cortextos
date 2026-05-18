@@ -565,10 +565,13 @@ async function syncRotationEvents(sinceTsStr) {
 // ── HTTP push ─────────────────────────────────────────────────────────────────
 
 async function push(payload) {
+  const serviceKey = secrets.SUPABASE_RGOS_SERVICE_KEY;
   const res = await fetch(EDGE_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      "Authorization": `Bearer ${serviceKey}`,
+      "apikey": serviceKey,
       "x-internal-secret": INTERNAL_SECRET,
     },
     body: JSON.stringify(payload),
