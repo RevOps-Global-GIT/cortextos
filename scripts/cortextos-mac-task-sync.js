@@ -2,12 +2,12 @@
 /**
  * cortextos-mac-task-sync.js
  *
- * Push VM task files → Mac local task store via rsync over SSH.
+ * Push VM task files -> Mac local task store via rsync over SSH.
  * Complements cortextos-vm-sync-push.js (which pushes to Supabase/RGOS).
  *
  * Syncs:
  *   VM: ~/.cortextos/<instance>/orgs/<org>/tasks/
- *   → Mac: ~/.cortextos/<instance>/orgs/<org>/tasks/
+ *   -> Mac: ~/.cortextos/<instance>/orgs/<org>/tasks/
  *
  * Also syncs audit/ and archive/ subdirs so Mac CLI reads correct history.
  * Uses --update (skip files newer on Mac) so Mac-local task edits are preserved.
@@ -15,8 +15,8 @@
  * Usage:
  *   node scripts/cortextos-mac-task-sync.js [--dry-run] [--org <org>]
  *
- * Requires: ssh key access to gregs-mac (Tailscale 100.84.86.6).
- * MAC_SSH_HOST defaults to env MAC_SSH_HOST or "gregs-mac".
+ * Guarded legacy path. Requires:
+ *   ALLOW_MAC_TASK_SYNC=1 MAC_SSH_HOST=<host>
  */
 
 "use strict";
@@ -34,7 +34,7 @@ const dryRun = args.includes("--dry-run");
 const orgIdx = args.indexOf("--org");
 const ORG = orgIdx !== -1 ? args[orgIdx + 1] : (process.env.CTX_ORG || "revops-global");
 const INSTANCE_ID = process.env.CTX_INSTANCE_ID || "cortextos1";
-const MAC_SSH_HOST = process.env.MAC_SSH_HOST || "gregs-mac";
+const MAC_SSH_HOST = process.env.MAC_SSH_HOST || "";
 const CTX_ROOT = path.join(os.homedir(), ".cortextos", INSTANCE_ID);
 
 const SYNC_DIRS = [
@@ -87,7 +87,17 @@ function ensureMacDir(host, dir) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-log(`Syncing ${ORG} task dirs from VM → ${MAC_SSH_HOST}${dryRun ? " [DRY RUN]" : ""}`);
+if (process.env.ALLOW_MAC_TASK_SYNC !== "1") {
+  console.error("Mac task sync is quarantined by STACK-12. Set ALLOW_MAC_TASK_SYNC=1 and MAC_SSH_HOST explicitly to run this legacy path.");
+  process.exit(78);
+}
+
+if (!MAC_SSH_HOST) {
+  console.error("MAC_SSH_HOST is required for guarded Mac task sync.");
+  process.exit(78);
+}
+
+log(`Syncing ${ORG} task dirs from VM -> ${MAC_SSH_HOST}${dryRun ? " [DRY RUN]" : ""}`);
 
 let synced = 0;
 let errors = 0;
