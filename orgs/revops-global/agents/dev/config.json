@@ -46,6 +46,12 @@
       "prompt": "node /home/cortextos/cortextos/scripts/inbox-drain-watchdog.js"
     },
     {
+      "name": "budget-check",
+      "type": "recurring",
+      "interval": "1h",
+      "prompt": "node /home/cortextos/cortextos/scripts/cortextos-budget-check.js"
+    },
+    {
       "name": "codebase-scanner",
       "type": "recurring",
       "interval": "24h",
