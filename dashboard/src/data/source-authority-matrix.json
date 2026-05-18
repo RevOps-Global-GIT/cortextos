@@ -1,0 +1,78 @@
+{
+  "version": "2026-05-18.stack-2",
+  "purpose": "Defines the authoritative source for each data domain accessed by agents. Prevents source-of-truth drift by banning fallback reads from stale mirrors when an authoritative source is reachable.",
+  "enforcementMode": "warn",
+  "guardrailEvent": "authority_violation",
+  "minimumRule": "Always read from the authoritative source first. Mirror reads are only allowed when the authority is unreachable and the mirror age is within the staleness threshold.",
+  "monitors": [
+    { "id": "agent_state", "description": "Watch for reads from state/ when MCP is available" },
+    { "id": "task_queue", "description": "Watch for direct JSONL reads bypassing cortextos bus" },
+    { "id": "capability_status", "description": "Watch for stale capability-monitor.json reads older than 30m" }
+  ],
+  "domains": [
+    {
+      "domain": "Agent State",
+      "authoritativeSource": "cortextos bus get-agent-state <name>",
+      "mirrorSource": "~/.cortextos/<instance>/state/<name>/",
+      "allowedFallback": "state/ files when daemon is unreachable",
+      "forbiddenSources": ["hardcoded paths", "memory assumptions"],
+      "stalenessThresholdMinutes": 5
+    },
+    {
+      "domain": "Task Queue",
+      "authoritativeSource": "cortextos bus list-tasks",
+      "mirrorSource": "~/.cortextos/<instance>/orgs/<org>/tasks/",
+      "allowedFallback": "JSONL files when bus is unreachable",
+      "forbiddenSources": ["RGOS kanban without bus sync", "memory"],
+      "stalenessThresholdMinutes": 2
+    },
+    {
+      "domain": "Capability Status",
+      "authoritativeSource": "scripts/capability-probe.mjs --capability <id>",
+      "mirrorSource": "dashboard/src/data/capability-monitor.json",
+      "allowedFallback": "capability-monitor.json when probe is blocked",
+      "forbiddenSources": ["agent memory claims", "stale cached results >30m"],
+      "stalenessThresholdMinutes": 30
+    },
+    {
+      "domain": "Cron Registry",
+      "authoritativeSource": "cortextos bus list-crons <agent>",
+      "mirrorSource": "orgs/<org>/agents/<agent>/config.json crons[]",
+      "allowedFallback": "config.json on restart/seed",
+      "forbiddenSources": ["in-memory CronCreate state only", "CronList (deprecated)"],
+      "stalenessThresholdMinutes": 5
+    },
+    {
+      "domain": "Agent Secrets",
+      "authoritativeSource": "orgs/<org>/agents/<agent>/.env (local)",
+      "mirrorSource": "RGOS Supabase project secrets",
+      "allowedFallback": "Supabase secrets when .env is absent",
+      "forbiddenSources": ["hardcoded values", "CLAUDE.md hints", "memory"],
+      "stalenessThresholdMinutes": 1440
+    },
+    {
+      "domain": "Inbox Messages",
+      "authoritativeSource": "cortextos bus check-inbox",
+      "mirrorSource": "~/.cortextos/<instance>/inbox/<agent>/",
+      "allowedFallback": "JSONL inbox files on bus failure",
+      "forbiddenSources": ["assumptions about pending messages", "session memory"],
+      "stalenessThresholdMinutes": 1
+    },
+    {
+      "domain": "Wiki / Knowledge Base",
+      "authoritativeSource": "/home/cortextos/work/team-brain (git)",
+      "mirrorSource": "QMD semantic index (~/.local/share/qmd/)",
+      "allowedFallback": "QMD index when git clone is unavailable",
+      "forbiddenSources": ["web search without wiki check first", "outdated summaries"],
+      "stalenessThresholdMinutes": 1440
+    },
+    {
+      "domain": "RGOS Dashboard Data",
+      "authoritativeSource": "RGOS Supabase (orch_agents, orch_tasks, orch_events)",
+      "mirrorSource": "vm-sync-push local JSONL cache",
+      "allowedFallback": "Local JSONL within 5-minute sync window",
+      "forbiddenSources": ["manual agent edits to Supabase rows", "stale hub.revopsglobal.com cache"],
+      "stalenessThresholdMinutes": 5
+    }
+  ]
+}
