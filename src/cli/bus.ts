@@ -41,6 +41,7 @@ import { syncSkills } from '../bus/sync-skills.js';
 import { runWorkflow } from '../bus/run-workflow.js';
 import { computerUse } from '../bus/computer-use.js';
 import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeaseStatus, releaseOrgoLease } from '../bus/orgo-lease.js';
+import { lastpassCred, LastPassCredApprovalRequiredError, LastPassCredFetchError, LastPassCredRejectedError } from '../bus/lastpass-cred.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -162,6 +163,8 @@ const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
   'evaluate-experiment',
   'manage-cycle',
   'sync-experiments',
+  // Credential access writes audit lines and can create approvals.
+  'lastpass-cred',
 ]);
 
 /**
@@ -2591,6 +2594,43 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     updateApproval(paths, id, status as ApprovalStatus, note);
     console.log(`Approval ${id} -> ${status}`);
+  });
+
+busCommand
+  .command('lastpass-cred')
+  .description('Fetch one approved LastPass credential via Greg Mac proxy')
+  .argument('<service>', 'LastPass service/item key')
+  .option('--ssh-host <host>', 'SSH host for Greg Mac', 'gregs-mac')
+  .option('--remote-script <path>', 'Remote fetcher path on Mac', '/Users/gregharned/.cortextos/bin/lastpass-cred-fetch.sh')
+  .action(async (service: string, opts: { sshHost?: string; remoteScript?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      const result = await lastpassCred(paths, service, {
+        agentName: env.agentName,
+        org: env.org,
+        frameworkRoot: env.frameworkRoot,
+        agentDir: env.agentDir,
+        sshHost: opts.sshHost,
+        remoteScript: opts.remoteScript,
+      });
+      process.stdout.write(result.credential);
+      if (!result.credential.endsWith('\n')) process.stdout.write('\n');
+    } catch (err) {
+      if (err instanceof LastPassCredApprovalRequiredError) {
+        process.stderr.write(`${err.message}\napproval_id: ${err.approvalId}\n`);
+        process.exit(2);
+      }
+      if (err instanceof LastPassCredRejectedError) {
+        process.stderr.write(`${err.message}\napproval_id: ${err.approvalId}\n`);
+        process.exit(3);
+      }
+      if (err instanceof LastPassCredFetchError) {
+        process.stderr.write(`lastpass-cred failed: ${err.message}\n`);
+        process.exit(1);
+      }
+      throw err;
+    }
   });
 
 // ---------------------------------------------------------------------------
