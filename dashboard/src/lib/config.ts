@@ -17,14 +17,16 @@ function expandTilde(p: string): string {
 const RAW_CTX_INSTANCE_ID = process.env.CTX_INSTANCE_ID ?? 'default';
 
 // Core path constants - mirror bus/_ctx-env.sh logic
-export const CTX_ROOT = expandTilde(
+const RAW_CTX_ROOT = expandTilde(
   process.env.CTX_ROOT ??
   path.join(os.homedir(), '.cortextos', RAW_CTX_INSTANCE_ID),
 );
 
-export const CTX_ROOT_REAL = fs.existsSync(CTX_ROOT)
-  ? fs.realpathSync(CTX_ROOT)
-  : CTX_ROOT;
+export const CTX_ROOT_REAL = fs.existsSync(RAW_CTX_ROOT)
+  ? fs.realpathSync(RAW_CTX_ROOT)
+  : RAW_CTX_ROOT;
+
+export const CTX_ROOT = CTX_ROOT_REAL;
 
 export const CTX_INSTANCE_ID = path.basename(CTX_ROOT_REAL) || RAW_CTX_INSTANCE_ID;
 
