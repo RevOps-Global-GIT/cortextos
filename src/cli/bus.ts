@@ -4152,6 +4152,11 @@ busCommand
   .action(() => runHook('hook-skill-telemetry'));
 
 busCommand
+  .command('hook-env-write-guard')
+  .description('PreToolUse hook (Write/Edit): rejects writes to *.env files with empty or non-parseable content')
+  .action(() => runHook('hook-env-write-guard'));
+
+busCommand
   .command('create-skill-pr')
   .description('Background worker: commits and draft-PRs a community skill (called by hook-skill-autopr)')
   .argument('<skill-name>', 'Skill directory name under community/skills/')
