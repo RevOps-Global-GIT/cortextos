@@ -1,0 +1,10 @@
+{
+  "whisper": {
+    "enabled": true,
+    "mode": "silent",
+    "timeout_ms": 300000,
+    "participants": ["codex-talk", "analyst-talk"],
+    "manual_forward_only": true,
+    "summarize_max_messages": 20
+  }
+}

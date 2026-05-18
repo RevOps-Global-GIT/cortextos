@@ -42,6 +42,7 @@ import { runWorkflow } from '../bus/run-workflow.js';
 import { computerUse } from '../bus/computer-use.js';
 import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeaseStatus, releaseOrgoLease } from '../bus/orgo-lease.js';
 import { lastpassCred, LastPassCredApprovalRequiredError, LastPassCredFetchError, LastPassCredRejectedError } from '../bus/lastpass-cred.js';
+import { closeWhisperRoom, readVoiceSettings, sendWhisper, summarizeWhisperRoom, watchWhisperRoom, whisperRoomId } from '../bus/whisper-room.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -151,6 +152,10 @@ const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
   'orgo-lease-claim',
   'orgo-lease-release',
   'farm-dispatch',
+  'whisper-send',
+  'whisper-watch',
+  'whisper-close',
+  'orch-talk',
   // Skill / catalog writes
   'create-skill-pr',
   'install-community-item',
@@ -1239,6 +1244,143 @@ busCommand
         remote,
       };
       console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+function parsePositiveIntOpt(value: string | undefined, flagName: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${flagName} must be a positive integer`);
+  }
+  return parsed;
+}
+
+busCommand
+  .command('whisper-send')
+  .description('Send a silent whisper-room message between talk agents')
+  .argument('<to>', 'Target talk agent, e.g. analyst-talk')
+  .argument('<text>', 'Message text')
+  .option('--from <agent>', 'Override sender identity, e.g. codex-talk')
+  .option('--room <id>', 'Explicit whisper room ID')
+  .option('--timeout-ms <ms>', 'Room timeout in milliseconds; defaults to voice-settings.json')
+  .action((to: string, text: string, opts: { from?: string; room?: string; timeoutMs?: string }) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      const from = opts.from || env.agentName;
+      const timeoutMs = parsePositiveIntOpt(opts.timeoutMs, '--timeout-ms');
+      const message = sendWhisper(paths, from, to, text, { roomId: opts.room, timeoutMs, agentDir: env.agentDir });
+      logEvent(paths, env.agentName, env.org, 'message', 'whisper_sent', 'info', JSON.stringify({ room_id: message.room_id, from, to, bus_message_id: message.bus_message_id }));
+      console.log(JSON.stringify(message, null, 2));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('whisper-watch')
+  .description('Watch a whisper room until it closes or the timeout fires')
+  .argument('<room>', 'Whisper room ID')
+  .option('--timeout-ms <ms>', 'Timeout in milliseconds; defaults to voice-settings.json')
+  .option('--poll-ms <ms>', 'Polling interval in milliseconds', '1000')
+  .option('--summarize', 'Print a compact transcript summary after close')
+  .action(async (room: string, opts: { timeoutMs?: string; pollMs: string; summarize?: boolean }) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      const timeoutMs = parsePositiveIntOpt(opts.timeoutMs, '--timeout-ms');
+      const pollMs = parsePositiveIntOpt(opts.pollMs, '--poll-ms');
+      const result = await watchWhisperRoom(paths, room, { timeoutMs, pollMs, summarize: opts.summarize });
+      logEvent(paths, env.agentName, env.org, 'message', 'whisper_watch_closed', 'info', JSON.stringify(result));
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('whisper-summary')
+  .description('Print a compact summary of a whisper room transcript')
+  .argument('<room>', 'Whisper room ID')
+  .option('--max <count>', 'Maximum recent messages to include')
+  .action((room: string, opts: { max?: string }) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      const maxMessages = parsePositiveIntOpt(opts.max, '--max');
+      console.log(summarizeWhisperRoom(paths, room, maxMessages));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('whisper-close')
+  .description('Close a whisper room manually')
+  .argument('<room>', 'Whisper room ID')
+  .option('--reason <reason>', 'Close reason', 'manual')
+  .action((room: string, opts: { reason: string }) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      const session = closeWhisperRoom(paths, room, opts.reason);
+      logEvent(paths, env.agentName, env.org, 'message', 'whisper_closed', 'info', JSON.stringify({ room_id: room, reason: opts.reason }));
+      console.log(JSON.stringify(session, null, 2));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('orch-talk')
+  .description('Voice-command handler for whisper room operations')
+  .argument('<command>', 'settings | whisper | summary | close | room-id')
+  .argument('[args...]')
+  .action((command: string, args: string[]) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      if (command === 'settings') {
+        console.log(JSON.stringify(readVoiceSettings(paths, env.agentDir), null, 2));
+        return;
+      }
+      if (command === 'room-id') {
+        const [a, b] = args;
+        if (!a || !b) throw new Error('Usage: cortextos bus orch-talk room-id <agent-a> <agent-b>');
+        console.log(whisperRoomId(a, b));
+        return;
+      }
+      if (command === 'whisper') {
+        const [to, ...textParts] = args;
+        if (!to || textParts.length === 0) throw new Error('Usage: cortextos bus orch-talk whisper <to> <text>');
+        const message = sendWhisper(paths, env.agentName, to, textParts.join(' '), { agentDir: env.agentDir });
+        logEvent(paths, env.agentName, env.org, 'message', 'orch_talk_whisper_sent', 'info', JSON.stringify({ room_id: message.room_id, to }));
+        console.log(JSON.stringify(message, null, 2));
+        return;
+      }
+      if (command === 'summary') {
+        const [room] = args;
+        if (!room) throw new Error('Usage: cortextos bus orch-talk summary <room>');
+        console.log(summarizeWhisperRoom(paths, room));
+        return;
+      }
+      if (command === 'close') {
+        const [room, ...reasonParts] = args;
+        if (!room) throw new Error('Usage: cortextos bus orch-talk close <room> [reason]');
+        const session = closeWhisperRoom(paths, room, reasonParts.join(' ') || 'manual');
+        logEvent(paths, env.agentName, env.org, 'message', 'orch_talk_whisper_closed', 'info', JSON.stringify({ room_id: room, reason: session.close_reason || null }));
+        console.log(JSON.stringify(session, null, 2));
+        return;
+      }
+      throw new Error(`Unknown orch-talk command '${command}'`);
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
