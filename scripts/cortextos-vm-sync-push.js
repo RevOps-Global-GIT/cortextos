@@ -150,7 +150,8 @@ const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
 // Agents whose Claude Code sessions run on Greg's Mac rather than this VM.
 // Their ~/.claude/projects/ data lives on the Mac and must be fetched via SSH.
-const MAC_AGENTS = ["codex", "codex-2"];
+// NOTE: codex-2 runs OpenAI Codex CLI (not Claude Code) — no JSONL to read; its $0 Anthropic spend is correct.
+const MAC_AGENTS = ["codex"];
 const MAC_SSH_HOST = secrets.MAC_SSH_HOST || process.env.MAC_SSH_HOST || "gregs-mac";
 // Temp dir for rsync'd Mac project JSONL files (recreated on each run).
 const MAC_PROJECTS_CACHE = path.join(os.tmpdir(), "cortextos-mac-projects");
