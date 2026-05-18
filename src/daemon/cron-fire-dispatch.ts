@@ -1,8 +1,10 @@
 import { join, resolve } from 'path';
 import type { CronDefinition } from '../types/index.js';
 import { spawnCodexAsync, type SpawnCodexResult } from '../bus/spawn-codex.js';
+import { mirrorReviewToRgos, type ReviewMirrorInput } from '../bus/rgos-mirror.js';
 
 type SpawnCodexFn = typeof spawnCodexAsync;
+type MirrorReviewFn = typeof mirrorReviewToRgos;
 
 export interface CronFireDispatchOptions {
   agentName: string;
@@ -10,6 +12,7 @@ export interface CronFireDispatchOptions {
   org: string;
   injectAgent: (agentName: string, message: string) => boolean;
   spawnCodexImpl?: SpawnCodexFn;
+  mirrorReviewImpl?: MirrorReviewFn;
   now?: () => Date;
 }
 
@@ -35,6 +38,79 @@ function resolveOrgPath(frameworkRoot: string, org: string, pathValue: string): 
   if (pathValue.startsWith('/')) return pathValue;
   if (pathValue.startsWith('orgs/')) return resolve(frameworkRoot, pathValue);
   return resolve(frameworkRoot, 'orgs', org, pathValue);
+}
+
+function isReviewType(value: string): value is ReviewMirrorInput['type'] {
+  return value === 'morning' || value === 'evening' || value === 'weekly';
+}
+
+function reviewTypeForCron(cron: CronDefinition): ReviewMirrorInput['type'] | null {
+  const explicit = metadataString(cron, 'review_type');
+  if (explicit) return isReviewType(explicit) ? explicit : null;
+
+  const name = cron.name.toLowerCase();
+  if (!name.includes('review')) return null;
+  if (name.includes('morning')) return 'morning';
+  if (name.includes('evening')) return 'evening';
+  if (name.includes('weekly')) return 'weekly';
+  return null;
+}
+
+function reviewPeriodStart(type: ReviewMirrorInput['type'], periodEnd: string, fallbackStart: string): string {
+  const end = new Date(periodEnd).getTime();
+  if (!Number.isFinite(end)) return fallbackStart;
+
+  const hours = type === 'weekly' ? 24 * 7
+    : type === 'evening' ? 12
+    : 24;
+  return new Date(end - hours * 60 * 60 * 1000).toISOString();
+}
+
+function excerpt(value: string, maxChars = 4000): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.length > maxChars ? `${trimmed.slice(0, maxChars)}...` : trimmed;
+}
+
+async function mirrorSpawnCodexReview(
+  cron: CronDefinition,
+  opts: CronFireDispatchOptions,
+  result: SpawnCodexResult,
+): Promise<void> {
+  const type = reviewTypeForCron(cron);
+  if (!type) return;
+
+  const periodEnd = result.metadata.completed_at;
+  const mirrorReview = opts.mirrorReviewImpl ?? mirrorReviewToRgos;
+  await mirrorReview({
+    runId: result.metadata.run_id,
+    org: opts.org,
+    type,
+    periodStart: reviewPeriodStart(type, periodEnd, result.metadata.started_at),
+    periodEnd,
+    createdAt: periodEnd,
+    summary: {
+      narrative: `Daemon-fired scoped Codex ${type} review completed. Artifact: ${result.outputPath}`,
+      daemon_spawn_codex: true,
+      cron_name: cron.name,
+      status: result.status,
+      agent: result.metadata.agent,
+      task_id: result.metadata.task_id,
+      requester: result.metadata.requester,
+      priority: result.metadata.priority,
+      artifact_path: result.outputPath,
+      sidecar_path: result.sidecarPath,
+      prompt_file: result.metadata.prompt_file,
+      prompt_sha256: result.metadata.prompt_sha256,
+      duration_ms: result.durationMs,
+      model: result.metadata.model,
+      effort: result.metadata.effort,
+      sandbox: result.metadata.sandbox,
+      exit_code: result.exitCode,
+      output_excerpt: excerpt(result.output),
+      stderr_excerpt: result.metadata.stderr_excerpt,
+    },
+  });
 }
 
 export async function dispatchCronFire(cron: CronDefinition, opts: CronFireDispatchOptions): Promise<SpawnCodexResult | void> {
@@ -74,6 +150,7 @@ export async function dispatchCronFire(cron: CronDefinition, opts: CronFireDispa
     if (!result.ok) {
       throw new Error(`spawn-codex cron "${cron.name}" failed with status ${result.status}; artifact: ${result.outputPath}`);
     }
+    await mirrorSpawnCodexReview(cron, opts, result);
     return result;
   }
 

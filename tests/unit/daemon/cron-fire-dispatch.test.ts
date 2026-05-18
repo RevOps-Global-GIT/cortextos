@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchCronFire } from '../../../src/daemon/cron-fire-dispatch.js';
 import type { CronDefinition } from '../../../src/types/index.js';
 import type { SpawnCodexResult } from '../../../src/bus/spawn-codex.js';
@@ -65,6 +65,30 @@ function result(ok = true): SpawnCodexResult {
 }
 
 describe('dispatchCronFire', () => {
+  const originalSupabaseUrl = process.env.SUPABASE_RGOS_URL;
+  const originalSupabaseKey = process.env.SUPABASE_RGOS_SERVICE_KEY;
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+    delete process.env.SUPABASE_RGOS_URL;
+    delete process.env.SUPABASE_RGOS_SERVICE_KEY;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (originalSupabaseUrl === undefined) {
+      delete process.env.SUPABASE_RGOS_URL;
+    } else {
+      process.env.SUPABASE_RGOS_URL = originalSupabaseUrl;
+    }
+    if (originalSupabaseKey === undefined) {
+      delete process.env.SUPABASE_RGOS_SERVICE_KEY;
+    } else {
+      process.env.SUPABASE_RGOS_SERVICE_KEY = originalSupabaseKey;
+    }
+    vi.clearAllMocks();
+  });
+
   it('keeps default PTY cron injection behavior', async () => {
     const injectAgent = vi.fn().mockReturnValue(true);
 
@@ -85,6 +109,7 @@ describe('dispatchCronFire', () => {
   it('runs spawn-codex crons without injecting into the long-running PTY', async () => {
     const injectAgent = vi.fn();
     const spawnCodexImpl = vi.fn().mockResolvedValue(result(true));
+    const mirrorReviewImpl = vi.fn().mockResolvedValue(undefined);
 
     await dispatchCronFire(cron({
       metadata: {
@@ -105,6 +130,7 @@ describe('dispatchCronFire', () => {
       org: 'revops-global',
       injectAgent,
       spawnCodexImpl,
+      mirrorReviewImpl,
     });
 
     expect(injectAgent).not.toHaveBeenCalled();
@@ -122,6 +148,85 @@ describe('dispatchCronFire', () => {
       replyTo: '1778976581063-orchestrator-00ahy',
       priority: 'cron',
     });
+    expect(mirrorReviewImpl).toHaveBeenCalledWith(expect.objectContaining({
+      runId: '20260516T000000Z-deadbeef',
+      org: 'revops-global',
+      type: 'evening',
+      periodEnd: '2026-05-16T00:00:00.012Z',
+      createdAt: '2026-05-16T00:00:00.012Z',
+      summary: expect.objectContaining({
+        daemon_spawn_codex: true,
+        cron_name: 'evening-review',
+        artifact_path: '/tmp/out.md',
+        output_excerpt: 'done',
+      }),
+    }));
+  });
+
+  it('mirrors successful spawn-codex review crons into orch_reviews', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 201 }));
+    process.env.SUPABASE_RGOS_URL = 'https://test.supabase.co';
+    process.env.SUPABASE_RGOS_SERVICE_KEY = 'test-service-key';
+
+    const spawnCodexImpl = vi.fn().mockResolvedValue(result(true));
+
+    await dispatchCronFire(cron({
+      name: 'evening-review',
+      metadata: {
+        runner: 'spawn-codex',
+        prompt_file: 'prompts/evening-review.md',
+        agent: 'codex',
+      },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent: vi.fn(),
+      spawnCodexImpl,
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://test.supabase.co/rest/v1/orch_reviews',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.any(String),
+      }),
+    );
+    const body = JSON.parse(vi.mocked(fetch).mock.calls[0][1]!.body as string);
+    expect(body).toMatchObject({
+      org_id: 'revops-global',
+      type: 'evening',
+      period_end: '2026-05-16T00:00:00.012Z',
+    });
+    expect(body.summary_json).toMatchObject({
+      daemon_spawn_codex: true,
+      cron_name: 'evening-review',
+      artifact_path: '/tmp/out.md',
+      output_excerpt: 'done',
+    });
+    expect(body.summary_json.narrative).toContain('Daemon-fired scoped Codex evening review completed.');
+  });
+
+  it('does not mirror non-review spawn-codex crons into orch_reviews', async () => {
+    process.env.SUPABASE_RGOS_URL = 'https://test.supabase.co';
+    process.env.SUPABASE_RGOS_SERVICE_KEY = 'test-service-key';
+
+    await dispatchCronFire(cron({
+      name: 'worker-monitor',
+      metadata: {
+        runner: 'spawn-codex',
+        prompt_file: 'prompts/worker-monitor.md',
+        agent: 'codex',
+      },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent: vi.fn(),
+      spawnCodexImpl: vi.fn().mockResolvedValue(result(true)),
+    });
+
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('throws when a spawn-codex cron fails', async () => {
@@ -153,4 +258,5 @@ describe('dispatchCronFire', () => {
       sandbox: 'danger-full-access',
     }));
   });
+
 });
