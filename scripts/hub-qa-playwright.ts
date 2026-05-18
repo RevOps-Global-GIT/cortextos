@@ -1903,12 +1903,13 @@ async function runWikiChecks(page: Page): Promise<CheckResult[]> {
   // CHECK 2: Wiki content visible (articles, pages, sections, or entries)
   try {
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    await page.locator('table tbody tr, [class*="wiki"], [class*="Wiki"], [class*="article"], [class*="Article"], [class*="prose"], [class*="markdown"], [class*="rich-text"], .ProseMirror, [data-block], [class*="page"], [class*="entry"], [role="row"]:not([role="columnheader"]), [role="listitem"], article, section').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    // Wiki uses React Query — data loads after networkidle. Wait for letter-section items or any list/row.
+    await page.locator('section[id^="wiki-"] li, table tbody tr, [class*="wiki"], [class*="article"], [role="row"]:not([role="columnheader"]), [role="listitem"], ul li').first().waitFor({ state: 'visible', timeout: 12000 }).catch(() => {});
     await page.waitForTimeout(500);
     await shot(page, `${sp}-2-content`);
     const articleCount = await page.locator('[class*="wiki"], [class*="Wiki"], [class*="article"], [class*="Article"], [class*="prose"], [class*="markdown"], [class*="rich-text"], .ProseMirror, article').filter({ hasText: /[a-z]/i }).count();
     const rowCount     = await page.locator('table tbody tr').count();
-    const listCount    = await page.locator('[role="listitem"], [role="row"]:not([role="columnheader"]), ul li').count();
+    const listCount    = await page.locator('[role="listitem"], [role="row"]:not([role="columnheader"]), section[id^="wiki-"] li, ul li').count();
     const total = articleCount || rowCount || listCount;
     if (total > 0) {
       results.push({ check: 'CHECK 2 Wiki content visible', status: 'PASS', evidence: `${total} item(s) visible (articles:${articleCount}, rows:${rowCount}, listitems:${listCount}).` });
@@ -1940,7 +1941,7 @@ async function runWikiChecks(page: Page): Promise<CheckResult[]> {
   try {
     await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
     const urlBefore = page.url();
-    const firstItem = page.locator('[class*="wiki"], [class*="Wiki"], [class*="article"], [class*="Article"], table tbody tr, [role="listitem"], [role="row"]:not([role="columnheader"]), ul li button').filter({ hasText: /[a-z]/i }).first();
+    const firstItem = page.locator('[class*="wiki"], [class*="Wiki"], [class*="article"], [class*="Article"], table tbody tr, [role="listitem"], [role="row"]:not([role="columnheader"]), section[id^="wiki-"] li button, ul li button').filter({ hasText: /[a-z]/i }).first();
     if (await firstItem.count() > 0) {
       const itemText = (await firstItem.textContent().catch(() => ''))?.trim().slice(0, 50) ?? '';
       await firstItem.click();
