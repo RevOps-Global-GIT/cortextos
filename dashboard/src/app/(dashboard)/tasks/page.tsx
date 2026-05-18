@@ -34,10 +34,22 @@ export default function TasksPage() {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [liveAgents, setLiveAgents] = useState<string[]>([]);
+
+  // Fetch live agent list from enabled-agents registry (not task assignees) so
+  // archived agents disappear and new agents appear without needing task history.
+  useEffect(() => {
+    fetch('/api/agents')
+      .then((r) => r.ok ? r.json() : [])
+      .then((data: Array<{ name: string }>) => setLiveAgents(data.map((a) => a.name).sort()))
+      .catch(() => {});
+  }, []);
 
   // Derive unique values for filter dropdowns
   const allTasks = tasks;
-  const agents = [...new Set(allTasks.map((t) => t.assignee).filter(Boolean) as string[])];
+  const taskAgents = [...new Set(allTasks.map((t) => t.assignee).filter(Boolean) as string[])];
+  // Merge live registry with task assignees; live registry is authoritative for known agents
+  const agents = [...new Set([...liveAgents, ...taskAgents])].sort();
   const projects = [...new Set(allTasks.map((t) => t.project).filter(Boolean) as string[])];
   const orgs = [...new Set(allTasks.map((t) => t.org))];
 
