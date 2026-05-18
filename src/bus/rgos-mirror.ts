@@ -72,7 +72,7 @@ export function isEnabled(): boolean {
 // ---------------------------------------------------------------------------
 
 export interface RetryEntry {
-  table: 'orch_tasks' | 'cortex_messages' | 'orch_events';
+  table: 'orch_tasks' | 'cortex_messages' | 'orch_events' | 'orch_reviews';
   row: Record<string, unknown>;
   ts: string;
   retries_remaining?: number;
@@ -156,7 +156,7 @@ export class PostgRESTError extends Error {
 // ---------------------------------------------------------------------------
 
 async function postgrestUpsert(
-  table: 'orch_tasks' | 'cortex_messages' | 'orch_events',
+  table: RetryEntry['table'],
   row: Record<string, unknown>,
 ): Promise<void> {
   const url = process.env.SUPABASE_RGOS_URL!;
@@ -526,24 +526,52 @@ export function buildMessageRow(msg: InboxMessage): Record<string, unknown> {
   };
 }
 
+export interface ReviewMirrorInput {
+  runId: string;
+  org: string;
+  type: 'morning' | 'evening' | 'weekly';
+  periodStart: string;
+  periodEnd: string;
+  summary: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export function buildReviewRow(review: ReviewMirrorInput): Record<string, unknown> {
+  return {
+    id: uuidv5(`orch_review:${review.org}:${review.type}:${review.runId}`),
+    org_id: review.org,
+    type: review.type,
+    period_start: review.periodStart,
+    period_end: review.periodEnd,
+    summary_json: review.summary,
+    slack_ts: null,
+    created_at: review.createdAt ?? review.periodEnd,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Realtime presence broadcast (STACK-11)
 // ---------------------------------------------------------------------------
 
-const PRESENCE_CHANNEL = 'agent-presence';
+const PRESENCE_CHANNEL = 'fleet-tasks-presence:revops-global';
 
 export interface AgentPresencePayload {
-  agent_id: string;
-  current_action: 'task_created' | 'task_updated' | 'task_completed' | 'idle';
-  current_task_id: string | null;
-  cursor_position_hint: string | null;
-  ts: string;
+  actor_id: string;
+  kind: 'agent';
+  name: string;
+  avatar_url: string | null;
+  task_id: string | null;
+  task_title: string | null;
+  status: 'task_created' | 'task_updated' | 'task_completed' | 'idle';
+  action_label: string | null;
+  updated_at: string;
+  source: 'cortextos-bus';
 }
 
 /**
  * Broadcast agent presence via Supabase Realtime REST API. Fire-and-forget —
  * never throws, never retries. Presence is ephemeral; gaps are acceptable.
- * Hub side subscribes to the `agent-presence` channel for `presence_update` events.
+ * Hub side subscribes to `fleet-tasks-presence:revops-global` for `presence_update` events.
  */
 export async function broadcastPresence(payload: AgentPresencePayload): Promise<void> {
   if (!isEnabled()) return;
@@ -585,15 +613,20 @@ export async function mirrorTaskToRgos(
   const action = event === 'create' ? 'task_created'
     : event === 'complete' ? 'task_completed'
     : 'task_updated';
-  const hint = event === 'create' ? `Creating: ${task.title.slice(0, 60)}`
+  const actionLabel = event === 'create' ? `Creating: ${task.title.slice(0, 60)}`
     : event === 'complete' ? `Completed: ${task.title.slice(0, 60)}`
     : `Working: ${task.title.slice(0, 60)}`;
   setImmediate(() => broadcastPresence({
-    agent_id: agentId,
-    current_action: action,
-    current_task_id: task.id,
-    cursor_position_hint: hint,
-    ts: new Date().toISOString(),
+    actor_id: agentId,
+    kind: 'agent',
+    name: agentId,
+    avatar_url: null,
+    task_id: task.id,
+    task_title: task.title.slice(0, 80),
+    status: action,
+    action_label: actionLabel,
+    updated_at: new Date().toISOString(),
+    source: 'cortextos-bus',
   }).catch(() => { /* already swallowed inside broadcastPresence */ }));
   try {
     await postgrestUpsert('orch_tasks', row);
@@ -670,6 +703,26 @@ export async function mirrorEventToRgos(event: {
     } else {
       console.warn(`[bus-mirror] orch_events upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
       enqueueRetry({ table: 'orch_events', row, ts: new Date().toISOString(), retries_remaining: EVENT_RETRY_MAX });
+    }
+  }
+}
+
+/**
+ * Mirror a daemon-fired spawn-codex review into RGOS orch_reviews so daemon
+ * and Supabase pg_cron reviews share the same Reviews feed.
+ */
+export async function mirrorReviewToRgos(review: ReviewMirrorInput): Promise<void> {
+  if (!isEnabled()) return;
+  const row = buildReviewRow(review);
+  try {
+    await postgrestUpsert('orch_reviews', row);
+    setImmediate(() => drainRetryQueue().catch(err => escalateCritical('bus-mirror drain loop (review)', err, { queue: 'reviews' })));
+  } catch (err) {
+    if (err instanceof PostgRESTError && err.isPermanent) {
+      console.error(`[bus-mirror] orch_reviews upsert permanent error (HTTP ${err.status}) — discarding: ${err.message}`);
+    } else {
+      console.warn(`[bus-mirror] orch_reviews upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
+      enqueueRetry({ table: 'orch_reviews', row, ts: new Date().toISOString(), retries_remaining: EVENT_RETRY_MAX });
     }
   }
 }

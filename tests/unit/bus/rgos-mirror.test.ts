@@ -33,6 +33,7 @@ import {
   mirrorTaskToRgos,
   mirrorMessageToRgos,
   mirrorEventToRgos,
+  broadcastPresence,
   drainRetryQueue,
   enqueueRetry,
   readRetryQueue,
@@ -375,6 +376,69 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     expect(body.status).toBe('completed');
     expect(body.result).toBe('Shipped the feature');
     expect(body.completed_at).toBe('2026-04-25T11:00:00Z');
+  });
+});
+
+describe('rgos-mirror — broadcastPresence (STACK-11)', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-presence-test-'));
+    setMirrorEnv(tmpDir);
+    mockFetchOk();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('posts the realtime presence broadcast contract', async () => {
+    const payload = {
+      actor_id: 'codex',
+      kind: 'agent' as const,
+      name: 'codex',
+      avatar_url: null,
+      task_id: 'task_123',
+      task_title: 'Task title',
+      status: 'task_updated' as const,
+      action_label: 'Working: task',
+      updated_at: '2026-05-18T19:15:00.000Z',
+      source: 'cortextos-bus' as const,
+    };
+
+    await broadcastPresence(payload);
+
+    const mockFetch = vi.mocked(fetch);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe('https://test.supabase.co/realtime/v1/api/broadcast');
+    expect((opts?.headers as Record<string, string>)['apikey']).toBe('test-service-key');
+    expect((opts?.headers as Record<string, string>)['Authorization']).toBe('Bearer test-service-key');
+    expect(JSON.parse(opts?.body as string)).toEqual({
+      messages: [{ topic: 'fleet-tasks-presence:revops-global', event: 'presence_update', payload }],
+    });
+  });
+
+  it('keeps presence best-effort and does not enqueue retries on failure', async () => {
+    mockFetchFail('realtime offline');
+
+    await expect(broadcastPresence({
+      actor_id: 'codex',
+      kind: 'agent',
+      name: 'codex',
+      avatar_url: null,
+      task_id: null,
+      task_title: null,
+      status: 'idle',
+      action_label: null,
+      updated_at: '2026-05-18T19:15:00.000Z',
+      source: 'cortextos-bus',
+    })).resolves.toBeUndefined();
+
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    expect(existsSync(qPath)).toBe(false);
   });
 });
 
