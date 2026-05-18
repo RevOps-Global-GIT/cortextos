@@ -64,13 +64,17 @@ export function syncTasks(org: string): number {
     for (const file of files) {
       const filePath = path.join(taskDir, file);
       activePaths.push(filePath);
-      if (!hasFileChanged(filePath)) continue;
+      const taskId = path.basename(file, '.json');
+      const rowExists = db
+        .prepare('SELECT 1 FROM tasks WHERE id = ?')
+        .get(taskId);
+      if (!hasFileChanged(filePath) && rowExists) continue;
 
       try {
         const raw = fs.readFileSync(filePath, 'utf-8');
         const task = JSON.parse(raw);
         upsert.run({
-          id: task.id ?? path.basename(file, '.json'),
+          id: task.id ?? taskId,
           title: task.title ?? 'Untitled',
           description: task.description ?? null,
           status: task.status ?? 'pending',
