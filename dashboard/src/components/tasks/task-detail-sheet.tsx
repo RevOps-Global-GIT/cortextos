@@ -29,7 +29,8 @@ import {
 } from '@/components/shared';
 import { IconPencil, IconFile, IconPhoto, IconFileText, IconCode } from '@tabler/icons-react';
 import { DeliverablePreview } from '@/components/tasks/deliverable-preview';
-import type { Task, TaskOutput, TaskStatus } from '@/lib/types';
+import { cn } from '@/lib/utils';
+import type { Task, TaskBrief, TaskOutput, TaskStatus } from '@/lib/types';
 
 export interface TaskDetailSheetProps {
   task: Task | null;
@@ -58,6 +59,38 @@ const STATUS_TRANSITIONS: Record<TaskStatus, { label: string; status: TaskStatus
     { label: 'Reopen', status: 'pending', variant: 'outline' },
   ],
 };
+
+const BRIEF_FIELDS: { key: keyof TaskBrief; label: string }[] = [
+  { key: 'success_criteria', label: 'Success Criteria' },
+  { key: 'out_of_scope', label: 'Out of Scope' },
+  { key: 'escalation_triggers', label: 'Escalation Triggers' },
+  { key: 'source_hierarchy', label: 'Source Hierarchy' },
+  { key: 'preferred_runtime', label: 'Preferred Runtime' },
+  { key: 'required_capabilities', label: 'Required Capabilities' },
+  { key: 'fallback_proof', label: 'Fallback Proof' },
+  { key: 'artifact_expectations', label: 'Artifact Expectations' },
+  { key: 'goal_ancestry', label: 'Goal Ancestry' },
+];
+
+function getBriefValueState(value: string | string[] | undefined) {
+  const values = Array.isArray(value)
+    ? value.map((item) => String(item).trim()).filter(Boolean)
+    : typeof value === 'string' && value.trim()
+      ? [value.trim()]
+      : [];
+
+  if (values.length === 0) {
+    return { values: ['Not provided'], muted: true };
+  }
+
+  const first = values[0];
+  const prefix = 'field-not-applicable:';
+  if (values.length === 1 && first.toLowerCase().startsWith(prefix)) {
+    return { values: [first.slice(prefix.length).trim() || 'Not applicable'], muted: true };
+  }
+
+  return { values, muted: false };
+}
 
 function getOutputIcon(filePath: string) {
   const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
@@ -123,6 +156,7 @@ export function TaskDetailSheet({
   if (!task) return null;
 
   const transitions = STATUS_TRANSITIONS[task.status] ?? [];
+  const brief = task.meta?.brief;
 
   function startEditing() {
     setEditTitle(task!.title);
@@ -313,6 +347,38 @@ export function TaskDetailSheet({
               <div>
                 <p className="text-sm text-muted-foreground mb-1">Notes</p>
                 <p className="text-sm whitespace-pre-wrap">{task.notes}</p>
+              </div>
+            </>
+          )}
+
+          {!editing && brief && (
+            <>
+              <Separator />
+              <div>
+                <p className="text-sm font-medium mb-2">Brief Contract</p>
+                <div className="grid gap-2">
+                  {BRIEF_FIELDS.map(({ key, label }) => {
+                    const { values, muted } = getBriefValueState(brief[key]);
+                    return (
+                      <section key={key} className="rounded-md border bg-muted/20 px-3 py-2">
+                        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                          {label}
+                        </p>
+                        {values.length > 1 ? (
+                          <ul className={cn('mt-1 list-disc space-y-1 pl-4 text-sm', muted && 'text-muted-foreground italic')}>
+                            {values.map((item, idx) => (
+                              <li key={idx} className="break-words">{item}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p className={cn('mt-1 text-sm whitespace-pre-wrap break-words', muted && 'text-muted-foreground italic')}>
+                            {values[0]}
+                          </p>
+                        )}
+                      </section>
+                    );
+                  })}
+                </div>
               </div>
             </>
           )}

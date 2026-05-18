@@ -1,6 +1,7 @@
 // cortextOS Dashboard - Task data fetcher
 // Reads from SQLite (synced from JSON task files on disk).
 
+import fs from 'fs';
 import { db } from '@/lib/db';
 import type { Task, TaskFilters } from '@/lib/types';
 import { appendTaskScopeConditions } from './task-scope';
@@ -174,6 +175,20 @@ export function getTaskCount(org?: string, status?: string): number {
 // ---------------------------------------------------------------------------
 
 function rowToTask(row: Record<string, unknown>): Task {
+  const sourceFile = (row.source_file as string) ?? undefined;
+  let meta: Task['meta'];
+
+  if (sourceFile) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(sourceFile, 'utf-8'));
+      if (raw && typeof raw.meta === 'object' && !Array.isArray(raw.meta)) {
+        meta = raw.meta as Task['meta'];
+      }
+    } catch {
+      // Metadata is an optional JSON-file-only extension; keep SQLite reads resilient.
+    }
+  }
+
   return {
     id: row.id as string,
     title: row.title as string,
@@ -188,6 +203,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     updated_at: (row.updated_at as string) ?? undefined,
     completed_at: (row.completed_at as string) ?? undefined,
     notes: (row.notes as string) ?? undefined,
-    source_file: (row.source_file as string) ?? undefined,
+    source_file: sourceFile,
+    meta,
   };
 }
