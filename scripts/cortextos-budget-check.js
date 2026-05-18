@@ -224,13 +224,15 @@ async function main() {
     }
 
     // New threshold crossed — alert
-    const level = highestCrossedPct >= 100 ? "HARD PAUSE" :
-                  highestCrossedPct >= 90  ? "CRITICAL"   :
-                  highestCrossedPct >= 75  ? "WARNING"    : "INFO";
+    const actuallyPausing = hardPauseEnabled && pct >= hardPauseAt;
+    const level = actuallyPausing        ? "HARD PAUSE" :
+                  highestCrossedPct >= 100 ? "CRITICAL"  :
+                  highestCrossedPct >= 90  ? "CRITICAL"  :
+                  highestCrossedPct >= 75  ? "WARNING"   : "INFO";
 
-    const hardPauseNote = hardPauseEnabled && pct >= hardPauseAt
+    const hardPauseNote = actuallyPausing
       ? " Hard-pause marker written — new dispatches blocked until Greg unlocks."
-      : (pct >= hardPauseAt ? " (hard_pause_enabled=false — marker NOT written; Greg can enable in budgets.json)" : "");
+      : (pct >= hardPauseAt ? " Set hard_pause_enabled=true in budgets.json to activate auto-pause." : "");
 
     const alertMsg =
       `[BUDGET ${level}] ${agent}: $${spent.toFixed(2)} / $${budget} monthly cap (${pctStr}%).${hardPauseNote}`;
