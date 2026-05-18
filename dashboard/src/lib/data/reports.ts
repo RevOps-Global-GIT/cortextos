@@ -423,6 +423,44 @@ export function getCostIntelligence(org: string): CostIntelligence | null {
 // UVD (Unique Value Deliveries) Metrics
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Per-agent budget summary (from budget-check script state)
+// ---------------------------------------------------------------------------
+
+export interface AgentBudget {
+  agent: string;
+  spent: number;
+  budget: number;
+  pct_used: number;
+  paused: boolean;
+}
+
+export interface BudgetSummary {
+  month: string;
+  generated_at: string;
+  agents: AgentBudget[];
+}
+
+export function getBudgetSummary(): BudgetSummary | null {
+  const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+  const file = path.join(CTX_ROOT, 'state', `budget-summary-${month}.json`);
+  if (!fs.existsSync(file)) return null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    const stateDir = path.join(CTX_ROOT, 'state');
+    const agents: AgentBudget[] = (raw.agents ?? []).map((a: { agent: string; spent: number; budget: number; pct_used: number }) => ({
+      agent: a.agent,
+      spent: a.spent ?? 0,
+      budget: a.budget ?? 0,
+      pct_used: a.pct_used ?? 0,
+      paused: fs.existsSync(path.join(stateDir, a.agent, 'budget-paused')),
+    }));
+    return { month: raw.month ?? month, generated_at: raw.generated_at ?? '', agents };
+  } catch {
+    return null;
+  }
+}
+
 export interface UvdDayData {
   date: string;
   uvd_count: number;

@@ -14,7 +14,8 @@ import { CostTracking } from '@/components/analytics/cost-tracking';
 import { GoalProgress } from '@/components/analytics/goal-progress';
 import { FleetHealth } from '@/components/analytics/fleet-health';
 import { UvdMetricCard } from '@/components/analytics/uvd-metric-card';
-import { getFleetHealth, getPlanUsage, getUsageHistory, getUvdMetrics } from '@/lib/data/reports';
+import { BudgetPane } from '@/components/analytics/budget-pane';
+import { getFleetHealth, getPlanUsage, getUsageHistory, getUvdMetrics, getBudgetSummary } from '@/lib/data/reports';
 
 export default async function AnalyticsPage({
   searchParams,
@@ -30,7 +31,7 @@ export default async function AnalyticsPage({
   syncCostsLazy();
 
   // Fetch all data in parallel
-  const [taskData, agentStats, dailyCosts, dailyCostByModel, monthCost, goalsData, fleetHealth, planUsage, usageHistory, uvdData] =
+  const [taskData, agentStats, dailyCosts, dailyCostByModel, monthCost, goalsData, fleetHealth, planUsage, usageHistory, uvdData, budgetSummary] =
     await Promise.all([
       Promise.resolve(getTaskThroughput(30, org || undefined)),
       Promise.resolve(getAgentEffectiveness(org || undefined)),
@@ -42,6 +43,7 @@ export default async function AnalyticsPage({
       Promise.resolve(getPlanUsage()),
       Promise.resolve(getUsageHistory(7)),
       Promise.resolve(getUvdMetrics(org || 'revops-global', 14)),
+      Promise.resolve(getBudgetSummary()),
     ]);
 
   // Project monthly cost: (month-to-date / days elapsed) * days in month
@@ -81,6 +83,9 @@ export default async function AnalyticsPage({
         planUsage={planUsage}
         usageHistory={usageHistory}
       />
+
+      {/* Per-Agent Budget Pane */}
+      <BudgetPane data={budgetSummary} />
 
       {/* Goal Progress - only show when specific org selected */}
       {org && <GoalProgress goals={goalsData.goals} />}
