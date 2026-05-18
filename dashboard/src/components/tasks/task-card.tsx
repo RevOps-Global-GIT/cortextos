@@ -1,15 +1,29 @@
 'use client';
 
 import { useState } from 'react';
+import {
+  IconCircleCheck,
+  IconDotsVertical,
+  IconEye,
+  IconLoader2,
+  IconLockOpen,
+  IconPlayerPlay,
+} from '@tabler/icons-react';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { PriorityBadge, OrgBadge, TimeAgo } from '@/components/shared';
 import type { Task, TaskStatus } from '@/lib/types';
 
-const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatus }>> = {
-  pending:     { label: 'Start',    next: 'in_progress' },
-  in_progress: { label: 'Complete', next: 'completed' },
-  blocked:     { label: 'Unblock',  next: 'in_progress' },
+const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatus; icon: typeof IconPlayerPlay }>> = {
+  pending:     { label: 'Start',    next: 'in_progress', icon: IconPlayerPlay },
+  in_progress: { label: 'Complete', next: 'completed',   icon: IconCircleCheck },
+  blocked:     { label: 'Unblock',  next: 'in_progress', icon: IconLockOpen },
 };
 
 interface TaskCardProps {
@@ -21,9 +35,14 @@ interface TaskCardProps {
 export function TaskCard({ task, onClick, onStatusChange }: TaskCardProps) {
   const [busy, setBusy] = useState(false);
   const action = QUICK_ACTIONS[task.status];
+  const ActionIcon = action?.icon;
 
-  async function handleAction(e: React.MouseEvent) {
+  function handleDetails(e: React.MouseEvent) {
     e.stopPropagation();
+    onClick?.(task);
+  }
+
+  async function handleAction() {
     if (!action || !onStatusChange) return;
     setBusy(true);
     try {
@@ -35,7 +54,7 @@ export function TaskCard({ task, onClick, onStatusChange }: TaskCardProps) {
 
   return (
     <Card
-      className="cursor-pointer p-3 transition-colors hover:bg-muted/50"
+      className="group cursor-pointer p-3 transition-colors hover:bg-muted/50"
       onClick={() => onClick?.(task)}
     >
       <div className="space-y-2">
@@ -46,23 +65,62 @@ export function TaskCard({ task, onClick, onStatusChange }: TaskCardProps) {
           <PriorityBadge priority={task.priority} />
           <OrgBadge org={task.org} />
         </div>
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
+        <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
           {task.assignee ? (
             <span className="truncate max-w-[120px]">{task.assignee}</span>
           ) : (
             <span className="italic">Unassigned</span>
           )}
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1">
             <TimeAgo date={task.created_at} className="text-xs" />
-            {action && onStatusChange && (
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              onClick={handleDetails}
+              aria-label={`View details for ${task.title}`}
+              title="Details"
+              className="h-6 w-6 opacity-100 md:opacity-0 md:transition-opacity md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+            >
+              <IconEye size={13} />
+            </Button>
+            {action && onStatusChange && ActionIcon && (
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      size="icon-xs"
+                      variant="ghost"
+                      disabled={busy}
+                      className="h-6 w-6 opacity-100 md:opacity-0 md:transition-opacity md:group-hover:opacity-100 md:group-focus-within:opacity-100"
+                    />
+                  }
+                  onClick={(e) => e.stopPropagation()}
+                  aria-label={`Task actions for ${task.title}`}
+                  title="Task actions"
+                >
+                  {busy ? (
+                    <IconLoader2 size={13} className="animate-spin" />
+                  ) : (
+                    <IconDotsVertical size={13} />
+                  )}
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" sideOffset={4} onClick={(e) => e.stopPropagation()}>
+                  <DropdownMenuItem onClick={handleAction}>
+                    <ActionIcon className="h-4 w-4" />
+                    {action.label}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+            {!action && (
               <Button
-                size="xs"
-                variant="outline"
-                disabled={busy}
-                onClick={handleAction}
-                className="h-5 px-1.5 text-[10px]"
+                size="icon-xs"
+                variant="ghost"
+                disabled
+                aria-label="No quick actions"
+                className="h-6 w-6 opacity-0"
               >
-                {action.label}
+                <IconDotsVertical size={13} />
               </Button>
             )}
           </div>
