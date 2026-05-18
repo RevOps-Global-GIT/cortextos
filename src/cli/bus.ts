@@ -22,7 +22,7 @@ import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStalen
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
-import { createApproval, updateApproval } from '../bus/approval.js';
+import { createApproval, updateApproval, sendApprovedEmail } from '../bus/approval.js';
 import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
 import { updateCronFire, parseDurationMs, readCronState } from '../bus/cron-state.js';
 import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByName, getExecutionLog } from '../bus/crons.js';
@@ -2960,22 +2960,51 @@ busCommand
   .argument('<title>', 'What you are requesting approval for')
   .argument('<category>', 'Category: external-comms, financial, deployment, data-deletion, other')
   .argument('[context]', 'Additional context')
-  .action(async (title: string, category: string, context?: string) => {
+  .option('--email-meta <json>', 'JSON email metadata for send-approved-email: {"to":"...","subject":"...","body":"..."}')
+  .action(async (title: string, category: string, context?: string, opts?: { emailMeta?: string }) => {
     const validCategories: ApprovalCategory[] = ['external-comms', 'financial', 'deployment', 'data-deletion', 'other'];
     if (!validCategories.includes(category as ApprovalCategory)) {
       console.error(`Invalid category '${category}'. Must be one of: ${validCategories.join(', ')}`);
       process.exit(1);
     }
+    let emailMeta;
+    if (opts?.emailMeta) {
+      try {
+        emailMeta = JSON.parse(opts.emailMeta);
+      } catch {
+        console.error('--email-meta must be valid JSON: {"to":"...","subject":"...","body":"..."}');
+        process.exit(1);
+      }
+      if (!emailMeta.to || !emailMeta.subject || !emailMeta.body) {
+        console.error('--email-meta must include to, subject, and body fields');
+        process.exit(1);
+      }
+    }
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    // await — createApproval fan-out posts to the activity channel, which
-    // must complete before the CLI process exits or the post silently
-    // never sends. env.frameworkRoot is passed so the activity-channel
-    // orgDir resolves to where activity-channel.env actually lives (the
-    // framework repo path, NOT the runtime state path — see
-    // src/bus/approval.ts:postApprovalToActivityChannel for the history).
-    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir);
+    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir, emailMeta);
     console.log(id);
+  });
+
+busCommand
+  .command('send-approved-email')
+  .description('Send an approved email by approval id (approval must have status=approved + email_meta)')
+  .argument('<approval-id>', 'Approval ID (approval_EPOCH_RAND)')
+  .option('--dry-run', 'Validate and print the email without sending', false)
+  .action((approvalId: string, opts: { dryRun?: boolean }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      const result = sendApprovedEmail(paths, approvalId, { dryRun: opts.dryRun });
+      if (opts.dryRun) {
+        console.log('[dry-run] Email validated — not sent');
+      } else {
+        console.log(`Sent: message_id=${result.id}${result.threadId ? ` thread_id=${result.threadId}` : ''}`);
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
   });
 
 busCommand
