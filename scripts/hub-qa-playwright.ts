@@ -981,15 +981,43 @@ async function runWorkInboxChecks(page: Page): Promise<CheckResult[]> {
   results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Inbox items visible',
     '[class*="inbox-item"], [class*="message"], [class*="item"], [role="listitem"]', /inbox is empty|no messages|nothing here/i));
 
-  // CHECK 3: Click first inbox item to read
+  // CHECK 3 + CHECK 4: Click first inbox item, verify read view AND capture action buttons
+  // while the item is open (action buttons typically appear in the detail view, not the list).
+  // Also try hover on list items first — some UIs reveal actions on hover.
+  let actionBtnsInDetail = 0;
+  let actionBtnsEvidence = 'No inbox items to click — could not check action buttons.';
   try {
     const item = page.locator('[class*="item"], [class*="message"], [role="listitem"]').first();
     if (await item.count() > 0) {
       const itemText = (await item.textContent().catch(() => ''))?.trim().slice(0, 40);
+
+      // Hover first — some UIs show inline actions on hover
+      await item.hover().catch(() => {});
+      await page.waitForTimeout(400);
+      const hoverBtns = await page.locator(
+        'button:has-text("Approve"), button:has-text("Deny"), button:has-text("Dismiss"), ' +
+        'button:has-text("Acknowledge"), button:has-text("Mark"), button:has-text("Reply"), ' +
+        'button:has-text("Archive"), button:has-text("Done"), button:has-text("Resolve"), ' +
+        'button:has-text("View")'
+      ).count();
+
       await item.click();
       await page.waitForTimeout(800);
       await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-3-item-open.png`) });
       const contentVisible = await page.locator('[class*="content"], [class*="body"], [class*="detail"], p').count() > 0;
+
+      // Capture action buttons while item detail is open
+      actionBtnsInDetail = await page.locator(
+        'button:has-text("Approve"), button:has-text("Deny"), button:has-text("Dismiss"), ' +
+        'button:has-text("Acknowledge"), button:has-text("Mark"), button:has-text("Reply"), ' +
+        'button:has-text("Archive"), button:has-text("Done"), button:has-text("Resolve"), ' +
+        'button:has-text("View")'
+      ).count();
+      const totalBtns = Math.max(hoverBtns, actionBtnsInDetail);
+      actionBtnsEvidence = totalBtns > 0
+        ? `${totalBtns} action button(s) found (hover:${hoverBtns}, detail:${actionBtnsInDetail}) — not clicked, NO-SEND.`
+        : 'No action buttons found in hover or item detail view (Approve/Deny/Dismiss/Done/Resolve/Reply).';
+
       await page.keyboard.press('Escape');
       await page.goBack().catch(() => {});
       await page.waitForTimeout(500);
@@ -1001,11 +1029,26 @@ async function runWorkInboxChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: 'CHECK 3 Item read view', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 4: Action buttons present (NO-SEND — just verify they exist)
-  // Inbox shows Approve/Deny for approval items, plus Dismiss/Acknowledge/Reply for other types
+  // CHECK 4: Action buttons present — uses evidence captured during CHECK 3 item-open context
+  // (list-page scan happens after detail close as a final fallback)
   try {
-    const actionBtns = await page.locator('button:has-text("Approve"), button:has-text("Deny"), button:has-text("Dismiss"), button:has-text("Acknowledge"), button:has-text("Mark"), button:has-text("Reply"), button:has-text("Archive")').count();
-    results.push({ check: 'CHECK 4 Action buttons present', status: actionBtns > 0 ? 'PASS' : 'DEFERRED', evidence: actionBtns > 0 ? `${actionBtns} action button(s) visible (Approve/Deny/Dismiss — not clicked, NO-SEND).` : 'No action buttons found (Approve/Deny/Dismiss/Acknowledge/Reply).' });
+    if (actionBtnsInDetail === 0) {
+      // Final fallback: scan the list page in case buttons are always visible
+      const listBtns = await page.locator(
+        'button:has-text("Approve"), button:has-text("Deny"), button:has-text("Dismiss"), ' +
+        'button:has-text("Acknowledge"), button:has-text("Mark"), button:has-text("Reply"), ' +
+        'button:has-text("Archive"), button:has-text("Done"), button:has-text("Resolve")'
+      ).count();
+      if (listBtns > 0) {
+        actionBtnsEvidence = `${listBtns} action button(s) visible on list page — not clicked, NO-SEND.`;
+        actionBtnsInDetail = listBtns;
+      }
+    }
+    results.push({
+      check: 'CHECK 4 Action buttons present',
+      status: actionBtnsInDetail > 0 ? 'PASS' : 'DEFERRED',
+      evidence: actionBtnsEvidence,
+    });
   } catch (e) {
     results.push({ check: 'CHECK 4 Action buttons present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
