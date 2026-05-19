@@ -19,6 +19,9 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { PriorityBadge, OrgBadge, TimeAgo } from '@/components/shared';
 import { IconCalendar } from '@tabler/icons-react';
+import { cn } from '@/lib/utils';
+import { AgentCursorStack, presenceRingStyle } from './agent-cursor';
+import type { AgentPresencePayload } from '@/lib/agent-presence';
 import type { Task, TaskStatus } from '@/lib/types';
 
 const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatus; icon: typeof IconPlayerPlay }>> = {
@@ -29,11 +32,12 @@ const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatu
 
 interface TaskCardProps {
   task: Task;
+  presence?: AgentPresencePayload[];
   onClick?: (task: Task) => void;
   onStatusChange?: (taskId: string, status: TaskStatus) => Promise<void>;
 }
 
-export function TaskCard({ task, onClick, onStatusChange }: TaskCardProps) {
+export function TaskCard({ task, presence, onClick, onStatusChange }: TaskCardProps) {
   const [busy, setBusy] = useState(false);
   const action = QUICK_ACTIONS[task.status];
   const ActionIcon = action?.icon;
@@ -55,11 +59,14 @@ export function TaskCard({ task, onClick, onStatusChange }: TaskCardProps) {
 
   return (
     <Card
-      className="group cursor-pointer p-3 transition-colors hover:bg-muted/50"
+      className="group relative min-h-[116px] cursor-pointer overflow-visible p-3 transition-[background-color,box-shadow] duration-200 ease-out hover:bg-muted/50"
+      style={presenceRingStyle(presence)}
+      data-task-id={task.id}
       onClick={() => onClick?.(task)}
     >
+      <AgentCursorStack presence={presence} />
       <div className="space-y-2">
-        <p className="text-sm font-medium leading-snug line-clamp-2">
+        <p className={cn('text-sm font-medium leading-snug line-clamp-2', presence?.length && 'pr-40')}>
           {task.title}
         </p>
         <div className="flex flex-wrap items-center gap-1.5">

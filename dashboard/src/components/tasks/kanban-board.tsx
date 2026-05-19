@@ -3,6 +3,7 @@
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { StatusBadge } from '@/components/shared';
 import { TaskCard } from './task-card';
+import type { AgentPresencePayload } from '@/lib/agent-presence';
 import type { Task, TaskStatus } from '@/lib/types';
 
 interface KanbanColumn {
@@ -14,11 +15,18 @@ interface KanbanColumn {
 interface KanbanBoardProps {
   tasks: Task[];
   completedTodayTasks: Task[];
+  presenceByTask?: Record<string, AgentPresencePayload[]>;
   onTaskClick: (task: Task) => void;
   onStatusChange?: (taskId: string, status: TaskStatus) => Promise<void>;
 }
 
-export function KanbanBoard({ tasks, completedTodayTasks, onTaskClick, onStatusChange }: KanbanBoardProps) {
+export function KanbanBoard({
+  tasks,
+  completedTodayTasks,
+  presenceByTask = {},
+  onTaskClick,
+  onStatusChange,
+}: KanbanBoardProps) {
   const columns: KanbanColumn[] = [
     {
       status: 'pending',
@@ -65,6 +73,7 @@ export function KanbanBoard({ tasks, completedTodayTasks, onTaskClick, onStatusC
                   <TaskCard
                     key={task.id}
                     task={task}
+                    presence={presenceByTask[task.id]}
                     onClick={onTaskClick}
                     onStatusChange={onStatusChange}
                   />
@@ -97,6 +106,7 @@ export function KanbanBoard({ tasks, completedTodayTasks, onTaskClick, onStatusC
                     <TaskCard
                       key={task.id}
                       task={task}
+                      presence={presenceByTask[task.id]}
                       onClick={onTaskClick}
                       onStatusChange={onStatusChange}
                     />

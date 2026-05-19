@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AgentPresencePayload } from '@/lib/agent-presence';
-import { isAgentPresencePayload } from '@/lib/agent-presence';
+import { isAgentPresencePayload, presenceTaskId } from '@/lib/agent-presence';
 
 const STREAM_URL = '/api/tasks/presence/stream';
 const PRESENCE_TTL_MS = 90_000;
@@ -63,8 +63,9 @@ export function useAgentPresence() {
   return useMemo(() => {
     const byTask: Record<string, AgentPresencePayload[]> = {};
     for (const item of Object.values(presence)) {
-      if (!item.task_id) continue;
-      byTask[item.task_id] = [...(byTask[item.task_id] ?? []), item];
+      const taskId = presenceTaskId(item);
+      if (!taskId) continue;
+      byTask[taskId] = [...(byTask[taskId] ?? []), item];
     }
     for (const items of Object.values(byTask)) {
       items.sort((a, b) => b.updated_at.localeCompare(a.updated_at));

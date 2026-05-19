@@ -683,6 +683,7 @@ export async function syncExperimentToSupabase(
       direction: experiment.direction,
       baseline: experiment.baseline_value,
       result: experiment.result_value,
+      score: experiment.score ?? null,
       decision: experiment.decision,
       learning: experiment.learning,
       local_id: experiment.id,

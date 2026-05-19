@@ -12,6 +12,8 @@ import {
 import { Button } from '@/components/ui/button';
 import { PriorityBadge, StatusBadge, OrgBadge, TimeAgo } from '@/components/shared';
 import { IconArrowsSort, IconSortAscending, IconSortDescending } from '@tabler/icons-react';
+import { AgentCursorStack, presenceRingStyle } from './agent-cursor';
+import type { AgentPresencePayload } from '@/lib/agent-presence';
 import type { Task, TaskStatus } from '@/lib/types';
 
 const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatus }>> = {
@@ -28,11 +30,17 @@ const STATUS_ORDER = { blocked: 0, in_progress: 1, pending: 2, completed: 3 };
 
 interface TaskListTableProps {
   tasks: Task[];
+  presenceByTask?: Record<string, AgentPresencePayload[]>;
   onTaskClick: (task: Task) => void;
   onStatusChange?: (taskId: string, status: TaskStatus) => Promise<void>;
 }
 
-export function TaskListTable({ tasks, onTaskClick, onStatusChange }: TaskListTableProps) {
+export function TaskListTable({
+  tasks,
+  presenceByTask = {},
+  onTaskClick,
+  onStatusChange,
+}: TaskListTableProps) {
   const [sortField, setSortField] = useState<SortField>('created_at');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
 
@@ -127,11 +135,14 @@ export function TaskListTable({ tasks, onTaskClick, onStatusChange }: TaskListTa
             return (
               <TableRow
                 key={task.id}
-                className="cursor-pointer"
+                className="relative cursor-pointer transition-shadow duration-200 ease-out"
+                style={presenceRingStyle(presenceByTask[task.id])}
+                data-task-id={task.id}
                 onClick={() => onTaskClick(task)}
               >
-                <TableCell className="max-w-[300px] truncate font-medium">
+                <TableCell className="relative max-w-[300px] truncate pr-36 font-medium">
                   {task.title}
+                  <AgentCursorStack presence={presenceByTask[task.id]} compact />
                 </TableCell>
                 <TableCell>
                   <StatusBadge status={task.status} />
