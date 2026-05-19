@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { PriorityBadge, OrgBadge, TimeAgo } from '@/components/shared';
+import { IconCalendar } from '@tabler/icons-react';
 import type { Task, TaskStatus } from '@/lib/types';
 
 const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatus; icon: typeof IconPlayerPlay }>> = {
@@ -72,7 +73,14 @@ export function TaskCard({ task, onClick, onStatusChange }: TaskCardProps) {
             <span className="italic">Unassigned</span>
           )}
           <div className="flex shrink-0 items-center gap-1">
-            <TimeAgo date={task.created_at} className="text-xs" />
+            {task.scheduled_for && new Date(task.scheduled_for) > new Date() ? (
+              <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900/30 dark:text-sky-300">
+                <IconCalendar size={11} />
+                {new Date(task.scheduled_for).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+              </span>
+            ) : (
+              <TimeAgo date={task.created_at} className="text-xs" />
+            )}
             <Button
               size="icon-xs"
               variant="ghost"

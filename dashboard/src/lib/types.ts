@@ -86,6 +86,7 @@ export interface Task {
   completed_at?: string;
   notes?: string;
   source_file?: string;
+  scheduled_for?: string;
   outputs?: TaskOutput[];
   meta?: {
     brief?: TaskBrief;
