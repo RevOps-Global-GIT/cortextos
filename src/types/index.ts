@@ -218,6 +218,45 @@ export interface Approval {
   email_meta?: EmailMeta;
 }
 
+// Agent Steer Types
+
+export type AgentSteerActionClass =
+  | 'guidance'
+  | 'status_request'
+  | 'artifact_request'
+  | 'pause'
+  | 'resume'
+  | 'escalate'
+  | 'stop';
+
+export type AgentSteerApprovalClass = 'low_risk_direct' | 'high_risk_approval';
+
+export type AgentSteerArtifactType = 'log' | 'diff' | 'screenshot' | 'report';
+
+export interface AgentSteerPayload {
+  instruction?: string;
+  artifactType?: AgentSteerArtifactType;
+  reason?: string;
+  sourcePanel?: 'agent_work_panel';
+  liveStatePath?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AgentSteerAction {
+  actor: string;
+  target_agent: string;
+  action_class: AgentSteerActionClass;
+  payload: AgentSteerPayload;
+  task_id?: string | null;
+}
+
+export interface AgentSteerApprovalDecision {
+  approval_class: AgentSteerApprovalClass;
+  approval_required: boolean;
+  approval_category: ApprovalCategory | null;
+  reason: string;
+}
+
 // Agent Config Types (config.json)
 
 export interface EcosystemFeatureConfig {
