@@ -59,20 +59,20 @@ export function syncTasks(org: string): number {
   console.log(`[sync] Found ${files.length} task files in ${taskDir}`);
 
   const run = db.transaction(() => {
-    const activePaths: string[] = [];
+    const validPaths: string[] = [];
 
     for (const file of files) {
       const filePath = path.join(taskDir, file);
-      activePaths.push(filePath);
       const taskId = path.basename(file, '.json');
       const rowExists = db
         .prepare('SELECT 1 FROM tasks WHERE id = ?')
         .get(taskId);
-      if (!hasFileChanged(filePath) && rowExists) continue;
 
       try {
         const raw = fs.readFileSync(filePath, 'utf-8');
         const task = JSON.parse(raw);
+        validPaths.push(filePath);
+        if (!hasFileChanged(filePath) && rowExists) continue;
         upsert.run({
           id: task.id ?? taskId,
           title: task.title ?? 'Untitled',
@@ -92,18 +92,19 @@ export function syncTasks(org: string): number {
         markSynced(filePath);
         synced++;
       } catch (err) {
+        db.prepare('DELETE FROM tasks WHERE org = ? AND source_file = ?').run(org, filePath);
         console.error(`[sync] Failed to sync task ${file}:`, err);
       }
     }
 
-    // Prune rows whose source files no longer exist on disk
-    if (activePaths.length > 0) {
-      const placeholders = activePaths.map(() => '?').join(',');
+    // Prune rows whose source files no longer exist or no longer parse as valid JSON.
+    if (validPaths.length > 0) {
+      const placeholders = validPaths.map(() => '?').join(',');
       db.prepare(
         `DELETE FROM tasks WHERE org = ? AND source_file NOT IN (${placeholders})`,
-      ).run(org, ...activePaths);
+      ).run(org, ...validPaths);
     } else {
-      // No files at all — delete all tasks for this org
+      // No valid files at all — delete all cached tasks for this org
       db.prepare('DELETE FROM tasks WHERE org = ?').run(org);
     }
   });
