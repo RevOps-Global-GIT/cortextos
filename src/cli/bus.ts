@@ -731,7 +731,7 @@ busCommand
   .argument('<id>', 'Task ID')
   .argument('[result]', 'Completion result (optional positional form)')
   .option('--result <text>', 'Completion result')
-  .action((id: string, resultArg: string | undefined, opts: { result?: string }) => {
+  .action(async (id: string, resultArg: string | undefined, opts: { result?: string }) => {
     // Accept result as either positional arg or --result flag (P1 fix #8)
     const effectiveResult = opts.result ?? resultArg;
     const env = resolveEnv();
@@ -748,6 +748,11 @@ busCommand
 
     completeTask(paths, id, effectiveResult);
     console.log(`Completed ${id}`);
+
+    // Clear heartbeat so crash notifications show 'idle' not the just-completed task.
+    // Swallowed — heartbeat update must never block or fail task completion.
+    await updateHeartbeat(paths, env.agentName, 'idle', { org: env.org, currentTask: '' }).catch(() => {});
+
     // Exit after local write completes — completeTask fires mirrorTaskToRgos
     // which schedules drainRetryQueue; exit before the drain runs.
     process.exit(0);

@@ -262,11 +262,12 @@ async function main(): Promise<void> {
     }
   }
 
-  // Read last heartbeat for context
+  // Read last heartbeat for context — prefer current_task (cleared on complete-task)
+  // over status (free-form, only cleared on the next update-heartbeat call).
   let lastTask = '';
   try {
     const hb = JSON.parse(readFileSync(join(stateDir, 'heartbeat.json'), 'utf-8'));
-    lastTask = hb.status || '';
+    lastTask = hb.current_task || hb.status || '';
   } catch { /* ignore */ }
 
   // Always log to crashes.log — we want visibility even when alerts are muted.
