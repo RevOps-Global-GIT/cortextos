@@ -111,6 +111,20 @@ function resolveOutputDir(agentsRoot?: string, agentName?: string): string {
   return dir;
 }
 
+function spawnEnv(opts: SpawnCodexOptions): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+
+  if (opts.agentName) {
+    env.CTX_AGENT_NAME = opts.agentName;
+  }
+  if (opts.agentsRoot && opts.agentName) {
+    env.CTX_AGENT_DIR = join(opts.agentsRoot, 'agents', opts.agentName);
+    env.CTX_ORG = basename(opts.agentsRoot);
+  }
+
+  return env;
+}
+
 function runId(startedAtMs: number, prompt: string): string {
   const timestamp = new Date(startedAtMs).toISOString()
     .replace(/[-:]/g, '')
@@ -182,7 +196,7 @@ export function spawnCodex(promptFileOrDash: string, opts: SpawnCodexOptions = {
     input: '',
     encoding: 'utf-8',
     maxBuffer: 10 * 1024 * 1024,
-    env: { ...process.env },
+    env: spawnEnv(opts),
   });
 
   const completedAtMs = Date.now();
@@ -347,7 +361,7 @@ export async function spawnCodexAsync(promptFileOrDash: string, opts: SpawnCodex
     const child = spawn(codexBin(), args, {
       cwd: workdir,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: spawnEnv(opts),
     });
 
     child.stdin.end('');

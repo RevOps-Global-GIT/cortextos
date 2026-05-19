@@ -1,5 +1,5 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'fs';
-import { join } from 'path';
+import { basename, join } from 'path';
 import { tmpdir } from 'os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnCodex } from '../../../src/bus/spawn-codex.js';
@@ -64,6 +64,26 @@ describe('spawnCodex', () => {
     expect(sidecar.stdout).toContain('fake codex ok');
     expect(sidecar.stderr).toBe('');
     expect(sidecar.output_collision_guard).toBe('created');
+  });
+
+  it('sets target agent identity env for the spawned Codex process', () => {
+    makeFakeCodex(`#!/usr/bin/env bash
+printf 'agent=%s\\n' "$CTX_AGENT_NAME"
+printf 'dir=%s\\n' "$CTX_AGENT_DIR"
+printf 'org=%s\\n' "$CTX_ORG"
+`);
+    const { prompt, agentsRoot } = makePrompt();
+
+    const result = spawnCodex(prompt, {
+      agentsRoot,
+      agentName: 'dev',
+      timeout: 5,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('agent=dev');
+    expect(result.output).toContain(`dir=${join(agentsRoot, 'agents', 'dev')}`);
+    expect(result.output).toContain(`org=${basename(agentsRoot)}`);
   });
 
   it('writes failure metadata when codex exits non-zero', () => {
