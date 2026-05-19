@@ -43,6 +43,12 @@ import { computerUse } from '../bus/computer-use.js';
 import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeaseStatus, releaseOrgoLease } from '../bus/orgo-lease.js';
 import { lastpassCred, LastPassCredApprovalRequiredError, LastPassCredFetchError, LastPassCredRejectedError } from '../bus/lastpass-cred.js';
 import { closeWhisperRoom, readVoiceSettings, sendWhisper, summarizeWhisperRoom, watchWhisperRoom, whisperRoomId } from '../bus/whisper-room.js';
+import {
+  AGENT_TASK_EVENT_TYPES,
+  emitAgentTaskEvent,
+  isAgentTaskEventType,
+  parseAgentTaskEventPayload,
+} from '../bus/agent-task-events.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -865,6 +871,46 @@ busCommand
     // Exit after local JSONL write completes — logEvent schedules mirrorEventToRgos
     // via setImmediate which triggers drainRetryQueue; exit before drain runs.
     process.exit(0);
+  });
+
+busCommand
+  .command('emit-task-event')
+  .description('Emit a STACK-17 per-task agent event to Supabase')
+  .argument('<task-id>', 'Task ID to attach the event to')
+  .argument('<event-type>', 'Event type')
+  .argument('<payload-json>', 'Payload JSON object')
+  .option('--agent <agent-id>', 'Override agent ID')
+  .option('--org <org-id>', 'Override org ID')
+  .action(async (
+    taskId: string,
+    eventType: string,
+    payloadJson: string,
+    opts: { agent?: string; org?: string },
+  ) => {
+    if (!isAgentTaskEventType(eventType)) {
+      console.error(`Invalid event type '${eventType}'. Must be one of: ${AGENT_TASK_EVENT_TYPES.join(', ')}`);
+      process.exit(1);
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = parseAgentTaskEventPayload(payloadJson);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+
+    try {
+      const env = resolveEnv();
+      const row = await emitAgentTaskEvent(env, taskId, eventType, payload, {
+        agentId: opts.agent,
+        orgId: opts.org,
+      });
+      console.log(JSON.stringify(row));
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
   });
 
 busCommand
@@ -2497,54 +2543,6 @@ busCommand
     // command. Without this, send-telegram can hang for hours (one 10s
     // timeout x N queued entries) and leave zombie processes.
     process.exit(0);
-  });
-
-busCommand
-  .command('react-telegram')
-  .description('React to a Telegram message with an emoji (default: 👍). Cuts ack-noise vs sending text.')
-  .argument('<chat-id>', 'Telegram chat ID')
-  .argument('<message-id>', 'Telegram message ID to react to')
-  .argument('[emoji]', 'Reaction emoji (default: 👍)', '👍')
-  .option('--bot-token <token>', 'Override BOT_TOKEN (default: agent .env)')
-  .action(async (chatId: string, messageIdStr: string, emoji: string, opts: { botToken?: string }) => {
-    const messageId = parseInt(messageIdStr, 10);
-    if (isNaN(messageId)) {
-      console.error('Error: message-id must be a number');
-      process.exit(1);
-    }
-
-    const env = resolveEnv();
-    let botToken = opts.botToken || '';
-
-    if (!botToken && env.agentDir) {
-      const { readFileSync, existsSync } = require('fs');
-      const { join } = require('path');
-      const agentEnv = join(env.agentDir, '.env');
-      if (existsSync(agentEnv)) {
-        const content = readFileSync(agentEnv, 'utf-8');
-        const match = content.match(/^BOT_TOKEN=(.+)$/m);
-        if (match && match[1].trim()) botToken = match[1].trim();
-      }
-    }
-    if (!botToken) botToken = process.env.BOT_TOKEN || '';
-    if (!botToken) {
-      console.error('Error: BOT_TOKEN not configured.');
-      process.exit(1);
-    }
-
-    const api = new TelegramAPI(botToken);
-    try {
-      const result = await api.setMessageReaction(chatId, messageId, [emoji]);
-      if (result?.ok) {
-        console.log(`react-telegram: reacted ${emoji} to message ${messageId} in chat ${chatId}`);
-      } else {
-        console.error(`react-telegram: API error — ${JSON.stringify(result)}`);
-        process.exit(1);
-      }
-    } catch (err: any) {
-      console.error(`react-telegram: ${err.message}`);
-      process.exit(1);
-    }
   });
 
 busCommand
