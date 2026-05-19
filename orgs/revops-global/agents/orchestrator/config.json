@@ -55,6 +55,24 @@
       "type": "recurring",
       "cron": "0 8,17 * * *",
       "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator — compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
+    },
+    {
+      "name": "blocked-uat-escalator",
+      "type": "recurring",
+      "cron": "0 8,20 * * *",
+      "prompt": "Read prompts/cron-blocked-uat-escalator.md and execute exactly one bounded UAT blocker escalation pass; create/update durable tasks only for current blockers and exit."
+    },
+    {
+      "name": "collaboration-optimizer",
+      "type": "recurring",
+      "cron": "30 16 * * 5",
+      "prompt": "Read prompts/cron-collaboration-optimizer.md and execute exactly one weekly collaboration-friction retro; write recommendations and exit."
+    },
+    {
+      "name": "overnight-permission-loop",
+      "type": "recurring",
+      "cron": "0 6 * * *",
+      "prompt": "Read prompts/cron-overnight-permission-loop.md and execute exactly one narrow permission/unblock digest; do not mutate external systems and exit."
     }
   ],
   "ctx_handoff_threshold": 88,
