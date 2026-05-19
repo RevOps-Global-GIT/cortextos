@@ -8,6 +8,11 @@ interface GhReview {
   author?: { login?: string };
   state?: string;
   submittedAt?: string;
+  body?: string;
+}
+
+interface GhLabel {
+  name?: string;
 }
 
 interface GhStatusCheck {
@@ -29,6 +34,7 @@ interface GhPullRequest {
   mergeStateStatus?: string | null;
   statusCheckRollup?: GhStatusCheck[];
   reviews?: GhReview[];
+  labels?: GhLabel[];
 }
 
 export interface PrStuckWatcherOptions {
@@ -52,6 +58,8 @@ export interface PrStuckItem {
   reviewDecision: string;
   lastReview: string;
   author: string;
+  awaitingGreg: boolean;
+  alertSuppressedReason: string | null;
 }
 
 export interface PrStuckWatcherResult {
@@ -138,6 +146,16 @@ function lastReview(reviews: GhReview[] | undefined): string {
   return `${state} by ${reviewer} at ${latest.submittedAt}`;
 }
 
+function hasAwaitingGregMarker(pr: GhPullRequest): boolean {
+  const haystacks = [
+    pr.title,
+    ...(pr.labels ?? []).map(label => label.name ?? ''),
+    ...(pr.reviews ?? []).map(review => review.body ?? ''),
+  ];
+
+  return haystacks.some(value => /\bawaiting\s+greg\b/i.test(value));
+}
+
 function formatHours(hours: number): string {
   if (hours >= 24) return `${(hours / 24).toFixed(1)}d`;
   return `${hours.toFixed(1)}h`;
@@ -167,8 +185,8 @@ function renderReport(result: PrStuckWatcherResult): string {
   }
 
   lines.push('## Open PRs Exceeding Threshold', '');
-  lines.push('| Repo | PR | Age | Updated | CI | Merge | Review | Last review |');
-  lines.push('| --- | --- | ---: | ---: | --- | --- | --- | --- |');
+  lines.push('| Repo | PR | Age | Updated | CI | Merge | Review | Last review | Alert |');
+  lines.push('| --- | --- | ---: | ---: | --- | --- | --- | --- | --- |');
   for (const pr of result.stuckPrs) {
     lines.push([
       pr.repo,
@@ -179,6 +197,7 @@ function renderReport(result: PrStuckWatcherResult): string {
       pr.mergeState,
       pr.reviewDecision,
       pr.lastReview.replace(/\|/g, '\\|'),
+      pr.alertSuppressedReason ?? 'eligible',
     ].join(' | ').replace(/^/, '| ').replace(/$/, ' |'));
   }
   lines.push('');
@@ -222,7 +241,7 @@ export function runPrStuckWatcher(
         '--limit',
         '100',
         '--json',
-        'number,title,url,createdAt,updatedAt,author,reviewDecision,mergeStateStatus,statusCheckRollup,reviews',
+        'number,title,url,createdAt,updatedAt,author,reviewDecision,mergeStateStatus,statusCheckRollup,reviews,labels',
       ]);
       checkedRepos.push(repo);
     } catch (err) {
@@ -236,6 +255,7 @@ export function runPrStuckWatcher(
       if (updatedHoursAgo <= stuckThresholdHours) continue;
       const checks = summarizeChecks(pr.statusCheckRollup);
       const mergeState = pr.mergeStateStatus || 'unknown';
+      const awaitingGreg = hasAwaitingGregMarker(pr);
       stuckPrs.push({
         repo,
         number: pr.number,
@@ -250,12 +270,14 @@ export function runPrStuckWatcher(
         reviewDecision: pr.reviewDecision || 'none',
         lastReview: lastReview(pr.reviews),
         author: pr.author?.login || 'unknown',
+        awaitingGreg,
+        alertSuppressedReason: awaitingGreg ? 'awaiting Greg' : null,
       });
     }
   }
 
   stuckPrs.sort((a, b) => b.ageHours - a.ageHours);
-  const alertPrs = stuckPrs.filter(pr => pr.updatedHoursAgo > alertThresholdHours);
+  const alertPrs = stuckPrs.filter(pr => pr.updatedHoursAgo > alertThresholdHours && !pr.awaitingGreg);
   const result: PrStuckWatcherResult = {
     generatedAt,
     watchedRepos,
