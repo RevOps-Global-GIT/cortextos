@@ -6,6 +6,7 @@ import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
 import { AgentPTY } from '../pty/agent-pty.js';
 import { CodexAppServerPTY } from '../pty/codex-app-server-pty.js';
 import { HermesPTY, hermesDbExists } from '../pty/hermes-pty.js';
+import { ScriptPTY } from '../pty/script-pty.js';
 import { MessageDedup, injectMessage } from '../pty/inject.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { ensureDir } from '../utils/atomic.js';
@@ -184,7 +185,9 @@ export class AgentProcess implements ManagedAgent {
       ? new HermesPTY(this.env, this.config, logPath)
       : this.config.runtime === 'codex-app-server'
         ? new CodexAppServerPTY(this.env, this.config, logPath)
-        : new AgentPTY(this.env, this.config, logPath);
+        : this.config.runtime === 'script'
+          ? new ScriptPTY(this.env, this.config, logPath)
+          : new AgentPTY(this.env, this.config, logPath);
 
     // Issue #330: re-wire the Telegram handle on every start() (session refresh
     // creates a fresh CodexAppServerPTY). Only CodexAppServerPTY uses this — Claude / Hermes
@@ -285,14 +288,10 @@ export class AgentProcess implements ManagedAgent {
           // so we use Ctrl+D which exits cleanly on the first press.
           pty.write('\x04'); // Ctrl+D
           await sleep(3000);
-        } else if (this.config.runtime === 'codex-app-server') {
-          // Codex uses an exec-per-turn model — there is no persistent REPL
-          // between turns, so /exit + sleep below are no-ops on CodexAppServerPTY
-          // (write() just buffers). The only meaningful stop step is
-          // pty.kill(), which terminates the in-flight `codex exec` (if any)
-          // and flips _alive=false. Skipping the 6s Claude-REPL dance makes
-          // `bus hard-restart` feel responsive instead of appearing to do
-          // nothing for several seconds.
+        } else if (this.config.runtime === 'codex-app-server' || this.config.runtime === 'script') {
+          // Codex uses an exec-per-turn model and script bridges own their loop —
+          // neither has a REPL to exit gracefully. Just kill() directly.
+          // Skipping the 6s Claude-REPL dance makes hard-restart feel responsive.
         } else {
           // BUG-032 fix: use CRLF (not lone CR) so Claude Code's REPL actually
           // recognizes the /exit line as a complete command, AND wait long
