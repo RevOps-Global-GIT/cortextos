@@ -3,6 +3,11 @@
  *
  * The hook intentionally no-ops when CTX_TASK_ID is missing so it can be
  * installed globally without generating unscoped noise.
+ *
+ * REGISTRATION RULE: Register this hook in exactly ONE PostToolUse chain —
+ * either cortextos agent settings OR rgos dist, never both. Dual registration
+ * causes every tool call to emit two events for the same task, doubling the
+ * event stream. Canonical location: cortextos agent settings.json PostToolUse.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
