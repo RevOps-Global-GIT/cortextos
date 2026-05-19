@@ -867,7 +867,7 @@ busCommand
   .option('--task <task>', 'Current task description')
   .option('--timezone <tz>', 'Timezone for day/night mode detection')
   .option('--interval <i>', 'Loop interval from cron config')
-  .action((status: string, opts: { task?: string; timezone?: string; interval?: string }) => {
+  .action(async (status: string, opts: { task?: string; timezone?: string; interval?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
@@ -907,7 +907,7 @@ busCommand
       }
     }
 
-    updateHeartbeat(paths, env.agentName, status, {
+    await updateHeartbeat(paths, env.agentName, status, {
       org: env.org,
       timezone: opts.timezone,
       loopInterval: opts.interval,
