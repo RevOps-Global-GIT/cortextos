@@ -568,7 +568,10 @@ busCommand
   .option('--blocked-by <ids>', 'Comma-separated task IDs that must complete before this task can progress')
   .option('--blocks <ids>', 'Comma-separated task IDs that this new task will block (symmetric reverse edge)')
   .option('--meta <json>', 'Free-form correlation metadata as JSON object (e.g. \'{"cron":"poll-codex-outbox"}\')')
-  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string; meta?: string }) => {
+  .option('--success-criteria <text>', 'Machine-checkable condition proving task is done. Auto-creates a linked goal guard on high-stakes tasks.')
+  .option('--loop-cron <expr>', 'Cron expression for a linked polling loop (e.g. "*/15 * * * *"). Requires --loop-prompt.')
+  .option('--loop-prompt <text>', 'Prompt that fires on each loop iteration when --loop-cron is set.')
+  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string; meta?: string; successCriteria?: string; loopCron?: string; loopPrompt?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
@@ -586,6 +589,10 @@ busCommand
         process.exit(1);
       }
     }
+    if ((opts.loopCron && !opts.loopPrompt) || (!opts.loopCron && opts.loopPrompt)) {
+      console.error('--loop-cron and --loop-prompt must be specified together');
+      process.exit(1);
+    }
     // Pre-generate trace_id so it's stored with the task from creation.
     // The task ID itself serves as the trace root — agents use it as `--trace-id $TASK_ID`
     // on downstream send-message calls to correlate the full workflow chain.
@@ -599,6 +606,8 @@ busCommand
       blockedBy: parseList(opts.blockedBy),
       blocks: parseList(opts.blocks),
       meta: { trace_id: autoTraceId, ...(meta ?? {}) },
+      successCriteria: opts.successCriteria,
+      ...(opts.loopCron && opts.loopPrompt ? { linkedLoop: { cron: opts.loopCron, prompt: opts.loopPrompt } } : {}),
     });
     console.log(taskId);
     // Auto-notify assignee so the task is visible immediately (issue #78)

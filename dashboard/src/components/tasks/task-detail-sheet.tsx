@@ -30,7 +30,7 @@ import {
 import { IconPencil, IconFile, IconPhoto, IconFileText, IconCode } from '@tabler/icons-react';
 import { DeliverablePreview } from '@/components/tasks/deliverable-preview';
 import { cn } from '@/lib/utils';
-import type { Task, TaskBrief, TaskOutput, TaskStatus } from '@/lib/types';
+import type { Task, TaskBrief, TaskOutput, TaskStatus, LinkedGoal, LinkedLoop } from '@/lib/types';
 
 export interface TaskDetailSheetProps {
   task: Task | null;
@@ -350,6 +350,82 @@ export function TaskDetailSheet({
               </div>
             </>
           )}
+
+          {/* Success Criteria — top-level field takes priority; falls back to brief */}
+          {!editing && (() => {
+            const sc = task.success_criteria ?? (typeof brief?.success_criteria === 'string' ? brief.success_criteria : Array.isArray(brief?.success_criteria) ? brief.success_criteria.join('\n') : undefined);
+            if (!sc) return null;
+            const isNA = sc.toLowerCase().startsWith('field-not-applicable');
+            return (
+              <>
+                <Separator />
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <p className="text-sm font-medium">Success Criteria</p>
+                    {task.status === 'completed' && (
+                      <span className="rounded-full bg-green-500/15 px-2 py-0.5 text-xs font-medium text-green-600 dark:text-green-400">met</span>
+                    )}
+                  </div>
+                  <p className={cn('text-sm whitespace-pre-wrap break-words', isNA && 'text-muted-foreground italic')}>
+                    {isNA ? sc.replace(/^field-not-applicable:\s*/i, '') || 'Not applicable' : sc}
+                  </p>
+                </div>
+              </>
+            );
+          })()}
+
+          {/* Linked Goal */}
+          {!editing && task.linked_goal && (() => {
+            const goal = task.linked_goal as LinkedGoal;
+            const statusColor: Record<string, string> = {
+              active: 'bg-blue-500/15 text-blue-600 dark:text-blue-400',
+              met: 'bg-green-500/15 text-green-600 dark:text-green-400',
+              failed: 'bg-red-500/15 text-red-600 dark:text-red-400',
+            };
+            return (
+              <>
+                <Separator />
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <p className="text-sm font-medium">Goal Guard</p>
+                    <span className={cn('rounded-full px-2 py-0.5 text-xs font-medium', statusColor[goal.status] ?? 'bg-muted text-muted-foreground')}>
+                      {goal.status}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 text-xs text-muted-foreground">
+                    {goal.owner && <span>Owner: <span className="text-foreground">{goal.owner}</span></span>}
+                    {goal.deadline && <span>Deadline: <span className="text-foreground">{new Date(goal.deadline).toLocaleDateString()}</span></span>}
+                  </div>
+                </div>
+              </>
+            );
+          })()}
+
+          {/* Linked Loop */}
+          {!editing && task.linked_loop && (() => {
+            const loop = task.linked_loop as LinkedLoop;
+            const statusColor: Record<string, string> = {
+              suggested: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+              active: 'bg-blue-500/15 text-blue-600 dark:text-blue-400',
+              completed: 'bg-green-500/15 text-green-600 dark:text-green-400',
+              cancelled: 'bg-muted text-muted-foreground',
+            };
+            return (
+              <>
+                <Separator />
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5">
+                    <p className="text-sm font-medium">Polling Loop</p>
+                    <span className={cn('rounded-full px-2 py-0.5 text-xs font-medium', statusColor[loop.status] ?? 'bg-muted text-muted-foreground')}>
+                      {loop.status}
+                    </span>
+                    <code className="rounded bg-muted px-1.5 py-0.5 text-xs font-mono">{loop.cron}</code>
+                  </div>
+                  <p className="text-xs text-muted-foreground break-words">{loop.prompt}</p>
+                </div>
+              </>
+            );
+          })()}
 
           {!editing && brief && (
             <>

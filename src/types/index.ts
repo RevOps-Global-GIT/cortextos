@@ -118,6 +118,49 @@ export interface Task {
    * bus — the dashboard surfaces it as-is.
    */
   meta?: Record<string, unknown>;
+  /**
+   * Machine-checkable condition proving this task is done. Promoted from
+   * meta.brief.success_criteria to a top-level field so it is queryable
+   * without parsing the opaque meta blob.  Required for high-stakes tasks
+   * (priority=high/urgent or needs_approval=true).
+   */
+  success_criteria?: string;
+  /**
+   * Goal guard — auto-created when a high-stakes task has a
+   * success_criteria. Lifecycle: active → met (task completes) or failed.
+   */
+  linked_goal?: LinkedGoal;
+  /**
+   * Loop config — auto-suggested when the task description implies polling
+   * is needed. The executing agent creates the real session cron and
+   * records the cron_id.
+   */
+  linked_loop?: LinkedLoop;
+}
+
+/**
+ * Linked goal guard — auto-created on high-stakes tasks (priority=high/urgent
+ * or needs_approval=true) when a success_criteria is present. Tracks whether
+ * the observable success condition has been evaluated.
+ */
+export interface LinkedGoal {
+  status: 'active' | 'met' | 'failed';
+  created_at: string;
+  deadline?: string;
+  owner?: string;
+}
+
+/**
+ * Linked loop — auto-created (as a suggestion) when task description
+ * implies polling is needed (keywords: poll, check, every N min, until merged,
+ * etc.). The executing agent creates the actual cron and records its ID.
+ */
+export interface LinkedLoop {
+  cron: string;
+  prompt: string;
+  status: 'suggested' | 'active' | 'completed' | 'cancelled';
+  created_at: string;
+  cron_id?: string;
 }
 
 /**

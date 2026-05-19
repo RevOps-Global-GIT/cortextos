@@ -68,6 +68,21 @@ export interface TaskBrief {
   goal_ancestry?: string | string[];
 }
 
+export interface LinkedGoal {
+  status: 'active' | 'met' | 'failed';
+  created_at: string;
+  deadline?: string;
+  owner?: string;
+}
+
+export interface LinkedLoop {
+  cron: string;
+  prompt: string;
+  status: 'suggested' | 'active' | 'completed' | 'cancelled';
+  created_at: string;
+  cron_id?: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -88,6 +103,12 @@ export interface Task {
   source_file?: string;
   scheduled_for?: string;
   outputs?: TaskOutput[];
+  /** Machine-checkable condition proving task is done (top-level field). */
+  success_criteria?: string;
+  /** Goal guard — auto-created on high-stakes tasks with a success_criteria. */
+  linked_goal?: LinkedGoal;
+  /** Polling loop config — auto-suggested when description implies recurring checks. */
+  linked_loop?: LinkedLoop;
   meta?: {
     brief?: TaskBrief;
     [key: string]: unknown;

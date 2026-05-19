@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { dirname, join } from 'path';
-import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
+import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport, LinkedGoal, LinkedLoop } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomDigits } from '../utils/random.js';
@@ -46,6 +46,36 @@ function withTaskLock<T>(taskDir: string, taskId: string, fn: () => T): T {
 // Task CRUD
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Goal / loop binding heuristics
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true for tasks where a missed success condition has high impact:
+ * urgent/high priority, or tasks that require human approval before execution.
+ */
+function isHighStakes(priority: Priority, needsApproval: boolean): boolean {
+  return priority === 'urgent' || priority === 'high' || needsApproval;
+}
+
+const POLLING_RE = /\b(poll|watch|monitor|every\s+\d+\s*(min(ute)?s?|hour?s?)|until\s+(merged?|green|pass(ed)?|done|complet))\b/i;
+
+/**
+ * Infer a suggested loop cron from the task title+description.
+ * Returns a cron expression if polling language is detected, null otherwise.
+ * Defaults to every-15-minutes when the interval is not explicit.
+ */
+function inferPollingCron(text: string): string | null {
+  if (!POLLING_RE.test(text)) return null;
+  // Try to extract "every N min(utes)" from text.
+  const m = text.match(/every\s+(\d+)\s*min/i);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n > 0 && n < 60) return `*/${n} * * * *`;
+  }
+  return '*/15 * * * *'; // default
+}
+
 /**
  * Create a new task. Identical JSON format to bash create-task.sh.
  */
@@ -64,6 +94,10 @@ export function createTask(
     blockedBy?: string[];
     blocks?: string[];
     meta?: Record<string, unknown>;
+    /** Machine-checkable condition proving task is done. */
+    successCriteria?: string;
+    /** Explicit loop config. If omitted, inferred from description when polling language is found. */
+    linkedLoop?: { cron: string; prompt: string };
   } = {},
 ): string {
   const {
@@ -76,6 +110,8 @@ export function createTask(
     blockedBy = [],
     blocks = [],
     meta,
+    successCriteria,
+    linkedLoop: explicitLoop,
   } = options;
 
   validatePriority(priority);
@@ -102,6 +138,20 @@ export function createTask(
     for (const downId of blocks) detectCycleOrThrow(paths, downId, [taskId], virtualTask);
   }
 
+  // Auto-bind goal guard when task is high-stakes and has a success condition.
+  const linkedGoal: LinkedGoal | undefined =
+    successCriteria && isHighStakes(priority, needsApproval)
+      ? { status: 'active', created_at: now }
+      : undefined;
+
+  // Auto-suggest a polling loop if explicit config given or inferred from text.
+  const inferredCron = !explicitLoop ? inferPollingCron(`${title} ${description}`) : null;
+  const linkedLoop: LinkedLoop | undefined = explicitLoop
+    ? { ...explicitLoop, status: 'suggested', created_at: now }
+    : inferredCron
+      ? { cron: inferredCron, prompt: `Check task ${taskId}: ${title}`, status: 'suggested', created_at: now }
+      : undefined;
+
   const task: Task = {
     id: taskId,
     title,
@@ -123,6 +173,9 @@ export function createTask(
     ...(blockedBy.length ? { blocked_by: [...blockedBy] } : {}),
     ...(blocks.length ? { blocks: [...blocks] } : {}),
     ...(meta && Object.keys(meta).length ? { meta } : {}),
+    ...(successCriteria ? { success_criteria: successCriteria } : {}),
+    ...(linkedGoal ? { linked_goal: linkedGoal } : {}),
+    ...(linkedLoop ? { linked_loop: linkedLoop } : {}),
   };
 
   ensureDir(paths.taskDir);
@@ -606,6 +659,13 @@ export function completeTask(
         : undefined;
       if (startCost !== undefined) {
         task.meta = { ...(task.meta ?? {}), session_cost_usd: Math.max(0, endCost - startCost) };
+      }
+      // Lifecycle binding: close linked goal and loop when task completes.
+      if (task.linked_goal?.status === 'active') {
+        task.linked_goal = { ...task.linked_goal, status: 'met' };
+      }
+      if (task.linked_loop && (task.linked_loop.status === 'active' || task.linked_loop.status === 'suggested')) {
+        task.linked_loop = { ...task.linked_loop, status: 'completed' };
       }
       atomicWriteSync(filePath, JSON.stringify(task));
       // Mirror to Supabase (fire-and-forget)
