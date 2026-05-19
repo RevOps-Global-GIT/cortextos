@@ -277,8 +277,10 @@ async function main() {
     process.stdin.setEncoding('utf-8');
     process.stdin.on('data', (chunk) => {
       stdinBuf += chunk;
-      // Process complete message blocks
-      if (stdinBuf.includes('=== AGENT MESSAGE')) {
+      // Wait for a complete block: both the header AND the reply-using footer must be
+      // present before parsing. Multi-line messages arrive in multiple PTY chunks;
+      // parsing on the first chunk (header only) gives empty body text.
+      if (stdinBuf.includes('=== AGENT MESSAGE') && stdinBuf.includes('\nReply using:')) {
         parseStdinMessages(Buffer.from(stdinBuf));
         stdinBuf = '';
       }
