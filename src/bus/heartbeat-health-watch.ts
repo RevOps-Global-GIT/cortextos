@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { join } from 'path';
 import type { BusPaths } from '../types/index.js';
 import { logEvent } from './event.js';
+import { parseDurationMs, cronExpressionMinIntervalMs, readCronState } from './cron-state.js';
+import { readCrons } from './crons.js';
 
 export interface HeartbeatHealthAgent {
   agent: string;
@@ -9,6 +11,7 @@ export interface HeartbeatHealthAgent {
   running: boolean;
   lastHeartbeat: string | null;
   ageMinutes: number | null;
+  thresholdMinutes: number;
   stale: boolean;
 }
 
@@ -60,20 +63,74 @@ function heartbeatAgeMinutes(ctxRoot: string, agent: string, nowMs: number): { l
   }
 }
 
+function intervalMinutes(schedule: string | undefined): number | null {
+  if (!schedule) return null;
+  const trimmed = schedule.trim();
+  if (!trimmed) return null;
+  const durationMs = parseDurationMs(trimmed);
+  const intervalMs = Number.isFinite(durationMs)
+    ? durationMs
+    : trimmed.split(/\s+/).length === 5
+      ? cronExpressionMinIntervalMs(trimmed)
+      : NaN;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return null;
+  return intervalMs / 60_000;
+}
+
+function heartbeatCronIntervalMinutes(
+  ctxRoot: string,
+  projectRoot: string,
+  org: string,
+  agent: string,
+): number | null {
+  const persistentHeartbeat = readCrons(agent).find(cron => cron.name === 'heartbeat' && cron.enabled !== false);
+  const persistentMinutes = intervalMinutes(persistentHeartbeat?.schedule);
+  if (persistentMinutes !== null) return persistentMinutes;
+
+  const legacyConfigPath = join(projectRoot, 'orgs', org, 'agents', agent, 'config.json');
+  if (existsSync(legacyConfigPath)) {
+    try {
+      const config = JSON.parse(readFileSync(legacyConfigPath, 'utf-8')) as {
+        crons?: Array<{ name?: string; interval?: string; schedule?: string; enabled?: boolean }>;
+      };
+      const legacyHeartbeat = config.crons?.find(cron => cron.name === 'heartbeat' && cron.enabled !== false);
+      const legacyMinutes = intervalMinutes(legacyHeartbeat?.schedule ?? legacyHeartbeat?.interval);
+      if (legacyMinutes !== null) return legacyMinutes;
+    } catch {
+      // Fall through to cron-state fallback.
+    }
+  }
+
+  const stateHeartbeat = readCronState(join(ctxRoot, 'state', agent)).crons.find(cron => cron.name === 'heartbeat');
+  return intervalMinutes(stateHeartbeat?.interval);
+}
+
+function staleThresholdMinutes(
+  ctxRoot: string,
+  projectRoot: string,
+  org: string,
+  agent: string,
+  fallbackThresholdMinutes: number,
+): number {
+  const heartbeatMinutes = heartbeatCronIntervalMinutes(ctxRoot, projectRoot, org, agent);
+  if (heartbeatMinutes === null) return fallbackThresholdMinutes;
+  return Math.max(1, Math.ceil(heartbeatMinutes * 1.5));
+}
+
 function renderReport(report: HeartbeatHealthReport): string {
   const lines = [
     '# Heartbeat Health Watch',
     '',
     `Generated: ${report.generatedAt}`,
-    `Threshold: ${report.thresholdMinutes} minutes`,
+    `Fallback threshold: ${report.thresholdMinutes} minutes`,
     `Running stale agents: ${report.staleRunningAgents.length}`,
     '',
-    '| Agent | Running | Last heartbeat | Age min | Stale |',
-    '| --- | --- | --- | ---: | --- |',
+    '| Agent | Running | Last heartbeat | Age min | Threshold min | Stale |',
+    '| --- | --- | --- | ---: | ---: | --- |',
   ];
 
   for (const agent of report.agents) {
-    lines.push(`| ${agent.agent} | ${agent.running ? 'yes' : 'no'} | ${agent.lastHeartbeat || '-'} | ${agent.ageMinutes === null ? '-' : agent.ageMinutes.toFixed(1)} | ${agent.stale ? 'yes' : 'no'} |`);
+    lines.push(`| ${agent.agent} | ${agent.running ? 'yes' : 'no'} | ${agent.lastHeartbeat || '-'} | ${agent.ageMinutes === null ? '-' : agent.ageMinutes.toFixed(1)} | ${agent.thresholdMinutes} | ${agent.stale ? 'yes' : 'no'} |`);
   }
   lines.push('');
   return lines.join('\n');
@@ -119,7 +176,7 @@ export function runHeartbeatHealthWatch(
 ): HeartbeatHealthReport {
   const generatedAt = new Date().toISOString();
   const nowMs = Date.now();
-  const thresholdMinutes = options.thresholdMinutes ?? 90;
+  const fallbackThresholdMinutes = options.thresholdMinutes ?? 90;
   const agentsByName = discoverAgents(projectRoot, org, readEnabledAgents(paths.ctxRoot));
   const agents: HeartbeatHealthAgent[] = [];
 
@@ -128,6 +185,7 @@ export function runHeartbeatHealthWatch(
     if (info.org && info.org !== org) continue;
     const heartbeat = heartbeatAgeMinutes(paths.ctxRoot, name, nowMs);
     const running = runningAgents.has(name);
+    const thresholdMinutes = staleThresholdMinutes(paths.ctxRoot, projectRoot, org, name, fallbackThresholdMinutes);
     const stale = running && (heartbeat.ageMinutes === null || heartbeat.ageMinutes > thresholdMinutes);
     agents.push({
       agent: name,
@@ -135,6 +193,7 @@ export function runHeartbeatHealthWatch(
       running,
       lastHeartbeat: heartbeat.lastHeartbeat,
       ageMinutes: heartbeat.ageMinutes,
+      thresholdMinutes,
       stale,
     });
   }
@@ -143,7 +202,7 @@ export function runHeartbeatHealthWatch(
   const staleRunningAgents = agents.filter(agent => agent.stale);
   const report: HeartbeatHealthReport = {
     generatedAt,
-    thresholdMinutes,
+    thresholdMinutes: fallbackThresholdMinutes,
     agents,
     staleRunningAgents,
   };
