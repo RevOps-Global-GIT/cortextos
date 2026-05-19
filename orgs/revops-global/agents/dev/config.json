@@ -62,6 +62,24 @@
       "type": "recurring",
       "interval": "15m",
       "prompt": "node /home/cortextos/cortextos/scripts/auto-merge-pr.js"
+    },
+    {
+      "name": "data-contract-guardrail-review",
+      "type": "recurring",
+      "cron": "0 11 * * 5",
+      "prompt": "Read prompts/cron-data-contract-guardrail-review.md and execute exactly one bounded review pass; write the artifact and exit."
+    },
+    {
+      "name": "dirty-checkout-drift-watch",
+      "type": "recurring",
+      "cron": "15 8 * * *",
+      "prompt": "Read prompts/cron-dirty-checkout-drift-watch.md and execute exactly one bounded shell-only drift check; do not mutate repositories; write the artifact and exit."
+    },
+    {
+      "name": "live-ship-verifier",
+      "type": "recurring",
+      "cron": "0 8,20 * * *",
+      "prompt": "Read prompts/cron-live-ship-verifier.md and execute exactly one bounded live-verification pass; use Orgo/Codex-CU for UI proof when needed; write the artifact and exit."
     }
   ],
   "ctx_autoreset_threshold": 85,

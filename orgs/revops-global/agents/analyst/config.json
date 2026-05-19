@@ -145,6 +145,24 @@
       "type": "recurring",
       "interval": "6h",
       "prompt": "Run customer-surface deep QA: cd /home/cortextos/cortextos && cortextos bus customer-surface-qa --user greg@revopsglobal.com. This runs the Playwright harness against core customer surfaces, writes a report, and creates a task for each failing page. If tasks are created or the command errors, notify orchestrator with the report path; otherwise stay silent."
+    },
+    {
+      "name": "automation-noise-audit",
+      "type": "recurring",
+      "cron": "15 9 * * 1",
+      "prompt": "Read prompts/cron-automation-noise-audit.md and execute exactly one bounded automation hygiene pass; write the artifact or DONT_NOTIFY and exit."
+    },
+    {
+      "name": "skill-progression-map-ob1-app",
+      "type": "recurring",
+      "cron": "0 10 * * 1",
+      "prompt": "Read prompts/cron-skill-progression-map-ob1-app.md and execute exactly one bounded OB1 skill progression pass; write the artifact and exit."
+    },
+    {
+      "name": "skill-progression-map-team-brain",
+      "type": "recurring",
+      "cron": "15 10 * * 1",
+      "prompt": "Read prompts/cron-skill-progression-map-team-brain.md and execute exactly one bounded team-brain skill progression pass; write the artifact and exit."
     }
   ],
   "ctx_autoreset_threshold": 45,
