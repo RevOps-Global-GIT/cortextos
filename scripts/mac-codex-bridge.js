@@ -234,8 +234,18 @@ async function processMessage(msg) {
  *
  * We extract from/id/text and feed into processMessage().
  */
+/**
+ * Strip ANSI/VT100 escape sequences (including bracketed-paste markers ESC[200~ / ESC[201~)
+ * that the daemon fast-checker injects around PTY-written messages.
+ */
+function stripEscapes(str) {
+  return str
+    .replace(/\x1b\[[0-9;]*[A-Za-z~]/g, '')  // CSI sequences (including ESC[200~ ESC[201~)
+    .replace(/\x1b./g, '');                    // any remaining ESC + one char
+}
+
 function parseStdinMessages(buf) {
-  const text = buf.toString('utf-8');
+  const text = stripEscapes(buf.toString('utf-8'));
   // Split on message boundaries
   const blocks = text.split(/(?====\s+AGENT MESSAGE)/);
   for (const block of blocks) {
@@ -243,9 +253,13 @@ function parseStdinMessages(buf) {
     if (!headerMatch) continue;
     const from = headerMatch[1];
     const id = headerMatch[2];
-    // Body: lines between header and "Reply using:" or end
+    // Body: lines between header and "Reply using:" or end.
+    // Fast-checker wraps the body in triple-backtick code fences; strip them.
     const bodyMatch = block.match(/===\n([\s\S]*?)(?:\nReply using:|$)/);
-    const bodyText = bodyMatch ? bodyMatch[1].trim() : '';
+    const rawBody = bodyMatch ? bodyMatch[1].trim() : '';
+    const bodyText = rawBody
+      .replace(/^```[^\n]*\n/, '')  // strip opening ``` or ```lang
+      .replace(/\n```\s*$/, '');    // strip closing ```
     if (id && from) {
       processMessage({ id, from, text: bodyText, to: AGENT_NAME, priority: 'normal', timestamp: new Date().toISOString(), reply_to: null })
         .catch((e) => log(`stdin processMessage uncaught: ${e.message}`));
