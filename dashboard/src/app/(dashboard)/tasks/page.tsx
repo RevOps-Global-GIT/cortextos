@@ -10,6 +10,7 @@ import { TaskListTable } from '@/components/tasks/task-list-table';
 import { TaskDetailSheet } from '@/components/tasks/task-detail-sheet';
 import { CreateTaskDialog } from '@/components/tasks/create-task-dialog';
 import { TaskFilters } from '@/components/tasks/task-filters';
+import { useAgentPresence } from '@/hooks/use-agent-presence';
 import type { Task, TaskStatus } from '@/lib/types';
 
 type ViewMode = 'kanban' | 'list';
@@ -35,6 +36,7 @@ export default function TasksPage() {
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [liveAgents, setLiveAgents] = useState<string[]>([]);
+  const { presenceByTask } = useAgentPresence();
 
   // Fetch live agent list from enabled-agents registry (not task assignees) so
   // archived agents disappear and new agents appear without needing task history.
@@ -290,11 +292,17 @@ export default function TasksPage() {
         <KanbanBoard
           tasks={displayTasks}
           completedTodayTasks={completedToday}
+          presenceByTask={presenceByTask}
           onTaskClick={handleTaskClick}
           onStatusChange={handleQuickStatusChange}
         />
       ) : (
-        <TaskListTable tasks={displayTasks} onTaskClick={handleTaskClick} onStatusChange={handleQuickStatusChange} />
+        <TaskListTable
+          tasks={displayTasks}
+          presenceByTask={presenceByTask}
+          onTaskClick={handleTaskClick}
+          onStatusChange={handleQuickStatusChange}
+        />
       )}
 
       {/* Task detail sheet */}

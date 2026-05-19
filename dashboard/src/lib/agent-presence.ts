@@ -5,6 +5,12 @@ export type AgentPresenceAction =
   | 'idle';
 
 export interface AgentPresencePayload {
+  agent_id?: string;
+  current_action?: string;
+  current_task_id?: string | null;
+  cursor_position_hint?: string | null;
+  ts?: string;
+  anchor_task_id?: string | null;
   actor_id: string;
   kind: 'agent';
   name: string;
@@ -15,6 +21,10 @@ export interface AgentPresencePayload {
   action_label: string | null;
   updated_at: string;
   source: 'cortextos-bus';
+}
+
+export function presenceTaskId(payload: AgentPresencePayload) {
+  return payload.anchor_task_id ?? payload.task_id ?? payload.current_task_id ?? null;
 }
 
 export function isAgentPresencePayload(value: unknown): value is AgentPresencePayload {
@@ -30,6 +40,16 @@ export function isAgentPresencePayload(value: unknown): value is AgentPresencePa
     typeof payload.status === 'string' &&
     (payload.action_label === null || typeof payload.action_label === 'string') &&
     typeof payload.updated_at === 'string' &&
-    payload.source === 'cortextos-bus'
+    payload.source === 'cortextos-bus' &&
+    (payload.agent_id === undefined || typeof payload.agent_id === 'string') &&
+    (payload.current_action === undefined || typeof payload.current_action === 'string') &&
+    (payload.current_task_id === undefined ||
+      payload.current_task_id === null ||
+      typeof payload.current_task_id === 'string') &&
+    (payload.cursor_position_hint === undefined ||
+      payload.cursor_position_hint === null ||
+      typeof payload.cursor_position_hint === 'string') &&
+    (payload.ts === undefined || typeof payload.ts === 'string') &&
+    (payload.anchor_task_id === undefined || payload.anchor_task_id === null || typeof payload.anchor_task_id === 'string')
   );
 }

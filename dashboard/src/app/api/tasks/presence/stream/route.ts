@@ -1,6 +1,7 @@
 import { auth } from '@/lib/auth';
 import type { AgentPresencePayload } from '@/lib/agent-presence';
 import { isAgentPresencePayload } from '@/lib/agent-presence';
+import { jwtVerify } from 'jose';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -27,6 +28,21 @@ function realtimeWebSocketUrl(url: string, key: string) {
   return wsUrl;
 }
 
+async function hasBearerAuth(request: Request) {
+  const authHeader = request.headers.get('authorization');
+  if (!authHeader?.startsWith('Bearer ')) return false;
+
+  const secret = process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET;
+  if (!secret) return false;
+
+  try {
+    await jwtVerify(authHeader.slice(7), new TextEncoder().encode(secret));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function extractAgentPresencePayload(raw: string): AgentPresencePayload | null {
   const frame = JSON.parse(raw) as unknown;
   const event = Array.isArray(frame) ? frame[3] : (frame as { event?: unknown }).event;
@@ -50,7 +66,7 @@ export function extractAgentPresencePayload(raw: string): AgentPresencePayload |
 
 export async function GET(request: Request) {
   const session = await auth();
-  if (!session) {
+  if (!session && !(await hasBearerAuth(request))) {
     return new Response('Unauthorized', { status: 401 });
   }
 

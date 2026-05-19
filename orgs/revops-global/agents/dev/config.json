@@ -56,6 +56,12 @@
       "type": "recurring",
       "interval": "24h",
       "prompt": "Run the codebase improvement scanner: execute `cortextos bus codebase-scan` in /home/cortextos/cortextos. This scans src/ for TODO/FIXME/HACK/XXX markers and files >500 lines, writes a report to dev/output/YYYY-MM-DD-codebase-scan.md, and creates RGOS tasks for the top 3 actionable items. Update heartbeat to reflect this work."
+    },
+    {
+      "name": "auto-merge-pr",
+      "type": "recurring",
+      "interval": "15m",
+      "prompt": "node /home/cortextos/cortextos/scripts/auto-merge-pr.js"
     }
   ],
   "ctx_autoreset_threshold": 85,

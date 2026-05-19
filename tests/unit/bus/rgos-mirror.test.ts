@@ -396,6 +396,12 @@ describe('rgos-mirror — broadcastPresence (STACK-11)', () => {
 
   it('posts the realtime presence broadcast contract', async () => {
     const payload = {
+      agent_id: 'codex',
+      current_action: 'task_updated',
+      current_task_id: 'task_123',
+      cursor_position_hint: 'Working: task',
+      ts: '2026-05-18T19:15:00.000Z',
+      anchor_task_id: 'task_123',
       actor_id: 'codex',
       kind: 'agent' as const,
       name: 'codex',
@@ -425,6 +431,12 @@ describe('rgos-mirror — broadcastPresence (STACK-11)', () => {
     mockFetchFail('realtime offline');
 
     await expect(broadcastPresence({
+      agent_id: 'codex',
+      current_action: 'idle',
+      current_task_id: null,
+      cursor_position_hint: null,
+      ts: '2026-05-18T19:15:00.000Z',
+      anchor_task_id: null,
       actor_id: 'codex',
       kind: 'agent',
       name: 'codex',
