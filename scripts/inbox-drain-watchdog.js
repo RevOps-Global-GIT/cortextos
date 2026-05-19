@@ -46,6 +46,23 @@ const CLI             = path.join(CTX_FRAMEWORK, 'dist', 'cli.js');
 //   via Telegram at morning review instead.
 const SKIP_INBOXES = new Set(['root', 'cortextos', 'human']);
 
+// Load known agent names from the org's agents directory.
+// This prevents archive dirs (e.g. human-archive-2026-05-19) and retired agent
+// inboxes from tripping the watchdog.
+const CTX_ORG_AGENTS_DIR = path.join(CTX_FRAMEWORK, 'orgs', CTX_ORG, 'agents');
+const KNOWN_AGENTS = (() => {
+  try {
+    return new Set(
+      fs.readdirSync(CTX_ORG_AGENTS_DIR).filter(name => {
+        if (name.startsWith('_')) return false; // skip _archive and similar
+        return fs.statSync(path.join(CTX_ORG_AGENTS_DIR, name)).isDirectory();
+      })
+    );
+  } catch {
+    return new Set(); // if agents dir unreadable, fall back to scanning all
+  }
+})();
+
 // State file to track which alerts have been sent (avoid spam)
 const STATE_FILE      = path.join(CTX_ROOT, 'state', CTX_AGENT, 'inbox-watchdog-state.json');
 
@@ -143,6 +160,7 @@ function main() {
   const agents = fs.readdirSync(INBOX_ROOT)
     .filter(name => {
       if (SKIP_INBOXES.has(name)) return false;
+      if (KNOWN_AGENTS.size > 0 && !KNOWN_AGENTS.has(name)) return false;
       const p = path.join(INBOX_ROOT, name);
       return fs.statSync(p).isDirectory() && !name.startsWith('.');
     });
