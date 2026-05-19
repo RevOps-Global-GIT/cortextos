@@ -24,7 +24,7 @@ const POLL_INTERVAL_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 const DISPATCH_SCRIPT = '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh';
 const SSH_HOST = 'gregs-mac';
-const CODEX_TIMEOUT_SEC = 120;
+const CODEX_TIMEOUT_SEC = 360;
 const SSH_TIMEOUT_MS = (CODEX_TIMEOUT_SEC + 30) * 1_000;
 
 // SSH connection failure patterns — used to distinguish offline vs execution errors
