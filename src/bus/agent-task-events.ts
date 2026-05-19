@@ -1,4 +1,4 @@
-import type { CtxEnv } from '../types/index.js';
+import type { CtxEnv, TaskStatus } from '../types/index.js';
 import { applySecretsToEnv } from '../utils/env.js';
 
 export const AGENT_TASK_EVENT_TYPES = [
@@ -121,4 +121,60 @@ export async function emitAgentTaskEvent(
   }
 
   return await res.json() as AgentTaskEventRow;
+}
+
+/**
+ * Fire-and-forget status_update event emitted automatically by the task
+ * lifecycle (updateTask, completeTask, claimTask). Reads agent/org from
+ * process.env so callers don't need to thread CtxEnv through every call site.
+ *
+ * No-ops silently in test/CI environments and when Supabase creds are absent.
+ */
+export function autoEmitStatusUpdate(
+  taskId: string,
+  taskTitle: string,
+  from: TaskStatus | undefined,
+  to: TaskStatus,
+  note?: string,
+): void {
+  if (process.env.VITEST || process.env.NODE_ENV === 'test') return;
+
+  const agentName = process.env.CTX_AGENT_NAME || '';
+  const org = process.env.CTX_ORG || '';
+  const supabaseUrl = (
+    process.env.SUPABASE_RGOS_URL ||
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    ''
+  ).replace(/\/$/, '');
+  const serviceKey =
+    process.env.SUPABASE_RGOS_SERVICE_KEY ||
+    process.env.RGOS_SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    '';
+
+  if (!supabaseUrl || !serviceKey || !agentName) return;
+
+  const env: CtxEnv = {
+    agentName,
+    org,
+    instanceId: process.env.CTX_INSTANCE_ID || 'default',
+    ctxRoot: process.env.CTX_ROOT || '',
+    frameworkRoot: process.env.CTX_FRAMEWORK_ROOT || process.env.CTX_PROJECT_ROOT || '',
+    agentDir: process.env.CTX_AGENT_DIR || '',
+    projectRoot: process.env.CTX_PROJECT_ROOT || '',
+    timezone: process.env.CTX_TIMEZONE || 'UTC',
+  };
+
+  const payload: Record<string, unknown> = { task_title: taskTitle, to };
+  if (from) payload.from = from;
+  if (note) payload.note = note;
+
+  emitAgentTaskEvent(env, taskId, 'status_update', payload, {
+    agentId: agentName,
+    orgId: org || undefined,
+    supabaseUrl,
+    serviceKey,
+  }).catch(() => undefined);
 }

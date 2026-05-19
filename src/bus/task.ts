@@ -8,6 +8,7 @@ import { validatePriority } from '../utils/validate.js';
 import { mirrorTaskToRgos } from './rgos-mirror.js';
 import { logEvent } from './event.js';
 import { snapshotSessionCost } from './task-cost.js';
+import { autoEmitStatusUpdate } from './agent-task-events.js';
 
 // ---------------------------------------------------------------------------
 // Per-task read-modify-write lock
@@ -393,12 +394,14 @@ export function updateTask(
   const costSnapshot = status === 'in_progress' ? snapshotSessionCost() : undefined;
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
+  let taskTitle: string = taskId;
   try {
     withTaskLock(actualTaskDir, taskId, () => {
       const content = readFileSync(filePath, 'utf-8');
       const task: Task = JSON.parse(content);
       prevStatus = task.status;
       assignee = task.assigned_to;
+      taskTitle = task.title ?? taskId;
 
       // Merge optional meta fields atomically before validation.
       if (metaMerge && Object.keys(metaMerge).length > 0) {
@@ -436,6 +439,9 @@ export function updateTask(
     throw new Error(`Task ${taskId} update failed: ${err}`);
   }
   appendTaskAudit(paths, taskId, { event: 'update', agent: assignee || 'unknown', from: prevStatus, to: status }, actualTaskDir);
+  // Auto-emit per-task event so the task panel event stream reflects status changes
+  // without agents having to manually call emit-task-event.
+  autoEmitStatusUpdate(taskId, taskTitle, prevStatus, status, metaMerge?.blocker_reason as string | undefined);
 }
 
 /**
@@ -609,6 +615,7 @@ export function claimTask(
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     mirrorTaskToRgos(task, 'update').catch(() => undefined);
   }
+  autoEmitStatusUpdate(taskId, task.title ?? taskId, prevStatus, 'in_progress');
   return task;
 }
 
@@ -640,6 +647,7 @@ export function completeTask(
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
   let taskOrg: string = '';
+  let taskTitle: string = taskId;
   try {
     withTaskLock(actualTaskDir, taskId, () => {
       const content = readFileSync(filePath, 'utf-8');
@@ -647,6 +655,7 @@ export function completeTask(
       prevStatus = task.status;
       assignee = task.assigned_to;
       taskOrg = task.org || '';
+      taskTitle = task.title ?? taskId;
       task.status = 'completed';
       task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
       task.completed_at = task.updated_at;
@@ -677,6 +686,7 @@ export function completeTask(
     throw new Error(`Task ${taskId} complete failed: ${err}`);
   }
   appendTaskAudit(paths, taskId, { event: 'complete', agent: assignee || 'unknown', from: prevStatus, to: 'completed', note: result }, actualTaskDir);
+  autoEmitStatusUpdate(taskId, taskTitle, prevStatus, 'completed', result);
 
   // Activity-feed event. Best-effort — the task is already persisted.
   if (assignee) {
