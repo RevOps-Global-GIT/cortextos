@@ -406,7 +406,12 @@ export interface AgentConfig {
    * NousResearch/hermes-agent) with Hermes-specific bootstrap, session
    * continuity, and exit handling.
    */
-  runtime?: 'claude-code' | 'hermes' | 'codex-app-server';
+  runtime?: 'claude-code' | 'hermes' | 'codex-app-server' | 'script';
+  /**
+   * Path to the Node.js script to run when runtime is 'script'.
+   * May be absolute or relative to the framework root (cortextos repo root).
+   */
+  script_path?: string;
   /**
    * Whether this agent runs a Telegram poller. Defaults to true when absent
    * (preserves existing behaviour). Set to false on specialist agents that
