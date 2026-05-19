@@ -177,6 +177,7 @@ export function getTaskCount(org?: string, status?: string): number {
 function rowToTask(row: Record<string, unknown>): Task {
   const sourceFile = (row.source_file as string) ?? undefined;
   let meta: Task['meta'];
+  let scheduledFor: string | undefined;
 
   if (sourceFile) {
     try {
@@ -184,6 +185,8 @@ function rowToTask(row: Record<string, unknown>): Task {
       if (raw && typeof raw.meta === 'object' && !Array.isArray(raw.meta)) {
         meta = raw.meta as Task['meta'];
       }
+      const sf = raw.fire_at ?? raw.scheduled_for ?? raw.due_date;
+      if (sf && typeof sf === 'string') scheduledFor = sf;
     } catch {
       // Metadata is an optional JSON-file-only extension; keep SQLite reads resilient.
     }
@@ -205,6 +208,7 @@ function rowToTask(row: Record<string, unknown>): Task {
     completed_at: (row.completed_at as string) ?? undefined,
     notes: (row.notes as string) ?? undefined,
     source_file: sourceFile,
+    scheduled_for: scheduledFor,
     meta,
   };
 }
