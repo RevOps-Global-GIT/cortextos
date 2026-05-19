@@ -553,9 +553,18 @@ export function buildReviewRow(review: ReviewMirrorInput): Record<string, unknow
 // Realtime presence broadcast (STACK-11)
 // ---------------------------------------------------------------------------
 
-const PRESENCE_CHANNEL = 'fleet-tasks-presence:revops-global';
+// Hub (hub.revopsglobal.com) subscribes to the "agent-presence" channel.
+// The local cortextos/dashboard SSE proxy (presence/stream) also uses this channel.
+const PRESENCE_CHANNEL = 'agent-presence';
 
 export interface AgentPresencePayload {
+  // Hub-compatible fields (useFleetTaskPresence → normalizeBroadcast expects these)
+  agent_id: string;
+  current_action: string;
+  current_task_id: string | null;
+  cursor_position_hint: string | null;
+  ts: string;
+  // Legacy cortextos-bus fields kept for local dashboard compat
   actor_id: string;
   kind: 'agent';
   name: string;
@@ -571,7 +580,7 @@ export interface AgentPresencePayload {
 /**
  * Broadcast agent presence via Supabase Realtime REST API. Fire-and-forget —
  * never throws, never retries. Presence is ephemeral; gaps are acceptable.
- * Hub side subscribes to `fleet-tasks-presence:revops-global` for `presence_update` events.
+ * Hub side subscribes to the "agent-presence" channel for `presence_update` events.
  */
 export async function broadcastPresence(payload: AgentPresencePayload): Promise<void> {
   if (!isEnabled()) return;

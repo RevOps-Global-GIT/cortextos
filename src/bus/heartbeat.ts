@@ -52,6 +52,13 @@ export function updateHeartbeat(
   // between task events. PRESENCE_TTL_MS on the Hub side is 90s; heartbeat fires
   // every 10m so this keeps the board non-empty while agents are active.
   broadcastPresence({
+    // Hub-compatible fields
+    agent_id: agentName,
+    current_action: 'idle',
+    current_task_id: null,
+    cursor_position_hint: status || 'online',
+    ts,
+    // Local dashboard fields
     actor_id: agentName,
     kind: 'agent',
     name: agentName,
