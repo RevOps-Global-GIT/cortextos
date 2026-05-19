@@ -16,12 +16,12 @@ import { broadcastPresence } from './rgos-mirror.js';
  * The upsert is keyed on (instance_id, agent_name) — the same agent name can
  * run on multiple VMs without collision.
  */
-export function updateHeartbeat(
+export async function updateHeartbeat(
   paths: BusPaths,
   agentName: string,
   status: string,
   options?: { org?: string; timezone?: string; loopInterval?: string; currentTask?: string; displayName?: string },
-): void {
+): Promise<void> {
   ensureDir(paths.stateDir);
 
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -48,28 +48,31 @@ export function updateHeartbeat(
     // Intentionally swallowed: Supabase unavailability must not affect local operation.
   });
 
-  // Fire-and-forget presence broadcast so the live-presence widget stays populated
-  // between task events. PRESENCE_TTL_MS on the Hub side is 90s; heartbeat fires
-  // every 10m so this keeps the board non-empty while agents are active.
-  broadcastPresence({
-    // Hub-compatible fields
-    agent_id: agentName,
-    current_action: 'idle',
-    current_task_id: null,
-    cursor_position_hint: status || 'online',
-    ts,
-    // Local dashboard fields
-    actor_id: agentName,
-    kind: 'agent',
-    name: agentName,
-    avatar_url: null,
-    task_id: null,
-    task_title: null,
-    status: 'idle',
-    action_label: status || 'online',
-    updated_at: ts,
-    source: 'cortextos-bus',
-  }).catch(() => {});
+  // Await presence broadcast so the WS has time to flush before process.exit(0).
+  // PRESENCE_TTL_MS on the Hub side is 90s; heartbeat fires every 10m so this
+  // keeps the board non-empty while agents are active.
+  try {
+    await broadcastPresence({
+      agent_id: agentName,
+      current_action: 'idle',
+      current_task_id: null,
+      cursor_position_hint: status || 'online',
+      ts,
+      actor_id: agentName,
+      kind: 'agent',
+      name: agentName,
+      avatar_url: null,
+      task_id: null,
+      task_title: null,
+      status: 'idle',
+      action_label: status || 'online',
+      updated_at: ts,
+      source: 'cortextos-bus',
+    });
+    await new Promise(r => setTimeout(r, 750));
+  } catch {
+    // Presence broadcast failure must not affect local heartbeat
+  }
 }
 
 /**
