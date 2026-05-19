@@ -625,7 +625,15 @@ export async function mirrorTaskToRgos(
   const actionLabel = event === 'create' ? `Creating: ${task.title.slice(0, 60)}`
     : event === 'complete' ? `Completed: ${task.title.slice(0, 60)}`
     : `Working: ${task.title.slice(0, 60)}`;
+  const ts = new Date().toISOString();
   setImmediate(() => broadcastPresence({
+    // Hub-compatible fields
+    agent_id: agentId,
+    current_action: action,
+    current_task_id: task.id,
+    cursor_position_hint: actionLabel,
+    ts,
+    // Local dashboard fields
     actor_id: agentId,
     kind: 'agent',
     name: agentId,
@@ -634,7 +642,7 @@ export async function mirrorTaskToRgos(
     task_title: task.title.slice(0, 80),
     status: action,
     action_label: actionLabel,
-    updated_at: new Date().toISOString(),
+    updated_at: ts,
     source: 'cortextos-bus',
   }).catch(() => { /* already swallowed inside broadcastPresence */ }));
   try {
