@@ -97,11 +97,24 @@ EOF
 else
   echo "  [OK] mmrag config.json already exists"
 
-  # Migrate stale embedding model names (text-embedding-004 was shut down 2026-01-14)
-  if grep -qE '"embedding_model"\s*:\s*"(models/text-embedding-004|text-embedding-004)"' "$CONFIG_FILE" 2>/dev/null; then
-    sed -i.bak 's/"models\/text-embedding-004"/"text-embedding-3-large"/g; s/"text-embedding-004"/"text-embedding-3-large"/g' "$CONFIG_FILE"
-    rm -f "${CONFIG_FILE}.bak"
-    echo "  [MIGRATED] embedding_model updated to text-embedding-3-large (text-embedding-004 was shut down)"
+  # Migrate stale embedding config. Gemini text embeddings were replaced by
+  # OpenAI text-embedding-3-large, while Gemini remains available for media
+  # descriptions via gemini_model.
+  if grep -qE '"embedding_model"\s*:\s*"(models/text-embedding-004|text-embedding-004|gemini-embedding-[^"]+)"' "$CONFIG_FILE" 2>/dev/null || \
+     ! grep -qE '"embedding_provider"\s*:' "$CONFIG_FILE" 2>/dev/null; then
+    "$VENV_BIN/python3" - "$CONFIG_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+data["embedding_provider"] = "openai"
+data["embedding_model"] = "text-embedding-3-large"
+data["embedding_dimensions"] = 3072
+path.write_text(json.dumps(data, indent=2) + "\n")
+PY
+    echo "  [MIGRATED] embedding provider updated to OpenAI text-embedding-3-large"
   fi
 fi
 
