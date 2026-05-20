@@ -12,12 +12,18 @@ import { getToken } from 'next-auth/jwt';
 // Built once at module load: env-derived origins are validated via `new URL()`,
 // malformed values are dropped with a warning, and wildcards are explicitly rejected.
 function buildAllowedOrigins(): string[] {
-  const staticOrigins = ['http://localhost:3000', 'http://localhost:3001'];
+  const staticOrigins = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'https://hub.revopsglobal.com',
+    'https://agentops.revopsglobal.com',
+  ];
   const envCandidates: Array<[string, string | undefined]> = [
     ['NEXTAUTH_URL', process.env.NEXTAUTH_URL],
     ['DASHBOARD_URL', process.env.DASHBOARD_URL],
     ['MOBILE_APP_ORIGIN', process.env.MOBILE_APP_ORIGIN],
     ['HUB_ORIGIN', process.env.HUB_ORIGIN],
+    ['AGENTOPS_ORIGIN', process.env.AGENTOPS_ORIGIN],
   ];
 
   const validated: string[] = [];
