@@ -20,6 +20,7 @@ export default defineConfig({
     'hooks/hook-policy-check-mcp': 'src/hooks/hook-policy-check-mcp.ts',
     'hooks/hook-env-write-guard': 'src/hooks/hook-env-write-guard.ts',
     'hooks/hook-agent-task-event': 'src/hooks/hook-agent-task-event.ts',
+    'mcp/hetzner-mcp-server': 'src/mcp/hetzner-mcp-server.ts',
   },
   format: ['cjs'],
   target: 'node20',

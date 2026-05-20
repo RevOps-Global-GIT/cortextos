@@ -7,6 +7,9 @@
         "TOKEN_BUDGET": "2000",
         "AGENTMEMORY_TOOLS": "core"
       }
+    },
+    "hetzner": {
+      "command": "hetzner-mcp-server"
     }
   }
 }

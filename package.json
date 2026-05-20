@@ -5,7 +5,8 @@
   "main": "dist/daemon.js",
   "bin": {
     "cortextos": "dist/cli.js",
-    "ascendops": "dist/ascendops.js"
+    "ascendops": "dist/ascendops.js",
+    "hetzner-mcp-server": "dist/mcp/hetzner-mcp-server.js"
   },
   "scripts": {
     "build": "tsup",
