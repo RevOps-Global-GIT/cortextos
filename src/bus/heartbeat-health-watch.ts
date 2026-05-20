@@ -166,23 +166,45 @@ export function inferRunningFromHeartbeats(ctxRoot: string, staleMinutes = 30): 
   return running;
 }
 
+export interface HeartbeatSuppressFile {
+  agents: string[];
+  expires_at?: string;
+}
+
+function readSuppressFile(ctxRoot: string): Set<string> {
+  const suppressPath = join(ctxRoot, 'state', 'heartbeat-suppress.json');
+  if (!existsSync(suppressPath)) return new Set();
+  try {
+    const data = JSON.parse(readFileSync(suppressPath, 'utf-8')) as HeartbeatSuppressFile;
+    if (data.expires_at && Date.now() > Date.parse(data.expires_at)) return new Set();
+    return new Set(Array.isArray(data.agents) ? data.agents : []);
+  } catch {
+    return new Set();
+  }
+}
+
 export function runHeartbeatHealthWatch(
   paths: BusPaths,
   agentName: string,
   org: string,
   projectRoot: string,
   runningAgents: Set<string>,
-  options: { thresholdMinutes?: number; outputDir?: string } = {},
+  options: { thresholdMinutes?: number; outputDir?: string; skipAgents?: string[] } = {},
 ): HeartbeatHealthReport {
   const generatedAt = new Date().toISOString();
   const nowMs = Date.now();
   const fallbackThresholdMinutes = options.thresholdMinutes ?? 90;
+  const skipSet = new Set([
+    ...(options.skipAgents ?? []),
+    ...readSuppressFile(paths.ctxRoot),
+  ]);
   const agentsByName = discoverAgents(projectRoot, org, readEnabledAgents(paths.ctxRoot));
   const agents: HeartbeatHealthAgent[] = [];
 
   for (const [name, info] of Object.entries(agentsByName)) {
     if (!info.enabled) continue;
     if (info.org && info.org !== org) continue;
+    if (skipSet.has(name)) continue;
     const heartbeat = heartbeatAgeMinutes(paths.ctxRoot, name, nowMs);
     const running = runningAgents.has(name);
     const thresholdMinutes = staleThresholdMinutes(paths.ctxRoot, projectRoot, org, name, fallbackThresholdMinutes);

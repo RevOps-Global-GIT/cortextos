@@ -1631,9 +1631,10 @@ busCommand
   .option('--threshold-minutes <n>', 'Stale heartbeat threshold for running agents', '90')
   .option('--restart', 'Attempt daemon restart for stale running agents')
   .option('--notify-agent <agent>', 'Agent to notify when stale running agents are found', 'orchestrator')
+  .option('--skip-agent <name>', 'Exclude agent from stale-running check (repeatable)', (val: string, acc: string[]) => [...acc, val], [] as string[])
   .option('--dry-run', 'Do not send notifications or restart agents')
   .option('--format <fmt>', 'Output format: json or text', 'text')
-  .action(async (opts: { thresholdMinutes?: string; restart?: boolean; notifyAgent?: string; dryRun?: boolean; format?: string }) => {
+  .action(async (opts: { thresholdMinutes?: string; restart?: boolean; notifyAgent?: string; skipAgent?: string[]; dryRun?: boolean; format?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
@@ -1661,6 +1662,7 @@ busCommand
     const report = runHeartbeatHealthWatch(paths, env.agentName, env.org, projectRoot, runningAgents, {
       thresholdMinutes: Number.isFinite(threshold) && threshold >= 1 ? threshold : 90,
       outputDir,
+      skipAgents: opts.skipAgent ?? [],
     });
 
     const restartAttempts: Array<{ agent: string; success: boolean; error?: string }> = [];
