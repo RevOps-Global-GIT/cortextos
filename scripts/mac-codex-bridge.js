@@ -135,18 +135,20 @@ function execOnMac(prompt) {
   const tmpScript = `/tmp/codex-dispatch-${nonce}.applescript`;
   const tmpPrompt = `/tmp/codex-prompt-${nonce}.txt`;
 
-  // Prompt is written to a temp file and read via `cat` inside AppleScript —
-  // this avoids ALL shell/AppleScript quoting issues with special characters.
+  // Prompt is written to a temp file and loaded into clipboard via pbcopy.
+  // Using clipboard paste (Cmd+V) instead of keystroke avoids AppleScript
+  // treating newlines as Return keypresses, which would submit multi-paragraph
+  // prompts after the first line.
   const scriptBody = [
-    `set promptText to do shell script "cat ${tmpPrompt}"`,
+    `do shell script "pbcopy < ${tmpPrompt}"`,
     'tell application "Codex" to activate',
     'delay 0.6',
     'tell application "System Events"',
     '  tell process "Codex"',
     '    click menu item "New Chat" of menu 1 of menu bar item "File" of menu bar 1',
     '    delay 1.2',
-    '    keystroke promptText',
-    '    delay 0.3',
+    '    keystroke "v" using command down',
+    '    delay 0.5',
     '    key code 36',
     '  end tell',
     'end tell',
