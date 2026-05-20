@@ -131,34 +131,40 @@ function checkInbox() {
  * issues with special characters in the prompt.
  */
 function execOnMac(prompt) {
-  // Escape prompt for AppleScript string literal (only \ and " need escaping)
-  const escaped = prompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const nonce = Date.now();
   const tmpScript = `/tmp/codex-dispatch-${nonce}.applescript`;
+  const tmpPrompt = `/tmp/codex-prompt-${nonce}.txt`;
 
-  // Build remote command: write script to temp file then run it
+  // Prompt is written to a temp file and read via `cat` inside AppleScript —
+  // this avoids ALL shell/AppleScript quoting issues with special characters.
   const scriptBody = [
+    `set promptText to do shell script "cat ${tmpPrompt}"`,
     'tell application "Codex" to activate',
     'delay 0.6',
     'tell application "System Events"',
     '  tell process "Codex"',
     '    click menu item "New Chat" of menu 1 of menu bar item "File" of menu bar 1',
     '    delay 1.2',
-    `    keystroke "${escaped}"`,
+    '    keystroke promptText',
     '    delay 0.3',
     '    key code 36',
     '  end tell',
     'end tell',
     'delay 2',
-    'set threadId to do shell script "sqlite3 /Users/gregharned/.codex/state_5.sqlite \\"SELECT id FROM threads ORDER BY created_at DESC LIMIT 1;\\""',
-    'do shell script "rm -f ' + tmpScript + '"',
+    `set threadId to do shell script "sqlite3 /Users/gregharned/.codex/state_5.sqlite \\"SELECT id FROM threads ORDER BY created_at DESC LIMIT 1;\\""`,
+    `do shell script "rm -f ${tmpScript} ${tmpPrompt}"`,
     'return threadId',
   ].join('\n');
 
-  // Use printf to write the script (avoids heredoc quoting issues over SSH)
-  const writeCmd = `printf '%s' ${JSON.stringify(scriptBody)} > ${tmpScript}`;
-  const runCmd   = `osascript ${tmpScript}`;
-  const remoteCmd = `${writeCmd} && ${runCmd}`;
+  // Base64-encode both files so they survive SSH quoting untouched.
+  const scriptB64 = Buffer.from(scriptBody).toString('base64');
+  const promptB64 = Buffer.from(prompt).toString('base64');
+
+  const remoteCmd = [
+    `echo ${scriptB64} | base64 -d > ${tmpScript}`,
+    `echo ${promptB64} | base64 -d > ${tmpPrompt}`,
+    `osascript ${tmpScript}`,
+  ].join(' && ');
 
   return spawnAsync('ssh', [
     '-n',
@@ -168,10 +174,7 @@ function execOnMac(prompt) {
     '-o', 'ServerAliveCountMax=2',
     SSH_HOST,
     remoteCmd,
-  ], {
-    timeout: SSH_TIMEOUT_MS,
-    maxBuffer: 1024 * 1024,
-  });
+  ], { timeout: SSH_TIMEOUT_MS, maxBuffer: 1024 * 1024 });
 }
 
 async function processMessage(msg) {
