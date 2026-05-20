@@ -611,6 +611,12 @@ def wav_duration_seconds(path: Path) -> float:
         with wave.open(str(path), "rb") as wav:
             frames = wav.getnframes()
             rate = wav.getframerate()
+            channels = wav.getnchannels() or 1
+            sample_width = wav.getsampwidth() or 1
+            declared_payload_size = frames * channels * sample_width
+            actual_payload_size = max(path.stat().st_size - 44, 0)
+            if declared_payload_size > actual_payload_size * 2:
+                return actual_payload_size / float((rate or 1) * channels * sample_width)
             return frames / float(rate or 1)
     except wave.Error:
         return 0.0
