@@ -532,6 +532,7 @@ export class AgentManager {
     // the agent has time to write its initial heartbeat before we evaluate staleness.
     setTimeout(() => this.startStaleHeartbeatWatcher(name, config), 0);
 
+
     // Start fast checker in background
     checker.start().catch(err => {
       console.error(`[${name}] Fast checker error:`, err);
@@ -978,6 +979,7 @@ export class AgentManager {
     this.stopStaleHeartbeatWatcher(name);
     // Clear health-restart flag in case stopAgent is called mid-restart.
     this.healthRestartInProgress.delete(name);
+
 
     if (entry.poller) {
       entry.poller.stop();
@@ -1473,7 +1475,7 @@ export class AgentManager {
     // Agent may have been stopped in the interim — don't restart a stopped agent.
     if (!this.agents.has(agentName)) return;
 
-    let state: { probe_id?: string; status?: string } = {};
+    let state: { probe_id?: string; status?: string; sent_at?: string } = {};
     try {
       state = JSON.parse(readFileSync(probeFile, 'utf-8'));
     } catch {
@@ -1492,7 +1494,7 @@ export class AgentManager {
     try {
       writeFileSync(
         probeFile,
-        JSON.stringify({ status: 'degraded', probe_id: probeId, sent_at: state.probe_id ? undefined : undefined, failed_at: failedAt }),
+        JSON.stringify({ status: 'degraded', probe_id: probeId, sent_at: state.sent_at, failed_at: failedAt }),
       );
     } catch (err) {
       console.error(`[health-probe] Failed to write degraded state for ${agentName}: ${err}`);
