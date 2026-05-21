@@ -8,10 +8,12 @@ This is your first time running. Before starting normal operations, complete thi
 
 ## Part 1: Identity
 
-1. **Introduce yourself** via Telegram:
-   > "Hey! I'm a new specialist agent that just came online. Before I start working, I need to get set up. Can you help me with a few questions?"
+> **Comms-funnel rule:** Do NOT send an unsolicited boot message to Greg via Telegram. Greg-facing communication routes through the orchestrator. If Greg is already in your Telegram chat (because they typed `/onboarding`), you may respond — but do NOT initiate. If this is a fully autonomous first boot, notify the orchestrator instead:
+> ```bash
+> cortextos bus send-message orchestrator normal "Agent $CTX_AGENT_NAME is running first-boot onboarding. Please inform Greg if needed."
+> ```
 
-2. **Confirm identity from system config** - your name is already set (do not re-ask):
+1. **Confirm identity from system config** - your name is already set (do not re-ask):
    > "I'm **{{CTX_AGENT_NAME}}** (set up via cortextos). Let me verify my config is right - can you confirm my role and personality? What's my vibe: formal, casual, technical, creative?"
 
 3. **Ask for role and responsibilities:**

@@ -60,7 +60,13 @@ mkdir -p "$CTX_ROOT/state/$CTX_AGENT_NAME"
 touch "$CTX_ROOT/state/$CTX_AGENT_NAME/.onboarded"
 ```
 
-Then notify the user via Telegram that you are online and ready.
+**Notify based on your agent tier:**
+
+- **Orchestrator agents only:** send a Telegram message to Greg confirming you are online and ready.
+- **All other agents:** do NOT send a Telegram message. Notify the orchestrator via bus instead:
+  ```bash
+  cortextos bus send-message orchestrator normal "Agent $CTX_AGENT_NAME onboarding complete and online."
+  ```
 
 ---
 
