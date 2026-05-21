@@ -5,7 +5,7 @@ import { join, dirname } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName } from '../utils/validate.js';
 import { randomString } from '../utils/random.js';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, listBlockedBy, checkStaleTasks, archiveTasks, checkHumanTasks, findTaskFile } from '../bus/task.js';
+import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks, findTaskFile } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
@@ -694,40 +694,6 @@ busCommand
     for (const d of open) console.log(`  ${d.id}  [${d.status}]`);
   });
 
-busCommand
-  .command('list-blocked')
-  .description('List all tasks that have the given task in their blocked_by array')
-  .requiredOption('--on <task_id>', 'Task ID to query dependents for')
-  .option('--format <fmt>', 'Output format: json or text', 'text')
-  .action((opts: { on: string; format?: string }) => {
-    const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const tasks = listBlockedBy(paths, opts.on);
-
-    if (opts.format === 'json') {
-      console.log(JSON.stringify(tasks, null, 2));
-      return;
-    }
-
-    if (tasks.length === 0) {
-      console.log(`No tasks blocked by ${opts.on}`);
-      return;
-    }
-
-    const STATUS_ICON: Record<string, string> = { pending: '○', in_progress: '●', blocked: '◑', completed: '✓', done: '✓', cancelled: '✗' };
-    console.log(`\n  Tasks blocked by ${opts.on} (${tasks.length})\n`);
-    const header = '  Status  ID                              Assignee         Title';
-    console.log(header);
-    console.log('  ' + '-'.repeat(header.length - 2));
-    for (const t of tasks) {
-      const statusIcon = (STATUS_ICON[t.status] || '?').padEnd(8);
-      const id = t.id.padEnd(32);
-      const assignee = (t.assigned_to || '-').substring(0, 16).padEnd(17);
-      const title = t.title.substring(0, 50);
-      console.log(`  ${statusIcon}${id}${assignee}${title}`);
-    }
-    console.log('');
-  });
 
 busCommand
   .command('task-history')
