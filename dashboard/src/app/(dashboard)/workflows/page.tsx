@@ -26,10 +26,9 @@ import {
   IconCircleCheck,
   IconAlertTriangle,
   IconCircleX,
-  IconCircleDashed,
   IconArrowRight,
 } from '@tabler/icons-react';
-import { formatRelative, formatSchedule } from '@/lib/cron-utils';
+import { formatRelative, formatSchedule, isValidScheduleClient } from '@/lib/cron-utils';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -89,24 +88,9 @@ interface FleetHealthSummary {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function intervalToHuman(interval: string | undefined): string {
-  if (!interval) return '?';
-  const match = interval.match(/^(\d+)([smhd])$/);
-  if (!match) return interval;
-  const n = parseInt(match[1]);
-  const unit = match[2];
-  const units: Record<string, string> = {
-    s: n === 1 ? 'second' : 'seconds',
-    m: n === 1 ? 'minute' : 'minutes',
-    h: n === 1 ? 'hour' : 'hours',
-    d: n === 1 ? 'day' : 'days',
-  };
-  return `${n} ${units[unit]}`;
-}
-
 function validateInterval(interval: string | undefined): boolean {
   if (!interval) return false;
-  return /^\d+[smhd]$/.test(interval);
+  return isValidScheduleClient(interval);
 }
 
 function validateName(name: string): boolean {
@@ -133,6 +117,54 @@ function statusLabel(status: 'fired' | 'retried' | 'failed' | null): string {
   return 'never';
 }
 
+function cronSchedule(cron: Cron): string {
+  return cron.schedule ?? cron.interval ?? cron.cron ?? '';
+}
+
+function cronBadgeLabel(cron: Cron): string {
+  if (cron.fire_at) return `once at ${new Date(cron.fire_at).toLocaleString()}`;
+  const schedule = cronSchedule(cron);
+  if (!schedule) return 'schedule unknown';
+  return formatSchedule(schedule);
+}
+
+function rowToCron(row: CronSummaryRow): Cron {
+  const schedule = cronSchedule(row.cron);
+  return {
+    ...row.cron,
+    schedule,
+    interval: schedule,
+  };
+}
+
+function buildAgentCrons(
+  agentList: { name: string; org: string }[],
+  rows: CronSummaryRow[],
+): AgentCrons[] {
+  const cronsByAgent = new Map<string, Cron[]>();
+  for (const row of rows) {
+    const list = cronsByAgent.get(row.agent) ?? [];
+    list.push(rowToCron(row));
+    cronsByAgent.set(row.agent, list);
+  }
+
+  const results = agentList.map((agent) => ({
+    name: agent.name,
+    org: agent.org,
+    crons: cronsByAgent.get(agent.name) ?? [],
+    loading: false,
+    error: null,
+  }));
+
+  results.sort((a, b) => {
+    if (a.crons.length > 0 && b.crons.length === 0) return -1;
+    if (a.crons.length === 0 && b.crons.length > 0) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return results;
+}
+
 // ---------------------------------------------------------------------------
 // Page
 // ---------------------------------------------------------------------------
@@ -149,7 +181,7 @@ export default function WorkflowsPage() {
   const [cronRows, setCronRows] = useState<CronSummaryRow[]>([]);
   const [statusLoading, setStatusLoading] = useState(true);
 
-  // ── Legacy per-agent cron config data (from /api/agents/[name]/crons) ─────
+  // ── Per-agent daemon cron data (from /api/workflows/crons) ────────────────
   const [agents, setAgents] = useState<AgentCrons[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -206,43 +238,19 @@ export default function WorkflowsPage() {
     }
   }, []);
 
-  // ── Fetch per-agent config crons (for CRUD) ────────────────────────────────
+  // ── Fetch per-agent daemon crons (for CRUD) ────────────────────────────────
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/agents');
-      const agentList: { name: string; org: string }[] = await res.json();
+      const [agentRes, cronRes] = await Promise.all([
+        fetch('/api/agents'),
+        fetch('/api/workflows/crons'),
+      ]);
+      const agentList: { name: string; org: string }[] = await agentRes.json();
+      const rows: CronSummaryRow[] = cronRes.ok ? await cronRes.json() : [];
+      if (Array.isArray(rows)) setCronRows(rows);
 
-      const results: AgentCrons[] = await Promise.all(
-        agentList.map(async (agent) => {
-          try {
-            const cronRes = await fetch(`/api/agents/${encodeURIComponent(agent.name)}/crons`);
-            const data = await cronRes.json();
-            return {
-              name: agent.name,
-              org: agent.org,
-              crons: data.crons ?? [],
-              loading: false,
-              error: null,
-            };
-          } catch {
-            return {
-              name: agent.name,
-              org: agent.org,
-              crons: [],
-              loading: false,
-              error: 'Failed to load crons',
-            };
-          }
-        }),
-      );
-
-      // Sort: agents with crons first, then alphabetical
-      results.sort((a, b) => {
-        if (a.crons.length > 0 && b.crons.length === 0) return -1;
-        if (a.crons.length === 0 && b.crons.length > 0) return 1;
-        return a.name.localeCompare(b.name);
-      });
+      const results = buildAgentCrons(agentList, Array.isArray(rows) ? rows : []);
 
       setAgents(results);
       if (results.length > 0 && !expandedAgent) {
@@ -290,28 +298,28 @@ export default function WorkflowsPage() {
 
   // ── CRUD operations ────────────────────────────────────────────────────────
 
-  const saveCrons = async (agentName: string, crons: Cron[]) => {
+  const deleteCron = async (agentName: string, index: number) => {
+    const agent = agents.find((a) => a.name === agentName);
+    if (!agent) return;
+    const cron = agent.crons[index];
+    if (!cron) return;
+
     setSaving(agentName);
     try {
-      const res = await fetch(`/api/agents/${encodeURIComponent(agentName)}/crons`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ crons }),
-      });
+      const res = await fetch(
+        `/api/workflows/crons/${encodeURIComponent(agentName)}/${encodeURIComponent(cron.name)}`,
+        { method: 'DELETE' },
+      );
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || 'Failed to save');
+        throw new Error(data.error || 'Failed to delete cron');
       }
-      setAgents((prev) =>
-        prev.map((a) =>
-          a.name === agentName ? { ...a, crons, error: null } : a,
-        ),
-      );
+      await Promise.all([fetchAll(), fetchFleetHealth()]);
     } catch (err) {
       setAgents((prev) =>
         prev.map((a) =>
           a.name === agentName
-            ? { ...a, error: err instanceof Error ? err.message : 'Save failed' }
+            ? { ...a, error: err instanceof Error ? err.message : 'Delete failed' }
             : a,
         ),
       );
@@ -320,14 +328,7 @@ export default function WorkflowsPage() {
     }
   };
 
-  const deleteCron = (agentName: string, index: number) => {
-    const agent = agents.find((a) => a.name === agentName);
-    if (!agent) return;
-    const updated = agent.crons.filter((_, i) => i !== index);
-    saveCrons(agentName, updated);
-  };
-
-  const addCron = (agentName: string) => {
+  const addCron = async (agentName: string) => {
     if (!validateName(newCron.name) || !validateInterval(newCron.interval) || !newCron.prompt.trim()) {
       return;
     }
@@ -343,18 +344,49 @@ export default function WorkflowsPage() {
       return;
     }
 
-    const updated = [...agent.crons, { ...newCron }];
-    saveCrons(agentName, updated);
-    setNewCron({ name: '', interval: '5m', prompt: '' });
-    setAddingTo(null);
+    setSaving(agentName);
+    try {
+      const res = await fetch('/api/workflows/crons', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agent: agentName,
+          definition: {
+            name: newCron.name,
+            schedule: newCron.interval,
+            prompt: newCron.prompt,
+            enabled: true,
+          },
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to add cron');
+      }
+      setNewCron({ name: '', interval: '5m', prompt: '' });
+      setAddingTo(null);
+      await Promise.all([fetchAll(), fetchFleetHealth()]);
+    } catch (err) {
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.name === agentName
+            ? { ...a, error: err instanceof Error ? err.message : 'Add failed' }
+            : a,
+        ),
+      );
+    } finally {
+      setSaving(null);
+    }
   };
 
-  const saveEdit = (agentName: string, index: number) => {
+  const saveEdit = async (agentName: string, index: number) => {
     if (!validateName(editCron.name) || !validateInterval(editCron.interval) || !editCron.prompt.trim()) {
       return;
     }
     const agent = agents.find((a) => a.name === agentName);
     if (!agent) return;
+    const original = agent.crons[index];
+    if (!original) return;
 
     if (agent.crons.some((c, i) => c.name === editCron.name && i !== index)) {
       setAgents((prev) =>
@@ -365,9 +397,43 @@ export default function WorkflowsPage() {
       return;
     }
 
-    const updated = agent.crons.map((c, i) => (i === index ? { ...editCron } : c));
-    saveCrons(agentName, updated);
-    setEditingCron(null);
+    setSaving(agentName);
+    try {
+      if (editCron.name !== original.name) {
+        throw new Error('Rename from inline editor is not supported. Open the detail page to recreate this cron with a new name.');
+      }
+
+      const res = await fetch(
+        `/api/workflows/crons/${encodeURIComponent(agentName)}/${encodeURIComponent(original.name)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            patch: {
+              schedule: editCron.interval,
+              prompt: editCron.prompt,
+              enabled: editCron.enabled ?? true,
+            },
+          }),
+        },
+      );
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to update cron');
+      }
+      setEditingCron(null);
+      await Promise.all([fetchAll(), fetchFleetHealth()]);
+    } catch (err) {
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.name === agentName
+            ? { ...a, error: err instanceof Error ? err.message : 'Update failed' }
+            : a,
+        ),
+      );
+    } finally {
+      setSaving(null);
+    }
   };
 
   // ── Derived data ──────────────────────────────────────────────────────────
@@ -882,11 +948,7 @@ export default function WorkflowsPage() {
                               <IconClock size={14} className="text-muted-foreground shrink-0" />
                               <span className="text-sm font-medium">{cron.name}</span>
                               <Badge variant="outline" className="text-[10px]">
-                                {cron.fire_at
-                                  ? `once at ${new Date(cron.fire_at).toLocaleString()}`
-                                  : cron.cron
-                                    ? `cron: ${cron.cron}`
-                                    : `every ${intervalToHuman(cron.interval)}`}
+                                {cronBadgeLabel(cron)}
                               </Badge>
                               {/* Runtime status from external cron system */}
                               {statusRow && (
@@ -923,7 +985,7 @@ export default function WorkflowsPage() {
                               title="Edit (inline)"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setEditCron({ ...cron });
+                                setEditCron({ ...cron, interval: cronSchedule(cron) });
                                 setEditingCron({ agent: agent.name, index: idx });
                               }}
                             >
