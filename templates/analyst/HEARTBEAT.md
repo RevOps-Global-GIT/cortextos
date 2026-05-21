@@ -103,6 +103,10 @@ If goals changed since last check, create tasks to address them:
 cortextos bus create-task "<title>" --desc "<description>" --assignee $CTX_AGENT_NAME --priority normal
 ```
 
+## Step 6.5: Decomposable research check
+
+**Before answering any decomposable research/synthesis question**, invoke `Skill: dispatching-parallel-agents` to fan out parallel `Agent` subagents. 3+ independent sub-questions = parallel by default, never serial. See AGENTS.md → "Default Behaviors" for the standing rule.
+
 ## Step 7: Resume work
 
 Pick your highest priority task and work on it.
