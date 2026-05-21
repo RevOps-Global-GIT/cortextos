@@ -1,7 +1,13 @@
-import monitor from '@/data/capability-monitor.json';
 import { Badge } from '@/components/ui/badge';
+import * as fs from 'fs';
+import * as path from 'path';
 
-export const dynamic = 'force-static';
+export const dynamic = 'force-dynamic';
+
+function loadMonitor() {
+  const p = path.resolve(process.cwd(), 'src/data/capability-monitor.json');
+  return JSON.parse(fs.readFileSync(p, 'utf8'));
+}
 
 type CapabilityStatus = 'ok' | 'warn' | 'fail' | 'blocked' | 'pending_wiring';
 
@@ -36,6 +42,7 @@ const statusClasses: Record<CapabilityStatus, string> = {
 };
 
 export default function CortexCapabilitiesPage() {
+  const monitor = loadMonitor();
   const capabilities = monitor.capabilities as Capability[];
   const pendingCount = capabilities.filter((item) => item.currentStatus === 'pending_wiring').length;
 

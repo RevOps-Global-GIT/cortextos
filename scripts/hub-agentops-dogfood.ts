@@ -712,6 +712,28 @@ async function main() {
     }
   }
 
+  // Update capability-monitor.json hub_qa entry and revalidate dashboard cache
+  try {
+    const monitorPath = path.resolve(REPO_ROOT, 'dashboard/src/data/capability-monitor.json');
+    const monitor = JSON.parse(fs.readFileSync(monitorPath, 'utf8'));
+    const hubQa = monitor.capabilities.find((c: Record<string, unknown>) => c.id === 'hub_qa');
+    if (hubQa) {
+      hubQa.lastCheckedAt = new Date().toISOString();
+      hubQa.currentStatus = overall === 'PASS' ? 'ok' : fail > 0 ? 'warn' : 'ok';
+      hubQa.observed = `${pass} pass, ${fail} fail, ${deferred} deferred`;
+      hubQa.proof = `AgentOps deep dogfood: ${overall}. Report: ${reportPath}`;
+      hubQa.lastEventName = overall === 'PASS' ? 'capability_check_passed' : 'capability_check_warn';
+    }
+    fs.writeFileSync(monitorPath, JSON.stringify(monitor, null, 2) + '\n');
+    console.log('[hub_qa] capability-monitor.json updated');
+    // Revalidate dashboard cache so the capabilities page reflects the new data
+    const dashboardUrl = process.env['DASHBOARD_URL'] ?? 'http://localhost:3000';
+    await fetch(`${dashboardUrl}/api/revalidate`, { method: 'POST' }).catch(() => {});
+    console.log('[hub_qa] dashboard revalidated');
+  } catch (e) {
+    console.warn('[hub_qa] capability update skipped:', (e as Error).message);
+  }
+
   console.log(`\nOverall: ${overall} (${pass} pass, ${fail} fail, ${deferred} deferred)`);
   process.exit(fail > 0 ? 1 : 0);
 }
