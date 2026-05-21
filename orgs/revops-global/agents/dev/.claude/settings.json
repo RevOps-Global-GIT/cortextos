@@ -142,6 +142,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cortextos bus hook-blocked-auto-rotate",
+            "timeout": 5
+          }
+        ]
       }
     ]
   },

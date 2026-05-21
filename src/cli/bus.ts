@@ -4730,6 +4730,11 @@ busCommand
   .action(() => runHook('hook-skill-telemetry'));
 
 busCommand
+  .command('hook-blocked-auto-rotate')
+  .description('PostToolUse hook (Bash): enforces blocked-task auto-rotate protocol — warns when agent marks task blocked without spawning a worker')
+  .action(() => runHook('hook-blocked-auto-rotate'));
+
+busCommand
   .command('hook-env-write-guard')
   .description('PreToolUse hook (Write/Edit): rejects writes to *.env files with empty or non-parseable content')
   .action(() => runHook('hook-env-write-guard'));
