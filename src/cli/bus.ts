@@ -51,6 +51,7 @@ import {
   parseAgentTaskEventPayload,
 } from '../bus/agent-task-events.js';
 import { sendHumanBlockersDigest, digestHumanBlockers } from '../bus/human-blockers-digest.js';
+import { logImplicitInvocation } from '../bus/skill-instrument.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -526,6 +527,7 @@ busCommand
     }
 
     console.log(msgId);
+    await logImplicitInvocation('comms', env.agentDir ?? '', env.agentName);
     // Exit immediately after all local writes and Telegram mirror complete.
     // sendMessage() and logEvent() both schedule fire-and-forget async work via
     // setImmediate → mirrorMessageToRgos/mirrorEventToRgos → drainRetryQueue.
@@ -582,7 +584,7 @@ busCommand
   .option('--loop-cron <expr>', 'Cron expression for a linked polling loop (e.g. "*/15 * * * *"). Requires --loop-prompt.')
   .option('--loop-prompt <text>', 'Prompt that fires on each loop iteration when --loop-cron is set.')
   .option('--skip-brief-validation', 'Skip brief contract field validation (for backward-compatible scripts and tests).', false)
-  .action((title: string, opts: {
+  .action(async (title: string, opts: {
     desc?: string;
     assignee?: string;
     priority: string;
@@ -674,6 +676,7 @@ busCommand
       sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
         `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
     }
+    await logImplicitInvocation('tasks', env.agentDir ?? '', env.agentName);
     // Exit after all local writes complete. createTask() fires mirrorTaskToRgos
     // and sendMessage() fires mirrorMessageToRgos — both via fire-and-forget;
     // the drain is persisted to disk and runs on the next daemon cycle.
@@ -993,7 +996,7 @@ busCommand
   .argument('<event>', 'Event name')
   .argument('<severity>', 'Severity (info, warning, error, critical)')
   .option('--meta <json>', 'Metadata JSON string', '{}')
-  .action((category: string, event: string, severity: string, opts: { meta: string }) => {
+  .action(async (category: string, event: string, severity: string, opts: { meta: string }) => {
     const validCategories: EventCategory[] = ['action', 'error', 'metric', 'milestone', 'heartbeat', 'message', 'task', 'approval'];
     if (!validCategories.includes(category as EventCategory)) {
       console.error(`Invalid category '${category}'. Must be one of: ${validCategories.join(', ')}`);
@@ -1008,6 +1011,7 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     logEvent(paths, env.agentName, env.org, category as EventCategory, event, severity as EventSeverity, opts.meta);
     console.log(`Logged ${category}/${event} (${severity})`);
+    await logImplicitInvocation('event-logging', env.agentDir ?? '', env.agentName);
     // Exit after local JSONL write completes — logEvent schedules mirrorEventToRgos
     // via setImmediate which triggers drainRetryQueue; exit before drain runs.
     process.exit(0);
@@ -1115,6 +1119,7 @@ busCommand
       // Non-fatal: heartbeat write already succeeded
     }
     console.log(`Heartbeat updated: ${env.agentName}`);
+    await logImplicitInvocation('heartbeat', env.agentDir ?? '', env.agentName);
     // Exit after all local writes complete — logEvent schedules mirrorEventToRgos
     // via setImmediate → drainRetryQueue. The drain is disk-persisted and runs
     // on the next daemon cycle; exiting here does not lose data.
@@ -3181,6 +3186,7 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir, emailMeta);
     console.log(id);
+    await logImplicitInvocation('approvals', env.agentDir ?? '', env.agentName);
   });
 
 busCommand
