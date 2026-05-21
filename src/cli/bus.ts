@@ -5,7 +5,7 @@ import { join, dirname } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName } from '../utils/validate.js';
 import { randomString } from '../utils/random.js';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks, findTaskFile } from '../bus/task.js';
+import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, listBlockedBy, checkStaleTasks, archiveTasks, checkHumanTasks, findTaskFile } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
@@ -49,6 +49,7 @@ import {
   isAgentTaskEventType,
   parseAgentTaskEventPayload,
 } from '../bus/agent-task-events.js';
+import { sendHumanBlockersDigest, digestHumanBlockers } from '../bus/human-blockers-digest.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -691,6 +692,41 @@ busCommand
     }
     console.log(`${id} blocked by ${open.length} dependency${open.length === 1 ? '' : 's'}:`);
     for (const d of open) console.log(`  ${d.id}  [${d.status}]`);
+  });
+
+busCommand
+  .command('list-blocked')
+  .description('List all tasks that have the given task in their blocked_by array')
+  .requiredOption('--on <task_id>', 'Task ID to query dependents for')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { on: string; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const tasks = listBlockedBy(paths, opts.on);
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(tasks, null, 2));
+      return;
+    }
+
+    if (tasks.length === 0) {
+      console.log(`No tasks blocked by ${opts.on}`);
+      return;
+    }
+
+    const STATUS_ICON: Record<string, string> = { pending: '○', in_progress: '●', blocked: '◑', completed: '✓', done: '✓', cancelled: '✗' };
+    console.log(`\n  Tasks blocked by ${opts.on} (${tasks.length})\n`);
+    const header = '  Status  ID                              Assignee         Title';
+    console.log(header);
+    console.log('  ' + '-'.repeat(header.length - 2));
+    for (const t of tasks) {
+      const statusIcon = (STATUS_ICON[t.status] || '?').padEnd(8);
+      const id = t.id.padEnd(32);
+      const assignee = (t.assigned_to || '-').substring(0, 16).padEnd(17);
+      const title = t.title.substring(0, 50);
+      console.log(`  ${statusIcon}${id}${assignee}${title}`);
+    }
+    console.log('');
   });
 
 busCommand
@@ -5315,3 +5351,38 @@ function sleepMs(ms: number): Promise<void> {
 function pct(v: number): string {
   return `${Math.round(v * 100)}%`;
 }
+
+busCommand
+  .command('human-blockers-digest')
+  .description('Send a digest of pending human-required tasks and approvals to Telegram')
+  .argument('<chat-id>', 'Telegram chat ID to send the digest to')
+  .option('--since <iso>', 'Only include items created after this ISO 8601 timestamp')
+  .option('--dry-run', 'Print the digest to stdout instead of sending Telegram', false)
+  .option('--bot-token <token>', 'Telegram bot token (defaults to BOT_TOKEN env var)')
+  .action(async (chatId: string, opts: { since?: string; dryRun?: boolean; botToken?: string }) => {
+    const env = resolveEnv();
+    // Resolve bot token: CLI flag > agent .env > process.env
+    let botToken = opts.botToken || '';
+    if (!botToken && env.agentDir) {
+      const agentEnvPath = join(env.agentDir, '.env');
+      if (existsSync(agentEnvPath)) {
+        const content = readFileSync(agentEnvPath, 'utf-8');
+        const match = content.match(/^BOT_TOKEN=(.+)$/m);
+        if (match?.[1]?.trim()) botToken = match[1].trim();
+      }
+    }
+    if (!botToken) botToken = process.env.BOT_TOKEN || '';
+
+    try {
+      await sendHumanBlockersDigest({
+        chatId,
+        instanceId: env.instanceId,
+        since: opts.since,
+        dryRun: opts.dryRun,
+        botToken,
+      });
+    } catch (err) {
+      console.error(`human-blockers-digest failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });

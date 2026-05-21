@@ -73,6 +73,12 @@
       "type": "recurring",
       "cron": "0 6 * * *",
       "prompt": "Read prompts/cron-overnight-permission-loop.md and execute exactly one narrow permission/unblock digest; do not mutate external systems and exit."
+    },
+    {
+      "name": "human-blockers-digest",
+      "type": "recurring",
+      "cron": "30 6 * * *",
+      "prompt": "Run: cortextos bus human-blockers-digest $CTX_TELEGRAM_CHAT_ID"
     }
   ],
   "ctx_handoff_threshold": 88,
