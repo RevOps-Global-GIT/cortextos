@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, findTaskFile } from '../../../src/bus/task';
+import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, listBlockedBy, findTaskFile } from '../../../src/bus/task';
 import { saveOutput } from '../../../src/bus/save-output';
 import { acquireLock, releaseLock } from '../../../src/utils/lock';
 import type { BusPaths } from '../../../src/types';
@@ -1046,5 +1046,229 @@ describe('claimTask — RGOS mirror hook', () => {
     const onDisk = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
     expect(onDisk.status).toBe('in_progress');
     expect(onDisk.assigned_to).toBe('alice');
+  });
+});
+
+// ── G3: task auto-unblock on completeTask ─────────────────────────────────────
+
+describe('listBlockedBy — list tasks blocked by a given task ID', () => {
+  let testDir: string;
+  let paths: BusPaths;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-listblocked-test-'));
+    paths = {
+      ctxRoot: testDir,
+      inbox: join(testDir, 'inbox', 'x'),
+      inflight: join(testDir, 'inflight', 'x'),
+      processed: join(testDir, 'processed', 'x'),
+      logDir: join(testDir, 'logs', 'x'),
+      stateDir: join(testDir, 'state', 'x'),
+      taskDir: join(testDir, 'tasks'),
+      approvalDir: join(testDir, 'approvals'),
+      analyticsDir: join(testDir, 'analytics'),
+      heartbeatDir: join(testDir, 'heartbeats'),
+    };
+  });
+
+  afterEach(() => { rmSync(testDir, { recursive: true, force: true }); });
+
+  it('returns tasks whose blocked_by includes the given id', () => {
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker task');
+    const child1 = createTask(paths, 'alice', 'acme', 'Child 1', { blockedBy: [blocker] });
+    const child2 = createTask(paths, 'alice', 'acme', 'Child 2', { blockedBy: [blocker] });
+    const unrelated = createTask(paths, 'alice', 'acme', 'Unrelated');
+
+    const blocked = listBlockedBy(paths, blocker);
+    const ids = blocked.map(t => t.id);
+    expect(ids).toContain(child1);
+    expect(ids).toContain(child2);
+    expect(ids).not.toContain(unrelated);
+    expect(ids).not.toContain(blocker);
+  });
+
+  it('returns empty array when no tasks reference the given id', () => {
+    createTask(paths, 'alice', 'acme', 'Standalone task');
+    expect(listBlockedBy(paths, 'task_nonexistent_000')).toEqual([]);
+  });
+
+  it('returns tasks sorted by created_at DESC', () => {
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
+    const child1 = createTask(paths, 'alice', 'acme', 'Child 1', { blockedBy: [blocker] });
+    const child2 = createTask(paths, 'alice', 'acme', 'Child 2', { blockedBy: [blocker] });
+
+    const blocked = listBlockedBy(paths, blocker);
+    // Must contain both children in some order
+    const ids = blocked.map(t => t.id);
+    expect(ids).toContain(child1);
+    expect(ids).toContain(child2);
+    // created_at DESC: each task should have >= created_at than the next
+    for (let i = 0; i + 1 < blocked.length; i++) {
+      expect(new Date(blocked[i].created_at).getTime()).toBeGreaterThanOrEqual(
+        new Date(blocked[i + 1].created_at).getTime(),
+      );
+    }
+  });
+
+  it('returns empty array when task dir does not exist', () => {
+    const ghostPaths = { ...paths, taskDir: join(testDir, 'nonexistent-tasks') };
+    expect(listBlockedBy(ghostPaths, 'task_000')).toEqual([]);
+  });
+});
+
+describe('completeTask auto-unblock', () => {
+  let testDir: string;
+  let paths: BusPaths;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-autounblock-test-'));
+    paths = {
+      ctxRoot: testDir,
+      inbox: join(testDir, 'inbox', 'x'),
+      inflight: join(testDir, 'inflight', 'x'),
+      processed: join(testDir, 'processed', 'x'),
+      logDir: join(testDir, 'logs', 'x'),
+      stateDir: join(testDir, 'state', 'x'),
+      taskDir: join(testDir, 'tasks'),
+      approvalDir: join(testDir, 'approvals'),
+      analyticsDir: join(testDir, 'analytics'),
+      heartbeatDir: join(testDir, 'heartbeats'),
+    };
+  });
+
+  afterEach(() => { rmSync(testDir, { recursive: true, force: true }); });
+
+  function readTask(id: string) {
+    return JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
+  }
+
+  it('flips a single-blocker child to pending when its only blocker completes', () => {
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
+    const child = createTask(paths, 'alice', 'acme', 'Child', {
+      blockedBy: [blocker],
+      assignee: 'bob',
+    });
+
+    completeTask(paths, blocker, 'done');
+
+    const childOnDisk = readTask(child);
+    expect(childOnDisk.status).toBe('pending');
+    expect(childOnDisk.meta.unblocked_at).toBeTruthy();
+    expect(childOnDisk.meta.unblocked_by).toBe(blocker);
+  });
+
+  it('does NOT flip child while it still has outstanding (non-completed) blockers', () => {
+    const b1 = createTask(paths, 'alice', 'acme', 'Blocker 1');
+    const b2 = createTask(paths, 'alice', 'acme', 'Blocker 2');
+    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [b1, b2] });
+
+    // Complete only b1 — b2 is still pending
+    completeTask(paths, b1, 'done');
+
+    const childOnDisk = readTask(child);
+    // Should still be pending (original state, not yet auto-unblocked)
+    expect(childOnDisk.meta?.unblocked_at).toBeUndefined();
+    // Status still pending (unchanged — never was blocked status in this test)
+    expect(childOnDisk.status).toBe('pending');
+  });
+
+  it('flips child to pending when the last of multiple blockers completes', () => {
+    const b1 = createTask(paths, 'alice', 'acme', 'Blocker 1');
+    const b2 = createTask(paths, 'alice', 'acme', 'Blocker 2');
+    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [b1, b2] });
+
+    completeTask(paths, b1, 'done');
+    // child should NOT be unblocked yet
+    expect(readTask(child).meta?.unblocked_at).toBeUndefined();
+
+    completeTask(paths, b2, 'done');
+    // Now both blockers are completed — child should be unblocked
+    const childOnDisk = readTask(child);
+    expect(childOnDisk.meta.unblocked_at).toBeTruthy();
+    expect(childOnDisk.meta.unblocked_by).toBe(b2);
+  });
+
+  it('does not unblock cancelled or completed children', () => {
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
+    const cancelled = createTask(paths, 'alice', 'acme', 'Cancelled child', { blockedBy: [blocker] });
+    const completed = createTask(paths, 'alice', 'acme', 'Completed child', { blockedBy: [blocker] });
+
+    updateTask(paths, cancelled, 'cancelled');
+    completeTask(paths, completed, 'already done');
+
+    const beforeBlocker = readTask(blocker);
+    completeTask(paths, blocker, 'done');
+
+    // cancelled and completed children should not get unblocked_at
+    const cancelledOnDisk = readTask(cancelled);
+    const completedOnDisk = readTask(completed);
+    expect(cancelledOnDisk.meta?.unblocked_at).toBeUndefined();
+    // completed child had no blocked_by in its meta before unblock
+    // (it was already completed before the blocker completed)
+    expect(completedOnDisk.meta?.unblocked_by).toBeUndefined();
+    expect(beforeBlocker.status).toBe('pending');
+  });
+
+  it('enqueues an inbox message to the child assignee on unblock', () => {
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
+    const child = createTask(paths, 'alice', 'acme', 'Child', {
+      blockedBy: [blocker],
+      assignee: 'bob',
+    });
+
+    completeTask(paths, blocker, 'done');
+
+    // Check inbox for bob
+    const inboxDir = join(testDir, 'inbox', 'bob');
+    expect(existsSync(inboxDir)).toBe(true);
+    const inboxFiles = readdirSync(inboxDir).filter(f => f.endsWith('.json'));
+    expect(inboxFiles.length).toBe(1);
+
+    const msg = JSON.parse(readFileSync(join(inboxDir, inboxFiles[0]), 'utf-8'));
+    expect(msg.to).toBe('bob');
+    expect(msg.text).toContain(child);
+    expect(msg.text).toContain(blocker);
+    expect(msg.text).toContain('unblocked');
+  });
+
+  it('appends an auto-unblocked audit entry for the child task', () => {
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
+    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [blocker] });
+
+    completeTask(paths, blocker, 'done');
+
+    const audit = readTaskAudit(paths, child);
+    const unblockEntry = audit.find(e => e.note?.includes('auto-unblocked'));
+    expect(unblockEntry).toBeDefined();
+    expect(unblockEntry!.agent).toBe('cortextos');
+    expect(unblockEntry!.to).toBe('pending');
+    expect(unblockEntry!.note).toContain(blocker);
+  });
+
+  it('treats missing dep as resolved so a child with a dangling ref still unblocks', () => {
+    const real = createTask(paths, 'alice', 'acme', 'Real blocker');
+    const child = createTask(paths, 'alice', 'acme', 'Child', {
+      blockedBy: [real, 'task_ghost_000'],
+    });
+
+    completeTask(paths, real, 'done');
+
+    const childOnDisk = readTask(child);
+    // dangling ghost treated as resolved → child should be unblocked
+    expect(childOnDisk.meta.unblocked_at).toBeTruthy();
+  });
+
+  it('completeTask itself never fails even if auto-unblock has a bug (best-effort)', () => {
+    // Create a child with a manually corrupted task file to trigger an error inside autoUnblockChildren.
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
+    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [blocker] });
+
+    // Corrupt the child's JSON on disk after creation
+    writeFileSync(join(paths.taskDir, `${child}.json`), 'NOT_VALID_JSON');
+
+    // completeTask should succeed regardless
+    expect(() => completeTask(paths, blocker, 'done')).not.toThrow();
+    const blockerOnDisk = readTask(blocker);
+    expect(blockerOnDisk.status).toBe('completed');
   });
 });
