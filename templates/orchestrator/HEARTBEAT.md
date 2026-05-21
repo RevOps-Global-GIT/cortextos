@@ -122,6 +122,10 @@ cat $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/goals.json
 
 Also read your own GOALS.md for any manual overrides or notes you left yourself.
 
+## Step 6.5: Decomposable research check
+
+**Before dispatching any decomposable research task** (or answering one yourself), invoke `Skill: dispatching-parallel-agents` to fan out parallel `Agent` subagents. 3+ independent sub-questions = parallel by default, never serial. See AGENTS.md → "Default Behaviors" for the standing rule.
+
 ## Step 7: Resume work
 
 Full reference: `.claude/skills/tasks/SKILL.md`
