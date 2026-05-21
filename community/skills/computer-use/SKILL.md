@@ -235,3 +235,21 @@ const { chromium } = require('playwright');
 - Dispatch anti-pattern: `feedback_codex_computer_use.md`
 - Reliability audit: `dev/output/2026-05-09-computer-use-reliability-audit.md`
 - Speed alternatives evaluation: `analyst/output/2026-05-10-computer-use-alternatives.md`
+
+---
+
+## Skill Notes
+
+<!-- Standing rule (Greg, 2026-05-21): every skill invocation that produces a deliverable MUST append a dated entry here. Pattern mirrors revops-global-brand. -->
+
+### What Works Well
+
+<!-- Dated entries: **YYYY-MM-DD — <one-line context>** followed by what worked + why. Keep additive; don't delete prior entries unless they were proven wrong. -->
+
+### Calibrations
+
+<!-- Subtle preferences Greg consistently nudges — pre-apply these next time. -->
+
+### Lessons Learned
+
+<!-- What went wrong and what to do instead. Anchor each to a concrete incident with date. -->

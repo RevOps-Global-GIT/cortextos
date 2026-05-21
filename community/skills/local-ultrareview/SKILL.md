@@ -299,3 +299,21 @@ No problem. All review docs are in $SESSION_DIR/ when you are ready.
 - Stage 1 agents run fully in parallel. On a typical PR this takes 2-4 minutes.
 - If a PR number is passed, `gh` CLI must be installed and authenticated.
 - The main agent handles all git operations. Subagents only read and write files.
+
+---
+
+## Skill Notes
+
+<!-- Standing rule (Greg, 2026-05-21): every skill invocation that produces a deliverable MUST append a dated entry here. Pattern mirrors revops-global-brand. -->
+
+### What Works Well
+
+<!-- Dated entries: **YYYY-MM-DD — <one-line context>** followed by what worked + why. Keep additive; don't delete prior entries unless they were proven wrong. -->
+
+### Calibrations
+
+<!-- Subtle preferences Greg consistently nudges — pre-apply these next time. -->
+
+### Lessons Learned
+
+<!-- What went wrong and what to do instead. Anchor each to a concrete incident with date. -->
