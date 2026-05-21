@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { dirname, join } from 'path';
+import { sendMessage } from './message.js';
 import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport, LinkedGoal, LinkedLoop } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
@@ -291,6 +292,30 @@ export function checkTaskDependencies(
     }
   }
   return open;
+}
+
+/**
+ * List all tasks whose `blocked_by` array includes the given task ID.
+ * Scans the local task dir (same-org only — matches listTasks scoping contract).
+ * Returns tasks in created_at DESC order.
+ */
+export function listBlockedBy(paths: BusPaths, blockerId: string): Task[] {
+  let files: string[];
+  try {
+    files = readdirSync(paths.taskDir).filter(
+      f => f.startsWith('task_') && f.endsWith('.json'),
+    );
+  } catch {
+    return [];
+  }
+  const result: Task[] = [];
+  for (const file of files) {
+    try {
+      const task = JSON.parse(readFileSync(join(paths.taskDir, file), 'utf-8')) as Task;
+      if (task.blocked_by?.includes(blockerId)) result.push(task);
+    } catch { /* skip corrupt */ }
+  }
+  return result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 }
 
 /**
@@ -697,6 +722,119 @@ export function completeTask(
       });
     } catch {
       // Never let observability break task completion.
+    }
+  }
+
+  // Auto-unblock: scan all tasks that declare this task as a blocker and
+  // flip them to pending (ready) if ALL their blockers are now completed.
+  // Best-effort — a failing unblock never rolls back the completion above.
+  try {
+    autoUnblockChildren(paths, taskId);
+  } catch {
+    // Never let auto-unblock break task completion.
+  }
+}
+
+/**
+ * After a task completes, scan every task whose `blocked_by` includes the
+ * completed task ID. For each such child task:
+ *   1. Check if ALL entries in child's `blocked_by` array are now `completed`.
+ *   2. If yes: flip the child from its current status to `pending`, stamp
+ *      `meta.unblocked_at` with the current ISO timestamp, and enqueue an
+ *      inbox message to the child's assignee notifying them it's ready.
+ *
+ * Uses cross-org lookup (findTaskFile) for the child itself so that tasks
+ * filed across org boundaries are properly unblocked. The initial scan uses
+ * the local taskDir (same-org scope), consistent with listTasks / listBlockedBy.
+ *
+ * Best-effort: individual child failures are swallowed so one bad task file
+ * cannot prevent the remaining children from being unblocked.
+ */
+function autoUnblockChildren(paths: BusPaths, completedTaskId: string): void {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  // Scan local task dir for children that reference the completed task.
+  let files: string[];
+  try {
+    files = readdirSync(paths.taskDir).filter(
+      f => f.startsWith('task_') && f.endsWith('.json'),
+    );
+  } catch {
+    return;
+  }
+
+  for (const file of files) {
+    let child: Task;
+    try {
+      child = JSON.parse(readFileSync(join(paths.taskDir, file), 'utf-8')) as Task;
+    } catch {
+      continue;
+    }
+
+    if (!child.blocked_by?.includes(completedTaskId)) continue;
+    // Only unblock tasks that are still pending or blocked (not cancelled/completed).
+    if (child.status === 'completed' || child.status === 'cancelled') continue;
+
+    // Check if ALL blockers are now completed.
+    const allResolved = child.blocked_by.every((depId) => {
+      if (depId === completedTaskId) return true; // we just completed it
+      const depPath = findTaskFile(paths, depId);
+      if (!depPath) return true; // missing dep treated as resolved (dangling ref)
+      try {
+        const dep = JSON.parse(readFileSync(depPath, 'utf-8')) as Task;
+        return dep.status === 'completed';
+      } catch {
+        return true; // unreadable dep treated as resolved
+      }
+    });
+
+    if (!allResolved) continue;
+
+    // All blockers satisfied — flip child to pending and stamp unblocked_at.
+    const childFilePath = findTaskFile(paths, child.id);
+    if (!childFilePath) continue;
+    const childTaskDir = dirname(childFilePath);
+
+    try {
+      withTaskLock(childTaskDir, child.id, () => {
+        const fresh = JSON.parse(readFileSync(childFilePath, 'utf-8')) as Task;
+        // Guard: re-check status inside the lock to avoid TOCTOU races.
+        if (fresh.status === 'completed' || fresh.status === 'cancelled') return;
+        fresh.status = 'pending';
+        fresh.updated_at = now;
+        fresh.meta = { ...(fresh.meta ?? {}), unblocked_at: now, unblocked_by: completedTaskId };
+        atomicWriteSync(childFilePath, JSON.stringify(fresh));
+        // Mirror to Supabase (fire-and-forget)
+        if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+          mirrorTaskToRgos(fresh, 'update').catch(() => undefined);
+        }
+      });
+
+      // Enqueue inbox notification to the child's assignee.
+      const childAssignee = child.assigned_to;
+      if (childAssignee) {
+        try {
+          sendMessage(
+            paths,
+            'cortextos',
+            childAssignee,
+            'normal',
+            `Task ${child.id} unblocked — ${completedTaskId} completed. Pick it up when ready.`,
+          );
+        } catch {
+          // Inbox ping is best-effort — never block unblock logic.
+        }
+      }
+
+      appendTaskAudit(paths, child.id, {
+        event: 'update',
+        agent: 'cortextos',
+        from: child.status,
+        to: 'pending',
+        note: `auto-unblocked by ${completedTaskId}`,
+      }, childTaskDir);
+    } catch {
+      // Individual child failure is swallowed — process remaining children.
     }
   }
 }
