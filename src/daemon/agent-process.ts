@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { join, sep } from 'path';
 import { homedir } from 'os';
@@ -1207,6 +1207,22 @@ export class AgentProcess implements ManagedAgent {
     if (this.onStatusChange) {
       this.onStatusChange(this.getStatus());
     }
+  }
+
+  /**
+   * Reset the daily crash counter to zero and delete the persisted crash count
+   * state file. Called by AgentManager after a health-triggered or
+   * stale-heartbeat restart so the restarted agent is not penalised for
+   * pre-restart crashes in the same day.
+   */
+  public resetCrashCount(): void {
+    this.crashCount = 0;
+    const crashFile = join(this.env.ctxRoot, 'logs', this.name, '.crash_count_today');
+    try {
+      if (existsSync(crashFile)) {
+        unlinkSync(crashFile);
+      }
+    } catch { /* non-fatal — file may not exist */ }
   }
 
 }

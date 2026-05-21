@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync, copyFileSync, chmodSync, statSync } from 'fs';
 import { join, relative } from 'path';
+import { sendMessage } from '../bus/message.js';
 import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, TelegramMessage } from '../types/index.js';
 import { AgentProcess } from './agent-process.js';
 import { WorkerProcess } from './worker-process.js';
@@ -41,6 +42,22 @@ export class AgentManager {
   // Tracks agents that received a start request while still stopping.
   // stopAgent() honors these after cleanup completes so restart-all is race-free.
   private pendingRestarts: Set<string> = new Set();
+  /** Per-agent health probe interval timers. Keyed by agent name. */
+  private probeTimers: Map<string, NodeJS.Timeout> = new Map();
+  /** Per-agent stale-heartbeat watcher timers (started in startAgent, cleared in stopAgent). */
+  private staleWatchers: Map<string, NodeJS.Timeout> = new Map();
+  /**
+   * Tracks the most recent health-triggered or stale-heartbeat restart timestamp
+   * per agent (epoch ms). Enforces a 5-minute cooldown between auto-restarts
+   * so a single misbehaving agent cannot hammer restartAgent() in a tight loop.
+   */
+  private lastRestartAt: Map<string, number> = new Map();
+  /**
+   * Signal that a restart was initiated by the stale-heartbeat watcher (not a
+   * user or crash-recovery restart). Used to skip BOT_TOKEN re-validation when
+   * telegramApi was already configured before the restart.
+   */
+  private healthRestartInProgress: Set<string> = new Set();
   private instanceId: string;
   private ctxRoot: string;
   private frameworkRoot: string;
@@ -398,6 +415,33 @@ export class AgentManager {
       }
     }
 
+    // PM2 process.env fallback: if BOT_TOKEN was not found or failed format
+    // validation from the .env file, check whether creds are injected into the
+    // process environment (e.g. via PM2 ecosystem env block or a systemd
+    // EnvironmentFile). We also skip re-validation entirely when a health-restart
+    // is in progress and telegramApi was already configured pre-restart.
+    if (!telegramApi) {
+      if (this.healthRestartInProgress.has(name)) {
+        // Health-triggered restart: telegramApi was validated before the restart;
+        // skip the credential block entirely and let the caller re-wire it below.
+        log(`[${name}] Health restart in progress — skipping BOT_TOKEN re-validation`);
+      } else {
+        // Check for per-agent env var (e.g. DEV_BOT_TOKEN for agent named "dev")
+        const agentNameUpper = name.toUpperCase().replace(/-/g, '_');
+        const envBotToken = process.env[`${agentNameUpper}_BOT_TOKEN`] ?? process.env.BOT_TOKEN;
+        const envChatId = process.env[`${agentNameUpper}_CHAT_ID`] ?? process.env.CHAT_ID ?? chatId;
+        const envAllowedUser = process.env[`${agentNameUpper}_ALLOWED_USER`] ?? process.env.ALLOWED_USER ?? allowedUserId;
+
+        if (envBotToken && envChatId) {
+          log(`[${name}] Using BOT_TOKEN from process env (PM2 fallback)`);
+          telegramApi = new TelegramAPI(envBotToken);
+          chatId = envChatId;
+          if (envAllowedUser) allowedUserId = envAllowedUser;
+          log(`Telegram configured via process env (chat_id: ****${String(envChatId).slice(-4)}, allowed_user: ${envAllowedUser ? 'enabled' : 'not set'})`);
+        }
+      }
+    }
+
     const agentProcess = new AgentProcess(name, env, config, log);
     // Issue #330: pass the Telegram handle into AgentProcess so CodexAppServerPTY
     // can emit sendChatAction directly from the JSONL stream. Has no effect for
@@ -478,6 +522,15 @@ export class AgentManager {
     // the agent PTY via injectAgent().  This is the Phase 2 daemon-managed
     // external cron system — agents no longer need to call CronCreate on boot.
     this.startAgentCronScheduler(name);
+
+    // Start health probe loop for this agent (non-blocking — fires PROBE_INTERVAL_MS
+    // from now, not immediately, so the agent has time to finish booting).
+    // Wrapped in setTimeout(0) to ensure it does not block the startAgent return.
+    setTimeout(() => this.startHealthProber(name), 0);
+
+    // Start stale-heartbeat watcher. First check deferred by one cycle (60s) so
+    // the agent has time to write its initial heartbeat before we evaluate staleness.
+    setTimeout(() => this.startStaleHeartbeatWatcher(name, config), 0);
 
     // Start fast checker in background
     checker.start().catch(err => {
@@ -918,6 +971,14 @@ export class AgentManager {
       this.cronSchedulers.delete(name);
     }
 
+    // Stop health probe loop synchronously (before any await).
+    this.stopHealthProber(name);
+
+    // Stop stale-heartbeat watcher synchronously.
+    this.stopStaleHeartbeatWatcher(name);
+    // Clear health-restart flag in case stopAgent is called mid-restart.
+    this.healthRestartInProgress.delete(name);
+
     if (entry.poller) {
       entry.poller.stop();
       if (entry.pollerToken) this.unregisterPoller(entry.pollerToken, entry.poller);
@@ -1213,6 +1274,236 @@ export class AgentManager {
     this.startAgentCronScheduler(agentName);
     console.log(`[agent-manager] Cron scheduler lazy-created for ${agentName} (start-window reload)`);
     return this.cronSchedulers.has(agentName);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Health probe
+  //
+  // Every 5 minutes per running agent the daemon sends a "ping" bus message
+  // to the agent's inbox.  The agent is expected to reply with
+  //   cortextos bus ack-health-probe <probe_id>
+  // which writes {ctxRoot}/state/{agent}/health-probe.json with
+  //   { status: "acked", probe_id, acked_at }.
+  // 30 seconds after the ping the daemon checks that file.  If the ack has
+  // not arrived the agent is marked degraded and restarted.
+  // ---------------------------------------------------------------------------
+
+  private static readonly PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  private static readonly PROBE_ACK_TIMEOUT_MS = 30 * 1000;  // 30 seconds
+
+  /**
+   * Start the health probe loop for `agentName`.
+   * Idempotent — if a timer is already registered for this agent it is left
+   * untouched so the existing schedule is not disrupted.
+   * The first probe fires PROBE_INTERVAL_MS after startup so the agent has
+   * time to boot before receiving a ping.
+   */
+  private startHealthProber(agentName: string): void {
+    if (this.probeTimers.has(agentName)) return;
+
+    const timer = setInterval(() => {
+      this.runHealthProbe(agentName).catch(err => {
+        console.error(`[health-probe] Error running probe for ${agentName}: ${err}`);
+      });
+    }, AgentManager.PROBE_INTERVAL_MS);
+
+    // Allow the Node.js event loop to exit if probes are the only thing keeping
+    // it alive (e.g. in tests).
+    if (timer.unref) timer.unref();
+
+    this.probeTimers.set(agentName, timer);
+    console.log(`[health-probe] Probe loop started for ${agentName} (interval=${AgentManager.PROBE_INTERVAL_MS / 1000}s)`);
+  }
+
+  /**
+   * Cancel and remove the health probe timer for `agentName`.
+   * Called by `stopAgent()` so probes stop when the agent stops.
+   */
+  private stopHealthProber(agentName: string): void {
+    const timer = this.probeTimers.get(agentName);
+    if (timer) {
+      clearInterval(timer);
+      this.probeTimers.delete(agentName);
+      console.log(`[health-probe] Probe loop stopped for ${agentName}`);
+    }
+  }
+
+  /**
+   * Start the stale-heartbeat watcher for `agentName`.
+   *
+   * Every 60 seconds, reads {ctxRoot}/state/{agent}/heartbeat.json and checks
+   * whether `last_heartbeat` is older than `health.stale_heartbeat_minutes`
+   * (default 45). If the agent is currently `running` AND the heartbeat is
+   * stale, triggers a restartAgent() call — subject to a 5-minute cooldown
+   * to prevent rapid-fire restarts.
+   *
+   * After the restart, resets the crash count so the agent is not penalised
+   * for pre-restart crashes and clears the healthRestartInProgress flag.
+   */
+  private startStaleHeartbeatWatcher(agentName: string, config: AgentConfig): void {
+    if (this.staleWatchers.has(agentName)) return; // already running
+
+    const staleMinutes: number =
+      (config as AgentConfig & { health?: { stale_heartbeat_minutes?: number } }).health?.stale_heartbeat_minutes ?? 45;
+    const staleMs = staleMinutes * 60 * 1000;
+    const COOLDOWN_MS = 5 * 60 * 1000;
+    const INTERVAL_MS = 60 * 1000;
+
+    const timer = setInterval(async () => {
+      const entry = this.agents.get(agentName);
+      if (!entry) {
+        // Agent was stopped — watcher will be cleared by stopStaleHeartbeatWatcher
+        return;
+      }
+
+      const agentStatus = entry.process.getStatus();
+      if (agentStatus.status !== 'running') return;
+
+      const heartbeatPath = join(this.ctxRoot, 'state', agentName, 'heartbeat.json');
+      if (!existsSync(heartbeatPath)) return;
+
+      let lastHeartbeatMs: number;
+      try {
+        const raw = readFileSync(heartbeatPath, 'utf-8');
+        const hb = JSON.parse(raw) as { last_heartbeat?: string };
+        if (!hb.last_heartbeat) return;
+        lastHeartbeatMs = new Date(hb.last_heartbeat).getTime();
+      } catch {
+        return; // unreadable / malformed — skip this cycle
+      }
+
+      const ageMs = Date.now() - lastHeartbeatMs;
+      if (ageMs <= staleMs) return; // heartbeat is fresh
+
+      // Enforce cooldown
+      const lastRestart = this.lastRestartAt.get(agentName) ?? 0;
+      if (Date.now() - lastRestart < COOLDOWN_MS) {
+        console.log(`[stale-watcher] ${agentName}: heartbeat stale (${Math.round(ageMs / 60000)}min) but cooldown active — skipping restart`);
+        return;
+      }
+
+      console.log(`[stale-watcher] ${agentName}: heartbeat stale for ${Math.round(ageMs / 60000)} min (threshold: ${staleMinutes} min) — triggering restart`);
+      this.lastRestartAt.set(agentName, Date.now());
+      this.healthRestartInProgress.add(agentName);
+
+      try {
+        await this.restartAgent(agentName);
+        // Reset crash counter so pre-restart crashes don't count against the day limit
+        const newEntry = this.agents.get(agentName);
+        if (newEntry) {
+          newEntry.process.resetCrashCount();
+        }
+        console.log(`[stale-watcher] ${agentName}: restart complete, crash count reset`);
+      } catch (err) {
+        console.error(`[stale-watcher] ${agentName}: restart failed: ${err}`);
+      } finally {
+        this.healthRestartInProgress.delete(agentName);
+      }
+    }, INTERVAL_MS);
+
+    this.staleWatchers.set(agentName, timer);
+    console.log(`[stale-watcher] Watcher started for ${agentName} (threshold: ${staleMinutes} min)`);
+  }
+
+  /**
+   * Cancel and remove the stale-heartbeat watcher for `agentName`.
+   * Called by `stopAgent()` so the watcher stops when the agent stops.
+   */
+  private stopStaleHeartbeatWatcher(agentName: string): void {
+    const timer = this.staleWatchers.get(agentName);
+    if (timer) {
+      clearInterval(timer);
+      this.staleWatchers.delete(agentName);
+      console.log(`[stale-watcher] Watcher stopped for ${agentName}`);
+    }
+  }
+
+  /**
+   * Execute one probe cycle for `agentName`:
+   *   1. Write a "pending" probe state file.
+   *   2. Send a "ping" message to the agent's inbox.
+   *   3. After PROBE_ACK_TIMEOUT_MS, read the probe state file.
+   *   4. If status !== "acked" → mark degraded and restart.
+   */
+  private async runHealthProbe(agentName: string): Promise<void> {
+    // Skip if the agent is no longer running.
+    if (!this.agents.has(agentName)) return;
+
+    const probeId = `health-probe-${agentName}-${Date.now()}`;
+    const sentAt = new Date().toISOString();
+    const stateDir = join(this.ctxRoot, 'state', agentName);
+    const probeFile = join(stateDir, 'health-probe.json');
+
+    // Write pending probe state.
+    try {
+      mkdirSync(stateDir, { recursive: true });
+      writeFileSync(probeFile, JSON.stringify({ probe_id: probeId, sent_at: sentAt, status: 'pending' }));
+    } catch (err) {
+      console.error(`[health-probe] Failed to write probe state for ${agentName}: ${err}`);
+      return;
+    }
+
+    // Send the ping to the agent's inbox.
+    try {
+      const paths = resolvePaths(agentName, this.instanceId, this.resolveAgentOrg(agentName));
+      sendMessage(paths, 'daemon', agentName, 'urgent', `ping\nprobe_id: ${probeId}`);
+      console.log(`[health-probe] Ping sent to ${agentName} (probe_id=${probeId})`);
+    } catch (err) {
+      console.error(`[health-probe] Failed to send ping to ${agentName}: ${err}`);
+      // Clean up pending state so we don't false-positive on the ack check.
+      try { unlinkSync(probeFile); } catch { /* ignore */ }
+      return;
+    }
+
+    // Schedule ack check after timeout.
+    const checkTimer = setTimeout(() => {
+      this.checkProbeAck(agentName, probeId, probeFile).catch(err => {
+        console.error(`[health-probe] Error checking ack for ${agentName}: ${err}`);
+      });
+    }, AgentManager.PROBE_ACK_TIMEOUT_MS);
+
+    if (checkTimer.unref) checkTimer.unref();
+  }
+
+  /**
+   * Read the probe state file and decide whether to restart the agent.
+   * Called PROBE_ACK_TIMEOUT_MS after the ping was sent.
+   */
+  private async checkProbeAck(agentName: string, probeId: string, probeFile: string): Promise<void> {
+    // Agent may have been stopped in the interim — don't restart a stopped agent.
+    if (!this.agents.has(agentName)) return;
+
+    let state: { probe_id?: string; status?: string } = {};
+    try {
+      state = JSON.parse(readFileSync(probeFile, 'utf-8'));
+    } catch {
+      // File unreadable or missing — treat as no ack.
+    }
+
+    if (state.probe_id === probeId && state.status === 'acked') {
+      console.log(`[health-probe] ${agentName} acked probe ${probeId} — healthy`);
+      return;
+    }
+
+    // No ack within timeout — mark degraded and restart.
+    const failedAt = new Date().toISOString();
+    console.warn(`[health-probe] ${agentName} did NOT ack probe ${probeId} within ${AgentManager.PROBE_ACK_TIMEOUT_MS / 1000}s — marking degraded and restarting`);
+
+    try {
+      writeFileSync(
+        probeFile,
+        JSON.stringify({ status: 'degraded', probe_id: probeId, sent_at: state.probe_id ? undefined : undefined, failed_at: failedAt }),
+      );
+    } catch (err) {
+      console.error(`[health-probe] Failed to write degraded state for ${agentName}: ${err}`);
+    }
+
+    try {
+      await this.restartAgent(agentName);
+    } catch (err) {
+      console.error(`[health-probe] restartAgent failed for degraded agent ${agentName}: ${err}`);
+      // Best-effort — probe is non-fatal.
+    }
   }
 
   /**
