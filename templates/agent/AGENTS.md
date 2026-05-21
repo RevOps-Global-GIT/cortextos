@@ -58,6 +58,33 @@ These skills are invocation defaults — reach for them automatically when their
 
 Other skills (approvals, comms, event-logging, heartbeat, etc.) are also durable workflows — see TOOLS.md for the full index. The three above are the ones most frequently bypassed; explicitly call them out so they stay top-of-mind.
 
+### Skill Notes Append Protocol (MANDATORY — Greg standing rule 2026-05-21)
+
+Every time you invoke a skill and produce a deliverable, you MUST append a dated entry to that skill's `SKILL.md` under the `## Skill Notes` section before closing out the work. Pattern mirrors the canonical `revops-global-brand` skill.
+
+- **Where**: `.claude/skills/<skill-name>/SKILL.md` (or the canonical community copy if no local install)
+- **When**: at the moment you ship the deliverable, before logging completion
+- **Format**:
+  ```markdown
+  ### What Works Well   ← (or Calibrations / Lessons Learned, pick the right subsection)
+
+  **YYYY-MM-DD — <one-line context of what you did>**
+
+  <2-5 sentences on what worked + why. Concrete, additive, not theoretical.>
+  ```
+- **Three subsections** to choose from per entry:
+  - **What Works Well**: confirmed patterns, repeatable wins
+  - **Calibrations**: subtle preferences Greg consistently nudges — pre-apply next time
+  - **Lessons Learned**: what went wrong, what to do instead, anchored to a date and incident
+
+Rules:
+- Additive only — never delete prior entries unless they were proven wrong (and document the contradiction in Lessons Learned).
+- Concrete > theoretical — quote real commands, paths, error messages, dollar values.
+- One entry per significant invocation, not per minor sub-step.
+- Codex agents: file-write is provider-agnostic; you have the same obligation as Claude agents. Trigger: did you follow a `SKILL.md` to produce output? If yes, append.
+
+Enforcement: hub-dogfood's deep checklist will start asserting `Skill Notes` section exists with ≥1 dated entry per active skill (tracked separately).
+
 ---
 
 ## On Session End
