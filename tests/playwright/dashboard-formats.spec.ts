@@ -70,6 +70,7 @@ test.describe('Task JSON format (dashboard sync compatibility)', () => {
       assignee: 'boris',
       priority: 'high',
       description: 'A landing page with hero section',
+      skipBriefValidation: true,
     });
 
     const taskFile = join(paths.taskDir, `${taskId}.json`);
@@ -119,7 +120,7 @@ test.describe('Task JSON format (dashboard sync compatibility)', () => {
 
   test('task status transitions update updated_at', () => {
     const paths = makePaths('testbot');
-    const taskId = createTask(paths, 'testbot', 'test-org', 'Test task');
+    const taskId = createTask(paths, 'testbot', 'test-org', 'Test task', { skipBriefValidation: true });
     const taskFile = join(paths.taskDir, `${taskId}.json`);
 
     updateTask(paths, taskId, 'in_progress');
@@ -135,7 +136,7 @@ test.describe('Task JSON format (dashboard sync compatibility)', () => {
 
   test('task filename matches id', () => {
     const paths = makePaths('testbot');
-    const taskId = createTask(paths, 'testbot', 'test-org', 'Verify filename');
+    const taskId = createTask(paths, 'testbot', 'test-org', 'Verify filename', { skipBriefValidation: true });
 
     const files = readdirSync(paths.taskDir).filter(f => f.endsWith('.json'));
     expect(files).toHaveLength(1);
@@ -145,7 +146,7 @@ test.describe('Task JSON format (dashboard sync compatibility)', () => {
   test('task with special characters in title', () => {
     const paths = makePaths('testbot');
     const title = 'Fix "auth" bug & deploy (v2.0) — urgent!';
-    createTask(paths, 'testbot', 'test-org', title);
+    createTask(paths, 'testbot', 'test-org', title, { skipBriefValidation: true });
 
     const files = readdirSync(paths.taskDir).filter(f => f.endsWith('.json'));
     const task = JSON.parse(readFileSync(join(paths.taskDir, files[0]), 'utf-8'));
@@ -154,7 +155,7 @@ test.describe('Task JSON format (dashboard sync compatibility)', () => {
 
   test('task with all optional fields empty', () => {
     const paths = makePaths('testbot');
-    const taskId = createTask(paths, 'testbot', 'test-org', 'Minimal task');
+    const taskId = createTask(paths, 'testbot', 'test-org', 'Minimal task', { skipBriefValidation: true });
     const task = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
 
     // Dashboard handles null values for all optional fields
@@ -826,7 +827,7 @@ test.describe('Cross-format consistency', () => {
     const paths = makePaths('testbot');
 
     // Create items across all formats
-    createTask(paths, 'testbot', 'test-org', 'Timestamp test');
+    createTask(paths, 'testbot', 'test-org', 'Timestamp test', { skipBriefValidation: true });
     logEvent(paths, 'testbot', 'test-org', 'action', 'test', 'info');
     updateHeartbeat(paths, 'testbot', 'alive');
     logOutboundMessage(ctxRoot, 'testbot', '12345', 'test', 1);
@@ -857,7 +858,7 @@ test.describe('Cross-format consistency', () => {
     const agentName = 'my-test-agent';
     const paths = makePaths(agentName);
 
-    createTask(paths, agentName, 'test-org', 'Test');
+    createTask(paths, agentName, 'test-org', 'Test', { skipBriefValidation: true });
     logEvent(paths, agentName, 'test-org', 'action', 'test', 'info');
     updateHeartbeat(paths, agentName, 'online');
 
@@ -879,7 +880,7 @@ test.describe('Cross-format consistency', () => {
     const paths = makePaths('testbot');
     const org = 'test-org';
 
-    createTask(paths, 'testbot', org, 'Org test');
+    createTask(paths, 'testbot', org, 'Org test', { skipBriefValidation: true });
     logEvent(paths, 'testbot', org, 'action', 'test', 'info');
 
     // Tasks should be under orgs/{org}/tasks/
@@ -903,7 +904,7 @@ test.describe('Format edge cases', () => {
   test('task with very long title (500+ chars)', () => {
     const paths = makePaths('testbot');
     const longTitle = 'A'.repeat(500);
-    const taskId = createTask(paths, 'testbot', 'test-org', longTitle);
+    const taskId = createTask(paths, 'testbot', 'test-org', longTitle, { skipBriefValidation: true });
     const task = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
     expect(task.title).toBe(longTitle);
   });

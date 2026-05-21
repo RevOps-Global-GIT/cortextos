@@ -121,10 +121,25 @@ export interface Task {
   /**
    * Machine-checkable condition proving this task is done. Promoted from
    * meta.brief.success_criteria to a top-level field so it is queryable
-   * without parsing the opaque meta blob.  Required for high-stakes tasks
-   * (priority=high/urgent or needs_approval=true).
+   * without parsing the opaque meta blob.  Required for all tasks (brief
+   * contract field 1 of 4).
    */
   success_criteria?: string;
+  /**
+   * What this task explicitly will NOT do. Brief contract field 2 of 4.
+   * Required at creation time via --out-of-scope.
+   */
+  out_of_scope?: string;
+  /**
+   * Conditions that should trigger escalation to a human. Brief contract
+   * field 3 of 4. Required at creation time via --escalation-triggers.
+   */
+  escalation_triggers?: string;
+  /**
+   * Who assigned this task (e.g. "orchestrator", "greg", "self-directed").
+   * Brief contract field 4 of 4. Required at creation time via --source-hierarchy.
+   */
+  source_hierarchy?: string;
   /**
    * Goal guard — auto-created when a high-stakes task has a
    * success_criteria. Lifecycle: active → met (task completes) or failed.

@@ -93,6 +93,7 @@ describe('E2E Lifecycle', () => {
         assignee: 'boris',
         priority: 'high',
         description: 'A product landing page with hero section',
+      skipBriefValidation: true,
       });
 
       // Verify created
@@ -161,6 +162,7 @@ describe('E2E Lifecycle', () => {
       const taskId = createTask(paulPaths, 'paul', 'test-org', 'Build API endpoint', {
         assignee: 'boris',
         priority: 'high',
+      skipBriefValidation: true,
       });
 
       // Paul sends message to Boris about the task
@@ -256,6 +258,7 @@ describe('E2E Lifecycle', () => {
       const taskId = createTask(paths, 'paul', 'test-org', 'Test', {
         assignee: 'boris',
         priority: 'high',
+      skipBriefValidation: true,
       });
 
       const task = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));

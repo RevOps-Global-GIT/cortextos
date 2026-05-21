@@ -27,6 +27,7 @@ describe('Task Management', () => {
         description: 'Create a product landing page',
         assignee: 'boris',
         priority: 'high',
+skipBriefValidation: true, 
       });
 
       expect(taskId).toMatch(/^task_\d+_\d{8}$/);
@@ -56,14 +57,14 @@ describe('Task Management', () => {
 
     it('attaches meta when provided as a non-empty object', () => {
       const meta = { cron: 'poll-codex-outbox', source_msg_id: 'abc123', count: 7 };
-      const taskId = createTask(paths, 'paul', 'acme', 'Task with meta', { meta });
+      const taskId = createTask(paths, 'paul', 'acme', 'Task with meta', { meta, skipBriefValidation: true });
       const content = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
       expect(content.meta).toEqual(meta);
     });
 
     it('omits meta key when meta option is empty or absent', () => {
-      const idNoMeta = createTask(paths, 'paul', 'acme', 'No meta');
-      const idEmptyMeta = createTask(paths, 'paul', 'acme', 'Empty meta', { meta: {} });
+      const idNoMeta = createTask(paths, 'paul', 'acme', 'No meta', { skipBriefValidation: true });
+      const idEmptyMeta = createTask(paths, 'paul', 'acme', 'Empty meta', { meta: {}, skipBriefValidation: true });
       const noMeta = JSON.parse(readFileSync(join(paths.taskDir, `${idNoMeta}.json`), 'utf-8'));
       const emptyMeta = JSON.parse(readFileSync(join(paths.taskDir, `${idEmptyMeta}.json`), 'utf-8'));
       expect('meta' in noMeta).toBe(false);
@@ -73,7 +74,7 @@ describe('Task Management', () => {
 
   describe('updateTask', () => {
     it('updates task status', () => {
-      const taskId = createTask(paths, 'paul', 'acme', 'Test task');
+      const taskId = createTask(paths, 'paul', 'acme', 'Test task', { skipBriefValidation: true });
       updateTask(paths, taskId, 'in_progress');
 
       const content = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
@@ -83,7 +84,7 @@ describe('Task Management', () => {
 
   describe('completeTask', () => {
     it('sets status to completed and completed_at', () => {
-      const taskId = createTask(paths, 'paul', 'acme', 'Test task');
+      const taskId = createTask(paths, 'paul', 'acme', 'Test task', { skipBriefValidation: true });
       completeTask(paths, taskId, 'Landing page done, committed at abc123');
 
       const content = JSON.parse(readFileSync(join(paths.taskDir, `${taskId}.json`), 'utf-8'));
@@ -95,6 +96,7 @@ describe('Task Management', () => {
     it('emits a task/task_completed activity event for the assignee', () => {
       const taskId = createTask(paths, 'paul', 'acme', 'Complete-event task', {
         assignee: 'boris',
+skipBriefValidation: true, 
       });
       completeTask(paths, taskId, 'shipped');
 
@@ -121,16 +123,16 @@ describe('Task Management', () => {
 
   describe('listTasks', () => {
     it('returns all non-archived tasks', () => {
-      createTask(paths, 'paul', 'acme', 'Task 1');
-      createTask(paths, 'paul', 'acme', 'Task 2');
+      createTask(paths, 'paul', 'acme', 'Task 1', { skipBriefValidation: true });
+      createTask(paths, 'paul', 'acme', 'Task 2', { skipBriefValidation: true });
 
       const tasks = listTasks(paths);
       expect(tasks.length).toBe(2);
     });
 
     it('filters by agent', () => {
-      createTask(paths, 'paul', 'acme', 'For boris', { assignee: 'boris' });
-      createTask(paths, 'paul', 'acme', 'For paul', { assignee: 'paul' });
+      createTask(paths, 'paul', 'acme', 'For boris', { assignee: 'boris', skipBriefValidation: true });
+      createTask(paths, 'paul', 'acme', 'For paul', { assignee: 'paul', skipBriefValidation: true });
 
       const borisTasks = listTasks(paths, { agent: 'boris' });
       expect(borisTasks.length).toBe(1);
@@ -138,8 +140,8 @@ describe('Task Management', () => {
     });
 
     it('filters by status', () => {
-      const id1 = createTask(paths, 'paul', 'acme', 'Task 1');
-      createTask(paths, 'paul', 'acme', 'Task 2');
+      const id1 = createTask(paths, 'paul', 'acme', 'Task 1', { skipBriefValidation: true });
+      createTask(paths, 'paul', 'acme', 'Task 2', { skipBriefValidation: true });
       updateTask(paths, id1, 'completed');
 
       const pending = listTasks(paths, { status: 'pending' });
@@ -227,7 +229,7 @@ describe('Cross-org task lifecycle', () => {
   it('updateTask same-org happy path: still works via the fast path', () => {
     // Regression guard for the existing single-org behavior. This is the
     // hot path and must not pay any cross-org scan cost when it hits.
-    const taskId = createTask(orgAPaths, 'agentA', 'OrgA', 'Same-org task');
+    const taskId = createTask(orgAPaths, 'agentA', 'OrgA', 'Same-org task', { skipBriefValidation: true });
     updateTask(orgAPaths, taskId, 'in_progress');
 
     const content = JSON.parse(
@@ -371,7 +373,7 @@ describe('Cross-org task lifecycle', () => {
     // per-org scoping for its sync loop. If this test fails, the refactor
     // broke the contract and must be reverted or gated behind an opt-in
     // flag.
-    const sameOrgId = createTask(orgAPaths, 'agentA', 'OrgA', 'Same-org task');
+    const sameOrgId = createTask(orgAPaths, 'agentA', 'OrgA', 'Same-org task', { skipBriefValidation: true });
     writeOrgBTask('task_other_1', { title: 'Sibling-org task 1' });
     writeOrgBTask('task_other_2', { title: 'Sibling-org task 2' });
 
@@ -405,7 +407,7 @@ describe('claimTask — atomic claim (beads-inspired)', () => {
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); });
 
   it('happy path: claims a pending task, flips status + assignee, writes lock file', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Claimable work');
+    const id = createTask(paths, 'alice', 'acme', 'Claimable work', { skipBriefValidation: true });
     const task = claimTask(paths, id, 'alice');
     expect(task.status).toBe('in_progress');
     expect(task.assigned_to).toBe('alice');
@@ -421,13 +423,13 @@ describe('claimTask — atomic claim (beads-inspired)', () => {
   });
 
   it('rejects second claim with a named owner when the lock already exists', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Race target');
+    const id = createTask(paths, 'alice', 'acme', 'Race target', { skipBriefValidation: true });
     claimTask(paths, id, 'alice');
     expect(() => claimTask(paths, id, 'bob-agent')).toThrow(/already claimed by alice/);
   });
 
   it('is idempotent when the same agent re-claims (no throw, returns the task)', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Re-claim');
+    const id = createTask(paths, 'alice', 'acme', 'Re-claim', { skipBriefValidation: true });
     claimTask(paths, id, 'alice');
     const again = claimTask(paths, id, 'alice');
     expect(again.assigned_to).toBe('alice');
@@ -473,7 +475,7 @@ describe('claimTask — atomic claim (beads-inspired)', () => {
   });
 
   it('rejects claim on a non-pending task with a clear status message', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Already done');
+    const id = createTask(paths, 'alice', 'acme', 'Already done', { skipBriefValidation: true });
     updateTask(paths, id, 'completed');
     expect(() => claimTask(paths, id, 'alice')).toThrow(/not pending.*status=completed/);
   });
@@ -483,7 +485,7 @@ describe('claimTask — atomic claim (beads-inspired)', () => {
   });
 
   it('rolls back the lock if the task-JSON write fails (so retry can still succeed)', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Rollback probe');
+    const id = createTask(paths, 'alice', 'acme', 'Rollback probe', { skipBriefValidation: true });
     const claimPath = join(paths.taskDir, '.claims', `${id}.claim`);
 
     // Force atomicWriteSync to fail by deleting the task file mid-flight.
@@ -520,7 +522,7 @@ describe('Task audit log (append-only JSONL)', () => {
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); });
 
   it('createTask writes one "create" audit entry', () => {
-    const id = createTask(paths, 'alice', 'acme', 'First task', { description: 'd' });
+    const id = createTask(paths, 'alice', 'acme', 'First task', { description: 'd', skipBriefValidation: true });
     const log = readTaskAudit(paths, id);
     expect(log.length).toBe(1);
     expect(log[0].event).toBe('create');
@@ -530,7 +532,7 @@ describe('Task audit log (append-only JSONL)', () => {
   });
 
   it('full lifecycle records create + claim + complete in order', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Lifecycle');
+    const id = createTask(paths, 'alice', 'acme', 'Lifecycle', { skipBriefValidation: true });
     claimTask(paths, id, 'alice');
     completeTask(paths, id, 'shipped');
 
@@ -545,7 +547,7 @@ describe('Task audit log (append-only JSONL)', () => {
   });
 
   it('updateTask audit captures from->to transition with assignee as agent', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Updatable', { assignee: 'alice' });
+    const id = createTask(paths, 'alice', 'acme', 'Updatable', { assignee: 'alice', skipBriefValidation: true });
     updateTask(paths, id, 'blocked', { blocker: { blocker_reason: 'audit test', next_proof_required: 'test passes' } });
     updateTask(paths, id, 'pending');
 
@@ -560,7 +562,7 @@ describe('Task audit log (append-only JSONL)', () => {
   });
 
   it('audit log is append-only — existing entries are never overwritten', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Append proof');
+    const id = createTask(paths, 'alice', 'acme', 'Append proof', { skipBriefValidation: true });
     const path = join(paths.taskDir, 'audit', `${id}.jsonl`);
     const before = readFileSync(path, 'utf-8');
     updateTask(paths, id, 'blocked', { blocker: { blocker_reason: 'append test', next_proof_required: 'test passes' } });
@@ -570,7 +572,7 @@ describe('Task audit log (append-only JSONL)', () => {
   });
 
   it('corrupt lines are skipped without blocking replay of surrounding entries', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Corrupt survivor');
+    const id = createTask(paths, 'alice', 'acme', 'Corrupt survivor', { skipBriefValidation: true });
     const path = join(paths.taskDir, 'audit', `${id}.jsonl`);
     // Inject a malformed line between two valid ones
     writeFileSync(path, readFileSync(path, 'utf-8') + 'not-json-at-all\n');
@@ -613,16 +615,16 @@ describe('Task dependency DAG (blocks / blocked_by)', () => {
   }
 
   it('blocked_by stores the declared dependency + the peer gets a symmetric blocks edge', () => {
-    const a = createTask(paths, 'alice', 'acme', 'A (blocker)');
-    const b = createTask(paths, 'alice', 'acme', 'B (blocked)', { blockedBy: [a] });
+    const a = createTask(paths, 'alice', 'acme', 'A (blocker)', { skipBriefValidation: true });
+    const b = createTask(paths, 'alice', 'acme', 'B (blocked)', { blockedBy: [a], skipBriefValidation: true });
 
     expect(readTask(b).blocked_by).toEqual([a]);
     expect(readTask(a).blocks).toEqual([b]);
   });
 
   it('blocks is the symmetric reverse of blocked_by', () => {
-    const a = createTask(paths, 'alice', 'acme', 'A');
-    const b = createTask(paths, 'alice', 'acme', 'B', { blocks: [a] });
+    const a = createTask(paths, 'alice', 'acme', 'A', { skipBriefValidation: true });
+    const b = createTask(paths, 'alice', 'acme', 'B', { blocks: [a], skipBriefValidation: true });
 
     // "B blocks A" means A is blocked_by B
     expect(readTask(a).blocked_by).toEqual([b]);
@@ -630,8 +632,8 @@ describe('Task dependency DAG (blocks / blocked_by)', () => {
   });
 
   it('checkTaskDependencies returns open blockers with their current status', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
-    const blocked = createTask(paths, 'alice', 'acme', 'Blocked', { blockedBy: [blocker] });
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
+    const blocked = createTask(paths, 'alice', 'acme', 'Blocked', { blockedBy: [blocker], skipBriefValidation: true });
 
     let open = checkTaskDependencies(paths, blocked);
     expect(open.length).toBe(1);
@@ -644,29 +646,29 @@ describe('Task dependency DAG (blocks / blocked_by)', () => {
   });
 
   it('checkTaskDependencies reports missing:true for dangling dep references', () => {
-    const b = createTask(paths, 'alice', 'acme', 'B', { blockedBy: ['task_nonexistent_777'] });
+    const b = createTask(paths, 'alice', 'acme', 'B', { blockedBy: ['task_nonexistent_777'], skipBriefValidation: true });
     const open = checkTaskDependencies(paths, b);
     expect(open).toEqual([{ id: 'task_nonexistent_777', status: 'missing' }]);
   });
 
   it('cycle detection: A blocked_by B, B blocked_by A throws at creation', () => {
-    const a = createTask(paths, 'alice', 'acme', 'A');
-    const b = createTask(paths, 'alice', 'acme', 'B', { blockedBy: [a] });
+    const a = createTask(paths, 'alice', 'acme', 'A', { skipBriefValidation: true });
+    const b = createTask(paths, 'alice', 'acme', 'B', { blockedBy: [a], skipBriefValidation: true });
     // A declares new blocked_by edge to B — would form A -> B -> A cycle.
-    expect(() => createTask(paths, 'alice', 'acme', 'A-rewrite', { blockedBy: [b], blocks: [a] })).toThrow(/cycle/i);
+    expect(() => createTask(paths, 'alice', 'acme', 'A-rewrite', { blockedBy: [b], blocks: [a], skipBriefValidation: true })).toThrow(/cycle/i);
   });
 
   it('REGRESSION: cycle-rejected createTask leaves ZERO state on disk — no task json, no audit, no peer mutation', () => {
-    const a = createTask(paths, 'alice', 'acme', 'A');
-    const b = createTask(paths, 'alice', 'acme', 'B', { blockedBy: [a] });
-    const c = createTask(paths, 'alice', 'acme', 'C', { blockedBy: [b] });
+    const a = createTask(paths, 'alice', 'acme', 'A', { skipBriefValidation: true });
+    const b = createTask(paths, 'alice', 'acme', 'B', { blockedBy: [a], skipBriefValidation: true });
+    const c = createTask(paths, 'alice', 'acme', 'C', { blockedBy: [b], skipBriefValidation: true });
 
     // Snapshot A's blocks list before the cycle-try attempt.
     const aBlocksBefore = readTask(a).blocks ?? [];
 
     // Attempt a cycle: new task blocked_by c + blocks a → cycle-try → a → b → c → cycle-try.
     const filesBefore = readdirSync(paths.taskDir).filter(f => f.startsWith('task_')).sort();
-    expect(() => createTask(paths, 'alice', 'acme', 'cycle-try', { blockedBy: [c], blocks: [a] })).toThrow(/cycle/i);
+    expect(() => createTask(paths, 'alice', 'acme', 'cycle-try', { blockedBy: [c], blocks: [a], skipBriefValidation: true })).toThrow(/cycle/i);
 
     // Invariants: (1) no new task JSON, (2) no audit directory entry for the rejected id,
     // (3) peer A's blocks list unchanged.
@@ -688,9 +690,9 @@ describe('Task dependency DAG (blocks / blocked_by)', () => {
   });
 
   it('listTasks --respect-deps orders unblocked tasks before blocked ones', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
-    const blocked = createTask(paths, 'alice', 'acme', 'Blocked', { blockedBy: [blocker] });
-    const free = createTask(paths, 'alice', 'acme', 'Free');
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
+    const blocked = createTask(paths, 'alice', 'acme', 'Blocked', { blockedBy: [blocker], skipBriefValidation: true });
+    const free = createTask(paths, 'alice', 'acme', 'Free', { skipBriefValidation: true });
 
     const ordered = listTasks(paths, { respectDeps: true });
     const ids = ordered.map(t => t.id);
@@ -755,7 +757,7 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
   }
 
   it('archives a completed task older than cutoff — removes active JSON, preserves audit log', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Old done', { assignee: 'alice' });
+    const id = createTask(paths, 'alice', 'acme', 'Old done', { assignee: 'alice', skipBriefValidation: true });
     completeTask(paths, id, 'shipped');
     backdateCompletion(id, 40);
 
@@ -781,7 +783,7 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
   });
 
   it('skips recently-completed tasks (within cutoff)', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Fresh done');
+    const id = createTask(paths, 'alice', 'acme', 'Fresh done', { skipBriefValidation: true });
     completeTask(paths, id, 'ok');
     // Leave completed_at as "just now" — should be skipped.
     const report = compactTasks(paths, { olderThanDays: 30 });
@@ -790,9 +792,9 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
   });
 
   it('skips in-progress and blocked tasks regardless of age', () => {
-    const a = createTask(paths, 'alice', 'acme', 'In progress');
+    const a = createTask(paths, 'alice', 'acme', 'In progress', { skipBriefValidation: true });
     claimTask(paths, a, 'alice'); // -> in_progress
-    const b = createTask(paths, 'alice', 'acme', 'Blocked');
+    const b = createTask(paths, 'alice', 'acme', 'Blocked', { skipBriefValidation: true });
     updateTask(paths, b, 'blocked', { blocker: { blocker_reason: 'compact test', next_proof_required: 'test passes' } });
 
     const report = compactTasks(paths, { olderThanDays: 0 });
@@ -800,8 +802,8 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
   });
 
   it('NEVER archives a completed task still referenced by an open task\'s blocked_by chain', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
-    const dependent = createTask(paths, 'alice', 'acme', 'Dependent', { blockedBy: [blocker] });
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
+    const dependent = createTask(paths, 'alice', 'acme', 'Dependent', { blockedBy: [blocker], skipBriefValidation: true });
     completeTask(paths, blocker, 'done');
     backdateCompletion(blocker, 60);
 
@@ -814,9 +816,9 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
   });
 
   it('REGRESSION: transitive blocker guard — A<-B<-C with C open preserves BOTH A and B', () => {
-    const a = createTask(paths, 'alice', 'acme', 'A');
-    const b = createTask(paths, 'alice', 'acme', 'B', { blockedBy: [a] });
-    const c = createTask(paths, 'alice', 'acme', 'C', { blockedBy: [b] });
+    const a = createTask(paths, 'alice', 'acme', 'A', { skipBriefValidation: true });
+    const b = createTask(paths, 'alice', 'acme', 'B', { blockedBy: [a], skipBriefValidation: true });
+    const c = createTask(paths, 'alice', 'acme', 'C', { blockedBy: [b], skipBriefValidation: true });
     expect(c).toBeDefined();
 
     // A + B both completed and aged out; C stays open.
@@ -838,8 +840,8 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
   });
 
   it('once the dependent completes, the blocker becomes eligible', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
-    const dependent = createTask(paths, 'alice', 'acme', 'Dependent', { blockedBy: [blocker] });
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
+    const dependent = createTask(paths, 'alice', 'acme', 'Dependent', { blockedBy: [blocker], skipBriefValidation: true });
     completeTask(paths, blocker, 'done');
     backdateCompletion(blocker, 60);
     completeTask(paths, dependent, 'done');
@@ -851,7 +853,7 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
   });
 
   it('is idempotent — running a second time on the same data archives nothing', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Run-twice');
+    const id = createTask(paths, 'alice', 'acme', 'Run-twice', { skipBriefValidation: true });
     completeTask(paths, id, 'ok');
     backdateCompletion(id, 60);
 
@@ -863,7 +865,7 @@ describe('compactTasks — semantic compaction of old completed tasks', () => {
   });
 
   it('dry-run reports candidates without modifying anything', () => {
-    const id = createTask(paths, 'alice', 'acme', 'Dry-run target');
+    const id = createTask(paths, 'alice', 'acme', 'Dry-run target', { skipBriefValidation: true });
     completeTask(paths, id, 'ok');
     backdateCompletion(id, 60);
 
@@ -902,7 +904,7 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
   });
 
   it('sequential updateTask calls on the same task complete without deadlock', () => {
-    const id = createTask(paths, 'dev', 'acme', 'Lock test task');
+    const id = createTask(paths, 'dev', 'acme', 'Lock test task', { skipBriefValidation: true });
     const blockerMeta = { blocker: { blocker_reason: 'waiting on dep', next_proof_required: 'dep completes' } };
     // Rapid sequential status transitions — each must acquire and release the lock cleanly.
     updateTask(paths, id, 'in_progress');
@@ -913,7 +915,7 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
   });
 
   it('updateTask then completeTask on the same task both succeed', () => {
-    const id = createTask(paths, 'dev', 'acme', 'Lock test — update then complete');
+    const id = createTask(paths, 'dev', 'acme', 'Lock test — update then complete', { skipBriefValidation: true });
     updateTask(paths, id, 'in_progress');
     completeTask(paths, id, 'finished');
     const task = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
@@ -922,7 +924,7 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
   });
 
   it('claimTask then updateTask on the same task both succeed', () => {
-    const id = createTask(paths, 'dev', 'acme', 'Lock test — claim then update');
+    const id = createTask(paths, 'dev', 'acme', 'Lock test — claim then update', { skipBriefValidation: true });
     claimTask(paths, id, 'dev');
     updateTask(paths, id, 'blocked', { blocker: { blocker_reason: 'waiting for review', next_proof_required: 'review approved' } });
     const task = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
@@ -930,19 +932,19 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
   });
 
   it('updateTask to blocked requires blocker_reason and next_proof_required', () => {
-    const id = createTask(paths, 'dev', 'acme', 'Needs blocker context');
+    const id = createTask(paths, 'dev', 'acme', 'Needs blocker context', { skipBriefValidation: true });
     expect(() => updateTask(paths, id, 'blocked')).toThrow(/blocker context/);
   });
 
   it('updateTask to blocked without next_proof_required fails', () => {
-    const id = createTask(paths, 'dev', 'acme', 'Missing next_proof');
+    const id = createTask(paths, 'dev', 'acme', 'Missing next_proof', { skipBriefValidation: true });
     expect(() =>
       updateTask(paths, id, 'blocked', { blocker: { blocker_reason: 'reason only', next_proof_required: '' } }),
     ).toThrow(/blocker context/);
   });
 
   it('updateTask to blocked with both fields in metaMerge succeeds', () => {
-    const id = createTask(paths, 'dev', 'acme', 'Full blocker context');
+    const id = createTask(paths, 'dev', 'acme', 'Full blocker context', { skipBriefValidation: true });
     updateTask(paths, id, 'blocked', {
       blocker: { blocker_reason: 'waiting for API key', next_proof_required: 'key appears in secrets.env' },
     });
@@ -955,6 +957,7 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
   it('updateTask to blocked uses pre-existing meta.blocker if flags not passed', () => {
     const id = createTask(paths, 'dev', 'acme', 'Pre-set blocker', {
       meta: { blocker: { blocker_reason: 'pre-set reason', next_proof_required: 'pre-set proof' } },
+skipBriefValidation: true, 
     });
     updateTask(paths, id, 'blocked');
     const task = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
@@ -962,8 +965,8 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
   });
 
   it('addSymmetricEdge via createTask with blockedBy locks peer tasks correctly', () => {
-    const blocker = createTask(paths, 'dev', 'acme', 'Blocker task');
-    const dependent = createTask(paths, 'dev', 'acme', 'Dependent task', { blockedBy: [blocker] });
+    const blocker = createTask(paths, 'dev', 'acme', 'Blocker task', { skipBriefValidation: true });
+    const dependent = createTask(paths, 'dev', 'acme', 'Dependent task', { blockedBy: [blocker], skipBriefValidation: true });
     // Both peer lock files should not be left behind (lock released)
     const blockerLockDir = join(paths.taskDir, '.task-locks', blocker, '.lock.d');
     expect(existsSync(blockerLockDir)).toBe(false); // lock released
@@ -973,7 +976,7 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
   });
 
   it('lock dir is created at .task-locks/<taskId> and cleaned up after operations', () => {
-    const id = createTask(paths, 'dev', 'acme', 'Lock dir cleanup test');
+    const id = createTask(paths, 'dev', 'acme', 'Lock dir cleanup test', { skipBriefValidation: true });
     updateTask(paths, id, 'in_progress');
     completeTask(paths, id, 'done');
     // Lock dir base should exist (created by ensureDir), but .lock.d must be gone
@@ -983,7 +986,7 @@ describe('Task r/m/w lock — no deadlock under sequential mutations', () => {
 
   it('lock timeout: throws when lock cannot be acquired within retry window', () => {
     // Manually hold the lock to simulate a contending process
-    const id = createTask(paths, 'dev', 'acme', 'Lock timeout test');
+    const id = createTask(paths, 'dev', 'acme', 'Lock timeout test', { skipBriefValidation: true });
     const lockBase = join(paths.taskDir, '.task-locks', id);
     mkdirSync(lockBase, { recursive: true });
     acquireLock(lockBase); // Hold the lock with current process PID
@@ -1032,7 +1035,7 @@ describe('claimTask — RGOS mirror hook', () => {
     // The VITEST env var is set by the vitest runner; the guard in claimTask
     // prevents mirrorTaskToRgos from being called. Verify the claim still
     // succeeds and the task transitions to in_progress.
-    const id = createTask(paths, 'dev', 'acme', 'Mirror suppression test');
+    const id = createTask(paths, 'dev', 'acme', 'Mirror suppression test', { skipBriefValidation: true });
     const task = claimTask(paths, id, 'dev');
     expect(task.status).toBe('in_progress');
     expect(task.assigned_to).toBe('dev');
@@ -1041,7 +1044,7 @@ describe('claimTask — RGOS mirror hook', () => {
   });
 
   it('claimTask sets in_progress + assigned_to on disk regardless of mirror env', () => {
-    const id = createTask(paths, 'dev', 'acme', 'Disk state test');
+    const id = createTask(paths, 'dev', 'acme', 'Disk state test', { skipBriefValidation: true });
     claimTask(paths, id, 'alice');
     const onDisk = JSON.parse(readFileSync(join(paths.taskDir, `${id}.json`), 'utf-8'));
     expect(onDisk.status).toBe('in_progress');
@@ -1074,10 +1077,10 @@ describe('listBlockedBy — list tasks blocked by a given task ID', () => {
   afterEach(() => { rmSync(testDir, { recursive: true, force: true }); });
 
   it('returns tasks whose blocked_by includes the given id', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker task');
-    const child1 = createTask(paths, 'alice', 'acme', 'Child 1', { blockedBy: [blocker] });
-    const child2 = createTask(paths, 'alice', 'acme', 'Child 2', { blockedBy: [blocker] });
-    const unrelated = createTask(paths, 'alice', 'acme', 'Unrelated');
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker task', { skipBriefValidation: true });
+    const child1 = createTask(paths, 'alice', 'acme', 'Child 1', { blockedBy: [blocker], skipBriefValidation: true });
+    const child2 = createTask(paths, 'alice', 'acme', 'Child 2', { blockedBy: [blocker], skipBriefValidation: true });
+    const unrelated = createTask(paths, 'alice', 'acme', 'Unrelated', { skipBriefValidation: true });
 
     const blocked = listBlockedBy(paths, blocker);
     const ids = blocked.map(t => t.id);
@@ -1088,14 +1091,14 @@ describe('listBlockedBy — list tasks blocked by a given task ID', () => {
   });
 
   it('returns empty array when no tasks reference the given id', () => {
-    createTask(paths, 'alice', 'acme', 'Standalone task');
+    createTask(paths, 'alice', 'acme', 'Standalone task', { skipBriefValidation: true });
     expect(listBlockedBy(paths, 'task_nonexistent_000')).toEqual([]);
   });
 
   it('returns tasks sorted by created_at DESC', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
-    const child1 = createTask(paths, 'alice', 'acme', 'Child 1', { blockedBy: [blocker] });
-    const child2 = createTask(paths, 'alice', 'acme', 'Child 2', { blockedBy: [blocker] });
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
+    const child1 = createTask(paths, 'alice', 'acme', 'Child 1', { blockedBy: [blocker], skipBriefValidation: true });
+    const child2 = createTask(paths, 'alice', 'acme', 'Child 2', { blockedBy: [blocker], skipBriefValidation: true });
 
     const blocked = listBlockedBy(paths, blocker);
     // Must contain both children in some order
@@ -1143,10 +1146,11 @@ describe('completeTask auto-unblock', () => {
   }
 
   it('flips a single-blocker child to pending when its only blocker completes', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
     const child = createTask(paths, 'alice', 'acme', 'Child', {
       blockedBy: [blocker],
       assignee: 'bob',
+skipBriefValidation: true, 
     });
 
     completeTask(paths, blocker, 'done');
@@ -1158,9 +1162,9 @@ describe('completeTask auto-unblock', () => {
   });
 
   it('does NOT flip child while it still has outstanding (non-completed) blockers', () => {
-    const b1 = createTask(paths, 'alice', 'acme', 'Blocker 1');
-    const b2 = createTask(paths, 'alice', 'acme', 'Blocker 2');
-    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [b1, b2] });
+    const b1 = createTask(paths, 'alice', 'acme', 'Blocker 1', { skipBriefValidation: true });
+    const b2 = createTask(paths, 'alice', 'acme', 'Blocker 2', { skipBriefValidation: true });
+    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [b1, b2], skipBriefValidation: true });
 
     // Complete only b1 — b2 is still pending
     completeTask(paths, b1, 'done');
@@ -1173,9 +1177,9 @@ describe('completeTask auto-unblock', () => {
   });
 
   it('flips child to pending when the last of multiple blockers completes', () => {
-    const b1 = createTask(paths, 'alice', 'acme', 'Blocker 1');
-    const b2 = createTask(paths, 'alice', 'acme', 'Blocker 2');
-    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [b1, b2] });
+    const b1 = createTask(paths, 'alice', 'acme', 'Blocker 1', { skipBriefValidation: true });
+    const b2 = createTask(paths, 'alice', 'acme', 'Blocker 2', { skipBriefValidation: true });
+    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [b1, b2], skipBriefValidation: true });
 
     completeTask(paths, b1, 'done');
     // child should NOT be unblocked yet
@@ -1189,9 +1193,9 @@ describe('completeTask auto-unblock', () => {
   });
 
   it('does not unblock cancelled or completed children', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
-    const cancelled = createTask(paths, 'alice', 'acme', 'Cancelled child', { blockedBy: [blocker] });
-    const completed = createTask(paths, 'alice', 'acme', 'Completed child', { blockedBy: [blocker] });
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
+    const cancelled = createTask(paths, 'alice', 'acme', 'Cancelled child', { blockedBy: [blocker], skipBriefValidation: true });
+    const completed = createTask(paths, 'alice', 'acme', 'Completed child', { blockedBy: [blocker], skipBriefValidation: true });
 
     updateTask(paths, cancelled, 'cancelled');
     completeTask(paths, completed, 'already done');
@@ -1210,10 +1214,11 @@ describe('completeTask auto-unblock', () => {
   });
 
   it('enqueues an inbox message to the child assignee on unblock', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
     const child = createTask(paths, 'alice', 'acme', 'Child', {
       blockedBy: [blocker],
       assignee: 'bob',
+skipBriefValidation: true, 
     });
 
     completeTask(paths, blocker, 'done');
@@ -1232,8 +1237,8 @@ describe('completeTask auto-unblock', () => {
   });
 
   it('appends an auto-unblocked audit entry for the child task', () => {
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
-    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [blocker] });
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
+    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [blocker], skipBriefValidation: true });
 
     completeTask(paths, blocker, 'done');
 
@@ -1246,9 +1251,10 @@ describe('completeTask auto-unblock', () => {
   });
 
   it('treats missing dep as resolved so a child with a dangling ref still unblocks', () => {
-    const real = createTask(paths, 'alice', 'acme', 'Real blocker');
+    const real = createTask(paths, 'alice', 'acme', 'Real blocker', { skipBriefValidation: true });
     const child = createTask(paths, 'alice', 'acme', 'Child', {
       blockedBy: [real, 'task_ghost_000'],
+skipBriefValidation: true, 
     });
 
     completeTask(paths, real, 'done');
@@ -1260,8 +1266,8 @@ describe('completeTask auto-unblock', () => {
 
   it('completeTask itself never fails even if auto-unblock has a bug (best-effort)', () => {
     // Create a child with a manually corrupted task file to trigger an error inside autoUnblockChildren.
-    const blocker = createTask(paths, 'alice', 'acme', 'Blocker');
-    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [blocker] });
+    const blocker = createTask(paths, 'alice', 'acme', 'Blocker', { skipBriefValidation: true });
+    const child = createTask(paths, 'alice', 'acme', 'Child', { blockedBy: [blocker], skipBriefValidation: true });
 
     // Corrupt the child's JSON on disk after creation
     writeFileSync(join(paths.taskDir, `${child}.json`), 'NOT_VALID_JSON');
