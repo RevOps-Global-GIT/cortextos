@@ -151,7 +151,7 @@ export function runCustomerSurfaceQa(
           page: page.page,
           report_path: page.reportPath || null,
         },
-      });
+      skipBriefValidation: true, });
       taskIds.push(taskId);
     }
   }

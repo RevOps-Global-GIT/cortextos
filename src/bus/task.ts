@@ -98,6 +98,22 @@ export function createTask(
     meta?: Record<string, unknown>;
     /** Machine-checkable condition proving task is done. */
     successCriteria?: string;
+    /** What this task explicitly will NOT do. Brief contract field 2 of 4. */
+    outOfScope?: string;
+    /** Conditions that should trigger escalation to a human. Brief contract field 3 of 4. */
+    escalationTriggers?: string;
+    /** Who assigned this task (e.g. "orchestrator", "greg", "self-directed"). Brief contract field 4 of 8. */
+    sourceHierarchy?: string;
+    /** Tools/access/permissions needed to complete this task. Brief contract field 5 of 8. */
+    requiredCapabilities?: string;
+    /** How to verify the task if the primary artifact is unavailable. Brief contract field 6 of 8. */
+    fallbackProof?: string;
+    /** What output/file/PR/result is expected from this task. Brief contract field 7 of 8. */
+    artifactExpectations?: string;
+    /** Which org goal this task traces back to. Brief contract field 8 of 8. */
+    goalAncestry?: string;
+    /** Skip all 8-field brief validation (for backward-compatible call sites and tests). */
+    skipBriefValidation?: boolean;
     /** Explicit loop config. If omitted, inferred from description when polling language is found. */
     linkedLoop?: { cron: string; prompt: string };
   } = {},
@@ -113,8 +129,36 @@ export function createTask(
     blocks = [],
     meta,
     successCriteria,
+    outOfScope,
+    escalationTriggers,
+    sourceHierarchy,
+    requiredCapabilities,
+    fallbackProof,
+    artifactExpectations,
+    goalAncestry,
+    skipBriefValidation = false,
     linkedLoop: explicitLoop,
   } = options;
+
+  // Brief-contract validation: all 8 fields required unless bypassed.
+  if (!skipBriefValidation) {
+    const briefChecks: Array<[string, string | undefined, string]> = [
+      ['--success-criteria', successCriteria, 'Provide a machine-checkable condition that proves this task is done.'],
+      ['--out-of-scope', outOfScope, 'Declare what this task explicitly will NOT do.'],
+      ['--escalation-triggers', escalationTriggers, 'List conditions that should trigger escalation to a human.'],
+      ['--source-hierarchy', sourceHierarchy, 'State who assigned this task (orchestrator / greg / self-directed).'],
+      ['--required-capabilities', requiredCapabilities, 'List the tools/access/permissions needed to complete this task.'],
+      ['--fallback-proof', fallbackProof, 'Describe how to verify the task if the primary artifact is unavailable.'],
+      ['--artifact-expectations', artifactExpectations, 'Specify what output/file/PR/result is expected from this task.'],
+      ['--goal-ancestry', goalAncestry, 'Identify which org goal this task traces back to.'],
+    ];
+    const errors = briefChecks
+      .filter(([, val]) => !val || (typeof val === 'string' && val.trim() === ''))
+      .map(([flag, , explanation]) => `Error: ${flag} is required. ${explanation}`);
+    if (errors.length > 0) {
+      throw new Error(errors.join('\n'));
+    }
+  }
 
   validatePriority(priority);
 
@@ -176,6 +220,13 @@ export function createTask(
     ...(blocks.length ? { blocks: [...blocks] } : {}),
     ...(meta && Object.keys(meta).length ? { meta } : {}),
     ...(successCriteria ? { success_criteria: successCriteria } : {}),
+    ...(outOfScope ? { out_of_scope: outOfScope } : {}),
+    ...(escalationTriggers ? { escalation_triggers: escalationTriggers } : {}),
+    ...(sourceHierarchy ? { source_hierarchy: sourceHierarchy } : {}),
+    ...(requiredCapabilities ? { required_capabilities: requiredCapabilities } : {}),
+    ...(fallbackProof ? { fallback_proof: fallbackProof } : {}),
+    ...(artifactExpectations ? { artifact_expectations: artifactExpectations } : {}),
+    ...(goalAncestry ? { goal_ancestry: goalAncestry } : {}),
     ...(linkedGoal ? { linked_goal: linkedGoal } : {}),
     ...(linkedLoop ? { linked_loop: linkedLoop } : {}),
   };

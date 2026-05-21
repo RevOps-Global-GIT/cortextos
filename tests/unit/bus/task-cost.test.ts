@@ -164,7 +164,7 @@ describe('updateTask cost snapshot', () => {
   });
 
   it('stores cost_snapshot_start in meta when transitioning to in_progress', () => {
-    const taskId = createTask(paths, 'dev', 'acme', 'Test cost snapshot');
+    const taskId = createTask(paths, 'dev', 'acme', 'Test cost snapshot', { skipBriefValidation: true });
     updateTask(paths, taskId, 'in_progress');
 
     const task = JSON.parse(
@@ -176,7 +176,7 @@ describe('updateTask cost snapshot', () => {
   });
 
   it('does not set cost_snapshot_start for non-in_progress transitions', () => {
-    const taskId = createTask(paths, 'dev', 'acme', 'Test no snapshot');
+    const taskId = createTask(paths, 'dev', 'acme', 'Test no snapshot', { skipBriefValidation: true });
     updateTask(paths, taskId, 'blocked', {
       blocker: { blocker_reason: 'waiting', next_proof_required: 'PR merged' },
     });
@@ -216,6 +216,7 @@ describe('completeTask cost attribution', () => {
   it('stores session_cost_usd when cost_snapshot_start is present in meta', () => {
     const taskId = createTask(paths, 'dev', 'acme', 'Cost delta task', {
       meta: { cost_snapshot_start: 5.0 },
+skipBriefValidation: true, 
     });
     updateTask(paths, taskId, 'in_progress');
     completeTask(paths, taskId, 'done');
@@ -232,7 +233,7 @@ describe('completeTask cost attribution', () => {
   it('does not store session_cost_usd when task is completed without an in_progress snapshot', () => {
     // Complete directly from pending — updateTask(in_progress) was never called,
     // so meta.cost_snapshot_start is never written, so completeTask has no delta to store.
-    const taskId = createTask(paths, 'dev', 'acme', 'No snapshot task');
+    const taskId = createTask(paths, 'dev', 'acme', 'No snapshot task', { skipBriefValidation: true });
     // Manually set to in_progress without triggering the wiring, then complete
     // by skipping updateTask and going straight to completeTask.
     completeTask(paths, taskId, 'done');
@@ -247,6 +248,7 @@ describe('completeTask cost attribution', () => {
     // Start snapshot is in the future (impossible in practice, but guard against it)
     const taskId = createTask(paths, 'dev', 'acme', 'Negative guard', {
       meta: { cost_snapshot_start: 999.0 },
+skipBriefValidation: true, 
     });
     updateTask(paths, taskId, 'in_progress');
     completeTask(paths, taskId, 'done');

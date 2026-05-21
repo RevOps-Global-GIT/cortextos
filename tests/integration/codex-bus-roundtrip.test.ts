@@ -97,6 +97,7 @@ describe('codex bus round-trip', () => {
     const taskId = createTask(paths, 'codex-alpha', 'codex-org', 'Reindex docs', {
       assignee: 'codex-beta',
       priority: 'high',
+skipBriefValidation: true, 
     });
     expect(taskId).toMatch(/^task_\d+_[a-z0-9]+$/);
     const tasks = listTasks(paths);

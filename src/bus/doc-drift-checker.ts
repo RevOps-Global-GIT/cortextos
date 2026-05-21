@@ -240,7 +240,7 @@ export function runDocDriftChecker(
           report_path: report.reportPath || null,
           drift_lines: findings.length,
         },
-      });
+      skipBriefValidation: true, });
       report.taskCreated = true;
     }
   }

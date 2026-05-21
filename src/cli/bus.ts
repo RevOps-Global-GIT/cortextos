@@ -572,9 +572,37 @@ busCommand
   .option('--blocks <ids>', 'Comma-separated task IDs that this new task will block (symmetric reverse edge)')
   .option('--meta <json>', 'Free-form correlation metadata as JSON object (e.g. \'{"cron":"poll-codex-outbox"}\')')
   .option('--success-criteria <text>', 'Machine-checkable condition proving task is done. Auto-creates a linked goal guard on high-stakes tasks.')
+  .option('--out-of-scope <text>', 'What this task explicitly does NOT do.')
+  .option('--escalation-triggers <text>', 'Conditions that should escalate this task to a human.')
+  .option('--source-hierarchy <text>', 'Who assigned this task (e.g. "orchestrator", "greg", "self-directed").')
+  .option('--required-capabilities <text>', 'Tools/access/permissions needed to complete this task.')
+  .option('--fallback-proof <text>', 'How to verify the task if the primary artifact is unavailable.')
+  .option('--artifact-expectations <text>', 'What output/file/PR/result is expected from this task.')
+  .option('--goal-ancestry <text>', 'Which org goal this task traces back to.')
   .option('--loop-cron <expr>', 'Cron expression for a linked polling loop (e.g. "*/15 * * * *"). Requires --loop-prompt.')
   .option('--loop-prompt <text>', 'Prompt that fires on each loop iteration when --loop-cron is set.')
-  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string; meta?: string; successCriteria?: string; loopCron?: string; loopPrompt?: string }) => {
+  .option('--skip-brief-validation', 'Skip brief contract field validation (for backward-compatible scripts and tests).', false)
+  .action((title: string, opts: {
+    desc?: string;
+    assignee?: string;
+    priority: string;
+    project?: string;
+    needsApproval?: boolean;
+    blockedBy?: string;
+    blocks?: string;
+    meta?: string;
+    successCriteria?: string;
+    outOfScope?: string;
+    escalationTriggers?: string;
+    sourceHierarchy?: string;
+    requiredCapabilities?: string;
+    fallbackProof?: string;
+    artifactExpectations?: string;
+    goalAncestry?: string;
+    loopCron?: string;
+    loopPrompt?: string;
+    skipBriefValidation?: boolean;
+  }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
@@ -592,9 +620,23 @@ busCommand
         process.exit(1);
       }
     }
-    if (!opts.successCriteria) {
-      console.error('Error: --success-criteria is required. Provide a machine-checkable condition proving this task is done.');
-      process.exit(1);
+    if (!opts.skipBriefValidation) {
+      const briefChecks: Array<[string, string | undefined, string]> = [
+        ['--success-criteria', opts.successCriteria, 'Provide a machine-checkable condition that proves this task is done.'],
+        ['--out-of-scope', opts.outOfScope, 'Declare what this task explicitly will NOT do.'],
+        ['--escalation-triggers', opts.escalationTriggers, 'List conditions that should trigger escalation to a human.'],
+        ['--source-hierarchy', opts.sourceHierarchy, 'State who assigned this task (orchestrator / greg / self-directed).'],
+        ['--required-capabilities', opts.requiredCapabilities, 'List the tools/access/permissions needed to complete this task.'],
+        ['--fallback-proof', opts.fallbackProof, 'Describe how to verify the task if the primary artifact is unavailable.'],
+        ['--artifact-expectations', opts.artifactExpectations, 'Specify what output/file/PR/result is expected from this task.'],
+        ['--goal-ancestry', opts.goalAncestry, 'Identify which org goal this task traces back to.'],
+      ];
+      for (const [flag, val, explanation] of briefChecks) {
+        if (!val || val.trim() === '') {
+          console.error(`Error: ${flag} is required. ${explanation}`);
+          process.exit(1);
+        }
+      }
     }
     if ((opts.loopCron && !opts.loopPrompt) || (!opts.loopCron && opts.loopPrompt)) {
       console.error('--loop-cron and --loop-prompt must be specified together');
@@ -614,6 +656,14 @@ busCommand
       blocks: parseList(opts.blocks),
       meta: { trace_id: autoTraceId, ...(meta ?? {}) },
       successCriteria: opts.successCriteria,
+      outOfScope: opts.outOfScope,
+      escalationTriggers: opts.escalationTriggers,
+      sourceHierarchy: opts.sourceHierarchy,
+      requiredCapabilities: opts.requiredCapabilities,
+      fallbackProof: opts.fallbackProof,
+      artifactExpectations: opts.artifactExpectations,
+      goalAncestry: opts.goalAncestry,
+      skipBriefValidation: opts.skipBriefValidation,
       ...(opts.loopCron && opts.loopPrompt ? { linkedLoop: { cron: opts.loopCron, prompt: opts.loopPrompt } } : {}),
     });
     console.log(taskId);
@@ -1604,6 +1654,7 @@ busCommand
             priority: 'normal',
             project: 'maintenance',
             meta: { source: 'pr-stuck-watcher', repo: pr.repo, pr_number: pr.number, url: pr.url },
+            skipBriefValidation: true,
           });
           actions.push({ pr: prRef, action: 'create_task', ok: true, detail: taskId });
         } else {
@@ -1888,6 +1939,7 @@ busCommand
         const taskId = createTask(paths, env.agentName, env.org, `[codebase-scan] ${item}`, {
           description: `Auto-generated by codebase-scan loop on ${today}. See ${outputPath} for full report.`,
           priority: 'low',
+          skipBriefValidation: true,
         });
         console.log(`[codebase-scan] Created task ${taskId}: ${item}`);
         logEvent(paths, env.agentName, env.org, 'action', 'codebase_scan_task_created', 'info', { task_id: taskId });
@@ -1951,6 +2003,7 @@ busCommand
           `[security] ${vuln.severity} vuln in ${vuln.name} — ${fix}`, {
             description: `Detected by security-audit loop on ${today}. See ${outputPath}.`,
             priority: vuln.severity === 'critical' ? 'high' : 'normal',
+            skipBriefValidation: true,
           });
         console.log(`[security-audit] Created task ${taskId}: ${vuln.name} (${vuln.severity})`);
         logEvent(paths, env.agentName, env.org, 'action', 'security_vuln_task_created', 'info',
