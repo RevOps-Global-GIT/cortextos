@@ -167,7 +167,7 @@ function scanPendingApprovals(ctxRoot: string, since?: Date): BlockerEntry[] {
           priority: 'high', // approvals are always treated as high-priority blockers
           summary: `[approval] ${approval.title}`,
           createdAt: approval.created_at,
-          details: (approval as Record<string, unknown>).description as string | undefined,
+          details: (approval as unknown as Record<string, unknown>).description as string | undefined,
         });
       } catch {
         // Skip corrupt
