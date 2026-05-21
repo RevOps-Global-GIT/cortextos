@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * external-health-monitor.ts
  *
@@ -95,6 +94,23 @@ function markRecovered(agentName: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Telegram notification helper
+// ---------------------------------------------------------------------------
+
+function notifyTelegram(agentName: string | null, reason: string): void {
+  const chatId = process.env.CTX_TELEGRAM_CHAT_ID;
+  const botToken = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
+  if (!chatId || !botToken) return;
+  const subject = agentName ?? 'daemon';
+  const text = `[health-monitor] Auto-recovered ${subject}: ${reason}`;
+  fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text }),
+  }).catch(() => {}); // best-effort, never block the poll loop
+}
+
+// ---------------------------------------------------------------------------
 // Recovery actions
 // ---------------------------------------------------------------------------
 
@@ -112,6 +128,8 @@ function recoverAgent(agentName: string, reason: string): void {
     // Expected when the agent is already running — log but continue
     log('ERROR', agentName, `cortextos start failed (may be already running): ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Fire-and-forget Telegram notification
+  notifyTelegram(agentName, reason);
 }
 
 function recoverDaemon(): void {
@@ -128,6 +146,8 @@ function recoverDaemon(): void {
   } catch (err) {
     log('ERROR', null, `pm2 restart failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Fire-and-forget Telegram notification
+  notifyTelegram(null, 'daemon PID was dead — pm2 restart cortextos-daemon triggered');
 }
 
 // ---------------------------------------------------------------------------
