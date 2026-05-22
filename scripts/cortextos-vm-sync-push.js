@@ -678,6 +678,132 @@ async function syncRotationEvents(sinceTsStr) {
 
 // ── HTTP push ─────────────────────────────────────────────────────────────────
 
+// ── Hub QA status sync ────────────────────────────────────────────────────────
+
+const HUB_QA_ROOTS = [
+  "/home/cortextos/cortextos/orgs/revops-global/agents/hub-dogfood/output",
+  "/home/cortextos/cortextos/orgs/revops-global/agents/qa-agent/output",
+  "/home/cortextos/cortextos/orgs/revops-global/agents/codex/output/playwright-qa",
+];
+const HUB_QA_PATTERN = /(?:qa-summary|report|dogfood).*\.md$/i;
+const VM_QA_MONITOR_NODE_KEY = "vm-qa-monitor";
+const ORCH_TASK_ORG_ID = "00000000-0000-0000-0000-000000000001";
+
+function listFilesLocal(root, maxDepth = 4) {
+  if (!fs.existsSync(root)) return [];
+  const output = [];
+  const visit = (dir, depth) => {
+    if (depth > maxDepth) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(fullPath, depth + 1);
+      else if (entry.isFile()) output.push(fullPath);
+    }
+  };
+  visit(root, 0);
+  return output;
+}
+
+function computeHubQaStatus() {
+  const candidates = HUB_QA_ROOTS
+    .flatMap((root) => listFilesLocal(root))
+    .filter((p) => HUB_QA_PATTERN.test(p))
+    .map((p) => {
+      try { return { path: p, mtime: fs.statSync(p).mtime.getTime() }; } catch { return null; }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime);
+
+  if (candidates.length === 0) {
+    return {
+      status: "empty",
+      label: "No QA artifact found",
+      updated_at: null,
+      stale_reason: "No qa-summary/report/dogfood .md found in playwright-qa roots",
+      failed_count: 0,
+      follow_up_count: 0,
+      passed_count: 0,
+      artifact_path: null,
+    };
+  }
+
+  const best = candidates[0];
+  let text = "";
+  try { text = fs.readFileSync(best.path, "utf8"); } catch { /* skip */ }
+  const updatedAt = new Date(best.mtime).toISOString();
+  const ageMs = Date.now() - best.mtime;
+  const ageMinutes = Math.floor(ageMs / 60000);
+
+  function numMatch(pattern) {
+    const m = text.match(pattern);
+    return m ? Number(m[1]) : null;
+  }
+  // Try multiple summary line formats: "This pass total:** X passed, Y failed, Z deferred"
+  // OR "**TOTALS: X passed / Y failed / Z deferred**"
+  const passTotal = text.match(/This pass total:\*\*\s*(\d+)\s+passed,\s*(\d+)\s+failed,\s*(\d+)\s+deferred/i)
+    ?? text.match(/\*\*TOTALS?:\s*(\d+)\s+passed\s*\/\s*(\d+)\s+failed\s*\/\s*(\d+)\s+deferred\*\*/i);
+  const passed = passTotal ? Number(passTotal[1]) : numMatch(/Checks passed:\s*(\d+)/i) ?? 0;
+  const failed = passTotal ? Number(passTotal[2]) : numMatch(/Checks failed:\s*(\d+)/i) ?? 0;
+  const deferred = passTotal ? Number(passTotal[3]) : numMatch(/Checks deferred:\s*(\d+)/i) ?? 0;
+
+  const STALE_MINUTES = 6 * 60;
+  return {
+    status: failed > 0 ? "error" : deferred > 0 ? "warning" : ageMinutes > STALE_MINUTES ? "stale" : "healthy",
+    label: `${passed} pass, ${failed} fail, ${deferred} follow-up`,
+    updated_at: updatedAt,
+    stale_reason:
+      failed > 0 ? `${failed} failing check(s) in ${path.basename(best.path)}`
+      : ageMinutes > STALE_MINUTES ? `${ageMinutes}m old; threshold ${STALE_MINUTES}m`
+      : deferred > 0 ? `${deferred} follow-up check(s) need attention`
+      : null,
+    failed_count: failed,
+    follow_up_count: deferred,
+    passed_count: passed,
+    artifact_path: best.path,
+  };
+}
+
+async function syncHubQaStatus() {
+  const serviceKey = secrets.SUPABASE_RGOS_SERVICE_KEY;
+  if (!serviceKey || !SUPABASE_URL) return;
+
+  const hubQa = computeHubQaStatus();
+  const row = {
+    org_id: ORCH_TASK_ORG_ID,
+    node_key: VM_QA_MONITOR_NODE_KEY,
+    provider: "cortextos",
+    display_name: "VM QA Monitor",
+    runtime: "claude",
+    status: hubQa.status === "healthy" ? "ready" : hubQa.status === "empty" ? "offline" : "idle",
+    capabilities: ["qa", "playwright"],
+    app_readiness: { hub_qa: hubQa, source: "vm-sync-push", synced_at: new Date().toISOString() },
+    last_heartbeat_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/orch_fleet_nodes`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${serviceKey}`,
+      apikey: serviceKey,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    },
+    body: JSON.stringify(row),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.warn(`[vm-sync-push] hub_qa sync failed ${res.status}: ${text.slice(0, 200)}`);
+  } else {
+    console.log(`[vm-sync-push] hub_qa synced: ${hubQa.status} (${hubQa.label})`);
+  }
+}
+
+// ── HTTP push ─────────────────────────────────────────────────────────────────
+
 async function push(payload) {
   const serviceKey = secrets.SUPABASE_RGOS_SERVICE_KEY;
   const res = await fetch(EDGE_URL, {
@@ -739,6 +865,9 @@ async function main() {
 
     // Write rotation events directly to orch_rotation_events
     await syncRotationEvents(watermark.last_synced);
+
+    // Sync hub_qa artifact status to Supabase so Vercel overview.ts can read it
+    await syncHubQaStatus();
 
     saveWatermark(payload.generated_at);
   } catch (err) {
