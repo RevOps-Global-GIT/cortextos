@@ -45,6 +45,7 @@ describe('SUBCOMMAND_SKILL_MAP', () => {
 
 describe('logImplicitInvocation', () => {
   let tmpRoot: string;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
   const originalSupabaseUrl = process.env.SUPABASE_RGOS_URL;
   const originalRgosSupabaseUrl = process.env.RGOS_SUPABASE_URL;
   const originalSupabaseKey = process.env.SUPABASE_RGOS_SERVICE_KEY;
@@ -58,9 +59,11 @@ describe('logImplicitInvocation', () => {
     delete process.env.RGOS_SUPABASE_URL;
     delete process.env.SUPABASE_RGOS_SERVICE_KEY;
     delete process.env.RGOS_SUPABASE_SERVICE_KEY;
+    stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   });
 
   afterEach(() => {
+    stderrSpy.mockRestore();
     rmSync(tmpRoot, { recursive: true, force: true });
     if (originalSupabaseUrl === undefined) delete process.env.SUPABASE_RGOS_URL;
     else process.env.SUPABASE_RGOS_URL = originalSupabaseUrl;
@@ -185,9 +188,22 @@ describe('logImplicitInvocation', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('silently swallows fetch errors', async () => {
+  it('logs fetch errors without throwing', async () => {
     fetchSpy.mockRejectedValue(new Error('network error'));
     const agentDir = makeFakeAgentDir(tmpRoot);
     await expect(logImplicitInvocation('comms', agentDir, 'dev')).resolves.toBeUndefined();
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('skill-instrument: error logging "comms"'));
+  });
+
+  it('logs insert failures without throwing', async () => {
+    fetchSpy
+      .mockResolvedValueOnce({ ok: true, json: async () => [] })
+      .mockResolvedValueOnce({ ok: true, json: async () => [] })
+      .mockResolvedValueOnce({ ok: false, status: 400, text: async () => 'bad payload' });
+    const agentDir = makeFakeAgentDir(tmpRoot);
+
+    await expect(logImplicitInvocation('tasks', agentDir, 'dev')).resolves.toBeUndefined();
+
+    expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('skill-instrument: insert failed for "tasks" (400): bad payload'));
   });
 });

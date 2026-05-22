@@ -7,7 +7,7 @@
  * though they fire 1000+ times per week.
  *
  * Call logImplicitInvocation(slug, agentDir, agentRole) at the end of each such
- * subcommand. The call is always fire-and-forget — errors are silently swallowed
+ * subcommand. The call is always fire-and-forget — errors are logged to stderr
  * and the bus command's own process.exit(0) is not delayed.
  */
 
@@ -25,7 +25,8 @@ export const SUBCOMMAND_SKILL_MAP: Record<string, string> = {
 
 /**
  * Insert a row into orch_skill_invocations for an implicit bus-layer invocation.
- * Reads Supabase credentials from `agentDir/.env`. Silently no-ops on any error.
+ * Reads Supabase credentials from `agentDir/.env`. No-ops when credentials are
+ * absent, and logs non-fatal telemetry errors to stderr.
  */
 export type SkillInvocationSource = 'bus_implicit' | 'cron';
 
@@ -45,6 +46,18 @@ function envValue(agentDir: string, key: string): string | undefined {
   return process.env[key]?.trim()
     || readEnvFileValue(agentEnv, key)
     || readEnvFileValue(orgEnv, key);
+}
+
+async function responseText(res: Response): Promise<string> {
+  try {
+    return await res.text();
+  } catch {
+    return '';
+  }
+}
+
+function warn(message: string): void {
+  process.stderr.write(`skill-instrument: ${message}\n`);
 }
 
 export async function logImplicitInvocation(
@@ -70,6 +83,8 @@ export async function logImplicitInvocation(
     if (skillRes.ok) {
       const rows = (await skillRes.json()) as Array<{ id: string }>;
       skillId = rows[0]?.id ?? null;
+    } else {
+      warn(`skill lookup failed for "${skillSlug}" (${skillRes.status}): ${await responseText(skillRes)}`);
     }
 
     // Resolve agent_id (nullable)
@@ -82,6 +97,8 @@ export async function logImplicitInvocation(
       if (agentRes.ok) {
         const rows = (await agentRes.json()) as Array<{ id: string }>;
         agentId = rows[0]?.id ?? null;
+      } else {
+        warn(`agent lookup failed for "${agentRole}" (${agentRes.status}): ${await responseText(agentRes)}`);
       }
     }
 
@@ -94,12 +111,16 @@ export async function logImplicitInvocation(
     if (agentId) body.agent_id = agentId;
     if (agentRole) body.agent_role = agentRole;
 
-    await fetch(`${sbUrl}/rest/v1/orch_skill_invocations`, {
+    const insertRes = await fetch(`${sbUrl}/rest/v1/orch_skill_invocations`, {
       method: 'POST',
       headers: { ...headers, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
       body: JSON.stringify(body),
     });
-  } catch {
-    // Never throw — must not block the bus command that called us
+    if (!insertRes.ok) {
+      warn(`insert failed for "${skillSlug}" (${insertRes.status}): ${await responseText(insertRes)}`);
+    }
+  } catch (err) {
+    // Never throw — must not block the bus command that called us.
+    warn(`error logging "${skillSlug}": ${err instanceof Error ? err.message : String(err)}`);
   }
 }

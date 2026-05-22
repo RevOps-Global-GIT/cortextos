@@ -669,7 +669,7 @@ export async function syncExperimentToSupabase(
   };
 
   const payload: Record<string, unknown> = {
-    org_id: 'revops-global',
+    org_id: REVOPS_ORG_UUID,
     hypothesis: experiment.hypothesis,
     method: experiment.measurement || `${experiment.metric} via ${experiment.surface}`,
     proposed_by: experiment.agent,
