@@ -85,6 +85,12 @@
       "type": "recurring",
       "interval": "15m",
       "prompt": "Run: cortextos bus wip-enforcer"
+    },
+    {
+      "name": "idle-overlap-watcher",
+      "type": "recurring",
+      "interval": "15m",
+      "prompt": "bash /home/cortextos/cortextos/scripts/idle-overlap-watcher.sh"
     }
   ],
   "ctx_handoff_threshold": 88,
