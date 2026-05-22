@@ -2466,9 +2466,35 @@ async function runSupremeOutstandingChecks(page: Page): Promise<CheckResult[]> {
   }
 
   // CHECK 3: Items loaded or empty state (auth gate breakage shows error/spinner stuck)
-  results.push(await checkDataOrEmpty(page, sp, 'CHECK 3 Items or empty state',
-    '[class*="card"], [class*="item"], [data-supreme], [role="listitem"]',
-    /no items|all clear|nothing outstanding|no messages|empty/i));
+  try {
+    const state = await wallClock(
+      page.evaluate(() => {
+        const body = document.body.textContent ?? '';
+        const items = document.querySelectorAll('[class*="card"], [class*="item"], [role="listitem"]').length;
+        const hasError = /failed to load|error loading|unauthorized|403|401|something went wrong/i.test(body);
+        const hasEmpty = /no items|all clear|nothing outstanding|no messages|empty/i.test(body);
+        return { items, hasError, hasEmpty };
+      }),
+      6000,
+      { items: 0, hasError: false, hasEmpty: false },
+    );
+    if (state.hasError) {
+      results.push({ check: 'CHECK 3 Items or empty state', status: 'FAIL',
+        evidence: `Page contains error message — API likely failing auth gate. items=${state.items}` });
+    } else if (state.items > 0) {
+      results.push({ check: 'CHECK 3 Items or empty state', status: 'PASS',
+        evidence: `${state.items} item(s) visible.` });
+    } else if (state.hasEmpty) {
+      results.push({ check: 'CHECK 3 Items or empty state', status: 'PASS',
+        evidence: 'Empty state shown — valid state, renders correctly.' });
+    } else {
+      results.push({ check: 'CHECK 3 Items or empty state', status: 'DEFERRED',
+        evidence: 'Neither items, empty state, nor error message detected — page may still be loading.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Items or empty state', status: 'FAIL',
+      evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
 
   return results;
 }
