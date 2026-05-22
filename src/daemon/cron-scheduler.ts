@@ -167,6 +167,8 @@ interface ScheduledCron {
   changeKey: string;
   /** True while onFire (+ retries) is executing — prevents re-entry on the next tick. */
   firing?: boolean;
+  /** Epoch ms when firing was last set to true — used to detect and recover hung fires. */
+  fireStartedAt?: number;
   /** Epoch ms when idle-deferral began (null = not deferring). */
   deferStart: number | null;
   /**
@@ -298,6 +300,13 @@ export interface ManagedAgent {
 
 /** Max time (ms) to defer a cron while the agent is busy before force-injecting. */
 const MAX_DEFER_MS = 15 * 60_000; // 15 minutes
+
+/**
+ * Max time (ms) a cron fire is allowed to be "in flight" before we treat it
+ * as a hung PTY injection and reset the firing flag.  Set well above the
+ * total retry wall-time (1s + 4s + 16s ≈ 21s) plus generous buffer.
+ */
+const MAX_FIRE_DURATION_MS = 90_000; // 90 seconds
 
 export class CronScheduler {
   private readonly agentName: string;
@@ -563,7 +572,21 @@ export class CronScheduler {
 
       // Guard against re-entry: if a previous tick's async fire+retry is still
       // in flight (can happen with fake timers or very slow onFire), skip.
+      // Exception: if the fire has been in-flight longer than MAX_FIRE_DURATION_MS
+      // the onFire call has almost certainly hung (e.g. blocked PTY write).
+      // Reset the firing flag and schedule a miss-retry so the cron can recover
+      // without requiring a daemon restart.
       if (sc.firing) {
+        if (sc.fireStartedAt !== undefined && now - sc.fireStartedAt > MAX_FIRE_DURATION_MS) {
+          this.logger(
+            `[cron-scheduler] WARNING: cron "${name}" has been firing for ` +
+            `${Math.round((now - sc.fireStartedAt) / 1000)}s — assumed hung; resetting ` +
+            `firing flag and scheduling miss-retry in 5min`
+          );
+          sc.firing = false;
+          sc.fireStartedAt = undefined;
+          sc.nextFireAt = now + 5 * 60_000;
+        }
         continue;
       }
 
@@ -588,6 +611,7 @@ export class CronScheduler {
       sc.deferStart = null;
 
       sc.firing = true;
+      sc.fireStartedAt = now;
       const cron = sc.definition;
       this.logger(`[cron-scheduler] firing cron "${name}" (was due ${new Date(sc.nextFireAt).toISOString()})`);
 
@@ -693,6 +717,7 @@ export class CronScheduler {
         }
       }
       sc.firing = false;
+      sc.fireStartedAt = undefined;
     }
   }
 }
