@@ -17,6 +17,10 @@ DESCRIPTION: ${task.description || '(none)'}
 SUCCESS CRITERIA: ${task.success_criteria}
 COMPLETION RESULT: ${task.result || '(no result provided)'}
 
+IMPORTANT: File paths mentioned in the completion result are relative to the executing agent's output
+directory and cannot be verified here. Do NOT penalize for unverifiable file paths — evaluate based
+on whether the described work satisfies the success criteria.
+
 Score the completion 1-10:
 - 1-4: FAIL — success criteria clearly not met
 - 5-6: NEEDS-REVISION — partial or unclear completion
