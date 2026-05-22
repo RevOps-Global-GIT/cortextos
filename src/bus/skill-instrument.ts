@@ -12,7 +12,7 @@
  */
 
 import { existsSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 
 /** Maps bus subcommand names to their canonical skill slugs. */
 export const SUBCOMMAND_SKILL_MAP: Record<string, string> = {
@@ -27,18 +27,36 @@ export const SUBCOMMAND_SKILL_MAP: Record<string, string> = {
  * Insert a row into orch_skill_invocations for an implicit bus-layer invocation.
  * Reads Supabase credentials from `agentDir/.env`. Silently no-ops on any error.
  */
+export type SkillInvocationSource = 'bus_implicit' | 'cron';
+
+export interface LogImplicitInvocationOptions {
+  source?: SkillInvocationSource;
+}
+
+function readEnvFileValue(file: string, key: string): string | undefined {
+  if (!existsSync(file)) return undefined;
+  const content = readFileSync(file, 'utf-8');
+  return content.match(new RegExp(`^${key}=(.+)$`, 'm'))?.[1]?.trim();
+}
+
+function envValue(agentDir: string, key: string): string | undefined {
+  const agentEnv = join(agentDir, '.env');
+  const orgEnv = join(dirname(dirname(agentDir)), 'secrets.env');
+  return process.env[key]?.trim()
+    || readEnvFileValue(agentEnv, key)
+    || readEnvFileValue(orgEnv, key);
+}
+
 export async function logImplicitInvocation(
   skillSlug: string,
   agentDir: string,
   agentRole?: string,
+  options: LogImplicitInvocationOptions = {},
 ): Promise<void> {
   try {
     if (!agentDir) return;
-    const envFile = join(agentDir, '.env');
-    if (!existsSync(envFile)) return;
-    const envContent = readFileSync(envFile, 'utf-8');
-    const sbUrl = envContent.match(/^SUPABASE_RGOS_URL=(.+)$/m)?.[1]?.trim();
-    const sbKey = envContent.match(/^SUPABASE_RGOS_SERVICE_KEY=(.+)$/m)?.[1]?.trim();
+    const sbUrl = envValue(agentDir, 'SUPABASE_RGOS_URL') || envValue(agentDir, 'RGOS_SUPABASE_URL');
+    const sbKey = envValue(agentDir, 'SUPABASE_RGOS_SERVICE_KEY') || envValue(agentDir, 'RGOS_SUPABASE_SERVICE_KEY');
     if (!sbUrl || !sbKey) return;
 
     const headers = { apikey: sbKey, Authorization: `Bearer ${sbKey}` };
@@ -69,7 +87,7 @@ export async function logImplicitInvocation(
 
     const body: Record<string, unknown> = {
       skill_slug: skillSlug,
-      source: 'bus_implicit',
+      source: options.source ?? 'bus_implicit',
       succeeded: true,
     };
     if (skillId) body.skill_id = skillId;
