@@ -184,16 +184,38 @@ async function pageText(page: Page): Promise<string> {
   return page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
 }
 
-async function elCount(page: Page, selector: string): Promise<number> {
-  return page.evaluate((sel) => document.querySelectorAll(sel).length, selector).catch(() => 0);
-}
-
 async function hasNotFoundPage(page: Page): Promise<boolean> {
   return page.evaluate(() => {
     const text = document.body?.innerText ?? '';
     const heading = document.querySelector('h1')?.textContent?.trim() ?? '';
     return heading === '404' && /page not found|return to home/i.test(text);
   }).catch(() => false);
+}
+
+async function hasServerErrorPage(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const body = document.body?.innerText ?? '';
+    const title = document.title ?? '';
+    const headingText = Array.from(document.querySelectorAll('h1, h2, [role="heading"]'))
+      .map((el) => el.textContent?.trim() ?? '')
+      .filter(Boolean)
+      .join('\n');
+    const alertText = Array.from(document.querySelectorAll('[role="alert"], [data-testid="error-banner"], .error-banner'))
+      .map((el) => el.textContent?.trim() ?? '')
+      .filter(Boolean)
+      .join('\n');
+    const errorChrome = [title, headingText, alertText].join('\n');
+
+    return (
+      /\b5\d\d\s*:\s*internal server error\b/i.test(body) ||
+      /^(500|5\d\d)$/m.test(headingText) ||
+      /internal server error|application error|something went wrong/i.test(errorChrome)
+    );
+  }).catch(() => false);
+}
+
+async function elCount(page: Page, selector: string): Promise<number> {
+  return page.evaluate((sel) => document.querySelectorAll(sel).length, selector).catch(() => 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -523,7 +545,7 @@ async function checkOrchestratorTabs(page: Page, _session: SupabaseSession): Pro
     // (a) Loads without error
     const hasErrorBanner = await elCount(page, SELECTORS.errorBanner) > 0;
     const has404         = await hasNotFoundPage(page) || /page not found|not_found/i.test(text);
-    const has500         = /500|internal server error|something went wrong/i.test(text);
+    const has500         = await hasServerErrorPage(page);
     const loadOk         = navOk && routeLanded && !hasErrorBanner && !has404 && !has500;
     results.push({
       id: tab.loadId,
