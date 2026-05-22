@@ -45,15 +45,31 @@ describe('SUBCOMMAND_SKILL_MAP', () => {
 
 describe('logImplicitInvocation', () => {
   let tmpRoot: string;
+  const originalSupabaseUrl = process.env.SUPABASE_RGOS_URL;
+  const originalRgosSupabaseUrl = process.env.RGOS_SUPABASE_URL;
+  const originalSupabaseKey = process.env.SUPABASE_RGOS_SERVICE_KEY;
+  const originalRgosSupabaseKey = process.env.RGOS_SUPABASE_SERVICE_KEY;
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'skill-instrument-'));
     fetchSpy.mockReset();
     mockFetchOk();
+    delete process.env.SUPABASE_RGOS_URL;
+    delete process.env.RGOS_SUPABASE_URL;
+    delete process.env.SUPABASE_RGOS_SERVICE_KEY;
+    delete process.env.RGOS_SUPABASE_SERVICE_KEY;
   });
 
   afterEach(() => {
     rmSync(tmpRoot, { recursive: true, force: true });
+    if (originalSupabaseUrl === undefined) delete process.env.SUPABASE_RGOS_URL;
+    else process.env.SUPABASE_RGOS_URL = originalSupabaseUrl;
+    if (originalRgosSupabaseUrl === undefined) delete process.env.RGOS_SUPABASE_URL;
+    else process.env.RGOS_SUPABASE_URL = originalRgosSupabaseUrl;
+    if (originalSupabaseKey === undefined) delete process.env.SUPABASE_RGOS_SERVICE_KEY;
+    else process.env.SUPABASE_RGOS_SERVICE_KEY = originalSupabaseKey;
+    if (originalRgosSupabaseKey === undefined) delete process.env.RGOS_SUPABASE_SERVICE_KEY;
+    else process.env.RGOS_SUPABASE_SERVICE_KEY = originalRgosSupabaseKey;
   });
 
   it('inserts a row for heartbeat skill', async () => {
@@ -117,6 +133,40 @@ describe('logImplicitInvocation', () => {
     expect(insertCall).toBeDefined();
     const body = JSON.parse(insertCall[1].body);
     expect(body.skill_slug).toBe('tasks');
+  });
+
+  it('can insert a cron-sourced row', async () => {
+    const agentDir = makeFakeAgentDir(tmpRoot);
+    await logImplicitInvocation('heartbeat', agentDir, 'codex-3', { source: 'cron' });
+
+    const insertCall = fetchSpy.mock.calls.find(
+      ([url]: [string]) => url.includes('/orch_skill_invocations'),
+    );
+    expect(insertCall).toBeDefined();
+    const body = JSON.parse(insertCall[1].body);
+    expect(body.skill_slug).toBe('heartbeat');
+    expect(body.source).toBe('cron');
+    expect(body.agent_role).toBe('codex-3');
+  });
+
+  it('falls back to org-level secrets.env when agent .env lacks Supabase credentials', async () => {
+    const agentDir = join(tmpRoot, 'orgs', 'revops-global', 'agents', 'codex-3');
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, '.env'), 'BOT_TOKEN=x\n');
+    writeFileSync(join(tmpRoot, 'orgs', 'revops-global', 'secrets.env'), [
+      'SUPABASE_RGOS_URL=https://org.example.com',
+      'SUPABASE_RGOS_SERVICE_KEY=org-key',
+      '',
+    ].join('\n'));
+
+    await logImplicitInvocation('heartbeat', agentDir, 'codex-3', { source: 'cron' });
+
+    const insertCall = fetchSpy.mock.calls.find(
+      ([url]: [string]) => url.includes('/orch_skill_invocations'),
+    );
+    expect(insertCall).toBeDefined();
+    expect(insertCall[0]).toBe('https://org.example.com/rest/v1/orch_skill_invocations');
+    expect(insertCall[1].headers.Authorization).toBe('Bearer org-key');
   });
 
   it('silently no-ops when .env is missing', async () => {

@@ -2,9 +2,11 @@ import { join, resolve } from 'path';
 import type { CronDefinition } from '../types/index.js';
 import { spawnCodexAsync, type SpawnCodexResult } from '../bus/spawn-codex.js';
 import { mirrorReviewToRgos, type ReviewMirrorInput } from '../bus/rgos-mirror.js';
+import { logImplicitInvocation } from '../bus/skill-instrument.js';
 
 type SpawnCodexFn = typeof spawnCodexAsync;
 type MirrorReviewFn = typeof mirrorReviewToRgos;
+type LogImplicitInvocationFn = typeof logImplicitInvocation;
 
 export interface CronFireDispatchOptions {
   agentName: string;
@@ -13,6 +15,7 @@ export interface CronFireDispatchOptions {
   injectAgent: (agentName: string, message: string) => boolean;
   spawnCodexImpl?: SpawnCodexFn;
   mirrorReviewImpl?: MirrorReviewFn;
+  logImplicitInvocationImpl?: LogImplicitInvocationFn;
   now?: () => Date;
 }
 
@@ -72,6 +75,52 @@ function excerpt(value: string, maxChars = 4000): string | null {
   return trimmed.length > maxChars ? `${trimmed.slice(0, maxChars)}...` : trimmed;
 }
 
+const SKILL_SLUG_RE = '[a-z0-9][a-z0-9_-]{0,63}';
+
+export function extractSkillSlugsFromCronPrompt(prompt: string | undefined): string[] {
+  if (!prompt) return [];
+
+  const slugs = new Set<string>();
+  const addMatches = (re: RegExp, group = 1) => {
+    for (const match of prompt.matchAll(re)) {
+      const slug = match[group]?.toLowerCase();
+      if (slug) slugs.add(slug);
+    }
+  };
+
+  // Matches .claude/skills/<slug>/SKILL.md, plugins/.../skills/<slug>/SKILL.md,
+  // and namespaced skill paths such as skills/.system/<slug>/SKILL.md.
+  addMatches(new RegExp(`(?:^|[/\\\\])skills[/\\\\](?:\\.[a-z0-9_-]+[/\\\\])?(${SKILL_SLUG_RE})[/\\\\]SKILL\\.md\\b`, 'gi'));
+
+  // Codex local skill command syntax, e.g. "$heartbeat".
+  addMatches(new RegExp(`\\$(${SKILL_SLUG_RE})\\b`, 'gi'));
+
+  // Plain-language cron prompts often say "read/use/follow the <slug> skill".
+  addMatches(new RegExp(`\\b(?:read|use|load|follow|run)\\s+(?:the\\s+)?[\\\`'"]?(${SKILL_SLUG_RE})[\\\`'"]?\\s+skill\\b`, 'gi'));
+  addMatches(new RegExp(`\\bskill\\s*[:=]\\s*[\\\`'"]?(${SKILL_SLUG_RE})[\\\`'"]?\\b`, 'gi'));
+
+  return [...slugs].sort();
+}
+
+function agentDirFor(opts: CronFireDispatchOptions, agentName: string): string {
+  return resolve(opts.frameworkRoot, 'orgs', opts.org, 'agents', agentName);
+}
+
+function logCronSkillInvocations(
+  prompt: string | undefined,
+  opts: CronFireDispatchOptions,
+  targetAgent: string,
+): void {
+  const slugs = extractSkillSlugsFromCronPrompt(prompt);
+  if (slugs.length === 0) return;
+
+  const logger = opts.logImplicitInvocationImpl ?? logImplicitInvocation;
+  const agentDir = agentDirFor(opts, targetAgent);
+  void Promise.all(
+    slugs.map(slug => logger(slug, agentDir, targetAgent, { source: 'cron' })),
+  ).catch(() => undefined);
+}
+
 async function mirrorSpawnCodexReview(
   cron: CronDefinition,
   opts: CronFireDispatchOptions,
@@ -123,6 +172,7 @@ export async function dispatchCronFire(cron: CronDefinition, opts: CronFireDispa
     }
 
     const targetAgent = metadataString(cron, 'agent') ?? metadataString(cron, 'target_agent') ?? opts.agentName;
+    logCronSkillInvocations(cron.prompt, opts, targetAgent);
     const workdir = metadataString(cron, 'workdir');
     const timeout = metadataNumber(cron, 'timeout_seconds');
     const resolvedPrompt = resolveOrgPath(opts.frameworkRoot, opts.org, promptFile);
@@ -159,6 +209,7 @@ export async function dispatchCronFire(cron: CronDefinition, opts: CronFireDispa
   }
 
   const prompt = cron.prompt ?? `[cron] ${cron.name} fired`;
+  logCronSkillInvocations(prompt, opts, opts.agentName);
   const firedAt = (opts.now ?? (() => new Date()))().toISOString();
   const injection = `[CRON FIRED ${firedAt}] ${cron.name}: ${prompt}`;
   const injected = opts.injectAgent(opts.agentName, injection);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { dispatchCronFire } from '../../../src/daemon/cron-fire-dispatch.js';
+import { dispatchCronFire, extractSkillSlugsFromCronPrompt } from '../../../src/daemon/cron-fire-dispatch.js';
 import type { CronDefinition } from '../../../src/types/index.js';
 import type { SpawnCodexResult } from '../../../src/bus/spawn-codex.js';
 
@@ -103,6 +103,78 @@ describe('dispatchCronFire', () => {
     expect(injectAgent).toHaveBeenCalledWith(
       'orchestrator',
       '[CRON FIRED 2026-05-16T12:00:00.000Z] evening-review: Run evening review',
+    );
+  });
+
+  it('extracts skill slugs from cron prompt skill references', () => {
+    expect(extractSkillSlugsFromCronPrompt([
+      'Read plugins/cortextos-agent-skills/skills/heartbeat/SKILL.md and follow it.',
+      'Then use the comms skill.',
+      'Also run $tasks.',
+      'Open /home/codex/.claude/skills/.system/imagegen/SKILL.md.',
+      'skill: event-logging',
+    ].join(' '))).toEqual(['comms', 'event-logging', 'heartbeat', 'imagegen', 'tasks']);
+  });
+
+  it('logs cron skill references without blocking PTY dispatch', async () => {
+    const injectAgent = vi.fn().mockReturnValue(true);
+    const logImplicitInvocationImpl = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchCronFire(cron({
+      prompt: 'Read plugins/cortextos-agent-skills/skills/heartbeat/SKILL.md, then use the tasks skill.',
+    }), {
+      agentName: 'codex-3',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent,
+      logImplicitInvocationImpl,
+      now: () => new Date('2026-05-16T12:00:00.000Z'),
+    });
+
+    expect(injectAgent).toHaveBeenCalledWith(
+      'codex-3',
+      '[CRON FIRED 2026-05-16T12:00:00.000Z] evening-review: Read plugins/cortextos-agent-skills/skills/heartbeat/SKILL.md, then use the tasks skill.',
+    );
+    expect(logImplicitInvocationImpl).toHaveBeenCalledTimes(2);
+    expect(logImplicitInvocationImpl).toHaveBeenCalledWith(
+      'heartbeat',
+      '/repo/orgs/revops-global/agents/codex-3',
+      'codex-3',
+      { source: 'cron' },
+    );
+    expect(logImplicitInvocationImpl).toHaveBeenCalledWith(
+      'tasks',
+      '/repo/orgs/revops-global/agents/codex-3',
+      'codex-3',
+      { source: 'cron' },
+    );
+  });
+
+  it('logs cron skill references for spawn-codex target agent prompts', async () => {
+    const spawnCodexImpl = vi.fn().mockResolvedValue(result(true));
+    const logImplicitInvocationImpl = vi.fn().mockResolvedValue(undefined);
+
+    await dispatchCronFire(cron({
+      prompt: 'Follow the heartbeat skill.',
+      metadata: {
+        runner: 'spawn-codex',
+        prompt_file: 'prompts/heartbeat.md',
+        agent: 'codex',
+      },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent: vi.fn(),
+      spawnCodexImpl,
+      logImplicitInvocationImpl,
+    });
+
+    expect(logImplicitInvocationImpl).toHaveBeenCalledWith(
+      'heartbeat',
+      '/repo/orgs/revops-global/agents/codex',
+      'codex',
+      { source: 'cron' },
     );
   });
 
