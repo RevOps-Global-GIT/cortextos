@@ -4373,7 +4373,12 @@ busCommand
       let nextFire = '-';
       const dms = parseDurationMs(c.schedule);
       if (!isNaN(dms)) {
-        const refMs = lastFire ? new Date(lastFire).getTime() : now;
+        // For interval-based crons, use the most recent of last_fired_at and
+        // last_fire_attempted_at as the reference. spawn-codex crons update
+        // last_fire_attempted_at on dispatch but only update last_fired_at on
+        // confirmed completion — using attempted avoids stale nextFire display.
+        const refTs = mostRecent(lastFire, c.last_fire_attempted_at);
+        const refMs = refTs ? new Date(refTs).getTime() : now;
         nextFire = fmtTs(new Date(refMs + dms).toISOString());
       } else {
         const nf = nextFireFromCron(c.schedule, now);
