@@ -901,7 +901,7 @@ busCommand
     // Guard: LLM validation gate — block until score >= 7 or --override
     if (!opts.override && process.env.ANTHROPIC_API_KEY) {
       try {
-        const validation = await validateTask(paths, id);
+        const validation = await validateTask(paths, id, effectiveResult);
         if (validation.score < 7) {
           console.error(`Validation blocked: score ${validation.score}/10 (${validation.verdict}) — ${validation.reasoning}`);
           console.error('Use --override to bypass the validation gate.');
