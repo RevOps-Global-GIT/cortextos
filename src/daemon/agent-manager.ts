@@ -15,6 +15,7 @@ import { isAgentDirScaffolded, resolvePaths } from '../utils/paths.js';
 import { acquireSession, releaseSession } from '../utils/session-lock.js';
 import { parseEnvFile, resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
+import { logEvent } from '../bus/event.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
@@ -542,7 +543,12 @@ export class AgentManager {
     // Start Telegram poller if credentials are available and enabled.
     if (telegramApi && chatId && this.isTelegramPollingEnabled(config, agentEnv)) {
       const stateDir = join(this.ctxRoot, 'state', name);
-      const poller = new TelegramPoller(telegramApi, stateDir, 1000, undefined, name);
+      const poller = new TelegramPoller(telegramApi, stateDir, 1000, undefined, name, {
+        paths,
+        agentName: name,
+        org: resolvedOrg,
+        log,
+      });
 
       const REJECT_ALERT_THRESHOLD = 3;
       const REJECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
@@ -591,7 +597,16 @@ export class AgentManager {
         // inbound messages on a window where Eros replied to multiple
         // agents — the JSONL had the data but it never reached the
         // event log.
-        recordInboundTelegram(paths, this.ctxRoot, name, resolvedOrg, from, msg, log);
+        try {
+          recordInboundTelegram(paths, this.ctxRoot, name, resolvedOrg, from, msg, log);
+        } catch (err) {
+          log(`recordInboundTelegram FAILED for msg_id=${msg.message_id}: ${err}`);
+          logEvent(paths, name, resolvedOrg, 'error', 'inbound_persistence_failed', 'error', {
+            message_id: msg.message_id,
+            error: String(err),
+          });
+          throw err;
+        }
 
         // Check for media messages (photo, document, voice, audio, video, video_note)
         const isMedia = !!(msg.photo || msg.document || msg.voice || msg.audio || msg.video || msg.video_note);
@@ -850,7 +865,13 @@ export class AgentManager {
     // offsetFileSuffix keeps the activity poller's offset file distinct
     // from the primary bot's .telegram-offset — without this they would
     // clobber each other in the same stateDir.
-    const activityPoller = new TelegramPoller(activityApi, stateDir, 1000, 'activity', `${name}:activity`);
+    const activityPaths = resolvePaths('activity-channel', this.instanceId, org);
+    const activityPoller = new TelegramPoller(activityApi, stateDir, 1000, 'activity', `${name}:activity`, {
+      paths: activityPaths,
+      agentName: 'activity-channel',
+      org,
+      log,
+    });
 
     activityPoller.onCallback((query) => {
       const entry = this.agents.get(name);
@@ -866,7 +887,7 @@ export class AgentManager {
     activityPoller.onMessage((msg) => {
       const from = stripControlChars(msg.from?.first_name || msg.from?.username || 'Unknown');
       const text = stripControlChars(msg.text || msg.caption || '');
-      log(`[activity-channel inbound] from ${from}: ${text.slice(0, 120)}`);
+        log(`[activity-channel inbound] msg_id=${msg.message_id} from ${from}: ${text.slice(0, 120)}`);
     });
 
     // Single-poller-per-token invariant + conflict self-heal for the
