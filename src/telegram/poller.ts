@@ -65,6 +65,8 @@ export class TelegramPoller {
   // agent-manager uses that to terminate orphans (incident 2026-05-17).
   private consecutiveConflictCycles: number = 0;
   private conflictHandlers: ConflictHandler[] = [];
+  private consecutiveNonConflictErrors: number = 0;
+  private lastErrSignature: string = '';
 
   /**
    * @param api Telegram API client scoped to a single bot token.
@@ -159,11 +161,19 @@ export class TelegramPoller {
     while (this.running) {
       try {
         await this.pollOnce();
-        // A clean cycle clears the conflict streak.
+        // A clean cycle clears both conflict streak and non-conflict error tracking.
+        if (this.consecutiveNonConflictErrors > 0) {
+          console.error(`[${this.label}] Recovered after ${this.consecutiveNonConflictErrors} failed polls.`);
+          this.consecutiveNonConflictErrors = 0;
+          this.lastErrSignature = '';
+        }
         this.consecutiveConflictCycles = 0;
+        await sleep(this.pollInterval);
       } catch (err) {
         if (isConflictError(err)) {
           this.consecutiveConflictCycles++;
+          this.consecutiveNonConflictErrors = 0;
+          this.lastErrSignature = '';
           console.warn(
             `[${this.label}] getUpdates Conflict (streak ${this.consecutiveConflictCycles}) — ` +
             `another poller is using this bot token`,
@@ -179,13 +189,36 @@ export class TelegramPoller {
               try { handler(); } catch { /* handler failure must not break the loop */ }
             }
           }
+          await sleep(this.pollInterval);
         } else {
-          // Non-conflict error: log and continue polling.
+          // Non-conflict error: exponential backoff + log dedup.
+          // First 5 errors log in full; then identical errors are suppressed
+          // with one summary line every 100. Distinct signatures always log.
           this.consecutiveConflictCycles = 0;
-          console.error(`[${this.label}] Poll error:`, err);
+          this.consecutiveNonConflictErrors++;
+          const retryable = isRetryableError(err);
+          const sig = err instanceof Error ? `${err.name}:${err.message}` : String(err);
+          const n = this.consecutiveNonConflictErrors;
+          const shouldLog =
+            !retryable ||
+            n <= 5 ||
+            sig !== this.lastErrSignature ||
+            n % 100 === 0;
+          if (shouldLog) {
+            const tag = retryable ? 'Poll error' : 'Poll error (non-retryable)';
+            console.error(`[${this.label}] ${tag} (#${n}):`, err);
+          }
+          this.lastErrSignature = sig;
+          let backoff: number;
+          if (retryable) {
+            const base = Math.min(this.pollInterval * 2 ** Math.min(n, 6), 60000);
+            backoff = Math.floor(base * (0.5 + Math.random() * 0.5));
+          } else {
+            backoff = 5000;
+          }
+          await sleep(backoff);
         }
       }
-      await sleep(this.pollInterval);
     }
   }
 
@@ -338,4 +371,28 @@ function detectUpdateType(update: TelegramUpdate): 'message' | 'callback_query' 
   if (update.callback_query) return 'callback_query';
   if (update.message_reaction) return 'message_reaction';
   return 'unknown';
+}
+
+/**
+ * Classify a non-conflict poll error as retryable (network/transient) or
+ * fatal (code bug, auth failure). Retryable errors get exponential backoff
+ * + log dedup; fatal errors are logged every time with a short fixed backoff.
+ *
+ * Note: pollOnce() already retries transient errors via withRetry (3 attempts,
+ * 8–30s). Errors that reach start()'s catch have either exhausted those
+ * retries or are non-transient. isRetryableError() guards the outer loop.
+ */
+function isRetryableError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'TypeError' || err.name === 'ReferenceError' || err.name === 'SyntaxError') {
+    return false;
+  }
+  const msg = err.message;
+  if (msg.startsWith('Telegram API request timed out')) return true;
+  if (msg.startsWith('Telegram API request failed')) return true;
+  if (msg.startsWith('Failed to download file:')) return true;
+  if (msg.startsWith('Telegram API error:')) {
+    return /\b(429|Too Many Requests|retry after|5\d\d|Bad Gateway|Gateway Timeout|Service Unavailable|Internal Server Error)\b/i.test(msg);
+  }
+  return false;
 }
