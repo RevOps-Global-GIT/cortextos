@@ -9,13 +9,14 @@ export interface ValidationResult {
   task_id: string;
 }
 
-function buildPrompt(task: Task): string {
+function buildPrompt(task: Task, resultOverride?: string): string {
+  const completionResult = resultOverride ?? task.result ?? '';
   return `You are a task completion validator. Score whether a task was completed per its success criteria.
 
 TASK: ${task.title}
 DESCRIPTION: ${task.description || '(none)'}
 SUCCESS CRITERIA: ${task.success_criteria}
-COMPLETION RESULT: ${task.result || '(no result provided)'}
+COMPLETION RESULT: ${completionResult || '(no result provided)'}
 
 IMPORTANT: File paths mentioned in the completion result are relative to the executing agent's output
 directory and cannot be verified here. Do NOT penalize for unverifiable file paths — evaluate based
@@ -72,6 +73,7 @@ function parseResponse(raw: string, taskId: string): ValidationResult {
 export async function validateTask(
   paths: BusPaths,
   taskId: string,
+  result?: string,
 ): Promise<ValidationResult> {
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) throw new Error(`Task ${taskId} not found`);
@@ -90,7 +92,7 @@ export async function validateTask(
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set');
 
-  const prompt = buildPrompt(task);
+  const prompt = buildPrompt(task, result);
   const raw = await callClaude(apiKey, prompt);
   return parseResponse(raw, taskId);
 }
