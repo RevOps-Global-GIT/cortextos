@@ -1047,6 +1047,15 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
         this.log(`rescanPendingApprovals: skipping ${approval.id} — already in resolved/`);
         continue;
       }
+      // Third guard: check the status field in the pending file itself.
+      // An approval resolved through a non-callback path (e.g. RGOS web UI) may
+      // update the status field without moving the file, leaving a stale pending/
+      // entry that would otherwise trigger a spurious re-notification every restart.
+      if (approval.status && approval.status !== 'pending') {
+        this.log(`rescanPendingApprovals: skipping ${approval.id} — status is '${approval.status}' (not pending)`);
+        try { unlinkSync(join(this.paths.approvalDir, 'pending', `${approval.id}.json`)); } catch { /* */ }
+        continue;
+      }
       try {
         const lines = [
           `⏳ Pending approval (restart re-notify): ${approval.title}`,
