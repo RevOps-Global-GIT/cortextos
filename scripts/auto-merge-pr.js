@@ -85,10 +85,11 @@ function inferOwnerAgent(headRefName) {
 
 const PLAYWRIGHT_HARNESS = path.join(__dirname, 'hub-qa-playwright.ts');
 
-// Next.js app-dir file path → hub route. Order matters: more specific patterns first.
+// File path → hub route. Covers both Next.js App Router (app/) and React Router (src/pages/).
+// Order matters: more specific patterns first.
 const FILE_ROUTE_MAP = [
+  // App Router style (app/)
   [/^(src\/)?app\/orchestrator\//, '/app/orchestrator'],
-  [/^(src\/)?app\/supreme-outstanding\//, '/app/orchestrator'], // AgentOps Command Center
   [/^(src\/)?app\/fleet\/tasks\//, '/app/fleet/tasks'],
   [/^(src\/)?app\/fleet\/agents\//, '/app/fleet/agents'],
   [/^(src\/)?app\/fleet\/activity\//, '/app/fleet/activity'],
@@ -107,6 +108,16 @@ const FILE_ROUTE_MAP = [
   [/^(src\/)?app\/pipeline\//, '/pipeline'],
   [/^(src\/)?app\/social-content\//, '/social-content'],
   [/^(src\/)?app\/content-review\//, '/content-review'],
+  // React Router + Pages style (src/pages/) used by rgos
+  [/^src\/pages\/SupremeOutstanding\.[tj]sx?$/, '/app/supreme-outstanding'],
+  [/^src\/pages\/portal\/Orchestrator\.[tj]sx?$/, '/app/orchestrator'],
+  [/^src\/pages\/portal\/Fleet[^/]*\.[tj]sx?$/, '/app/fleet/tasks'],
+  [/^src\/pages\/portal\/Work[^/]*\.[tj]sx?$/, '/app/work/inbox'],
+  [/^src\/pages\/Companies\.[tj]sx?$/, '/companies'],
+  [/^src\/pages\/Pipeline\.[tj]sx?$/, '/pipeline'],
+  [/^src\/pages\/Projects\.[tj]sx?$/, '/projects'],
+  [/^src\/pages\/Reports\.[tj]sx?$/, '/reports'],
+  [/^src\/pages\/MyDay\.[tj]sx?$/, '/my-day'],
 ];
 
 // High-traffic pages to fall back to when no specific route can be inferred
@@ -120,34 +131,73 @@ function filePathToRoute(filePath) {
 }
 
 /**
- * For an API route file (e.g. app/api/supreme-outstanding/route.ts), find which
- * hub pages consume that endpoint by searching the repo's source code via
- * GitHub code search. Returns an array of hub routes to verify.
+ * For an API file, extract the endpoint path.
+ * Handles both App Router ('app/api/foo/route.ts') and flat ('api/foo.ts') styles.
+ */
+function apiFileToEndpoint(filePath) {
+  const appRouterMatch = filePath.match(/(?:^|\/)app\/api\/(.+?)\/route\.[tj]s$/);
+  if (appRouterMatch) return '/api/' + appRouterMatch[1];
+  const flatMatch = filePath.match(/(?:^|\/)api\/(.+?)\.[tj]s$/);
+  if (flatMatch) return '/api/' + flatMatch[1];
+  return null;
+}
+
+/**
+ * Search a repo for files referencing a string. Returns array of file paths.
+ */
+function searchCode(term, repo) {
+  try {
+    const result = gh(['api', `search/code?q=${encodeURIComponent(term)}+in:file+repo:${repo}&per_page=30`]);
+    return (JSON.parse(result).items || []).map(i => i.path);
+  } catch (err) {
+    console.warn(`[auto-merge] Code search failed for "${term}" in ${repo}: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * For an API file, find which hub pages consume that endpoint by:
+ * 1. Searching for the endpoint string in the repo
+ * 2. If only hook/component files are found (not pages), searching one level deeper
+ *    for files that import those hooks (the pages that actually render the data)
  */
 function findApiConsumers(apiFilePath, repo) {
-  const match = apiFilePath.match(/app\/api\/(.+?)\/route\.[tj]s/);
-  if (!match) return [];
+  const endpoint = apiFileToEndpoint(apiFilePath);
+  if (!endpoint) return [];
 
-  const endpoint = '/api/' + match[1];
   console.log(`[auto-merge] API change detected (${endpoint}), searching consumers in ${repo}...`);
 
-  try {
-    const searchResult = gh(['api', `search/code?q=${encodeURIComponent(endpoint)}+in:file+repo:${repo}&per_page=30`]);
-    const data = JSON.parse(searchResult);
-    const items = data.items || [];
+  const level1 = searchCode(endpoint, repo);
+  console.log(`[auto-merge] Level-1 hits for ${endpoint}: [${level1.join(', ')}]`);
 
-    const routes = new Set();
-    for (const item of items) {
-      const route = filePathToRoute(item.path);
-      if (route) routes.add(route);
+  const routes = new Set();
+  const hookFiles = [];
+
+  for (const f of level1) {
+    const route = filePathToRoute(f);
+    if (route) {
+      routes.add(route);
+    } else if (/\.[tj]sx?$/.test(f) && !/\.(test|spec)\./.test(f) &&
+               /^src\/hooks\//.test(f)) {
+      hookFiles.push(f);
     }
-
-    console.log(`[auto-merge] Found ${items.length} consumer file(s) for ${endpoint} → routes: [${[...routes].join(', ')}]`);
-    return routes.size > 0 ? Array.from(routes) : DEFAULT_VERIFY_ROUTES;
-  } catch (err) {
-    console.warn(`[auto-merge] Consumer search failed for ${endpoint}: ${err.message}`);
-    return DEFAULT_VERIFY_ROUTES;
   }
+
+  // Level-2: when level-1 only found hooks (not pages), find what pages use those hooks
+  if (routes.size === 0 && hookFiles.length > 0) {
+    for (const hookFile of hookFiles.slice(0, 2)) {
+      const hookName = hookFile.split('/').pop().replace(/\.[tj]sx?$/, '');
+      console.log(`[auto-merge] Level-2 search for hook "${hookName}"...`);
+      const level2 = searchCode(hookName, repo);
+      for (const f of level2) {
+        const route = filePathToRoute(f);
+        if (route) routes.add(route);
+      }
+    }
+  }
+
+  console.log(`[auto-merge] Consumer routes for ${endpoint}: [${[...routes].join(', ')}]`);
+  return routes.size > 0 ? Array.from(routes) : DEFAULT_VERIFY_ROUTES;
 }
 
 /**
@@ -169,8 +219,8 @@ function mapPrFilesToRoutes(repo, number) {
   const routes = new Set();
 
   for (const f of files) {
-    if (/\/api\//.test(f)) {
-      // API route change → verify the pages that consume it
+    if (/(?:^|\/)api\//.test(f) && !/\.(test|spec)\./.test(f)) {
+      // API file change → verify the pages that consume it (catches both 'api/foo.ts' and 'app/api/foo/route.ts')
       const consumers = findApiConsumers(f, repo);
       consumers.forEach(r => routes.add(r));
     } else {
@@ -436,6 +486,6 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, isCarvedOut, inferOwnerAgent, filePathToRoute, mapPrFilesToRoutes, REPOS, CARVE_OUTS, FILE_ROUTE_MAP };
+  module.exports = { shouldSkipBody, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, REPOS, CARVE_OUTS, FILE_ROUTE_MAP };
 }
 
