@@ -14,7 +14,7 @@
 
 'use strict';
 
-const { execSync, execFileSync } = require('child_process');
+const { execSync, execFileSync, spawnSync } = require('child_process');
 const path = require('path');
 const { checkPR, formatComment, postComment } = require('./memo-conflict-check');
 
@@ -77,6 +77,202 @@ function inferOwnerAgent(headRefName) {
     }
   }
   return CTX_AGENT_NAME;
+}
+
+// ---------------------------------------------------------------------------
+// Post-merge Playwright verification
+// ---------------------------------------------------------------------------
+
+const PLAYWRIGHT_HARNESS = path.join(__dirname, 'hub-qa-playwright.ts');
+
+// File path → hub route. Covers both Next.js App Router (app/) and React Router (src/pages/).
+// Order matters: more specific patterns first.
+const FILE_ROUTE_MAP = [
+  // App Router style (app/)
+  [/^(src\/)?app\/orchestrator\//, '/app/orchestrator'],
+  [/^(src\/)?app\/fleet\/tasks\//, '/app/fleet/tasks'],
+  [/^(src\/)?app\/fleet\/agents\//, '/app/fleet/agents'],
+  [/^(src\/)?app\/fleet\/activity\//, '/app/fleet/activity'],
+  [/^(src\/)?app\/work\/inbox\//, '/app/work/inbox'],
+  [/^(src\/)?app\/work\/approvals\//, '/app/work/approvals'],
+  [/^(src\/)?app\/cortex\/theta\//, '/app/cortex/theta'],
+  [/^(src\/)?app\/wiki\//, '/app/wiki'],
+  [/^(src\/)?app\/presence\//, '/app/presence'],
+  [/^(src\/)?app\/signals\//, '/app/signals'],
+  [/^(src\/)?app\/time\//, '/time'],
+  [/^(src\/)?app\/my-day\//, '/my-day'],
+  [/^(src\/)?app\/tasks\//, '/tasks'],
+  [/^(src\/)?app\/companies\//, '/companies'],
+  [/^(src\/)?app\/projects\//, '/projects'],
+  [/^(src\/)?app\/reports\//, '/reports'],
+  [/^(src\/)?app\/pipeline\//, '/pipeline'],
+  [/^(src\/)?app\/social-content\//, '/social-content'],
+  [/^(src\/)?app\/content-review\//, '/content-review'],
+  // React Router + Pages style (src/pages/) used by rgos
+  [/^src\/pages\/SupremeOutstanding\.[tj]sx?$/, '/app/supreme-outstanding'],
+  [/^src\/pages\/portal\/Orchestrator\.[tj]sx?$/, '/app/orchestrator'],
+  [/^src\/pages\/portal\/Fleet[^/]*\.[tj]sx?$/, '/app/fleet/tasks'],
+  [/^src\/pages\/portal\/Work[^/]*\.[tj]sx?$/, '/app/work/inbox'],
+  [/^src\/pages\/Companies\.[tj]sx?$/, '/companies'],
+  [/^src\/pages\/Pipeline\.[tj]sx?$/, '/pipeline'],
+  [/^src\/pages\/Projects\.[tj]sx?$/, '/projects'],
+  [/^src\/pages\/Reports\.[tj]sx?$/, '/reports'],
+  [/^src\/pages\/MyDay\.[tj]sx?$/, '/my-day'],
+];
+
+// High-traffic pages to fall back to when no specific route can be inferred
+const DEFAULT_VERIFY_ROUTES = ['/app/orchestrator', '/app/fleet/tasks', '/'];
+
+function filePathToRoute(filePath) {
+  for (const [pattern, route] of FILE_ROUTE_MAP) {
+    if (pattern.test(filePath)) return route;
+  }
+  return null;
+}
+
+/**
+ * For an API file, extract the endpoint path.
+ * Handles both App Router ('app/api/foo/route.ts') and flat ('api/foo.ts') styles.
+ */
+function apiFileToEndpoint(filePath) {
+  const appRouterMatch = filePath.match(/(?:^|\/)app\/api\/(.+?)\/route\.[tj]s$/);
+  if (appRouterMatch) return '/api/' + appRouterMatch[1];
+  const flatMatch = filePath.match(/(?:^|\/)api\/(.+?)\.[tj]s$/);
+  if (flatMatch) return '/api/' + flatMatch[1];
+  return null;
+}
+
+/**
+ * Search a repo for files referencing a string. Returns array of file paths.
+ */
+function searchCode(term, repo) {
+  try {
+    const result = gh(['api', `search/code?q=${encodeURIComponent(term)}+in:file+repo:${repo}&per_page=30`]);
+    return (JSON.parse(result).items || []).map(i => i.path);
+  } catch (err) {
+    console.warn(`[auto-merge] Code search failed for "${term}" in ${repo}: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * For an API file, find which hub pages consume that endpoint by:
+ * 1. Searching for the endpoint string in the repo
+ * 2. If only hook/component files are found (not pages), searching one level deeper
+ *    for files that import those hooks (the pages that actually render the data)
+ */
+function findApiConsumers(apiFilePath, repo) {
+  const endpoint = apiFileToEndpoint(apiFilePath);
+  if (!endpoint) return [];
+
+  console.log(`[auto-merge] API change detected (${endpoint}), searching consumers in ${repo}...`);
+
+  const level1 = searchCode(endpoint, repo);
+  console.log(`[auto-merge] Level-1 hits for ${endpoint}: [${level1.join(', ')}]`);
+
+  const routes = new Set();
+  const hookFiles = [];
+
+  for (const f of level1) {
+    const route = filePathToRoute(f);
+    if (route) {
+      routes.add(route);
+    } else if (/\.[tj]sx?$/.test(f) && !/\.(test|spec)\./.test(f) &&
+               /^src\/hooks\//.test(f)) {
+      hookFiles.push(f);
+    }
+  }
+
+  // Level-2: when level-1 only found hooks (not pages), find what pages use those hooks
+  if (routes.size === 0 && hookFiles.length > 0) {
+    for (const hookFile of hookFiles.slice(0, 2)) {
+      const hookName = hookFile.split('/').pop().replace(/\.[tj]sx?$/, '');
+      console.log(`[auto-merge] Level-2 search for hook "${hookName}"...`);
+      const level2 = searchCode(hookName, repo);
+      for (const f of level2) {
+        const route = filePathToRoute(f);
+        if (route) routes.add(route);
+      }
+    }
+  }
+
+  console.log(`[auto-merge] Consumer routes for ${endpoint}: [${[...routes].join(', ')}]`);
+  return routes.size > 0 ? Array.from(routes) : DEFAULT_VERIFY_ROUTES;
+}
+
+/**
+ * Map a merged PR's changed files to hub routes that should be verified.
+ * Returns [] for non-rgos repos (no hub pages).
+ */
+function mapPrFilesToRoutes(repo, number) {
+  if (!repo.includes('rgos')) return [];
+
+  let files;
+  try {
+    const out = gh(['pr', 'view', String(number), '-R', repo, '--json', 'files', '-q', '.files[].path']);
+    files = out.trim().split('\n').filter(Boolean);
+  } catch (err) {
+    console.warn(`[auto-merge] Could not fetch files for PR #${number}: ${err.message}`);
+    return DEFAULT_VERIFY_ROUTES;
+  }
+
+  const routes = new Set();
+
+  for (const f of files) {
+    if (/(?:^|\/)api\//.test(f) && !/\.(test|spec)\./.test(f)) {
+      // API file change → verify the pages that consume it (catches both 'api/foo.ts' and 'app/api/foo/route.ts')
+      const consumers = findApiConsumers(f, repo);
+      consumers.forEach(r => routes.add(r));
+    } else {
+      const route = filePathToRoute(f);
+      if (route) routes.add(route);
+    }
+  }
+
+  // Shared lib/component change with no direct page match → check default surface
+  if (routes.size === 0) DEFAULT_VERIFY_ROUTES.forEach(r => routes.add(r));
+
+  return Array.from(routes).slice(0, 3); // Cap at 3 routes (~3 min max)
+}
+
+/**
+ * Run hub-qa-playwright.ts against each route, synchronously.
+ * Sends [verify-ok] or [verify-FAILED] to the owning agent when done.
+ */
+function runPlaywrightVerify(routes, repo, number, title, ownerAgent) {
+  const repoShort = repo.split('/')[1];
+  const results = [];
+
+  for (const route of routes) {
+    console.log(`[auto-merge] playwright verify: ${route} for #${number} ${repoShort}`);
+    const proc = spawnSync(
+      'npx', ['tsx', PLAYWRIGHT_HARNESS, '--page', route, '--no-send'],
+      { timeout: 120000, encoding: 'utf-8', cwd: __dirname }
+    );
+    const passed = proc.status === 0;
+    results.push({ route, passed });
+    console.log(`[auto-merge] ${passed ? 'PASS' : 'FAIL'} ${route} (exit ${proc.status})`);
+    if (!passed && proc.stderr) {
+      console.error(`[auto-merge] stderr: ${proc.stderr.slice(0, 300)}`);
+    }
+  }
+
+  const allPassed = results.every(r => r.passed);
+  const failed = results.filter(r => !r.passed).map(r => r.route);
+  const passed = results.filter(r => r.passed).map(r => r.route);
+
+  const verifyMsg = allPassed
+    ? `[verify-ok] PR #${number} ${repoShort} ("${title}") — Playwright auth check PASSED on: ${passed.join(', ')}. Task may be closed.`
+    : `[verify-FAILED] PR #${number} ${repoShort} ("${title}") — Playwright auth check FAILED on: ${failed.join(', ')}. Screenshots in codex/output/playwright-qa/. Do not close related task until fixed.`;
+
+  bus(['send-message', ownerAgent, 'normal', verifyMsg]);
+  bus(['log-event', 'action', 'pr_playwright_verify', allPassed ? 'info' : 'error',
+    '--meta', JSON.stringify({ pr: number, repo, routes, passed: allPassed, agent: CTX_AGENT_NAME })]);
+
+  if (!allPassed) {
+    bus(['send-message', 'orchestrator', 'normal',
+      `[playwright-regression] PR #${number} ${repoShort} failed page verification: ${failed.join(', ')}. Owner agent: ${ownerAgent}.`]);
+  }
 }
 
 function shouldSkipBody(body) {
@@ -184,7 +380,7 @@ async function main() {
     }
 
     for (const pr of prs) {
-      const { number, title, body, isDraft, mergeable, mergeStateStatus, ciPassed, hasChangesRequested } = pr;
+      const { number, title, body, isDraft, headRefName, mergeable, mergeStateStatus, ciPassed, hasChangesRequested } = pr;
 
       // Skip conditions
       if (isDraft) {
@@ -237,14 +433,21 @@ async function main() {
         bus(['log-event', 'action', 'pr_auto_merged', 'info',
           '--meta', JSON.stringify({ pr: number, repo, title, agent: CTX_AGENT_NAME })]);
 
-        // Post-merge verification gate: notify the owning agent that they must
-        // verify the merged change is working before marking the related task complete.
         const ownerAgent = inferOwnerAgent(headRefName);
-        const verifyMsg = `[verify-required] PR #${number} ${repo.split('/')[1]} merged ("${title}"). ` +
-          `Before marking any related task complete: confirm the change works in prod ` +
-          `(CI green + smoke test or screenshot). Reply with verification evidence.`;
-        bus(['send-message', ownerAgent, 'normal', verifyMsg]);
-        console.log(`[auto-merge] Sent verify-required message to ${ownerAgent} for #${number}`);
+        const verifyRoutes = mapPrFilesToRoutes(repo, number);
+
+        if (verifyRoutes.length > 0) {
+          // rgos PR: run authenticated Playwright check on affected hub pages
+          console.log(`[auto-merge] Running playwright verify on [${verifyRoutes.join(', ')}] for #${number}`);
+          runPlaywrightVerify(verifyRoutes, repo, number, title, ownerAgent);
+        } else {
+          // Non-hub repo: send manual verify message (no UI surface to automate)
+          const verifyMsg = `[verify-required] PR #${number} ${repo.split('/')[1]} merged ("${title}"). ` +
+            `Before marking any related task complete: confirm the change works in prod ` +
+            `(CI green + smoke test or screenshot). Reply with verification evidence.`;
+          bus(['send-message', ownerAgent, 'normal', verifyMsg]);
+          console.log(`[auto-merge] Sent verify-required message to ${ownerAgent} for #${number}`);
+        }
       } catch (err) {
         console.error(`[auto-merge] ERROR merging #${number} ${repo}: ${err.message}`);
         errors.push({ repo, pr: number, error: err.message });
@@ -283,6 +486,6 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, isCarvedOut, REPOS, CARVE_OUTS };
+  module.exports = { shouldSkipBody, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, REPOS, CARVE_OUTS, FILE_ROUTE_MAP };
 }
 

@@ -2433,6 +2433,73 @@ async function runSignalsChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /app/supreme-outstanding checks
+// ---------------------------------------------------------------------------
+async function runSupremeOutstandingChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'supreme-outstanding';
+
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Filter tabs present (Unanswered / Mentioned / Action items / All)
+  try {
+    const filterCount = await wallClock(
+      page.evaluate(() =>
+        ['Unanswered', 'Mentioned', 'Action items', 'All'].filter(label =>
+          document.body.textContent?.includes(label)
+        ).length
+      ),
+      5000,
+      0,
+    );
+    results.push({
+      check: 'CHECK 2 Filter tabs present',
+      status: filterCount >= 2 ? 'PASS' : 'FAIL',
+      evidence: filterCount >= 2
+        ? `${filterCount}/4 filter labels found (Unanswered/Mentioned/Action items/All).`
+        : `Only ${filterCount}/4 filter labels found — page shell likely broken.`,
+    });
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Filter tabs present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Items loaded or empty state (auth gate breakage shows error/spinner stuck)
+  try {
+    const state = await wallClock(
+      page.evaluate(() => {
+        const body = document.body.textContent ?? '';
+        const items = document.querySelectorAll('[class*="card"], [class*="item"], [role="listitem"]').length;
+        const hasError = /failed to load|error loading|unauthorized|403|401|something went wrong/i.test(body);
+        const hasEmpty = /no items|all clear|nothing outstanding|no messages|empty/i.test(body);
+        return { items, hasError, hasEmpty };
+      }),
+      6000,
+      { items: 0, hasError: false, hasEmpty: false },
+    );
+    if (state.hasError) {
+      results.push({ check: 'CHECK 3 Items or empty state', status: 'FAIL',
+        evidence: `Page contains error message — API likely failing auth gate. items=${state.items}` });
+    } else if (state.items > 0) {
+      results.push({ check: 'CHECK 3 Items or empty state', status: 'PASS',
+        evidence: `${state.items} item(s) visible.` });
+    } else if (state.hasEmpty) {
+      results.push({ check: 'CHECK 3 Items or empty state', status: 'PASS',
+        evidence: 'Empty state shown — valid state, renders correctly.' });
+    } else {
+      results.push({ check: 'CHECK 3 Items or empty state', status: 'DEFERRED',
+        evidence: 'Neither items, empty state, nor error message detected — page may still be loading.' });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 3 Items or empty state', status: 'FAIL',
+      evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
   const passed  = results.filter(r => r.status === 'PASS').length;
   const failed  = results.filter(r => r.status === 'FAIL').length;
@@ -2607,8 +2674,10 @@ async function main() {
       results = await runWithTimeout(() => runLinkedInPresenceChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/signals' || targetPage === '/signals') {
       results = await runWithTimeout(() => runSignalsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+    } else if (targetPage === '/app/supreme-outstanding' || targetPage === '/supreme-outstanding') {
+      results = await runWithTimeout(() => runSupremeOutstandingChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
