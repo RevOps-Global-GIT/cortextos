@@ -694,7 +694,13 @@ busCommand
       const tokenize = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2 && !stopWords.has(w));
       const newTokens = new Set(tokenize(title));
       if (newTokens.size > 0) {
-        const openTasks = listTasks(paths, { status: 'pending' }).concat(listTasks(paths, { status: 'in_progress' }));
+        let openTasks: ReturnType<typeof listTasks> = [];
+        try {
+          openTasks = listTasks(paths, { status: 'pending' }).concat(listTasks(paths, { status: 'in_progress' }));
+        } catch (e: unknown) {
+          // Task directory not yet created — no existing tasks to deduplicate against
+          if (!(e instanceof Error) || !e.message.startsWith('list-tasks: task directory not found')) throw e;
+        }
         for (const existing of openTasks) {
           const existingTokens = new Set(tokenize(existing.title));
           const overlap = [...newTokens].filter(t => existingTokens.has(t)).length;
