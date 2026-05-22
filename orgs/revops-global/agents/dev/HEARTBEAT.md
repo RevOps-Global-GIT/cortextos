@@ -88,6 +88,8 @@ Full reference: `.claude/skills/tasks/SKILL.md`
 
 Pick your highest priority task and work on it. Tasks should trace back to your current goals.
 
+**Before any decomposable research/synthesis question**, use the native `Agent` tool to fan out parallel subagents. 3+ independent sub-questions = parallel by default, never serial. See AGENTS.md → "Default Behaviors" for the standing rule.
+
 When starting:
 ```bash
 cortextos bus update-task "<task_id>" in_progress
