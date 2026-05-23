@@ -97,6 +97,7 @@ const KNOWN_QA_ROUTES = new Set([
   '/skill-brainstorming', '/skill-find-skills', '/skill-marketing-psychology',
   '/skill-onboard', '/skill-page-cro', '/skill-pdf-processing-pro',
   '/skill-schema-markup', '/skill-seo-audit', '/skill-seo-content-rewrite',
+  '/company-task-submit', '/supreme-outstanding',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
