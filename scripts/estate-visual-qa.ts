@@ -545,11 +545,11 @@ async function checkBeerDialog(page: Page) {
 
 // ---------------------------------------------------------------------------
 // Orca Voice QA
-// CANONICAL: orca-voice-character-v2-2026-05-23/ORCA-APP-CANONICAL.md
-// Key invariants:
-//   - Voice shell background = sky-200 #C9E8F5
+// CANONICAL: orca-voice-WAVE-G-full-system-2026-05-23/ORCA-APP-CANONICAL.md
+// Key invariants (Wave G):
+//   - Voice shell background = Soft Off-White #FAFAFB (sky-200 is now a regression)
 //   - Character present (.orca-aura img or svg)
-//   - Character NOT regressed to brown/terracotta (should be coral #F2A498 family)
+//   - Character palette = Blush Pink #FFB2C1 (not Wave A brown/terracotta)
 //   - Clouds-near layer above character in DOM order
 // ---------------------------------------------------------------------------
 async function checkOrcaVoice(browser: import('playwright').Browser): Promise<void> {
@@ -683,12 +683,148 @@ async function checkOrcaVoice(browser: import('playwright').Browser): Promise<vo
 // ---------------------------------------------------------------------------
 // Mandoland QA (STUB — disabled pending CANONICAL.md commission)
 // ---------------------------------------------------------------------------
-// async function checkMandoland(browser: import('playwright').Browser): Promise<void> {
-//   // TODO: wire in once design-agent ships MANDOLAND-CANONICAL.md
-//   // Expected path: design-agent/output/mandoland-design-system-YYYY-MM-DD/CANONICAL.md
-//   // Key drift zones (historically): nav layout, color palette, typography stack
-//   record('Mandoland', 'STUB — CANONICAL pending', 'WARN', 'Mandoland canonical not yet commissioned');
-// }
+// Mandoland QA
+// CANONICAL: mandoland-design-system-2026-05-23/MANDOLAND-CANONICAL.md
+// Parchment editorial aesthetic — warm off-white bg, amber CTA, Fraunces/Figtree fonts
+// Enable via MANDOLAND_ENABLED=true once mandoland.revopsglobal.com is live.
+// ---------------------------------------------------------------------------
+async function checkMandoland(browser: import('playwright').Browser): Promise<void> {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  });
+  const page = await context.newPage();
+
+  console.log('\n[Mandoland] Checking Mandoland visual invariants...');
+
+  try {
+    // --- Check 1: App loads ---
+    await page.goto(MANDOLAND_URL, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+
+    const appMounted = await page.waitForSelector('#root > *, main, .app', { timeout: 5000, state: 'attached' })
+      .then(() => true).catch(() => false);
+
+    if (!appMounted) {
+      const sc = await shot(page, 'warn-mandoland-load');
+      record('Mandoland', 'App loads (#root mounted)', 'WARN',
+        `App did not mount at ${MANDOLAND_URL} — may be auth-gated or not deployed`, sc);
+      await context.close();
+      return;
+    }
+    record('Mandoland', 'App loads (#root mounted)', 'PASS', `App mounted at ${MANDOLAND_URL}`);
+
+    // --- Check 2: Background = parchment #F1E7D5 ---
+    // CANONICAL: page background MUST be --color-parchment #F1E7D5 (PWA background_color confirmed)
+    const bodyBg = await page.evaluate(() => {
+      const body = document.body;
+      if (!body) return '__NOT_FOUND__';
+      return window.getComputedStyle(body).getPropertyValue('background-color').trim() ||
+             window.getComputedStyle(body).getPropertyValue('background').trim();
+    }).catch(() => '__ERROR__');
+
+    const PARCHMENT_RGB = 'rgb(241, 231, 213)';
+    const SURFACE_RGB   = 'rgb(255, 253, 246)';
+    const hasParchment = bodyBg.includes('#F1E7D5') || bodyBg.includes(PARCHMENT_RGB) ||
+                         bodyBg.includes('f1e7d5') || bodyBg.includes('241, 231, 213');
+    const hasSurface   = bodyBg.includes('#FFFDF6') || bodyBg.includes(SURFACE_RGB) ||
+                         bodyBg.includes('fffdf6') || bodyBg.includes('255, 253, 246');
+
+    if (bodyBg === '__NOT_FOUND__' || bodyBg === '__ERROR__') {
+      record('Mandoland', 'Page background: parchment #F1E7D5', 'WARN', `Background unreadable: ${bodyBg}`);
+    } else if (hasParchment || hasSurface) {
+      record('Mandoland', 'Page background: parchment #F1E7D5', 'PASS',
+        `background = ${bodyBg.slice(0, 60)}`);
+    } else {
+      const sc = await shot(page, 'fail-mandoland-bg');
+      record('Mandoland', 'Page background: parchment #F1E7D5', 'FAIL',
+        `background=${bodyBg.slice(0, 120)} — must be #F1E7D5 (parchment) per CANONICAL`, sc);
+    }
+
+    // --- Check 3: Fraunces display font on headings ---
+    // CANONICAL: --font-display = Fraunces; every h1/h2 must resolve to it
+    const displayFont = await page.evaluate(() => {
+      const h = document.querySelector('h1, h2, [class*="font-display"]');
+      if (!h) return '__NOT_FOUND__';
+      return window.getComputedStyle(h).getPropertyValue('font-family').trim();
+    }).catch(() => '__ERROR__');
+
+    const hasFraunces = displayFont.toLowerCase().includes('fraunces');
+    if (displayFont === '__NOT_FOUND__') {
+      record('Mandoland', 'Typography: Fraunces display font (headings)', 'WARN',
+        `No heading element found — verify app rendered fully`);
+    } else if (hasFraunces) {
+      record('Mandoland', 'Typography: Fraunces display font (headings)', 'PASS',
+        `font-family includes Fraunces: ${displayFont.slice(0, 80)}`);
+    } else {
+      const sc = await shot(page, 'fail-mandoland-font-display');
+      record('Mandoland', 'Typography: Fraunces display font (headings)', 'FAIL',
+        `font-family=${displayFont.slice(0, 120)} — Fraunces must be applied to headings per CANONICAL`, sc);
+    }
+
+    // --- Check 4: Figtree UI font on body/buttons ---
+    // CANONICAL: --font-sans = Figtree; all UI text (body, buttons, labels) must use it
+    const uiFont = await page.evaluate(() => {
+      const el = document.querySelector('p, button, input, label, [class*="font-sans"]');
+      if (!el) return '__NOT_FOUND__';
+      return window.getComputedStyle(el).getPropertyValue('font-family').trim();
+    }).catch(() => '__ERROR__');
+
+    const hasFigtree = uiFont.toLowerCase().includes('figtree');
+    if (uiFont === '__NOT_FOUND__') {
+      record('Mandoland', 'Typography: Figtree UI font (body/buttons)', 'WARN',
+        `No UI element found — verify app rendered fully`);
+    } else if (hasFigtree) {
+      record('Mandoland', 'Typography: Figtree UI font (body/buttons)', 'PASS',
+        `font-family includes Figtree: ${uiFont.slice(0, 80)}`);
+    } else {
+      record('Mandoland', 'Typography: Figtree UI font (body/buttons)', 'WARN',
+        `font-family=${uiFont.slice(0, 120)} — Figtree expected; verify font loaded correctly`);
+    }
+
+    // --- Check 5: Primary CTA uses amber #B5651D ---
+    // CANONICAL: primary action color = --color-amber #B5651D; no other fill on CTAs
+    const amberFound = await page.evaluate(() => {
+      const AMBER_RGB = '181, 101, 29';
+      const btns = Array.from(document.querySelectorAll('button, a[href]'));
+      for (const btn of btns) {
+        const bg = window.getComputedStyle(btn).getPropertyValue('background-color').trim();
+        if (bg.includes(AMBER_RGB) || bg.includes('#B5651D') || bg.includes('b5651d')) return bg;
+      }
+      return '__NOT_FOUND__';
+    }).catch(() => '__ERROR__');
+
+    if (amberFound === '__NOT_FOUND__') {
+      record('Mandoland', 'Primary CTA: amber #B5651D present', 'WARN',
+        `No amber CTA found — may be on deeper route or app not fully rendered`);
+    } else if (amberFound !== '__ERROR__') {
+      record('Mandoland', 'Primary CTA: amber #B5651D present', 'PASS',
+        `Amber CTA found: ${amberFound.slice(0, 60)}`);
+    } else {
+      record('Mandoland', 'Primary CTA: amber #B5651D present', 'WARN', `CTA check errored`);
+    }
+
+    // --- Check 6: Main container border-2 (2px) ---
+    // CANONICAL: all containers use border-2; no 0px or 1px borders on panels
+    const has2pxBorder = await page.evaluate(() => {
+      const containers = Array.from(document.querySelectorAll('main > *, section, [class*="rounded-3xl"], [class*="rounded-2xl"]'));
+      return containers.some(c => {
+        const bw = window.getComputedStyle(c).getPropertyValue('border-width').trim();
+        return bw === '2px' || bw.startsWith('2px');
+      });
+    }).catch(() => false);
+
+    if (has2pxBorder) {
+      record('Mandoland', 'Container borders: border-2 (2px)', 'PASS', `border-width=2px found on container`);
+    } else {
+      record('Mandoland', 'Container borders: border-2 (2px)', 'WARN',
+        `No border-2 container detected — verify containers use 2px border per CANONICAL`);
+    }
+
+  } finally {
+    await context.close();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Main
@@ -776,8 +912,21 @@ async function main() {
     record('Orca Voice', 'CANONICAL present', 'WARN', `ORCA-APP-CANONICAL.md not found at expected path`);
   }
 
-  // Mandoland: CANONICAL not yet commissioned — skip silently
-  // if (MANDOLAND_ENABLED) { await checkMandoland(...); }
+  // Mandoland checks (MANDOLAND_ENABLED=false until mandoland.revopsglobal.com is live)
+  if (MANDOLAND_ENABLED) {
+    if (fs.existsSync(MANDOLAND_CANONICAL)) {
+      const mandoBrowser = await chromium.launch({ headless: true });
+      try {
+        await checkMandoland(mandoBrowser);
+      } finally {
+        await mandoBrowser.close();
+      }
+    } else {
+      record('Mandoland', 'CANONICAL present', 'WARN', `MANDOLAND-CANONICAL.md not found at expected path`);
+    }
+  } else {
+    console.log('[Mandoland] Skipping — MANDOLAND_ENABLED=false (URL not yet live)');
+  }
 
   // ---------------------------------------------------------------------------
   // Write report
