@@ -89,6 +89,7 @@ const IDENTITY_MANIFEST_PATH = process.env.DOGFOOD_BAND_B_IDENTITY_MANIFEST
 const args = new Set(process.argv.slice(2));
 const staticOnly = args.has('--static');
 const liveIdentityChecks = args.has('--live') && !staticOnly;
+const strictLive = process.env.DOGFOOD_LIVE_STRICT === '1';
 const results: CheckResult[] = [];
 
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -150,6 +151,10 @@ function isInsideRepo(filePath: string): boolean {
 
 function missingEnv(names: string[] | undefined): string[] {
   return (names ?? []).filter(name => !process.env[name]);
+}
+
+function liveMissingEnvStatus(): 'FAIL' | 'SKIP' {
+  return strictLive ? 'FAIL' : 'SKIP';
 }
 
 function runDesignTokenCompliance(): void {
@@ -391,6 +396,9 @@ async function runIdentityManifestLiveChecks(): Promise<void> {
   if (!liveIdentityChecks) return;
   const manifest = readJson<BandBIdentityManifest | null>(IDENTITY_MANIFEST_PATH, null);
   if (!manifest) return;
+  for (const entry of manifest.bot_icons) {
+    if (entry.live_verification?.type === 'telegram_avatar') await runTelegramAvatarSmoke(entry);
+  }
   let browser: Browser | null = null;
   try {
     for (const smoke of manifest.real_device_smokes) {
@@ -405,6 +413,74 @@ async function runIdentityManifestLiveChecks(): Promise<void> {
   } finally {
     await browser?.close();
   }
+}
+
+async function runTelegramAvatarSmoke(entry: BotIconEntry): Promise<void> {
+  const missing = missingEnv(entry.live_verification?.required_env ?? (entry.token_env ? [entry.token_env] : []));
+  if (missing.length > 0) {
+    record({
+      id: `b7-live-${entry.id}`,
+      surface: 'dogfood-band-b',
+      route: `bot-icon-manifest/${entry.id}`,
+      status: liveMissingEnvStatus(),
+      severity: 'P0',
+      check_label: 'B7 live Telegram bot avatar smoke',
+      evidence: `Missing env for Telegram avatar verification: ${missing.join(', ')}`,
+    });
+    return;
+  }
+
+  try {
+    const token = process.env[entry.token_env ?? ''];
+    if (!token) throw new Error(`Missing token env ${entry.token_env}`);
+    const apiBase = `https://api.telegram.org/bot${token}`;
+    const me = await telegramJson<{ ok: boolean; result?: { id: number; username?: string }; description?: string }>(`${apiBase}/getMe`);
+    if (!me.ok || !me.result?.id) throw new Error(me.description ?? 'Telegram getMe did not return bot id');
+    if (entry.username && me.result.username && entry.username.toLowerCase() !== me.result.username.toLowerCase()) {
+      throw new Error(`Manifest username ${entry.username} does not match Telegram username ${me.result.username}`);
+    }
+    const photos = await telegramJson<{ ok: boolean; result?: { total_count: number; photos: Array<Array<{ file_id: string; file_size?: number }>> }; description?: string }>(
+      `${apiBase}/getUserProfilePhotos?user_id=${encodeURIComponent(String(me.result.id))}&limit=1`,
+    );
+    if (!photos.ok) throw new Error(photos.description ?? 'Telegram getUserProfilePhotos failed');
+    const fileId = photos.result?.photos?.[0]?.[0]?.file_id;
+    if (!fileId) throw new Error('Telegram bot has no profile photo to verify');
+    const file = await telegramJson<{ ok: boolean; result?: { file_path?: string; file_size?: number }; description?: string }>(
+      `${apiBase}/getFile?file_id=${encodeURIComponent(fileId)}`,
+    );
+    if (!file.ok || !file.result?.file_path) throw new Error(file.description ?? 'Telegram getFile did not return file_path');
+    const download = await fetch(`https://api.telegram.org/file/bot${token}/${file.result.file_path}`);
+    if (!download.ok) throw new Error(`Telegram avatar download returned HTTP ${download.status}`);
+    const bytes = Buffer.from(await download.arrayBuffer());
+    const observedSha = sha256Bytes(bytes);
+    const expected = entry.expected_sha256;
+    const hasPinnedExpected = isSha256(expected);
+    record({
+      id: `b7-live-${entry.id}`,
+      surface: 'dogfood-band-b',
+      route: `bot-icon-manifest/${entry.id}`,
+      status: hasPinnedExpected && observedSha !== expected ? 'FAIL' : 'PASS',
+      severity: 'P0',
+      check_label: 'B7 live Telegram bot avatar smoke',
+      evidence: `telegram @${me.result.username ?? entry.username ?? entry.id}; avatar bytes=${bytes.length}; sha256=${observedSha}${hasPinnedExpected ? `; expected=${expected}` : '; expected=pending-live-verification'}`,
+    });
+  } catch (err) {
+    record({
+      id: `b7-live-${entry.id}`,
+      surface: 'dogfood-band-b',
+      route: `bot-icon-manifest/${entry.id}`,
+      status: 'FAIL',
+      severity: 'P0',
+      check_label: 'B7 live Telegram bot avatar smoke',
+      evidence: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+async function telegramJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { redirect: 'follow' });
+  if (!response.ok) throw new Error(`Telegram API returned HTTP ${response.status}`);
+  return await response.json() as T;
 }
 
 async function runPwaManifestSmoke(smoke: RealDeviceSmoke, botIcons: BotIconEntry[]): Promise<void> {
@@ -495,7 +571,7 @@ async function runDadAccountSmoke(browser: Browser, smoke: RealDeviceSmoke): Pro
       id: 'm-framework-1-live-mandoland-dad-account',
       surface: smoke.surface,
       route: smoke.url ? new URL(smoke.url).pathname || '/' : 'dad-account',
-      status: 'SKIP',
+      status: liveMissingEnvStatus(),
       severity: 'P0',
       check_label: 'M-Framework 1 live dad-account smoke',
       evidence: `Missing env for dad-account smoke: ${missing.join(', ')}`,
