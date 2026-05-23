@@ -681,6 +681,132 @@ async function checkOrcaVoice(browser: import('playwright').Browser): Promise<vo
 }
 
 // ---------------------------------------------------------------------------
+// Orca Voice Liveness Contract (Band C — wave-h-liveness gate)
+// CANONICAL: ORCA-APP-CANONICAL.md §"Liveness Contract (Wave H — PR merge blocker)"
+// WARNs until Wave H ships (--orca-eye-x absent = feature not yet live).
+// Promotes to FAILs automatically once --orca-eye-x is detected in production.
+// ---------------------------------------------------------------------------
+async function checkOrcaLiveness(browser: import('playwright').Browser): Promise<void> {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  });
+  const page = await context.newPage();
+  const SURF = 'Orca Voice';
+
+  console.log('\n[Orca Liveness] Checking Wave H liveness contract...');
+
+  try {
+    await page.goto(ORCA_URL, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+
+    // Detect Wave H liveness: --orca-eye-x on :root means liveness controller is live
+    const orcaEyeX = await page.evaluate(() =>
+      window.getComputedStyle(document.documentElement).getPropertyValue('--orca-eye-x').trim()
+    ).catch(() => '');
+    const waveHLive = orcaEyeX !== '';
+    console.log(`  [Orca Liveness] Wave H ${waveHLive ? 'DETECTED — FAIL-mode' : 'not yet shipped — WARN-mode'}`);
+
+    const livenessFail = (rule: string, evidence: string, sc?: string) =>
+      record(SURF, rule, waveHLive ? 'FAIL' : 'WARN', evidence, sc);
+
+    // --- L1: --orca-* CSS variable namespace ---
+    if (!waveHLive) {
+      record(SURF, 'Liveness: --orca-* CSS namespace registered on :root', 'WARN',
+        'Wave H not yet shipped — --orca-eye-x absent. Will promote to FAIL once liveness ships.');
+    } else {
+      const vars = await page.evaluate(() => {
+        const s = window.getComputedStyle(document.documentElement);
+        return {
+          eyeX:     s.getPropertyValue('--orca-eye-x').trim(),
+          eyeY:     s.getPropertyValue('--orca-eye-y').trim(),
+          tailRate: s.getPropertyValue('--orca-tail-rate').trim(),
+          mouth:    s.getPropertyValue('--orca-mouth-shape').trim(),
+          gillRate: s.getPropertyValue('--orca-gill-rate').trim(),
+          flinch:   s.getPropertyValue('--orca-body-flinch').trim(),
+          blink:    s.getPropertyValue('--orca-blink').trim(),
+        };
+      }).catch(() => null);
+      if (!vars) {
+        const sc = await shot(page, 'fail-orca-liveness-vars');
+        record(SURF, 'Liveness: --orca-* CSS namespace registered on :root', 'FAIL',
+          'evaluate() error reading CSS vars', sc);
+      } else {
+        const missing = Object.entries(vars).filter(([, v]) => v === '').map(([k]) => k);
+        if (missing.length === 0) {
+          record(SURF, 'Liveness: --orca-* CSS namespace registered on :root', 'PASS',
+            `All 7 --orca-* vars present; eye-x=${vars.eyeX}, tail=${vars.tailRate}`);
+        } else {
+          const sc = await shot(page, 'fail-orca-liveness-vars');
+          record(SURF, 'Liveness: --orca-* CSS namespace registered on :root', 'FAIL',
+            `Missing --orca-* vars: ${missing.join(', ')}`, sc);
+        }
+      }
+    }
+
+    // --- L2: prefers-reduced-motion freezes liveness ---
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.waitForTimeout(500);
+    const livenessAnimCount = await page.evaluate(() => {
+      const el = document.querySelector(
+        '[class*="liveness"], [class*="orca-live"], [data-liveness], [class*="OrcaLiveness"]'
+      );
+      if (!el) return null;
+      return el.getAnimations().filter((a: Animation) => a.playState === 'running').length;
+    }).catch(() => null);
+    if (livenessAnimCount === null) {
+      record(SURF, 'Liveness: prefers-reduced-motion freezes liveness animations', 'WARN',
+        'Liveness container not found — Wave H not yet shipped');
+    } else if (livenessAnimCount === 0) {
+      record(SURF, 'Liveness: prefers-reduced-motion freezes liveness animations', 'PASS',
+        '0 animations running on liveness container under prefers-reduced-motion=reduce');
+    } else {
+      const sc = await shot(page, 'fail-orca-reduced-motion');
+      livenessFail('Liveness: prefers-reduced-motion freezes liveness animations',
+        `${livenessAnimCount} animation(s) still running under prefers-reduced-motion=reduce`, sc);
+    }
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+
+    // --- L3: audio opt-out key format ---
+    // CANONICAL: localStorage key orca_audio_enabled must be 'true' or 'false' if set
+    const audioKeyVal = await page.evaluate(() =>
+      localStorage.getItem('orca_audio_enabled')
+    ).catch(() => null);
+    if (!waveHLive) {
+      record(SURF, 'Liveness: audio opt-out key orca_audio_enabled valid format', 'WARN',
+        'Wave H not yet shipped — audio key not expected yet');
+    } else if (audioKeyVal === null || audioKeyVal === 'true' || audioKeyVal === 'false') {
+      record(SURF, 'Liveness: audio opt-out key orca_audio_enabled valid format', 'PASS',
+        `orca_audio_enabled = ${audioKeyVal ?? 'NOT_SET (default ON)'}`);
+    } else {
+      livenessFail('Liveness: audio opt-out key orca_audio_enabled valid format',
+        `Invalid value: "${audioKeyVal}" — must be 'true', 'false', or absent`);
+    }
+
+    // --- L4: liveness controller debug API present (visibility pause verifiability) ---
+    // CANONICAL: liveness must pause when document.hidden. Wave H ships with __orca_liveness
+    // debug flag for observability. If absent post-Wave-H, it's a regression.
+    const hasDebugFlag = await page.evaluate(() =>
+      typeof (window as unknown as Record<string, unknown>).__orca_liveness !== 'undefined'
+    ).catch(() => false);
+    if (!waveHLive) {
+      record(SURF, 'Liveness: __orca_liveness debug API present', 'WARN',
+        'Wave H not yet shipped — debug flag not expected yet');
+    } else if (hasDebugFlag) {
+      record(SURF, 'Liveness: __orca_liveness debug API present', 'PASS',
+        '__orca_liveness debug object found — visibility pause verifiable');
+    } else {
+      const sc = await shot(page, 'warn-orca-liveness-debug');
+      record(SURF, 'Liveness: __orca_liveness debug API present', 'WARN',
+        '__orca_liveness not found post-Wave-H — add window.__orca_liveness for QA observability', sc);
+    }
+
+  } finally {
+    await context.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mandoland QA (STUB — disabled pending CANONICAL.md commission)
 // ---------------------------------------------------------------------------
 // Mandoland QA
@@ -905,6 +1031,7 @@ async function main() {
     const orcaBrowser = await chromium.launch({ headless: true });
     try {
       await checkOrcaVoice(orcaBrowser);
+      await checkOrcaLiveness(orcaBrowser); // Band C — wave-h-liveness gate
     } finally {
       await orcaBrowser.close();
     }
