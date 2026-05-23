@@ -1,0 +1,34 @@
+{
+  "canonical_doc": "CANONICAL.md",
+  "surfaces": [
+    {
+      "id": "add-beer",
+      "label": "Add Beer surface",
+      "path_patterns": [
+        "ob1-app/**/add*beer*.tsx",
+        "ob1-app/**/beer*.tsx",
+        "ob1-parents/**/add*beer*.tsx",
+        "ob1-parents/**/beer*.tsx"
+      ],
+      "allowed_tokens": [
+        "bg-background",
+        "bg-card",
+        "bg-muted",
+        "bg-primary",
+        "bg-secondary",
+        "text-foreground",
+        "text-muted-foreground",
+        "text-primary",
+        "border-border",
+        "border-input",
+        "ring-ring",
+        "rounded",
+        "rounded-md",
+        "rounded-lg",
+        "shadow-sm",
+        "font-serif",
+        "font-sans"
+      ]
+    }
+  ]
+}
