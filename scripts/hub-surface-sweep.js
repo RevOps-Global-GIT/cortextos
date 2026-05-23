@@ -42,6 +42,7 @@ const KNOWN_QA_ROUTES = new Set([
   '/app/signals', '/app/supreme-outstanding',
   '/assessment-detail', '/assessment-rubric', '/assessments',
   '/clients', '/company-detail', '/contact-detail', '/contacts', '/invoices', '/settings', '/financials', '/workflow-deployer',
+  '/outreach', '/outreach-preview', '/outreach-upload',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
