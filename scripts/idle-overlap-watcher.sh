@@ -34,9 +34,12 @@ fi
 
 KICKED=0
 for AGENT in $CANDIDATES; do
-    # Skip non-worker pseudo-agents and human operators.
+    # Skip non-worker pseudo-agents, human operators, and project-orchestrators.
+    # Project-orchestrators (*-orch) author child tasks for dev/codex but don't
+    # execute code-write work themselves — nudging them causes false-positive kicks.
     case "$AGENT" in
         orchestrator|orgo-1|cortextos|state|human|greg|"") continue ;;
+        *-orch) continue ;;
     esac
 
     # Count in_progress tasks for this agent
