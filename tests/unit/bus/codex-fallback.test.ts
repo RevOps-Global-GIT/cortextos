@@ -117,6 +117,17 @@ describe('parseCodexLimit', () => {
     expect(r.limitClass).toBe('long_lock');
     expect(r.retryAfterSecs).toBe(7200);
   });
+
+  it('null exitCode with 429 stderr → classifies as long_lock (not treated as success)', () => {
+    const r = parseCodexLimit('429 rate limit exceeded', null);
+    expect(r.limitClass).toBe('long_lock');
+    expect(r.retryAfterSecs).toBeNull();
+  });
+
+  it('null exitCode with non-rate-limit stderr → none', () => {
+    const r = parseCodexLimit('process killed', null);
+    expect(r.limitClass).toBe('none');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -286,5 +297,28 @@ describe('handleCodexFallback', () => {
       paths, 'dev', 'revops-global',
     );
     expect(mockSpawnSync).toHaveBeenCalledOnce();
+  });
+
+  it('returns dispatched=false and emits dispatch_failed when spawn-worker exits non-zero', async () => {
+    mockSpawnSync.mockReturnValueOnce({ status: 1 } as ReturnType<typeof import('child_process').spawnSync>);
+    const result = makeInput({ exitCode: 1, stderr: '429 rate limit exceeded' });
+    const r = await handleCodexFallback(
+      result,
+      { prompt: 'do work', dir: '/tmp', parentAgent: 'orchestrator', autoFallback: true, taskId: 'task-fail' },
+      paths, 'dev', 'revops-global',
+    );
+
+    expect(r.dispatched).toBe(false);
+    expect(r.limitClass).toBe('long_lock');
+
+    const events = readEventLines(tmpDir, 'dev');
+    expect(events.some(e => e.event === 'codex_limit_hit')).toBe(true);
+    expect(events.some(e => e.event === 'codex_failover_dispatch_failed')).toBe(true);
+    expect(events.some(e => e.event === 'codex_failover_dispatched')).toBe(false);
+
+    const failed = events.find(e => e.event === 'codex_failover_dispatch_failed')!;
+    const meta = failed.metadata as Record<string, unknown>;
+    expect(meta.tier).toBe('spillover-1');
+    expect(meta.task_id).toBe('task-fail');
   });
 });
