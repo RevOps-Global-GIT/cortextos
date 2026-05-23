@@ -2500,6 +2500,102 @@ async function runSupremeOutstandingChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /clients checks
+// ---------------------------------------------------------------------------
+async function runClientsChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'clients';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Client list visible',
+    'table tbody tr, [role="row"]:not([role="columnheader"]), [class*="client-card"],[class*="clientCard"]',
+    /no clients|no results|empty/i));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /contacts checks
+// ---------------------------------------------------------------------------
+async function runContactsChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'contacts';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Contact list visible',
+    'table tbody tr, [role="row"]:not([role="columnheader"]), [class*="contact-card"],[class*="contactCard"]',
+    /no contacts|no results|empty/i));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /invoices checks
+// ---------------------------------------------------------------------------
+async function runInvoicesChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'invoices';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Invoice list visible',
+    'table tbody tr, [role="row"]:not([role="columnheader"]), [class*="invoice"]',
+    /no invoices|no results|empty/i));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /settings checks
+// ---------------------------------------------------------------------------
+async function runSettingsChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'settings';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  try {
+    await new Promise<void>(r => setTimeout(r, 1500));
+    const state = await Promise.race([
+      page.evaluate(() => {
+        const sections = document.querySelectorAll('[class*="setting"],[class*="Setting"],fieldset,form section,[data-section]').length;
+        const headings = Array.from(document.querySelectorAll('h1,h2,h3')).map(h => h.textContent?.trim() ?? '').filter(Boolean);
+        const inputs = document.querySelectorAll('input,select,textarea').length;
+        return { sections, headings, inputs };
+      }),
+      new Promise<{ sections: number; headings: string[]; inputs: number }>(r => setTimeout(() => r({ sections: -1, headings: [], inputs: -1 }), 5000)),
+    ]);
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-sections.png`) }).catch(() => {});
+    if (state.sections > 0 || state.inputs > 0) {
+      results.push({ check: 'CHECK 2 Settings sections visible', status: 'PASS', evidence: `${state.sections} section(s), ${state.inputs} input(s). Headings: ${state.headings.slice(0, 3).join(', ')}` });
+    } else {
+      results.push({ check: 'CHECK 2 Settings sections visible', status: 'DEFERRED', evidence: `No recognized settings sections found (sections=${state.sections}, inputs=${state.inputs}). Headings: ${state.headings.slice(0, 3).join(', ')}` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Settings sections visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /financials checks
+// ---------------------------------------------------------------------------
+async function runFinancialsChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'financials';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Financial data visible',
+    '[class*="financial"],[class*="revenue"],[class*="chart"],[class*="metric"],table tbody tr',
+    /no data|no results|empty|no financial/i));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 function writeReport(results: CheckResult[], reportPath: string) {
   const passed  = results.filter(r => r.status === 'PASS').length;
   const failed  = results.filter(r => r.status === 'FAIL').length;
@@ -2676,8 +2772,18 @@ async function main() {
       results = await runWithTimeout(() => runSignalsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/supreme-outstanding' || targetPage === '/supreme-outstanding') {
       results = await runWithTimeout(() => runSupremeOutstandingChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+    } else if (targetPage === '/clients') {
+      results = await runWithTimeout(() => runClientsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/contacts') {
+      results = await runWithTimeout(() => runContactsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/invoices') {
+      results = await runWithTimeout(() => runInvoicesChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/settings') {
+      results = await runWithTimeout(() => runSettingsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/financials') {
+      results = await runWithTimeout(() => runFinancialsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);

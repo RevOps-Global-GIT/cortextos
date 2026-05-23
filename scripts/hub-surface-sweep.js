@@ -34,13 +34,14 @@ const SCAN_REPOS = [
 ];
 
 const KNOWN_QA_ROUTES = new Set([
-  '/time', '/my-day', '/tasks', '/', '/app/orchestrator',
+  '/time', '/my-day', '/tasks', '/', '/dashboard', '/app/orchestrator',
   '/app/fleet/activity', '/app/work/inbox', '/app/work/approvals',
   '/companies', '/projects', '/reports', '/pipeline',
   '/app/fleet/tasks', '/app/fleet/agents', '/social-content',
   '/content-review', '/app/wiki', '/app/cortex/theta', '/app/presence',
   '/app/signals', '/app/supreme-outstanding',
   '/assessment-detail', '/assessment-rubric', '/assessments',
+  '/clients', '/contacts', '/invoices', '/settings', '/financials',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
@@ -176,6 +177,9 @@ function scanZombieCrons() {
     const cfgPath = path.join(AGENTS_DIR, agent, 'config.json');
     let cfg;
     try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch { continue; }
+
+    // Skip intentionally-disabled agents — their crons are correctly suppressed, not zombies
+    if (cfg.enabled === false) continue;
 
     const crons = cfg.crons || [];
     if (crons.length === 0) continue;
