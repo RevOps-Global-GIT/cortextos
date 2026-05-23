@@ -63,6 +63,9 @@ const KNOWN_QA_ROUTES = new Set([
   '/skill-audit', '/skill-audit-data-extraction', '/skill-data-sql-queries',
   '/skill-data-visualization', '/skill-kb-extract', '/skill-knowledge-base',
   '/skill-multimodal-ingest', '/skill-open-brain-weekly',
+  '/skill-attribution-modeling', '/skill-four-pillars', '/skill-lifecycle-modeling',
+  '/skill-rev-ops-context', '/skill-rev-ops-cro-frameworks', '/skill-rev-ops-wp-page',
+  '/skill-rgos-platform', '/skill-sow-creator',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
