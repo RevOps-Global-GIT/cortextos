@@ -21,7 +21,7 @@ npm test
 
 - `src/` — TypeScript source (bus, cli, daemon, hooks, types, utils)
 - `bus/` — Shell wrapper scripts (delegate to `dist/cli.js bus`)
-- `dashboard/` — Next.js 14 web dashboard
+- `dashboard/` — Next.js 16 web dashboard
 - `templates/` — Agent templates (agent, orchestrator, analyst)
 - `community/` — Community skills and agent catalog
 - `tests/` — Unit, integration, and E2E tests
