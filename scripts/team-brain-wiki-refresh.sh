@@ -11,6 +11,7 @@ REPO_DIR="${TEAM_BRAIN_REPO:-/home/cortextos/work/team-brain}"
 LOG_DIR="${TEAM_BRAIN_LOG_DIR:-$REPO_DIR/logs}"
 BRANCH="${TEAM_BRAIN_BRANCH:-main}"
 SINCE_DAYS="${TEAM_BRAIN_WIKI_SINCE_DAYS:-7}"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 
 PATH="/usr/local/bin:/usr/bin:/bin:/home/cortextos/.local/bin:$PATH"
 
@@ -23,6 +24,17 @@ mkdir -p "$LOG_DIR"
 exec >> "$LOG_DIR/team-brain-wiki-refresh-$MODE.log" 2>&1
 
 echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) team-brain wiki refresh ($MODE) start ==="
+
+log_bus_event() {
+  local event="$1"
+  local severity="$2"
+  local reason="$3"
+  if command -v cortextos >/dev/null 2>&1; then
+    cortextos bus log-event action "$event" "$severity" --meta \
+      '{"script":"team-brain-wiki-refresh","mode":"'"$MODE"'","repo":"'"$REPO_DIR"'","branch":"'"$BRANCH"'","reason":"'"$reason"'"}' \
+      >/dev/null 2>&1 || true
+  fi
+}
 
 if [[ ! -d "$REPO_DIR/.git" ]]; then
   echo "ERROR: $REPO_DIR is not a git checkout" >&2
@@ -46,8 +58,34 @@ if [[ "$MODE" == "wiki" && -z "$SUPABASE_RGOS_SERVICE_KEY" ]]; then
   exit 1
 fi
 
+if ! git rev-parse --verify "origin/$BRANCH" >/dev/null 2>&1; then
+  git fetch origin "$BRANCH"
+fi
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  STASH_NAME="team-brain-wiki-refresh-autostash-$MODE-$RUN_ID"
+  echo "WARNING: dirty worktree detected; stashing as $STASH_NAME"
+  git stash push -u -m "$STASH_NAME"
+  log_bus_event team_brain_wiki_refresh_anomaly warning "dirty_worktree_stashed:$STASH_NAME"
+fi
+
 git fetch origin "$BRANCH"
-git checkout "$BRANCH"
+
+if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+  LOCAL_HEAD="$(git rev-parse "$BRANCH")"
+  REMOTE_HEAD="$(git rev-parse "origin/$BRANCH")"
+  if [[ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]]; then
+    BACKUP_BRANCH="autobackup/team-brain-wiki-refresh-$MODE-$BRANCH-$RUN_ID"
+    echo "WARNING: local $BRANCH diverges from origin/$BRANCH; preserving local head at $BACKUP_BRANCH"
+    git branch "$BACKUP_BRANCH" "$BRANCH"
+    log_bus_event team_brain_wiki_refresh_anomaly warning "local_branch_reset:backup=$BACKUP_BRANCH"
+  fi
+  git checkout "$BRANCH"
+else
+  git checkout -b "$BRANCH" "origin/$BRANCH"
+fi
+
+git reset --hard "origin/$BRANCH"
 git pull --ff-only origin "$BRANCH"
 
 case "$MODE" in
