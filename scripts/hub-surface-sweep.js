@@ -104,6 +104,8 @@ const KNOWN_QA_ROUTES = new Set([
   '/company-task-submit', '/supreme-outstanding',
   '/app/agent-memory', '/app/agent-optimization', '/app/agent-systems', '/app/agent-theta',
   '/app/agents', '/app/agents-monitor', '/app/analytics',
+  '/app/cortex-events', '/app/cortex-messages', '/app/cortex-tasks',
+  '/app/create-task-page', '/app/dashboard',
   '/app/config-guardrails', '/app/config-orchestrator-settings',
   '/app/config-permissions', '/app/config-rotations',
   '/app/connector-status', '/app/connectors',
