@@ -78,7 +78,6 @@ export function AgentCursor({
 
   return (
     <motion.div
-      layout
       layoutId={`agent-cursor-${presence.actor_id}`}
       initial={{ opacity: 0, scale: 0.96, x: x + 10, y }}
       animate={{ opacity: stale ? 0.54 : 1, scale: 1, x, y }}
