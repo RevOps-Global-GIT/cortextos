@@ -118,7 +118,7 @@ export async function handleCodexFallback(
     `cortextos bus send-message ${opts.parentAgent} normal "done: ${workerName} completed" && cortextos terminate-worker ${workerName}`,
   ].join('\n');
 
-  spawnSync(
+  const spawnResult1 = spawnSync(
     'cortextos',
     [
       'bus', 'spawn-worker', workerName,
@@ -127,8 +127,18 @@ export async function handleCodexFallback(
       '--parent', opts.parentAgent,
       '--model', 'claude-opus-4-7',
     ],
-    { stdio: 'pipe' },
+    { stdio: 'pipe', timeout: 30000 },
   );
+
+  if (spawnResult1.status !== 0) {
+    logEvent(paths, agentName, org, 'action', 'codex_failover_dispatch_failed', 'error', {
+      worker_name: workerName,
+      tier: 'spillover-1',
+      exit_code: spawnResult1.status,
+      task_id: opts.taskId ?? null,
+    });
+    return { dispatched: false, limitClass: limitResult.limitClass };
+  }
 
   logEvent(paths, agentName, org, 'action', 'codex_failover_dispatched', 'info', {
     worker_name: workerName,
@@ -151,7 +161,7 @@ export async function handleCodexFallback(
       `cortextos bus send-message ${opts.parentAgent} normal "done: ${worker2Name} completed" && cortextos terminate-worker ${worker2Name}`,
     ].join('\n');
 
-    spawnSync(
+    const spawnResult2 = spawnSync(
       'cortextos',
       [
         'bus', 'spawn-worker', worker2Name,
@@ -161,9 +171,17 @@ export async function handleCodexFallback(
         '--model', 'claude-opus-4-7',
         '--home', opts.claudeTeamHome,
       ],
-      { stdio: 'pipe' },
+      { stdio: 'pipe', timeout: 30000 },
     );
 
+    if (spawnResult2.status !== 0) {
+      logEvent(paths, agentName, org, 'action', 'codex_failover_dispatch_failed', 'error', {
+        worker_name: worker2Name,
+        tier: 'spillover-2',
+        exit_code: spawnResult2.status,
+        task_id: opts.taskId ?? null,
+      });
+    } else {
     logEvent(paths, agentName, org, 'action', 'codex_failover_dispatched', 'info', {
       worker_name: worker2Name,
       tier: 'spillover-2',
@@ -174,6 +192,7 @@ export async function handleCodexFallback(
       dir: opts.dir,
       claude_team_home: opts.claudeTeamHome,
     });
+    }
   }
 
   return { dispatched: true, workerName, limitClass: limitResult.limitClass };
