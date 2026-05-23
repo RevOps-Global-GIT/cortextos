@@ -1,0 +1,43 @@
+name: Dogfood Band B Live
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '37 9 * * *'
+
+jobs:
+  band-b-live:
+    name: B7/B8/M live smoke gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run live dogfood identity and real-device smokes
+        env:
+          DOGFOOD_OUTPUT_DIR: dogfood-band-b-live-report
+          DOGFOOD_LIVE_STRICT: '1'
+          ORCA_TELEGRAM_BOT_TOKEN: ${{ secrets.ORCA_TELEGRAM_BOT_TOKEN }}
+          MANDOLAND_TELEGRAM_BOT_TOKEN: ${{ secrets.MANDOLAND_TELEGRAM_BOT_TOKEN }}
+          MANDOLAND_TWO_TELEGRAM_BOT_TOKEN: ${{ secrets.MANDOLAND_TWO_TELEGRAM_BOT_TOKEN }}
+          MANDOLAND_DAD_EMAIL: ${{ secrets.MANDOLAND_DAD_EMAIL }}
+          MANDOLAND_DAD_PASSWORD: ${{ secrets.MANDOLAND_DAD_PASSWORD }}
+        run: npm run dogfood:band-b:live
+
+      - name: Upload Band B live evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dogfood-band-b-live-report
+          path: dogfood-band-b-live-report

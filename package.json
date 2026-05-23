@@ -18,7 +18,8 @@
     "test:playwright": "npx playwright test",
     "test:e2e:hooks": "vitest run tests/e2e/hooks",
     "dogfood:band-a": "tsx scripts/dogfood-band-a.ts",
-    "dogfood:band-b": "tsx scripts/dogfood-band-b.ts"
+    "dogfood:band-b": "tsx scripts/dogfood-band-b.ts",
+    "dogfood:band-b:live": "tsx scripts/dogfood-band-b.ts --live"
   },
   "keywords": [
     "claude",
