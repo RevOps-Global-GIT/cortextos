@@ -162,6 +162,24 @@ describe('handleCodexFallback', () => {
     expect(r.limitClass).toBe('none');
   });
 
+  it('emits codex_auth_expired error event (not codex_limit_hit) on 401', async () => {
+    const result = makeInput({ exitCode: 1, stderr: '401 unauthorized' });
+    const r = await handleCodexFallback(
+      result,
+      { prompt: 'do work', dir: '/tmp', parentAgent: 'orchestrator', taskId: 'task-auth' },
+      paths, 'dev', 'revops-global',
+    );
+    expect(r.dispatched).toBe(false);
+    expect(r.limitClass).toBe('auth_expired');
+    expect(mockSpawnSync).not.toHaveBeenCalled();
+    const events = readEventLines(tmpDir, 'dev');
+    expect(events).toHaveLength(1);
+    expect(events[0].event).toBe('codex_auth_expired');
+    expect((events[0] as Record<string, unknown>).severity).toBe('error');
+    expect((events[0].metadata as Record<string, unknown>).task_id).toBe('task-auth');
+    expect((events[0].metadata as Record<string, unknown>).parent_agent).toBe('orchestrator');
+  });
+
   it('emits codex_limit_hit on short_throttle', async () => {
     const result = makeInput({ exitCode: 1, stderr: 'exceeded retry limit\n429\nRetry-After: 900' });
     await handleCodexFallback(
