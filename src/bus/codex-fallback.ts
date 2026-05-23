@@ -99,6 +99,15 @@ export async function handleCodexFallback(
     return { dispatched: false, limitClass: 'none' };
   }
 
+  if (limitResult.limitClass === 'auth_expired') {
+    logEvent(paths, agentName, org, 'action', 'codex_auth_expired', 'error', {
+      task_id: opts.taskId ?? null,
+      parent_agent: opts.parentAgent,
+      dir: opts.dir,
+    });
+    return { dispatched: false, limitClass: 'auth_expired' };
+  }
+
   logEvent(paths, agentName, org, 'action', 'codex_limit_hit', 'warning', {
     limit_class: limitResult.limitClass,
     retry_after_secs: limitResult.retryAfterSecs,
