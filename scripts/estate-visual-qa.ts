@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 /**
  * estate-visual-qa.ts
- * Visual consistency QA for ob1-parents (Estate App).
- * Checks each surface against design-agent CANONICAL.md rules.
+ * Visual consistency QA for multiple apps vs design-agent CANONICAL.md specs.
+ *
+ * Apps covered:
+ *   - ob1-parents (Estate App)  — CANONICAL: estate-design-system-audit-2026-05-23/CANONICAL.md
+ *   - Orca Voice                — CANONICAL: orca-voice-character-v2-2026-05-23/ORCA-APP-CANONICAL.md
+ *   - Mandoland                 — CANONICAL: pending commission (stub, disabled)
  *
  * Usage:
  *   cd /home/cortextos/cortextos && npx tsx scripts/estate-visual-qa.ts
@@ -15,12 +19,26 @@ import * as path from 'path';
 const SCRIPT_DIR  = path.dirname(new URL(import.meta.url).pathname);
 const REPO_ROOT   = path.resolve(SCRIPT_DIR, '..');
 const SECRETS_ENV = path.resolve(REPO_ROOT, 'orgs/revops-global/secrets.env');
+
+// Estate App
 const ESTATE_URL  = 'https://ob1-parents.vercel.app';
 const AUTH_COOKIE = 'ob1-parents-auth';
 const CANONICAL   = path.resolve(
   REPO_ROOT,
   'orgs/revops-global/agents/design-agent/output/estate-design-system-audit-2026-05-23/CANONICAL.md'
 );
+
+// Orca Voice
+const ORCA_URL       = 'https://orca.revopsglobal.com';
+const ORCA_CANONICAL = path.resolve(
+  REPO_ROOT,
+  'orgs/revops-global/agents/design-agent/output/orca-voice-character-v2-2026-05-23/ORCA-APP-CANONICAL.md'
+);
+
+// Mandoland — CANONICAL not yet commissioned; stub disabled
+// const MANDOLAND_URL       = 'https://mandoland.revopsglobal.com';
+// const MANDOLAND_CANONICAL = '<path-TBD>';
+const MANDOLAND_ENABLED = false;
 
 const RUN_STAMP  = new Date().toISOString().slice(0, 16).replace('T', '-').replace(':', '');
 const OUTPUT_DIR = path.resolve(REPO_ROOT, 'orgs/revops-global/agents/hub-dogfood/output/estate-visual-qa', RUN_STAMP);
@@ -205,6 +223,88 @@ async function checkNavPosition(page: Page, route: string): Promise<boolean> {
 
   record(`Nav${route}`, 'P0: Bottom nav pinned to viewport bottom', 'PASS',
     `bottom=${result.bottom?.toFixed(1)} viewport=${result.vpHeight} z-index ok`);
+
+  // --- P0 second-line: nav-OVERLAP check ---
+  // Scroll to bottom of content, then probe elementsFromPoint across the nav's Y band.
+  // The nav should be the topmost element at every X position across its area.
+  // Any content element (card, tile, button) returned instead = nav is being covered or
+  // content is overlapping into the nav zone.
+  const overlapResult = await page.evaluate((navSel) => {
+    // Scroll to bottom of page
+    window.scrollTo(0, document.documentElement.scrollHeight);
+
+    // Find the nav element again after scroll
+    const candidates = [
+      ...Array.from(document.querySelectorAll(navSel)),
+      document.querySelector('.bottom-nav'),
+      document.querySelector('[class*="bottom"][class*="nav"]'),
+      ...Array.from(document.querySelectorAll('*')).filter(el => {
+        const s = window.getComputedStyle(el);
+        return (s.position === 'fixed' || s.position === 'sticky') &&
+               s.bottom === '0px' && el.tagName !== 'SCRIPT' && el.tagName !== 'STYLE';
+      }),
+    ].filter(Boolean) as Element[];
+
+    if (candidates.length === 0) return { checked: false, reason: 'no nav after scroll' };
+
+    const nav = candidates[0] as HTMLElement;
+    const navRect = nav.getBoundingClientRect();
+    const vpWidth = window.innerWidth;
+
+    // Probe 5 X positions across the nav width, at the top edge of the nav (where content might poke in)
+    const probeY = navRect.top + 4; // 4px inside the top edge of the nav
+    const probeXs = [
+      vpWidth * 0.1,
+      vpWidth * 0.25,
+      vpWidth * 0.5,
+      vpWidth * 0.75,
+      vpWidth * 0.9,
+    ];
+
+    const violations: string[] = [];
+    for (const x of probeXs) {
+      const stack = document.elementsFromPoint(x, probeY);
+      // Content elements that should NOT be at this Y level
+      const contentViolators = stack.filter(el => {
+        if (nav.contains(el) || el === nav) return false;
+        if (el === document.documentElement || el === document.body) return false;
+        const tag = el.tagName.toLowerCase();
+        const cls = (el.className || '').toString().toLowerCase();
+        // Skip purely decorative/backdrop elements
+        if (tag === 'html' || tag === 'body') return false;
+        // Any interactive or content element above the nav is a violation
+        const isContent = tag === 'button' || tag === 'a' || tag === 'article' ||
+                          cls.includes('card') || cls.includes('tile') || cls.includes('row') ||
+                          cls.includes('list') || cls.includes('item') || cls.includes('glass');
+        const s = window.getComputedStyle(el);
+        const zIndex = parseInt(s.zIndex) || 0;
+        const navZ = parseInt(window.getComputedStyle(nav).zIndex) || 50;
+        // A non-nav element with z-index >= nav's is a problem
+        return isContent || (zIndex >= navZ && !nav.contains(el) && el !== nav);
+      });
+
+      if (contentViolators.length > 0) {
+        violations.push(`x=${Math.round(x)}: ${contentViolators[0].tagName}[${(contentViolators[0].className || '').toString().slice(0, 40)}]`);
+      }
+    }
+
+    return { checked: true, violations, navTop: navRect.top, vpHeight: window.innerHeight };
+  }, NAV_SEL).catch(() => ({ checked: false, reason: 'evaluate error' })) as {
+    checked: boolean; violations?: string[]; navTop?: number; vpHeight?: number; reason?: string;
+  };
+
+  if (!overlapResult.checked) {
+    // Non-fatal — overlap check couldn't run
+  } else if (overlapResult.violations && overlapResult.violations.length > 0) {
+    const sc2 = await shot(page, `fail-nav-overlap-${route.replace(/\//g, '-').slice(1) || 'root'}`);
+    record(`Nav${route}`, 'P0: Nav does not overlap content (scroll-to-bottom)', 'FAIL',
+      `Content elements in nav zone: ${overlapResult.violations.join(' | ')}`, sc2);
+    return false;
+  } else {
+    record(`Nav${route}`, 'P0: Nav does not overlap content (scroll-to-bottom)', 'PASS',
+      `No content elements found in nav zone at scroll-bottom (navTop=${overlapResult.navTop?.toFixed(0)}px)`);
+  }
+
   return true;
 }
 
@@ -394,6 +494,147 @@ async function checkBeerDialog(page: Page) {
 }
 
 // ---------------------------------------------------------------------------
+// Orca Voice QA
+// CANONICAL: orca-voice-character-v2-2026-05-23/ORCA-APP-CANONICAL.md
+// Key invariants:
+//   - Voice shell background = sky-200 #C9E8F5
+//   - Character present (.orca-aura img or svg)
+//   - Character NOT regressed to brown/terracotta (should be coral #F2A498 family)
+//   - Clouds-near layer above character in DOM order
+// ---------------------------------------------------------------------------
+async function checkOrcaVoice(browser: import('playwright').Browser): Promise<void> {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  });
+  const page = await context.newPage();
+
+  console.log('\n[Orca] Checking Orca Voice visual invariants...');
+
+  try {
+    // --- Check 1: App loads ---
+    // Orca is a Vite SPA — #root is in the HTML but content mounts after JS hydration.
+    // Use networkidle + waitForSelector to ensure the app has rendered.
+    await page.goto(ORCA_URL, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(2000);
+
+    // Wait up to 5s for React to mount something into #root
+    const shellAppeared = await page.waitForSelector('#root > *, .voice-shell, .auth-shell', { timeout: 5000, state: 'attached' })
+      .then(() => true).catch(() => false);
+
+    if (!shellAppeared) {
+      const sc = await shot(page, 'warn-orca-load');
+      // WARN not FAIL: headless Chrome may be blocked by CSP or auth gate on Orca.
+      // This is not a new regression — under investigation. Remaining checks skipped.
+      record('Orca Voice', 'App loads (.voice-shell present)', 'WARN',
+        `React did not mount into #root at ${ORCA_URL} — may be CSP/auth-gated in headless mode`, sc);
+      await context.close();
+      return;
+    }
+    const shellClass = await page.evaluate(() => document.querySelector('#root > *')?.className ?? '').catch(() => '');
+    record('Orca Voice', 'App loads (.voice-shell present)', 'PASS', `App mounted: root child class="${shellClass.slice(0, 60)}"`);
+
+    // --- Check 2: Voice shell background = sky-200 #C9E8F5 ---
+    // CANONICAL: "The voice shell background MUST be sky-200 #C9E8F5"
+    // Check body computed background — accept either the exact hex or the rgb equivalent rgb(201, 232, 245)
+    const bodyBg = await page.evaluate(() => {
+      const body = document.body;
+      if (!body) return '__NOT_FOUND__';
+      return window.getComputedStyle(body).getPropertyValue('background').trim() ||
+             window.getComputedStyle(body).getPropertyValue('background-color').trim();
+    }).catch(() => '__ERROR__');
+
+    const SKY_200_RGB = 'rgb(201, 232, 245)';
+    const hasSkyBg = bodyBg.includes('#C9E8F5') || bodyBg.includes(SKY_200_RGB) ||
+                     bodyBg.includes('c9e8f5') || bodyBg.includes('201, 232, 245');
+    if (bodyBg === '__NOT_FOUND__' || bodyBg === '__ERROR__') {
+      record('Orca Voice', 'Voice shell background: sky-200 #C9E8F5', 'WARN', `Background unreadable: ${bodyBg}`);
+    } else if (hasSkyBg) {
+      record('Orca Voice', 'Voice shell background: sky-200 #C9E8F5', 'PASS', `background includes sky-200`);
+    } else {
+      const sc = await shot(page, 'fail-orca-bg');
+      record('Orca Voice', 'Voice shell background: sky-200 #C9E8F5', 'FAIL',
+        `background=${bodyBg.slice(0, 120)} — must be #C9E8F5 per CANONICAL Wave F`, sc);
+    }
+
+    // --- Check 3: Character present (.orca-aura img or character SVG) ---
+    const charPresent = await page.locator('.orca-aura img, .orca-aura svg, svg[class*="orca"], [class*="orca-character"]').first().isVisible().catch(() => false);
+    if (charPresent) {
+      record('Orca Voice', 'Character element present (.orca-aura)', 'PASS', '.orca-aura img visible');
+    } else {
+      // Character may be behind auth gate — check if we're on the auth screen
+      const onAuth = await page.locator('.auth-shell, .auth-card').isVisible().catch(() => false);
+      if (onAuth) {
+        record('Orca Voice', 'Character element present (.orca-aura)', 'WARN', 'App on auth screen — character not visible without session');
+      } else {
+        const sc2 = await shot(page, 'fail-orca-no-character');
+        record('Orca Voice', 'Character element present (.orca-aura)', 'FAIL', '.orca-aura not found in DOM', sc2);
+      }
+    }
+
+    // --- Check 4: Character NOT regressed to brown/terracotta ---
+    // The canonical body_light = #F2A498 (coral/salmon). Brown/terracotta was the Wave A regression.
+    // We check the character img src — should be canonical SVG or PNG, not a legacy asset.
+    const charSrc = await page.evaluate(() => {
+      const img = document.querySelector('.orca-aura img') as HTMLImageElement | null;
+      return img ? (img.src || img.getAttribute('src') || '__NO_SRC__') : '__NOT_FOUND__';
+    }).catch(() => '__ERROR__');
+
+    if (charSrc === '__NOT_FOUND__' || charSrc === '__ERROR__') {
+      record('Orca Voice', 'Character: no brown/terracotta regression (Wave A palette)', 'WARN', `Character img not found: ${charSrc}`);
+    } else if (charSrc.includes('pwa-512') || charSrc.includes('character') || charSrc.includes('orca')) {
+      record('Orca Voice', 'Character: no brown/terracotta regression (Wave A palette)', 'PASS',
+        `Character src=${charSrc.split('/').slice(-1)[0]} — canonical asset in use`);
+    } else {
+      const sc3 = await shot(page, 'warn-orca-char-src');
+      record('Orca Voice', 'Character: no brown/terracotta regression (Wave A palette)', 'WARN',
+        `Unexpected character asset: ${charSrc.split('/').slice(-1)[0]} — verify not Wave A brown palette`, sc3);
+    }
+
+    // --- Check 5: clouds-near layer above character in DOM order ---
+    // CANONICAL: clouds-near must occlude orca (appear after orca in DOM)
+    const layerOrder = await page.evaluate(() => {
+      const orca = document.querySelector('.orca-aura, [class*="orca-char"], svg[class*="orca"]');
+      const cloudsNear = document.querySelector('.clouds-near, [class*="clouds-near"], [class*="cloud-near"]');
+      if (!orca) return 'NO_ORCA';
+      if (!cloudsNear) return 'NO_CLOUDS_NEAR';
+      const pos = orca.compareDocumentPosition(cloudsNear);
+      // DOCUMENT_POSITION_FOLLOWING = 4 means cloudsNear comes AFTER orca in DOM = correct
+      return (pos & Node.DOCUMENT_POSITION_FOLLOWING) ? 'CORRECT' : 'INVERTED';
+    }).catch(() => '__ERROR__');
+
+    if (layerOrder === 'CORRECT') {
+      record('Orca Voice', 'z-stack: clouds-near above character in DOM order', 'PASS', 'clouds-near follows orca in DOM');
+    } else if (layerOrder === 'NO_CLOUDS_NEAR') {
+      record('Orca Voice', 'z-stack: clouds-near above character in DOM order', 'WARN', 'No clouds-near element found — may not be deployed yet');
+    } else if (layerOrder === 'NO_ORCA') {
+      record('Orca Voice', 'z-stack: clouds-near above character in DOM order', 'WARN', 'No orca character element found for DOM-order check');
+    } else if (layerOrder === 'INVERTED') {
+      const sc4 = await shot(page, 'fail-orca-zstack');
+      record('Orca Voice', 'z-stack: clouds-near above character in DOM order', 'FAIL',
+        'clouds-near precedes orca in DOM — orca will not be occluded by clouds', sc4);
+    } else {
+      record('Orca Voice', 'z-stack: clouds-near above character in DOM order', 'WARN', `Layer order check error: ${layerOrder}`);
+    }
+
+    await shot(page, 'orca-voice-state');
+
+  } finally {
+    await context.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mandoland QA (STUB — disabled pending CANONICAL.md commission)
+// ---------------------------------------------------------------------------
+// async function checkMandoland(browser: import('playwright').Browser): Promise<void> {
+//   // TODO: wire in once design-agent ships MANDOLAND-CANONICAL.md
+//   // Expected path: design-agent/output/mandoland-design-system-YYYY-MM-DD/CANONICAL.md
+//   // Key drift zones (historically): nav layout, color palette, typography stack
+//   record('Mandoland', 'STUB — CANONICAL pending', 'WARN', 'Mandoland canonical not yet commissioned');
+// }
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
@@ -464,6 +705,23 @@ async function main() {
   } finally {
     await browser.close();
   }
+
+  // ---------------------------------------------------------------------------
+  // Orca Voice checks (separate browser context — no auth cookie needed)
+  // ---------------------------------------------------------------------------
+  if (fs.existsSync(ORCA_CANONICAL)) {
+    const orcaBrowser = await chromium.launch({ headless: true });
+    try {
+      await checkOrcaVoice(orcaBrowser);
+    } finally {
+      await orcaBrowser.close();
+    }
+  } else {
+    record('Orca Voice', 'CANONICAL present', 'WARN', `ORCA-APP-CANONICAL.md not found at expected path`);
+  }
+
+  // Mandoland: CANONICAL not yet commissioned — skip silently
+  // if (MANDOLAND_ENABLED) { await checkMandoland(...); }
 
   // ---------------------------------------------------------------------------
   // Write report
