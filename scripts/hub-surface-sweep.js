@@ -40,6 +40,7 @@ const KNOWN_QA_ROUTES = new Set([
   '/app/fleet/tasks', '/app/fleet/agents', '/social-content',
   '/content-review', '/app/wiki', '/app/cortex/theta', '/app/presence',
   '/app/signals', '/app/supreme-outstanding',
+  '/assessment-detail', '/assessment-rubric', '/assessments',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
