@@ -110,6 +110,9 @@ const KNOWN_QA_ROUTES = new Set([
   '/app/context-brand', '/app/context-campaign-history', '/app/context-competitive',
   '/app/context-complete', '/app/context-icp', '/app/context-integrations',
   '/app/context-sales-process',
+  '/app/cortex-knowledge-base', '/app/cortex-sources',
+  '/app/enrichment-hub', '/app/experiments', '/app/portal-capabilities',
+  '/app/tool-library',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
