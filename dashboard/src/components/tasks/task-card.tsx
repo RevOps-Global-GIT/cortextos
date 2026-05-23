@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   IconCircleCheck,
   IconDotsVertical,
@@ -39,6 +39,19 @@ interface TaskCardProps {
 
 export function TaskCard({ task, presence, onClick, onStatusChange }: TaskCardProps) {
   const [busy, setBusy] = useState(false);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [inViewport, setInViewport] = useState(false);
+
+  useEffect(() => {
+    const el = cardRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(([entry]) => setInViewport(entry.isIntersecting), {
+      rootMargin: '200px',
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   const action = QUICK_ACTIONS[task.status];
   const ActionIcon = action?.icon;
 
@@ -59,12 +72,13 @@ export function TaskCard({ task, presence, onClick, onStatusChange }: TaskCardPr
 
   return (
     <Card
+      ref={cardRef}
       className="group relative min-h-[116px] cursor-pointer overflow-visible p-3 transition-[background-color,box-shadow] duration-200 ease-out hover:bg-muted/50"
       style={presenceRingStyle(presence)}
       data-task-id={task.id}
       onClick={() => onClick?.(task)}
     >
-      <AgentCursorStack presence={presence} />
+      {inViewport && <AgentCursorStack presence={presence} />}
       <div className="space-y-2">
         <p className={cn('text-sm font-medium leading-snug line-clamp-2', presence?.length && 'pr-40')}>
           {task.title}

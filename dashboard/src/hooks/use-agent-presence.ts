@@ -12,6 +12,8 @@ export function useAgentPresence() {
   const [presence, setPresence] = useState<Record<string, AgentPresencePayload>>({});
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const pendingRef = useRef<Record<string, AgentPresencePayload>>({});
+  const rafRef = useRef<number | null>(null);
 
   useEffect(() => {
     let stopped = false;
@@ -27,7 +29,15 @@ export function useAgentPresence() {
         try {
           const parsed = JSON.parse(event.data);
           if (!isAgentPresencePayload(parsed)) return;
-          setPresence((prev) => ({ ...prev, [parsed.actor_id]: parsed }));
+          pendingRef.current[parsed.actor_id] = parsed;
+          if (rafRef.current === null) {
+            rafRef.current = requestAnimationFrame(() => {
+              rafRef.current = null;
+              const batch = pendingRef.current;
+              pendingRef.current = {};
+              setPresence((prev) => ({ ...prev, ...batch }));
+            });
+          }
         } catch {
           // Ignore malformed realtime frames.
         }
@@ -54,6 +64,7 @@ export function useAgentPresence() {
 
     return () => {
       stopped = true;
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
       clearInterval(prune);
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       eventSourceRef.current?.close();
