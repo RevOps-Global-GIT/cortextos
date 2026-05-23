@@ -150,7 +150,7 @@ describe('codex-fallback smoke — 429 long_lock path', () => {
     expect(mockSpawnSync).not.toHaveBeenCalled();
   });
 
-  it('auth_expired → emits codex_limit_hit, no spawn regardless of autoFallback', async () => {
+  it('auth_expired → emits codex_auth_expired (not codex_limit_hit), no spawn regardless of autoFallback', async () => {
     const r = await handleCodexFallback(
       { stderr: '401 unauthorized', exitCode: 1 },
       { prompt: 'do work', dir: '/tmp', parentAgent: 'orchestrator', autoFallback: true },
@@ -162,6 +162,7 @@ describe('codex-fallback smoke — 429 long_lock path', () => {
     expect(mockSpawnSync).not.toHaveBeenCalled();
 
     const events = readEventLines(tmpDir, 'dev');
-    expect(events.some(e => e.event === 'codex_limit_hit')).toBe(true);
+    expect(events.some(e => e.event === 'codex_auth_expired')).toBe(true);
+    expect(events.some(e => e.event === 'codex_limit_hit')).toBe(false);
   });
 });
