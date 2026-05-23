@@ -86,7 +86,7 @@ describe('codex-fallback smoke — 429 long_lock path', () => {
 
     expect(r.dispatched).toBe(true);
     expect(r.limitClass).toBe('long_lock');
-    expect(r.workerName).toMatch(/^codex-spillover-\d+$/);
+    expect(r.workerName).toMatch(/^codex-spillover-1-\d+$/);
 
     // Verify spawn-worker was called with correct arguments
     expect(mockSpawnSync).toHaveBeenCalledOnce();
