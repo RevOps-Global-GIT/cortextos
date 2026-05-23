@@ -25,7 +25,8 @@ const AGENT_NAME = process.env.CTX_AGENT_NAME || 'mac-codex';
 const POLL_INTERVAL_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 const SSH_HOST = 'gregs-mac';
-const SSH_TIMEOUT_MS = 30_000; // AppleScript dispatch is fast — no Codex execution wait
+// Polling loop waits up to 30s for new thread — give SSH 45s headroom
+const SSH_TIMEOUT_MS = 45_000;
 
 // SSH connection failure patterns — used to distinguish offline vs execution errors
 const SSH_CONN_ERROR_PATTERNS = [
@@ -93,6 +94,27 @@ function spawnAsync(cmd, args, opts = {}) {
 // Tracks already-processed message IDs to deduplicate across both input channels
 const processed = new Set();
 
+// State for status-check read-path replies (fix b)
+const lastDispatch = { threadId: null, at: 0, from: null, durationMs: 0 };
+
+function isStatusCheck(text) {
+  const t = (text || '').trim().toLowerCase();
+  return t === 'status' || t === 'ping' || t === 'health' || t === 'status?' || t === 'status check';
+}
+
+// Liveness probe: returns thread count from Mac SQLite, or null on error (fix c)
+async function probeDbThreadCount() {
+  try {
+    const out = await spawnAsync('ssh', [
+      '-n', '-o', 'ConnectTimeout=5', '-o', 'StrictHostKeyChecking=accept-new', SSH_HOST,
+      "sqlite3 /Users/gregharned/.codex/state_5.sqlite 'SELECT COUNT(*) FROM threads;'",
+    ], { timeout: 10_000 });
+    return parseInt(out.trim(), 10);
+  } catch {
+    return null;
+  }
+}
+
 function log(msg) {
   process.stdout.write(`[${new Date().toISOString()}] [mac-codex-bridge] ${msg}\n`);
 }
@@ -141,6 +163,9 @@ function execOnMac(prompt) {
   // prompts after the first line.
   const scriptBody = [
     `do shell script "pbcopy < ${tmpPrompt}"`,
+    // Snapshot MAX(created_at) BEFORE triggering new chat — race-fix anchor (fix a).
+    // Any thread with created_at strictly greater is guaranteed to be the new one.
+    `set snapshotTs to do shell script "sqlite3 /Users/gregharned/.codex/state_5.sqlite \\"SELECT COALESCE(MAX(created_at), '1970-01-01 00:00:00') FROM threads;\\""`,
     'tell application "Codex" to activate',
     'delay 0.6',
     'tell application "System Events"',
@@ -152,9 +177,16 @@ function execOnMac(prompt) {
     '    key code 36',
     '  end tell',
     'end tell',
-    'delay 2',
-    `set threadId to do shell script "sqlite3 /Users/gregharned/.codex/state_5.sqlite \\"SELECT id FROM threads ORDER BY created_at DESC LIMIT 1;\\""`,
+    // Poll up to 30s (60 × 0.5s) for the new thread to appear.
+    // Replaces the old fixed delay-2 + DESC LIMIT 1 that raced against Codex.app writes.
+    'set threadId to ""',
+    'repeat 60 times',
+    `  set threadId to do shell script "sqlite3 /Users/gregharned/.codex/state_5.sqlite \\"SELECT id FROM threads WHERE created_at > '" & snapshotTs & "' ORDER BY created_at ASC LIMIT 1;\\""`,
+    '  if threadId is not "" then exit repeat',
+    '  delay 0.5',
+    'end repeat',
     `do shell script "rm -f ${tmpScript} ${tmpPrompt}"`,
+    'if threadId is "" then error "Timed out waiting for new Codex.app thread (30s)"',
     'return threadId',
   ].join('\n');
 
@@ -191,15 +223,38 @@ async function processMessage(msg) {
   const preview = (text || '').slice(0, 80);
   log(`Processing msg ${id} from ${from}: ${preview}...`);
 
+  // Status-check read path (fix b): reply locally without dispatching to Codex.app.
+  // Saves one thread per status/health/ping probe.
+  if (isStatusCheck(text)) {
+    const elapsed = lastDispatch.at
+      ? `${Math.round((Date.now() - lastDispatch.at) / 1000)}s ago`
+      : 'never';
+    const threadCount = await probeDbThreadCount();
+    const dbInfo = threadCount !== null ? `, db_threads=${threadCount}` : '';
+    const reply = lastDispatch.threadId
+      ? `status: last dispatch ${elapsed} (thread ${lastDispatch.threadId}, ${lastDispatch.durationMs}ms${dbInfo})`
+      : `status: no dispatches this session${dbInfo}`;
+    try { bus('send-message', from, 'normal', reply, id); } catch { /* non-fatal */ }
+    try { bus('ack-inbox', id); } catch { /* non-fatal */ }
+    log(`Status check from ${from}: ${reply}`);
+    return;
+  }
+
   const start = Date.now();
   let result;
   let ok = false;
 
   try {
     const threadId = await execOnMac(text || '');
-    result = `dispatched — new chat in Codex.app (thread ${threadId.trim()})`;
+    const tid = threadId.trim();
+    const durationMs = Date.now() - start;
+    result = `dispatched — new chat in Codex.app (thread ${tid})`;
     ok = true;
-    log(`Dispatched in ${((Date.now() - start) / 1000).toFixed(1)}s — thread ${threadId.trim()}`);
+    lastDispatch.threadId = tid;
+    lastDispatch.at = Date.now();
+    lastDispatch.from = from;
+    lastDispatch.durationMs = durationMs;
+    log(`Dispatched in ${(durationMs / 1000).toFixed(1)}s — thread ${tid}`);
   } catch (e) {
     result = `mac-codex error: ${e.message.slice(0, 500)}`;
     log(`Error: ${result}`);
