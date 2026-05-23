@@ -98,6 +98,8 @@ const KNOWN_QA_ROUTES = new Set([
   '/skill-onboard', '/skill-page-cro', '/skill-pdf-processing-pro',
   '/skill-schema-markup', '/skill-seo-audit', '/skill-seo-content-rewrite',
   '/company-task-submit', '/supreme-outstanding',
+  '/app/agent-memory', '/app/agent-optimization', '/app/agent-systems', '/app/agent-theta',
+  '/app/agents', '/app/agents-monitor', '/app/analytics',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
