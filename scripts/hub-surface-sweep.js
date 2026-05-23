@@ -100,6 +100,12 @@ const KNOWN_QA_ROUTES = new Set([
   '/company-task-submit', '/supreme-outstanding',
   '/app/agent-memory', '/app/agent-optimization', '/app/agent-systems', '/app/agent-theta',
   '/app/agents', '/app/agents-monitor', '/app/analytics',
+  '/app/config-guardrails', '/app/config-orchestrator-settings',
+  '/app/config-permissions', '/app/config-rotations',
+  '/app/connector-status', '/app/connectors',
+  '/app/context-brand', '/app/context-campaign-history', '/app/context-competitive',
+  '/app/context-complete', '/app/context-icp', '/app/context-integrations',
+  '/app/context-sales-process',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
