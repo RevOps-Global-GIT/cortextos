@@ -13,6 +13,7 @@
  */
 
 import { chromium, Browser, Page } from 'playwright';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -1140,7 +1141,22 @@ ${results.filter(r => r.screenshot).map(r => `- **${r.surface} / ${r.rule}**: ${
   });
   console.log(`\nOverall: ${overall} (${pass} pass, ${fail} fail, ${warn} warn)`);
 
-  process.exit(fail > 0 ? 1 : 0);
+  let bandDFailed = false;
+  if (process.env.DOGFOOD_SKIP_BAND_D !== '1') {
+    console.log('\n[Band D] Running vignette copy-quality gate after Band C...');
+    try {
+      execFileSync('npx', ['tsx', 'scripts/dogfood-band-d.ts'], {
+        cwd: REPO_ROOT,
+        stdio: 'inherit',
+        env: process.env,
+      });
+    } catch {
+      bandDFailed = true;
+      console.error('[Band D] Vignette copy-quality gate failed.');
+    }
+  }
+
+  process.exit(fail > 0 || bandDFailed ? 1 : 0);
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
