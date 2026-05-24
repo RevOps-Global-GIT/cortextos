@@ -16,6 +16,10 @@ import { chromium, Browser, Page } from 'playwright';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  findDuplicateListeningPills,
+  type ListeningPillCandidate,
+} from '../src/dogfood/listening-pill-detector';
 
 const SCRIPT_DIR  = path.dirname(new URL(import.meta.url).pathname);
 const REPO_ROOT   = path.resolve(SCRIPT_DIR, '..');
@@ -399,6 +403,51 @@ async function checkSurface(page: Page, name: string, route: string, extraChecks
   }
 
   if (extraChecks) await extraChecks(page);
+}
+
+async function checkListeningPillDuplicates(page: Page, name: string, route: string) {
+  await goto(page, route);
+  const url = page.url();
+  if (url.includes('/unlock')) {
+    record(name, 'Duplicate Listening pills are not double-rendered', 'WARN', `Not authed at ${url} — skipping Listening-pill detector`);
+    return;
+  }
+
+  const candidates = await page.evaluate((pageKey) => {
+    const all = Array.from(document.querySelectorAll<HTMLElement>('.listening-pill, [aria-label*="Listening" i], [class]'));
+    return all
+      .map((el) => {
+        const className = typeof el.className === 'string' ? el.className : String(el.className ?? '');
+        const ariaLabel = el.getAttribute('aria-label') ?? '';
+        const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+        const hasListeningClass = className.split(/\s+/).includes('listening-pill');
+        const hasListeningLabel = /\blistening\b/i.test(`${ariaLabel} ${text}`);
+        const hasPillClass = className.split(/\s+/).some(token => token === 'pill' || token.endsWith('pill') || token.includes('listening-pill'));
+        if (!hasListeningClass && !(hasListeningLabel && hasPillClass)) return null;
+        return {
+          pageKey,
+          tagName: el.tagName.toLowerCase(),
+          text,
+          ariaLabel,
+          className,
+          id: el.id,
+          testId: el.getAttribute('data-testid') ?? '',
+          selectorHint: `${el.tagName.toLowerCase()}#${el.id || 'no-id'}.${className.replace(/\s+/g, '.')}`,
+        };
+      })
+      .filter(Boolean);
+  }, name) as ListeningPillCandidate[];
+
+  const duplicates = findDuplicateListeningPills(candidates);
+  if (duplicates.length === 0) {
+    record(name, 'Duplicate Listening pills are not double-rendered', 'PASS',
+      `${candidates.length} Listening-pill candidate(s), 0 duplicate same-pill groups`);
+    return;
+  }
+
+  const sc = await shot(page, `fail-${name.toLowerCase().replace(/\s+/g, '-')}-listening-pill-dup`);
+  record(name, 'Duplicate Listening pills are not double-rendered', 'FAIL',
+    duplicates.map(group => `${group.key}: ${group.count} instances`).join('; '), sc);
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1055,13 @@ async function main() {
     await checkSurface(page, 'Family', '/family');
     await checkSurface(page, 'Provisions', '/meals');
     await checkSurface(page, 'Casita', '/casita');
+
+    // Detection-shadow guard: the 2026-05-24 deep-dive duplicate detector used
+    // [class*=pill], which matched ordinary glass-pill tabs. Only actual
+    // Listening-labelled pill components should participate in this duplicate check.
+    await checkListeningPillDuplicates(page, 'Cottage', '/cottage');
+    await checkListeningPillDuplicates(page, 'Maintenance', '/maintenance');
+    await checkListeningPillDuplicates(page, 'Settings', '/settings');
 
     // Primary audit target: Add Beer dialog
     await checkBeerDialog(page);
