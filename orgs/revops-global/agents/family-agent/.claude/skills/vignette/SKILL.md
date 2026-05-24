@@ -47,23 +47,64 @@ node scripts/generate-daily-vignette.mjs --force    # rerender even if present
 
 ---
 
-## Engine: Secondary — mac-codex Flow path (video)
+## Engine: Secondary — Veo 3.1 loop video (canonical video path)
 
-Uses Greg's 20K Vertex/AI Studio browser credits via labs.google/flow on Greg's Mac.
+Wraps tonight's still into a seamless 8-second loop via `veo-3.1-fast-generate-preview`.
 
-**2-step video generation:**
-1. **Step 1 — Still**: Use JPG from primary engine, or generate via Flow with the character's Flow Characters library entry (`-p <character>`, same canonical PNG) + composePrompt-style scene description
-2. **Step 2 — Video**: Flow stitch mode with Step 1 still as **both start frame and end frame** + short motion-only prompt. Character and environment are pinned by the still.
+**Inputs:**
+- Still image from primary engine (`public/vignettes/YYYY-MM-DD-{character}.jpg`) used as **both start_frame AND last_frame** for seamless looping
+- Character-specific motion prompt (NEVER re-specifies appearance — the still locks identity). Motion can range from micro-movements (breathing) to fuller actions (walking, rolling, drinking, investigating a prop) — pick what fits the day's beat:
+  - `chunk`: breathing + ear flicks, OR walking toward a bed, OR drinking from puddle, OR ambient still posture with cherry blossom drift
+  - `petunia`: calm head tilt + ear flick, OR slow roll in mud, OR sheltering motion if raining, OR rooting in moss
+  - `chunkita`: curious head bob, OR small investigative step, OR sniff-and-look-up sequence
+  - family members (`greg`, `tiffany`, `dad`, `mom`, `alejandro`, etc.) can appear when narratively appropriate — e.g. Greg's birthday vignette could include Greg + Tiffany + Chunk together; harvest day could include Dad inspecting orchard with Chunkita. Multi-character scenes use multiple `-i` references on the upstream still, then Veo loop motion as usual.
 
-Result: `public/vignettes/YYYY-MM-DD-<scene>.mp4` committed with `git add -f`; `"video"` field added to JSON sidecar.
+**Pipeline:**
+1. `google.genai.Client(api_key=GEMINI_API_KEY).models.generate_videos(...)` with `GenerateVideosSource(prompt, image)` + `GenerateVideosConfig(duration_seconds=8, aspect_ratio="16:9", last_frame=image)`
+2. Poll `client.operations.get(op)` every 15s (typically 3 polls / ~45s)
+3. Download MP4 from `op.result.generated_videos[0].video.uri` with `&key=API_KEY`
+4. ffmpeg crop watermark + scale: `crop=1156:650:62:0,scale=1280:720:flags=lanczos -c:v libx264 -preset slow -crf 28 -pix_fmt yuv420p -movflags +faststart -an`
+5. Save to `public/vignettes/YYYY-MM-DD-{character}-loop.mp4`
+6. Add `"video"` field to JSON sidecar referencing the MP4
+
+**Reference implementations:**
+- `ob1-parents/lib/veo-client.ts` — TypeScript Veo client with Supabase storage upload
+- `ob1-app/scripts/generate-hero-loops.py` — Python Veo invocation pattern (see `generate_loop()`)
+
+**Key constraint**: API key. `GEMINI_API_KEY` in `ob1-app/.env.local` is the paid project. Org `secrets.env` key is on a different metering bucket and was 429'd on prepayment as of 2026-05-24. Use the `.env.local` key.
+
+## Engine: Tertiary — Flow via mac-codex (manual fallback only)
+
+Use ONLY if Veo API is down/quota-exhausted AND the daily loop must ship. Uses Greg's 20K Vertex/AI Studio browser credits via labs.google/flow on Greg's Mac. Reference Character via `-p <character>` (Characters library, built from same canonical PNG). Stitch mode with still as start+end frame. Manual operation — slow, non-automated.
 
 ---
 
 ## Character Continuity Rule (Greg directive 2026-05-23)
 
-- Animals and people **MUST** come from canonical PNG: `-i` flag for nano-banana, `-p` (Flow Characters) for Flow
-- Poses, activities, and estate context vary daily — **identity never varies**
+- Animals and people **MUST** come from canonical PNG: `-i` flag for nano-banana, Flow Characters `-p` for the tertiary fallback
+- Poses, activities, motion, and scenes vary daily — **identity never varies**
+- Family members (`greg`, `tiffany`, `dad`, `mom`, `alejandro`, etc.) are valid canonicals — include them when narratively appropriate (birthdays, harvest days, cottage stays, etc.)
+- Multi-character scenes allowed — pass multiple `-i` refs (nano-banana supports up to 14)
 - No fresh generic characters without the canonical reference — this is what caused the "generic chicken" incident
+
+## Daily Contextual Relevance Rule (Greg directive 2026-05-23)
+
+Every vignette must reference today's real estate signals — not a generic seasonal scene.
+
+`composePrompt()` already pulls from Supabase:
+- `estate_insights` top current insight (e.g. "Greg's birthday 5/29, drizzle 5/25-27")
+- `maintenance_tasks` priority due within 7d
+- `harvest_log` recent + `plantings` ready-to-harvest within 2d
+- `egg_production` today's count
+- `hive_inspections`, `orchard_events`, `mushroom_batches`, `cottage_stays`
+
+The Veo motion prompt should ALSO weave in context where it adds visual storytelling — e.g.:
+- Birthday week → drift birthday-cake confetti past the character; include a tiny May 29 sign prop (as in 2026-05-23-chunk.jpg)
+- Egg morning → tiny basket of eggs in foreground rocks subtly
+- Drizzle coming → cherry blossom petals shift just before a rain droplet hits the puddle
+- Cottage guest arriving → distant warm-lit cottage window flickers on
+
+**Required env for Supabase context fetch**: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_OB1_USER_ID`. If estate context returns empty, the generator falls back to generic season copy — that's a **data gap** (Greg needs to populate Estate tables), NOT a code bug.
 
 ---
 
