@@ -1156,7 +1156,22 @@ ${results.filter(r => r.screenshot).map(r => `- **${r.surface} / ${r.rule}**: ${
     }
   }
 
-  process.exit(fail > 0 || bandDFailed ? 1 : 0);
+  let bandEFailed = false;
+  if (process.env.DOGFOOD_SKIP_BAND_E !== '1') {
+    console.log('\n[Band E] Running cross-screen card-consistency gate after Band D...');
+    try {
+      execFileSync('npx', ['tsx', 'scripts/dogfood-band-e.ts'], {
+        cwd: REPO_ROOT,
+        stdio: 'inherit',
+        env: process.env,
+      });
+    } catch {
+      bandEFailed = true;
+      console.error('[Band E] Cross-screen card-consistency gate failed.');
+    }
+  }
+
+  process.exit(fail > 0 || bandDFailed || bandEFailed ? 1 : 0);
 }
 
 main().catch(err => { console.error(err); process.exit(1); });
