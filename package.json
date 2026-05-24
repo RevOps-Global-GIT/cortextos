@@ -21,7 +21,9 @@
     "dogfood:band-b": "tsx scripts/dogfood-band-b.ts",
     "dogfood:band-b:live": "tsx scripts/dogfood-band-b.ts --live",
     "dogfood:band-c": "tsx scripts/dogfood-band-c.ts",
-    "dogfood:band-d": "tsx scripts/dogfood-band-d.ts"
+    "dogfood:band-d": "tsx scripts/dogfood-band-d.ts",
+    "dogfood:band-e": "tsx scripts/dogfood-band-e.ts",
+    "dogfood:band-f": "tsx scripts/dogfood-band-f.ts"
   },
   "keywords": [
     "claude",
