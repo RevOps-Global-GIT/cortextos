@@ -20,6 +20,7 @@
     "dogfood:band-a": "tsx scripts/dogfood-band-a.ts",
     "dogfood:band-b": "tsx scripts/dogfood-band-b.ts",
     "dogfood:band-b:live": "tsx scripts/dogfood-band-b.ts --live",
+    "dogfood:band-c": "tsx scripts/dogfood-band-c.ts",
     "dogfood:band-d": "tsx scripts/dogfood-band-d.ts"
   },
   "keywords": [
@@ -62,6 +63,8 @@
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@types/node": "^25.5.0",
+    "@types/pngjs": "^6.0.5",
+    "pngjs": "^7.0.0",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2",
