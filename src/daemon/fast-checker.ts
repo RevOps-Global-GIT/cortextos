@@ -767,6 +767,7 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     chatId: string | number,
     text: string,
     frameworkRoot: string,
+    messageId?: number,
     replyToText?: string,
     lastSentText?: string,
     recentHistory?: string,
@@ -793,9 +794,17 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     const body = isSlashCommand
       ? text.trim()
       : `\`\`\`\n${text}\n\`\`\``;
-    return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId}) ===
+    const messageIdCx = messageId ? ` [message_id:${messageId}]` : '';
+    const reactionInstruction = messageId
+      ? `For acknowledgement, eyes, like, receipt, or "on this post/thread" requests, react first with: cortextos bus react-telegram ${chatId} ${messageId} 👀\n`
+      : '';
+    const threadedReplyInstruction = messageId
+      ? `Threaded reply: cortextos bus send-telegram ${chatId} '<your reply>' --reply-to ${messageId}\n`
+      : '';
+
+    return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId})${messageIdCx} ===
 ${replyCx}${historyCx}${body}
-${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${lastSentCtx}${reactionInstruction}${threadedReplyInstruction}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
   }
@@ -1627,14 +1636,16 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     }
 
     const { warn, handoff, autoreset } = this.getCtxThresholds();
+    const warningEnabled = warn > 0;
+    const handoffEnabled = handoff > 0;
 
     // No threshold configured — observe-only mode (log but don't act). Any of
     // the three thresholds being explicitly set arms the monitor; an agent
     // that sets only ctx_autoreset_threshold still gets Tier 0.
     const cfg = this.agent.getConfig();
     const anyThresholdSet =
-      cfg.ctx_handoff_threshold !== undefined ||
-      cfg.ctx_warning_threshold !== undefined ||
+      (typeof cfg.ctx_handoff_threshold === 'number' && cfg.ctx_handoff_threshold > 0) ||
+      (typeof cfg.ctx_warning_threshold === 'number' && cfg.ctx_warning_threshold > 0) ||
       (typeof cfg.ctx_autoreset_threshold === 'number' && cfg.ctx_autoreset_threshold > 0);
     if (!anyThresholdSet) return;
 
@@ -1705,10 +1716,12 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     }
 
     // Tier 1: warning — PTY injection only, no Telegram ping (context management is internal)
-    if (effectivePct >= warn && now - this.ctxWarningFiredAt > 15 * 60_000) {
+    if (warningEnabled && effectivePct >= warn && now - this.ctxWarningFiredAt > 15 * 60_000) {
       this.ctxWarningFiredAt = now;
       const pctRound = Math.round(effectivePct);
-      const statusSuffix = effectivePct >= handoff ? 'Handoff in progress.' : `Handoff triggers at ${handoff}%.`;
+      const statusSuffix = handoffEnabled
+        ? (effectivePct >= handoff ? 'Handoff in progress.' : `Handoff triggers at ${handoff}%.`)
+        : 'Handoff disabled for this agent.';
       this.agent.injectMessage(`[CONTEXT] Window at ${pctRound}%. ${statusSuffix}`);
       this.log(`Context warning fired at ${pctRound}%`);
     }
@@ -1720,7 +1733,7 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // context_status.json showed the old high value even though the new session is fresh.
     // hardRestart() now zeroes context_status.json, but a 90s guard provides defence-in-depth
     // and handles the race where the status file is read before hardRestart() writes it.
-    if (effectivePct >= handoff && this.ctxHandoffFiredAt === 0) {
+    if (handoffEnabled && effectivePct >= handoff && this.ctxHandoffFiredAt === 0) {
       const sessionAge = this.ctxSessionStartedAt > 0 ? now - this.ctxSessionStartedAt : Infinity;
       if (sessionAge >= 0 && sessionAge < 90_000) {
         // Do not latch ctxHandoffFiredAt — allow Tier 2 to fire once the session is settled.

@@ -201,6 +201,7 @@ export class TelegramAPI {
     replyMarkup?: object,
     opts?: {
       parseMode?: 'HTML' | null;
+      replyToMessageId?: number;
       onParseFallback?: (reason: string) => void;
     },
   ): Promise<any> {
@@ -220,6 +221,7 @@ export class TelegramAPI {
         chunk,
         plainText ? null : 'HTML',
         isLastChunk ? replyMarkup : undefined,
+        i === 0 ? opts?.replyToMessageId : undefined,
       );
     }
     return lastResult;
@@ -233,11 +235,13 @@ export class TelegramAPI {
     text: string,
     parseMode: 'HTML' | null,
     replyMarkup: object | undefined,
+    replyToMessageId?: number,
   ): Promise<any> {
     const basePayload: Record<string, unknown> = {
       chat_id: chatId,
       text,
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+      ...(replyToMessageId ? { reply_to_message_id: replyToMessageId, allow_sending_without_reply: true } : {}),
     };
 
     const payload =

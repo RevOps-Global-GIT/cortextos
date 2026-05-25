@@ -93,13 +93,19 @@
       "prompt": "bash /home/cortextos/cortextos/scripts/idle-overlap-watcher.sh"
     }
   ],
-  "ctx_handoff_threshold": 88,
-  "ctx_autoreset_threshold": 92,
+  "ctx_warning_threshold": 0,
+  "ctx_handoff_threshold": 0,
+  "ctx_autoreset_threshold": 70,
   "ecosystem": {
     "local_version_control": {
       "enabled": true
     }
   },
-  "model": "claude-opus-4-7",
-  "telegram_polling": true
+  "model": "gpt-5.5",
+  "telegram_polling": false,
+  "suppress_restart_telegram": true,
+  "runtime": "codex-app-server",
+  "codex_app_server_transport": "ws",
+  "codex_runtime_note": "P0 2026-05-24: Claude Code session hit org monthly usage limit while receiving Telegram; switched orchestrator Telegram owner to Codex app-server runtime so inbound Telegram can respond.",
+  "telegram_owner_note": "P0 2026-05-24: revops_director_bot polling moved to orca-orch Codex runtime because Claude/orchestrator lane was quota-blocked/too slow."
 }

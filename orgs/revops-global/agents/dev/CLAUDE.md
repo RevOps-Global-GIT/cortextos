@@ -15,6 +15,93 @@ If `ONBOARDED`: continue with the session start protocol below.
 
 ---
 
+## Code Execution Quality Rules
+
+These rules apply to EVERY coding task, without exception.
+
+### Rule 1: Always Produce Concrete Changes
+
+Every coding response MUST include at least one of:
+- A complete file path with full modified file content written via Write/Edit
+- A precise diff showing exact lines added/removed
+- A complete, runnable function or class with its exact file path stated
+
+**Before writing any code, always run discovery commands first:**
+```bash
+find . -name "<filename>" 2>/dev/null
+cat <file_path>
+grep -r "<symbol>" --include="*.ts" --include="*.py" -l
+```
+
+Run these commands yourself in the same response. Do NOT ask clarifying questions and stop — investigate and implement in the same response. If discovery returns nothing, write a BLOCKED statement (see Rule 5). Do NOT produce a response that contains only shell commands, questions, analysis templates, or descriptions with zero code changes.
+
+### Rule 2: Never Fabricate Code or Outputs
+
+Before writing any code, ALWAYS read the actual file first:
+```bash
+cat <file_path>
+```
+
+**These things are FORBIDDEN unless confirmed by actual command execution in this response:**
+- Inventing file paths, function signatures, class names, or constants
+- Inventing import statements or module names
+- Showing bash command output that was not actually run
+- Inventing tool commands, API endpoints, environment variable names, or framework interfaces not present in the provided task context
+- Writing code that references `cortextos bus`, `CTX_ROOT`, `CTX_AGENT_NAME`, or any other env var/command unless those appear in the actual task input
+
+If a file cannot be found after searching, write exactly: "File not found at `<path>` — searched with `find . -name <filename>` and got no results. Cannot implement without seeing the actual code." Then write a BLOCKED statement.
+
+### Rule 3: Always Include Tests or Verification
+
+Every response that makes a code change MUST end with exactly one of:
+- A new or updated test (unit, integration, or e2e) that directly exercises the change, with its full file path and content
+- An explicit statement in this exact form: "Testing not applicable because [specific reason]. Manual verification: run `<exact command>` and confirm `<exact expected output>`."
+
+**Never silently omit this.** Vague statements like "run the tests" do not satisfy this rule. The verification command must be copy-pasteable and the expected output must be stated.
+
+### Rule 4: Always Stay Scoped to the Ask
+
+Only make changes directly required by the stated task.
+
+**These actions are FORBIDDEN unless the task explicitly requests them:**
+- Session boot rituals (reading IDENTITY.md, SOUL.md, GOALS.md, HEARTBEAT.md, etc.)
+- Sending Telegram notifications
+- Creating or updating tasks in the task system
+- Writing memory entries (daily or long-term)
+- Updating heartbeat
+- Logging events to the activity feed
+- Restoring crons
+- Any other operational bookkeeping unrelated to the code change
+
+If the task says "fix the bug in X", fix the bug in X — nothing else.
+
+### Rule 5: Always End Commit-Ready or with an Explicit Blocker
+
+Every response MUST end with exactly one of these two blocks. No exceptions.
+
+**Option A — Commit message (change is complete and code was written):**
+```
+Commit: <type>(<scope>): <imperative summary>
+
+- <bullet: what changed and why>
+- <bullet: what changed and why>
+```
+
+**Option B — Explicit blocker (no code change was possible):**
+```
+BLOCKED: <exact reason why implementation cannot proceed>
+Next step: <single concrete copy-pasteable command that will unblock this>
+```
+
+**These endings are FORBIDDEN:**
+- Open questions ("Which approach do you prefer?", "Can you share X?")
+- Promises ("Once I have X I'll implement…")
+- Truncated files (if a file is too long, write BLOCKED with the continuation command)
+- Analysis or investigation summaries with no code and no BLOCKED statement
+- Temp files written to /tmp as a substitute for editing the actual source file
+
+---
+
 ## On Session Start
 
 See AGENTS.md for the full 13-step session start checklist. Key steps:
@@ -24,7 +111,7 @@ See AGENTS.md for the full 13-step session start checklist. Key steps:
 3. Read org knowledge base: `../../knowledge.md`
 4. Discover available skills: `cortextos bus list-skills --format text`
 5. Discover active agents: `cortextos bus list-agents`
-6. Restore crons from `config.json` — run `cortextos bus list-crons $CTX_AGENT_NAME` first (no duplicates)
+6. Restore crons from `config.json` — run CronList first (no duplicates)
 7. Check today's memory file for in-progress work
 8. If resuming a task, query KB: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
 9. Check inbox: `cortextos bus check-inbox`
@@ -39,27 +126,11 @@ Every significant piece of work gets a task. See `.claude/skills/tasks/SKILL.md`
 
 1. **Create**: `cortextos bus create-task "<title>" --desc "<desc>"`
 2. **Start**: `cortextos bus update-task <id> in_progress`
-3. **Complete**: `cortextos bus complete-task <id> --result "[summary]"` — mirror to RGOS is automatic.
-   Use `skip_review: false` (review queue) only when Greg's explicit sign-off is required.
+3. **Complete**: `cortextos bus complete-task <id> --result "[summary]"`
 4. **Log KPI**: `cortextos bus log-event task task_completed info --meta '{"task_id":"ID"}'`
 
 CONSEQUENCE: Tasks without creation = invisible on dashboard. Your effectiveness score will be 0%.
 TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
-
----
-
-## UI/Browser Work Routing — Orgo CU First
-
-When a task requires browser automation, UI interaction, OAuth flows, or any web-based capability:
-
-1. **Probe Orgo CU first** — use `cortextos bus computer-use` via the Orgo VM pool. This is the primary and preferred path. Org directive (active through 2026-05-28): drive Orgo utilization as the fleet scales.
-2. **Mac SSH only as fallback** — use `ssh gregs-mac` only if Orgo CU cannot handle the required auth state or capability.
-
-**Decision example:**
-- "Open hub.revopsglobal.com and verify a UI change" → Orgo CU (fresh browser session, no saved state needed)
-- "Run a browser action that requires Greg's saved Chrome session" → Mac SSH fallback
-
-If Orgo CU fails with an auth error or capability gap, document the gap and fall back to Mac. Do not default to Mac first.
 
 ---
 
@@ -123,23 +194,6 @@ Reply using: cortextos bus send-message <agent> normal '<reply>' <msg_id>
 
 Always include `msg_id` as reply_to (auto-ACKs the original). Un-ACK'd messages redeliver after 5 min. For no-reply messages: `cortextos bus ack-inbox <msg_id>`
 
-## Health Probe Acks
-
-The daemon sends periodic health probes via the agent message bus:
-
-```
-=== AGENT MESSAGE from daemon [msg_id: health-probe-...] ===
-ping
-probe_id: health-probe-...
-```
-
-When you receive a message from `daemon` with body starting with `ping` and containing a `probe_id:` line:
-1. Extract the probe_id value from the `probe_id:` line
-2. Run: `cortextos bus ack-health-probe <probe_id>`
-3. No reply to daemon needed — the ack command handles it
-
-Failure to ack within 30 seconds causes the daemon to mark you `degraded` and restart you.
-
 ---
 
 ## Crons
@@ -151,8 +205,6 @@ Defined in `config.json` under `crons` array. Set up once per session via `/loop
 **Format:** `{"name": "...", "interval": "5m", "prompt": "..."}`
 
 Crons expire after 7 days but are recreated from config on each restart.
-
-**IMPORTANT:** CronCreate fires cron expressions in local timezone ($CTX_TIMEZONE = America/Los_Angeles), not UTC. `"0 7 * * 1-5"` = 7 AM PT (14:00 UTC). Always verify fire times against local clock, not UTC.
 
 ---
 

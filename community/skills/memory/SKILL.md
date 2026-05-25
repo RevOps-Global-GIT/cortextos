@@ -125,7 +125,63 @@ cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
 
 ### What Works Well
 
+**2026-05-25 - Silent handoff startup checkpoint after 06:09 reset**
+
+For the 06:09 UTC context handoff restart, the daily memory checkpoint records prompt-required Telegram silence, strict zero-create cron proof, empty inbox/approvals, live delegated lane checks, and artifact state. Capturing the accepted Monday fallback, missing analyst artifact, pending `orgo-1`/`design-agent`/`qa-agent` lanes, and the three standing orchestrator tasks keeps the next session from recreating crons, sending duplicate pickup messages, or rediscovering the same owner state.
+
+**2026-05-25 - Silent handoff startup checkpoint after 06:02 reset**
+
+For the 06:02 UTC context handoff restart, the daily memory checkpoint records the prompt-required Telegram silence, the zero-create cron result, empty inbox/approvals, and the live task/artifact deltas after the handoff. The important state is that the accepted Monday fallback exists while the analyst original artifact is still missing, and `orgo-1`, `design-agent`, `qa-agent`, and `analyst` still have pending lanes. Capturing both the handoff assertion and live bus truth prevents duplicate nudges or false cron creation.
+
+**2026-05-25 - Context-full handoff after 05:40 pickup restart**
+
+When a context-full handoff follows a required-pickup restart, the handoff should explicitly separate the one Telegram required by the prompt from the later no-noise comms posture. The 05:43 UTC handoff captures zero-create cron proof, empty inbox/approvals, the codex-3 internal ACK, the Monday fallback/artifact split, and the pending owner lanes. That gives the next session enough live state to avoid rereading the oversized daily memory tail.
+
+**2026-05-25 - Required pickup handoff startup checkpoint after 05:40 reset**
+
+For the 05:40 UTC context handoff restart, the daily memory checkpoint records the required pickup Telegram, the zero-create cron result, empty inbox/approvals, and the live task deltas after the handoff. The important state is that the accepted Monday fallback exists while the analyst original artifact is still missing, `orca-orch` self-analysis is complete, and `orgo-1`, `design-agent`, `qa-agent`, and `analyst` still have pending lanes. Capturing both the handoff assertion and live bus truth prevents duplicate nudges or false cron creation.
+
+**2026-05-25 - Silent handoff startup checkpoint after 05:23 reset**
+
+For the 05:23 UTC context handoff restart, the daily memory checkpoint records the prompt-required Telegram silence, the zero-create cron result, empty inbox/approvals, and the live task deltas after the handoff. The important state is that `orca-orch` still has the P0 self-analysis lane from the handoff while `orgo-1`, `design-agent`, `qa-agent`, and `analyst` still have pending lanes. Capturing artifact state for the Monday fallback and missing analyst file keeps the next session from rediscovering the same checks.
+
+**2026-05-25 - Silent handoff startup checkpoint after 05:18 reset**
+
+For the 05:18 UTC context handoff restart, the daily memory checkpoint records the prompt-required Telegram silence, the zero-create cron result, empty inbox/approvals, and the live task deltas after the handoff. The important state is that `orca-orch` now shows an in-progress P0 self-analysis task while the prior Estate task is not active, and `orgo-1`, `design-agent`, `qa-agent`, and `analyst` still have pending lanes. Capturing artifact state for the Monday fallback and missing analyst file keeps the next session from rediscovering the same checks.
+
+**2026-05-25 - Silent handoff startup checkpoint after 05:11 reset**
+
+For the 05:11 UTC context handoff restart, the daily memory checkpoint records the prompt-required Telegram silence, the zero-create cron result, empty inbox/approvals, and the live task deltas after the handoff. The important state is that `orca-orch` currently has no in-progress Estate task listed, while `orgo-1`, `design-agent`, `qa-agent`, and `analyst` still have pending lanes. Capturing artifact state for the Monday fallback and missing analyst file keeps the next session from rediscovering the same checks.
+
+**2026-05-25 - Handoff startup checkpoint after required pickup**
+
+For the 05:07 UTC context handoff restart, the daily memory checkpoint records the required pickup Telegram, the zero-create cron result, and live owner deltas in one place. The important state is that `orca-orch` currently has no in-progress Estate task listed, while `orgo-1`, `design-agent`, `qa-agent`, and `analyst` still have pending lanes. Capturing both the handoff assertion and live bus truth prevents the next session from acting on stale Estate ownership or sending duplicate nudges.
+
+**2026-05-25 - Handoff startup checkpoint includes live owner deltas**
+
+For the 05:02 UTC context handoff restart, the daily memory checkpoint records both handoff state and live bus deltas after checks. The important update is that `orca-orch` no longer shows an in-progress Estate task, while `orgo-1`, `design-agent`, and `qa-agent` still have the pending lanes named in the handoff. Capturing that distinction keeps the next session from acting on stale Estate ownership or sending duplicate nudges.
+
+**2026-05-25 - Context-full handoff captures internal nudge state**
+
+When a context-full handoff happens immediately after a coordination nudge, the handoff must include the message ID and the anti-duplication rationale. The 04:55 UTC handoff records `orgo-1` message `1779684890908-orchestrator-7oc07`, separates it from recent watcher kicks to analyst/design/QA, and names the exact artifact checks for the next session.
+
+**2026-05-25 - Handoff startup checkpoint captures prompt-dedupe correction**
+
+For context handoff restarts, the daily memory checkpoint should capture both the final cron decision and any non-obvious correction made during boot. The 04:54 UTC checkpoint records that `rgos-task-poll` looked missing only because JSON escaping hid the quoted substring, then confirms actual daemon prompt-field matching found all 12 config prompts. That detail keeps the next session from creating a duplicate cron or distrusting the zero-create restore.
+
+**2026-05-25 - Context-full handoff records active owner handoff**
+
+For context-full handoffs, the handoff artifact should distinguish "approval no longer visible" from "approval resolved and execution moved." The 04:45 UTC handoff records the resolved Estate approval, the `orca-orch` execution task, zero-create cron state, and the Monday prep artifact split, which gives the next session a direct first-action list.
+
+**2026-05-25 - Handoff startup checkpoint records disappeared approval surface**
+
+For context handoff restarts, the daily memory checkpoint should capture both handoff assertions and current bus truth. The 04:43 UTC checkpoint recorded that the prior Estate DailyVignette approval was mentioned in the handoff but no longer visible in normal or all-org approval lists, while preserving cron proof, artifact presence, and the active task IDs needed for the next resume.
+
 <!-- Dated entries: **YYYY-MM-DD — <one-line context>** followed by what worked + why. Keep additive; don't delete prior entries unless they were proven wrong. -->
+
+**2026-05-25 - Handoff startup checkpoint captures approval and artifact state**
+
+For context handoff restarts, the daily memory checkpoint should record not just that startup ran, but the exact resume state: cron create count, inbox/approval results, active task IDs, and artifact presence. The 04:37 UTC checkpoint captured `approval_1779683703_i0kwb`, the existing fallback meeting-prep artifact, the missing analyst artifact, and the three standing orchestrator tasks, which is enough for a fresh session to continue without rediscovery.
 
 ### Calibrations
 
@@ -134,3 +190,21 @@ cortextos bus kb-ingest ./MEMORY.md ./memory/$(date -u +%Y-%m-%d).md \
 ### Lessons Learned
 
 <!-- What went wrong and what to do instead. Anchor each to a concrete incident with date. -->
+
+### What Works Well
+
+**2026-05-25 - Silent handoff startup checkpoint after 05:33 reset**
+
+For the 05:33 UTC context handoff restart, the daily memory checkpoint records the prompt-required Telegram silence, the zero-create cron result, empty inbox/approvals, live delegated lanes, and the new Orca self-analysis completion. Capturing both pending owner tasks and completed proof artifacts keeps the next session from rediscovering the same checks or reopening closed work.
+
+**2026-05-25 - Silent handoff startup checkpoint after 05:45 reset**
+
+For the 05:45 UTC context handoff restart, the daily memory checkpoint records the prompt-required Telegram silence, the strict zero-create cron result across both unavailable `CronList` surfaces and the daemon registry, empty inbox/approvals, and unchanged delegated lanes. Capturing the accepted Monday fallback, missing analyst artifact, completed Orca self-analysis report, and three active orchestrator tasks keeps the next session from recreating crons, sending duplicate pickup messages, or rediscovering the same owner state.
+
+**2026-05-25 - Context handoff at 91 percent after 05:47 startup**
+
+When a context handoff is triggered soon after startup, the handoff should summarize the already-completed boot work instead of forcing the next session through the full daily memory tail. The 05:49 UTC handoff captures the exact zero-create cron proof, empty inbox/approvals, accepted Monday fallback artifact, missing analyst artifact, completed Orca self-analysis report, and the five delegated pending lanes. That is enough for the next session to resume monitoring without duplicate Telegram, duplicate cron creation, or duplicate owner nudges.
+
+**2026-05-25 - Silent handoff startup checkpoint after 05:58 reset**
+
+For the 05:58 UTC context handoff restart, the daily memory checkpoint again records the prompt-required Telegram silence, the exact handoff file, unavailable `CronList` surfaces, 14 daemon crons, all 12 config prompts matched, empty inbox/approvals, and the active delegated lanes. Including the accepted Monday fallback artifact plus the missing analyst artifact gives the next session a practical resume path without replaying cron restore or sending a duplicate pickup message.

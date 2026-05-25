@@ -80,6 +80,8 @@ Requires `ecosystem.local_version_control.enabled: true` in config.json.
 
 **2026-05-24 — Daily manual snapshot after session-lock block.** The staged-diff review caught untracked credential-bearing verification scripts before commit, so the safety checklist still worked when `cortextos bus auto-commit` could not run under the active analyst session lock.
 
+**2026-05-25 — Daily manual snapshot after session-lock block.** `cortextos bus auto-commit` was blocked by the active analyst session lock, so the manual review path was used again. The scan excluded generated backups/cache and an untracked credential-bearing verification script before staging the safe source, config, report, and memory changes.
+
 ### Calibrations
 
 <!-- Subtle preferences Greg consistently nudges — pre-apply these next time. -->

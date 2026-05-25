@@ -45,5 +45,6 @@
       "data-deletion"
     ],
     "never_ask": []
-  }
+  },
+  "telegram_polling": false
 }

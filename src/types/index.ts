@@ -418,6 +418,8 @@ export interface AgentConfig {
   codex_app_server_transport?: 'ws' | 'unix';
   /** Optional fixed localhost port for codex-app-server when using ws transport. */
   codex_app_server_port?: number;
+  /** Suppress user-visible Telegram narration for internal boot/handoff/continue restarts. */
+  suppress_restart_telegram?: boolean;
   /**
    * Agent runtime. Defaults to 'claude-code' when absent.
    * 'hermes' selects the HermesPTY spawn path (Python persistent REPL,

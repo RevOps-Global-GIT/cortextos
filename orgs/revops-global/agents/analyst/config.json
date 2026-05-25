@@ -169,6 +169,12 @@
       "type": "recurring",
       "interval": "4h",
       "prompt": "Run detection-shadow monitor: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/detection-shadow-monitor.py. Detects three classes of detection-shadow failures: red-main (any of 5 RevOps repos failing CI on main), stale-lock-d (>15min .lock.d in agent inbox), ack-loop (3+ generic acks in 10min without artifact). Alerts orchestrator on each new incident (6h dedup). Per theta-2026-05-24 Phase 7."
+    },
+    {
+      "name": "cache-split-monitor",
+      "type": "recurring",
+      "interval": "30m",
+      "prompt": "Run cache-split fast-cycle monitor: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/cache-split-monitor.py. Detects thin-body 200 responses on configured agentops.revopsglobal.com routes (cache split symptom). Alerts orchestrator when consecutive thin passes >= 2 per route (1h dedup, severity high). Per dev 2026-05-24 detection-shadow-monitor v4 expansion."
     }
   ],
   "ctx_autoreset_threshold": 45,

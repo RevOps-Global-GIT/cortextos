@@ -488,6 +488,8 @@ export class CodexAppServerPTY {
   }
 
   private async startOrResumeThread(mode: 'fresh' | 'continue'): Promise<void> {
+    const persistExtendedHistory = this.shouldPersistExtendedHistory();
+
     if (mode === 'continue') {
       const persisted = this.readThreadState();
       if (persisted) {
@@ -497,7 +499,7 @@ export class CodexAppServerPTY {
             cwd: this._cwd,
             ...THREAD_PERMISSION_OVERRIDES,
             excludeTurns: true,
-            persistExtendedHistory: true,
+            persistExtendedHistory,
           });
           this.setThreadId(resumed.result?.thread.id || persisted.threadId);
           return;
@@ -513,7 +515,7 @@ export class CodexAppServerPTY {
           cwd: this._cwd,
           ...THREAD_PERMISSION_OVERRIDES,
           excludeTurns: true,
-          persistExtendedHistory: true,
+          persistExtendedHistory,
         });
         this.setThreadId(resumed.result?.thread.id || latest);
         return;
@@ -525,9 +527,13 @@ export class CodexAppServerPTY {
       ...THREAD_PERMISSION_OVERRIDES,
       sessionStartSource: 'startup',
       experimentalRawEvents: false,
-      persistExtendedHistory: true,
+      persistExtendedHistory,
     });
     this.setThreadId(started.result!.thread.id);
+  }
+
+  private shouldPersistExtendedHistory(): boolean {
+    return this._config.suppress_restart_telegram !== true;
   }
 
   private async findLatestThreadForCwd(): Promise<string | null> {
@@ -543,22 +549,25 @@ export class CodexAppServerPTY {
 
   private queueTurn(input: unknown[]): void {
     this._turnQueue.push(input);
-    if (!this._executing) {
-      this.drainQueue().catch((err) => {
+    if (this._executing) return;
+    this._executing = true;
+    this.drainQueue()
+      .catch((err) => {
         this._outputBuffer.push(`[codex-app-server] turn queue failed: ${err}\n`);
+      })
+      .finally(() => {
+        this._executing = false;
+        if (this._alive && this._turnQueue.length > 0) {
+          this.queueTurn([]);
+        }
       });
-    }
   }
 
   private async drainQueue(): Promise<void> {
     while (this._alive && this._turnQueue.length > 0) {
       const input = this._turnQueue.shift()!;
-      this._executing = true;
-      try {
-        await this.startTurn(input);
-      } finally {
-        this._executing = false;
-      }
+      if (Array.isArray(input) && input.length === 0) continue;
+      await this.startTurn(input);
     }
   }
 

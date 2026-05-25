@@ -2692,8 +2692,9 @@ busCommand
   .option('--image <path>', 'Send a photo with caption')
   .option('--file <path>', 'Send a document/file with caption (any file type)')
   .option('--plain-text', 'Skip Telegram Markdown parsing entirely. Use this when the message contains unescaped _, *, backtick, or [ that would otherwise trip the Markdown parser. Without this flag, sendMessage still retries once with parse_mode disabled on a parse-entity error — so it is purely an opt-in to save the retry roundtrip.', false)
+  .option('--reply-to <message-id>', 'Reply in-thread to a Telegram message id')
   .option('--policy-approval-id <id>', 'Approval ID authorizing a policy-gated direct Telegram send')
-  .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean; policyApprovalId?: string }) => {
+  .action(async (chatId: string, message: string, opts: { image?: string; file?: string; plainText?: boolean; replyTo?: string; policyApprovalId?: string }) => {
     // Codex agents emit literal '\n'/'\t' inside single-quoted bash where bash
     // does not expand escapes, so they arrive at argv as 2-char literals and
     // Telegram renders them as visible text. Normalize before send + log.
@@ -2748,6 +2749,11 @@ busCommand
     const api = new TelegramAPI(botToken);
     try {
       let sentMessageId = 0;
+      const replyToMessageId = opts.replyTo ? Number(opts.replyTo) : undefined;
+      if (opts.replyTo && (!Number.isFinite(replyToMessageId) || replyToMessageId! <= 0)) {
+        console.error(`Invalid --reply-to '${opts.replyTo}'. Must be a positive integer.`);
+        process.exit(1);
+      }
       if (opts.image) {
         const result = await api.sendPhoto(chatId, opts.image, message);
         sentMessageId = result?.result?.message_id ?? 0;
@@ -2757,6 +2763,7 @@ busCommand
       } else {
         const result = await api.sendMessage(chatId, message, undefined, {
           parseMode: opts.plainText ? null : 'HTML',
+          replyToMessageId,
         });
         sentMessageId = result?.result?.message_id ?? 0;
       }

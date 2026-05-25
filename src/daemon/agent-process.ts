@@ -827,9 +827,28 @@ export class AgentProcess implements ManagedAgent {
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
-    const handoffBlock = this.consumeHandoffBlock();
+    const suppressRestartTelegram = this.config.suppress_restart_telegram === true;
+    const handoffBlock = suppressRestartTelegram ? this.discardHandoffMarker() : this.consumeHandoffBlock();
     const isHandoffRestart = handoffBlock.length > 0;
     const isSilentRestart = this.consumeSilentRestartMarker();
+
+    if (suppressRestartTelegram) {
+      const mode = isHandoffRestart
+        ? 'context handoff restart'
+        : isSilentRestart
+        ? 'silent context auto-reset'
+        : 'startup';
+      return `LEAN QUIET STARTUP (${mode}). Current UTC time: ${nowUtc}.${rateLimitBlock}${reminderBlock}${deliverablesBlock}${handoffBlock}
+Performance recovery rules:
+- Do NOT send Telegram about booting, being back online, reconnecting, handoff, restart, or resume state.
+- If this input contains a live Telegram user message, handle that message first before crons, memory, or broad task scans.
+- If the user asks for an acknowledgement, eyes, receipt, like, reaction, or "on this post/thread", use the injected command exactly: cortextos bus react-telegram <chat_id> <message_id> 👀. Do not replace that with a new prose message.
+- Crons are daemon-managed. Do not call CronList or CronCreate. Inspect only with: cortextos bus list-crons $CTX_AGENT_NAME.
+- Avoid loading full daily memory. If memory is needed, use tail -80 memory/$(date -u +%Y-%m-%d).md, and archive/trim files over 50KB before reading more.
+- Check inbox and direct agent tasks narrowly, update heartbeat, and resume the highest-priority user/material blocker only. Do not run broad backlog sweeps during recovery.
+${onboardingAppend}`;
+    }
+
     // HANDOFF UX: the pickup message MUST be the first action after reading the handoff doc —
     // before cron restoration, before heartbeat, before anything else. Placing this instruction
     // immediately after the handoffBlock in the prompt ensures it is not buried.
@@ -837,7 +856,9 @@ export class AgentProcess implements ManagedAgent {
     // rapid cascade restart just happened), skip the send-telegram step to avoid a duplicate.
     const recentBackSent = isHandoffRestart && this.checkRecentBackMessage();
     const handoffUxOverride = isHandoffRestart
-      ? recentBackSent
+      ? suppressRestartTelegram
+        ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. Do NOT send any Telegram message about the restart or resume state. Restore crons, check inbox, and continue work silently unless there is a user message, material blocker, approval need, or material completion.'
+        : recentBackSent
         ? ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. A "back —" pickup message was already sent within the last 30 minutes — skip the send-telegram step entirely and resume work directly.'
         : ' HANDOFF UX: This is a context handoff restart — your memory is intact via the handoff doc. CRITICAL: After reading the handoff document, your VERY FIRST tool call MUST be a Bash call running: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID \'back — [what you were just working on]\' — replace the brackets with one brief plain-English sentence about your current state. Do this BEFORE restoring crons, BEFORE running heartbeat, BEFORE any other tool call. No cron IDs, no status report, no cold-boot phrasing. Do NOT send "Booting up... one moment" (skip AGENTS.md step 1 entirely).'
       : '';
@@ -847,7 +868,7 @@ export class AgentProcess implements ManagedAgent {
     const silentUxOverride = isSilentRestart && !isHandoffRestart
       ? ' SILENT AUTO-RESET: This session was automatically reset by the daemon at the configured ctx_autoreset_threshold. Do NOT send any Telegram messages about booting, being back online, or restarting — the reset is internal and the user did not ask for it. Skip AGENTS.md step 1 (boot message) and step 14 (online status message) entirely. Restore crons, check inbox, pick up the highest-priority task silently.'
       : '';
-    const onlineMessage = isHandoffRestart || isSilentRestart
+    const onlineMessage = isHandoffRestart || isSilentRestart || suppressRestartTelegram
       ? ''
       : ' After setting up crons, send a Telegram message to the user saying you are back online.';
     return `You are starting a new session. Current UTC time: ${nowUtc}.${rateLimitBlock} Read AGENTS.md and all bootstrap files listed there. Then restore your crons from config.json: CRITICAL DEDUP: Always call CronList BEFORE creating any cron. Also run 'cortextos bus list-crons $CTX_AGENT_NAME' to check daemon-managed crons. For each config.json entry, search BOTH the CronList output AND the bus list-crons output for its prompt text — if the prompt already appears in either, SKIP that cron entirely. For entries NOT already listed: for each entry with type "recurring" (or no type field), call CronCreate directly (do NOT use /loop — /loop will prompt the user about cloud scheduling which blocks boot in autonomous mode). Convert the interval to a cron expression: 1h→"0 */1 * * *", 2h→"0 */2 * * *", 4h→"0 */4 * * *", 6h→"0 */6 * * *", 12h→"0 */12 * * *", 24h→"0 0 * * *", Nm→"*/N * * * *". Pass recurring:true. For entries with type "once": compare fire_at against the current UTC time — if fire_at is in the future call CronCreate (one-shot, no recurring flag), if in the past delete that entry from config.json.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${silentUxOverride}${onlineMessage}${onboardingAppend}`;
@@ -857,7 +878,18 @@ export class AgentProcess implements ManagedAgent {
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
-    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Restore your crons from config.json ONLY if missing. CRITICAL DEDUP: Call CronList FIRST AND run 'cortextos bus list-crons $CTX_AGENT_NAME'. For each config.json entry, search BOTH the CronList output AND the bus list-crons output for its prompt text — if the prompt already appears in either, SKIP that cron. For entries NOT already listed: use CronCreate directly (do NOT use /loop — /loop will prompt about cloud scheduling which blocks autonomous boot). Convert interval to cron expression: 1h→"0 */1 * * *", 6h→"0 */6 * * *", 24h→"0 0 * * *", Nm→"*/N * * * *". Pass recurring:true for recurring entries, no recurring flag for once entries (only if fire_at is in the future). Rapid --continue restarts must not accumulate duplicates.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. After restoring crons and checking inbox, send a Telegram message to the user saying you are back online.`;
+    if (this.config.suppress_restart_telegram === true) {
+      return `LEAN SESSION CONTINUATION. Current UTC time: ${nowUtc}.${reminderBlock}${deliverablesBlock}
+Your history is preserved, but performance is the priority:
+- Do NOT send Telegram about booting, being back online, reconnecting, handoff, restart, or resume state.
+- Handle any live Telegram user message first.
+- For acknowledgement/eyes/like/reaction/"on this post" requests, run: cortextos bus react-telegram <chat_id> <message_id> 👀.
+- Crons are daemon-managed; inspect only with cortextos bus list-crons $CTX_AGENT_NAME. Do not call CronList/CronCreate.
+- Do not read full daily memory; tail the last 80 lines only if needed.
+- Check inbox/direct tasks narrowly, update heartbeat, then continue material work.`;
+    }
+    const restartTelegramInstruction = ' After restoring crons and checking inbox, send a Telegram message to the user saying you are back online.';
+    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Restore your crons from config.json ONLY if missing. CRITICAL DEDUP: Call CronList FIRST AND run 'cortextos bus list-crons $CTX_AGENT_NAME'. For each config.json entry, search BOTH the CronList output AND the bus list-crons output for its prompt text — if the prompt already appears in either, SKIP that cron. For entries NOT already listed: use CronCreate directly (do NOT use /loop — /loop will prompt about cloud scheduling which blocks autonomous boot). Convert interval to cron expression: 1h→"0 */1 * * *", 6h→"0 */6 * * *", 24h→"0 0 * * *", Nm→"*/N * * * *". Pass recurring:true for recurring entries, no recurring flag for once entries (only if fire_at is in the future). Rapid --continue restarts must not accumulate duplicates.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${restartTelegramInstruction}`;
   }
 
   /**
@@ -897,6 +929,23 @@ export class AgentProcess implements ManagedAgent {
     } catch {
       return '';
     }
+  }
+
+  /**
+   * Quiet-start agents should not resurrect stale handoff docs. The doc content
+   * is often exactly what pushed the session over context in the first place.
+   * Remove an explicit marker if present, but do not auto-scan handoffs.
+   */
+  private discardHandoffMarker(): string {
+    const markerPath = join(this.env.ctxRoot, 'state', this.name, '.handoff-doc-path');
+    if (!existsSync(markerPath)) return '';
+    try {
+      unlinkSync(markerPath);
+      this.log('Quiet startup: discarded handoff marker without injecting handoff doc');
+    } catch {
+      // Ignore marker cleanup failures; returning empty keeps the prompt lean.
+    }
+    return '';
   }
 
   /**
