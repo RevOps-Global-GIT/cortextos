@@ -23,6 +23,10 @@ type Capability = {
   failWhen: string;
   renewalPath: string;
   proofRequired: string;
+  lastCheckedAt?: string;
+  lastAuthority?: string;
+  observed?: string;
+  proof?: string;
 };
 
 const statusLabels: Record<CapabilityStatus, string> = {
@@ -45,6 +49,7 @@ export default function CortexCapabilitiesPage() {
   const monitor = loadMonitor();
   const capabilities = monitor.capabilities as Capability[];
   const pendingCount = capabilities.filter((item) => item.currentStatus === 'pending_wiring').length;
+  const issueCount = capabilities.filter((item) => !['ok', 'pending_wiring'].includes(item.currentStatus)).length;
 
   return (
     <div className="space-y-6">
@@ -57,7 +62,7 @@ export default function CortexCapabilitiesPage() {
         <p className="max-w-3xl text-sm text-muted-foreground">{monitor.purpose}</p>
       </header>
 
-      <section className="grid gap-3 md:grid-cols-3">
+      <section className="grid gap-3 md:grid-cols-4">
         <div className="rounded-lg border bg-card p-4">
           <p className="text-xs font-medium uppercase text-muted-foreground">Capabilities</p>
           <p className="mt-2 text-2xl font-semibold">{capabilities.length}</p>
@@ -65,6 +70,10 @@ export default function CortexCapabilitiesPage() {
         <div className="rounded-lg border bg-card p-4">
           <p className="text-xs font-medium uppercase text-muted-foreground">Pending Wiring</p>
           <p className="mt-2 text-2xl font-semibold">{pendingCount}</p>
+        </div>
+        <div className="rounded-lg border bg-card p-4">
+          <p className="text-xs font-medium uppercase text-muted-foreground">Live Issues</p>
+          <p className="mt-2 text-2xl font-semibold">{issueCount}</p>
         </div>
         <div className="rounded-lg border bg-card p-4">
           <p className="text-xs font-medium uppercase text-muted-foreground">Event Contract</p>
@@ -95,11 +104,16 @@ export default function CortexCapabilitiesPage() {
               <div className="grid gap-3 sm:grid-cols-2">
                 <div>
                   <p className="text-xs font-medium uppercase text-muted-foreground">Authority</p>
-                  <p className="mt-1 text-sm">{capability.authority}</p>
+                  <p className="mt-1 text-sm">{capability.lastAuthority ?? capability.authority}</p>
                 </div>
                 <div>
                   <p className="text-xs font-medium uppercase text-muted-foreground">Freshness</p>
                   <p className="mt-1 text-sm">{capability.freshnessTarget}</p>
+                  {capability.lastCheckedAt && (
+                    <p className="mt-1 font-mono text-xs text-muted-foreground">
+                      checked {new Date(capability.lastCheckedAt).toLocaleString()}
+                    </p>
+                  )}
                 </div>
                 <div>
                   <p className="text-xs font-medium uppercase text-muted-foreground">Warn</p>
@@ -112,6 +126,18 @@ export default function CortexCapabilitiesPage() {
               </div>
 
               <div className="space-y-3">
+                {capability.observed && (
+                  <div>
+                    <p className="text-xs font-medium uppercase text-muted-foreground">Observed</p>
+                    <p className="mt-1 text-sm">{capability.observed}</p>
+                  </div>
+                )}
+                {capability.proof && (
+                  <div>
+                    <p className="text-xs font-medium uppercase text-muted-foreground">Latest Proof</p>
+                    <p className="mt-1 break-words font-mono text-xs text-muted-foreground">{capability.proof}</p>
+                  </div>
+                )}
                 <div>
                   <p className="text-xs font-medium uppercase text-muted-foreground">Sentinels</p>
                   <div className="mt-1 flex flex-wrap gap-1">

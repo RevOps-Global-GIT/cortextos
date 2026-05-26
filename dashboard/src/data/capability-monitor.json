@@ -105,16 +105,17 @@
         "no-op exec/health endpoint",
         "lane identity match"
       ],
-      "currentStatus": "warn",
+      "currentStatus": "ok",
       "freshnessTarget": "daily plus before VM-dependent dispatch",
       "warnWhen": "one transient 5xx, stale lease metadata, VM listed but slow/unready, or lane mismatch",
       "failWhen": "401/403, endpoint unreachable, VM stuck/deleted while marked active, or repeated 5xx",
       "renewalPath": "Vendor support or VM recreation workflow; preserve lane authority in VM ledger",
       "proofRequired": "Per-lane inventory id, exec status, and blocker class when vendor/human action is required",
-      "lastCheckedAt": "2026-05-24T07:48:11.815Z",
-      "lastAuthority": "Orgo API/VM ledger for the assigned workspace/lane",
-      "observed": "Orgo API 404",
-      "lastEventName": "capability_check_passed"
+      "lastCheckedAt": "2026-05-26T15:20:14.725Z",
+      "lastAuthority": "cortextos bus orgo-lease-status",
+      "observed": "5/5 exec-capable Orgo lanes healthy",
+      "lastEventName": "capability_check_passed",
+      "proof": "healthy=[orgo-codex-computeruse: last_exec_ok=true status=running; orgo-hub-qa: last_exec_ok=standby-complete status=idle; orgo-linkedin-session: last_exec_ok=true status=running; orgo-telegram-web: last_exec_ok=true status=running; orgo-wiki-ingestion-worker: last_exec_ok=true status=running]"
     },
     {
       "id": "github_token",
