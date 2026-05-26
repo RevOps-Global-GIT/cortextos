@@ -912,7 +912,7 @@ busCommand
   .argument('<id>', 'Task ID')
   .argument('[result]', 'Completion result (optional positional form)')
   .option('--result <text>', 'Completion result')
-  .option('--override', 'Skip LLM validation gate (emergency use only)')
+  .option('--override', 'Skip task validation gate (emergency use only)')
   .action(async (id: string, resultArg: string | undefined, opts: { result?: string; override?: boolean }) => {
     // Accept result as either positional arg or --result flag (P1 fix #8)
     const effectiveResult = opts.result ?? resultArg;
@@ -928,8 +928,8 @@ busCommand
       }
     }
 
-    // Guard: LLM validation gate — block until score >= 7 or --override
-    if (!opts.override && process.env.ANTHROPIC_API_KEY) {
+    // Guard: local validation gate — block vague completions without spending provider credits.
+    if (!opts.override) {
       try {
         const validation = await validateTask(paths, id, effectiveResult);
         if (validation.score < 7) {
@@ -939,7 +939,8 @@ busCommand
         }
         console.log(`Validation passed: ${validation.score}/10 — ${validation.reasoning}`);
       } catch (err) {
-        // Non-blocking: network errors or missing task criteria warn but don't block
+        // Missing task files or malformed task JSON should not prevent the canonical
+        // completeTask path from running its own lookup/error handling.
         console.error(`Warning: validation skipped — ${err instanceof Error ? err.message : String(err)}`);
       }
     } else if (opts.override) {
@@ -961,7 +962,7 @@ busCommand
 busCommand
   .command('validate-task')
   .argument('<id>', 'Task ID')
-  .description('LLM-judge a task against its success_criteria. Exits 0 if score >= 7, exits 1 if score < 7.')
+  .description('Locally validate a task against its success_criteria. Exits 0 if score >= 7, exits 1 if score < 7.')
   .action(async (id: string) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
