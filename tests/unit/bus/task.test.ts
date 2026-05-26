@@ -148,6 +148,36 @@ skipBriefValidation: true,
       expect(pending.length).toBe(1);
     });
   });
+
+  describe('RGOS-imported task files', () => {
+    it('lists UUID-named task JSON files materialized from Supabase', () => {
+      const id = 'abc39b97-96f6-410a-87a6-fa4ead610d0e';
+      mkdirSync(paths.taskDir, { recursive: true });
+      writeFileSync(join(paths.taskDir, `${id}.json`), JSON.stringify({
+        id,
+        title: 'Imported Cortex task',
+        description: 'Supabase-origin task',
+        type: 'agent',
+        needs_approval: false,
+        status: 'pending',
+        assigned_to: 'codex',
+        created_by: 'orchestrator',
+        org: 'revops-global',
+        priority: 'high',
+        project: '',
+        kpi_key: null,
+        created_at: '2026-05-26T17:00:00Z',
+        updated_at: '2026-05-26T17:00:00Z',
+        completed_at: null,
+        due_date: null,
+        archived: false,
+      }));
+
+      const tasks = listTasks(paths, { agent: 'codex', status: 'pending' });
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0].id).toBe(id);
+    });
+  });
 });
 
 /**

@@ -34,6 +34,7 @@ import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled } from '../bus/rgos-mirror.js';
+import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { enforceControlPolicy } from '../bus/orch-control-policy.js';
@@ -889,7 +890,7 @@ busCommand
   .description('Atomically claim a pending task — marks in_progress + sets assignee in one shot, rejecting if another agent already owns it')
   .argument('<id>', 'Task ID')
   .option('--agent <name>', 'Agent claiming the task (defaults to CTX_AGENT_NAME)')
-  .action((id: string, opts: { agent?: string }) => {
+  .action(async (id: string, opts: { agent?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const agent = opts.agent || env.agentName;
@@ -898,6 +899,9 @@ busCommand
       process.exit(1);
     }
     try {
+      if (!findTaskFile(paths, id)) {
+        await importRgosTaskById(paths, id, agent);
+      }
       const task = claimTask(paths, id, agent);
       console.log(`Claimed ${id} -> in_progress (assigned to ${agent})`);
       console.log(`  Title: ${task.title}`);
@@ -1013,14 +1017,22 @@ busCommand
   .option('--status <s>', 'Filter by status')
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .option('--respect-deps', 'Sort DAG-aware: unblocked tasks first, blocked tasks last')
-  .action((opts: { agent?: string; status?: string; format?: string; respectDeps?: boolean }) => {
+  .action(async (opts: { agent?: string; status?: string; format?: string; respectDeps?: boolean }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const requestedStatus = opts.status === 'approved' ? 'pending' : opts.status;
+    if (opts.status === 'approved') {
+      try {
+        await importApprovedRgosTasks(paths, { agent: opts.agent });
+      } catch (err) {
+        console.error(`[list-tasks] Supabase approved backlog sync failed; showing local tasks only: ${(err as Error).message}`);
+      }
+    }
     let tasks;
     try {
       tasks = listTasks(paths, {
         agent: opts.agent,
-        status: opts.status as TaskStatus,
+        status: requestedStatus as TaskStatus,
         respectDeps: opts.respectDeps ?? false,
       });
     } catch (err: unknown) {

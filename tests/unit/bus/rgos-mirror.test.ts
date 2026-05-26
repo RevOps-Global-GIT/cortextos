@@ -942,6 +942,12 @@ describe('rgos-mirror — PostgREST UUID validation (scenario 14)', () => {
     expect(uuid1).toBe(uuid2);
     expect(uuid1).toMatch(UUID_RE);
   });
+
+  it('preserves Supabase UUID task IDs instead of hashing them again', () => {
+    const id = 'abc39b97-96f6-410a-87a6-fa4ead610d0e';
+    const row = buildTaskRow(makeTask({ id }));
+    expect(row.id).toBe(id);
+  });
 });
 
 // ── Priority and status constraint maps ──────────────────────────────────────
