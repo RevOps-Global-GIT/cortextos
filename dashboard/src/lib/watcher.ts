@@ -3,10 +3,12 @@
 
 import { EventEmitter } from 'events';
 import { watch, type FSWatcher } from 'chokidar';
+import fs from 'fs';
 import path from 'path';
 import { CTX_ROOT, getOrgs } from './config';
 import { syncFile, syncAll } from './sync';
-import type { SSEEvent } from './types';
+import { db } from './db';
+import type { EventType, SSEEvent } from './types';
 
 // ---------------------------------------------------------------------------
 // globalThis singleton pattern (survives Next.js hot reloads)
@@ -51,6 +53,8 @@ function getWatchPaths(): string[] {
 // File change handler
 // ---------------------------------------------------------------------------
 
+type WatchChangeType = 'change' | 'add' | 'remove';
+
 function categorizeFilePath(filePath: string): SSEEvent['type'] {
   if (filePath.includes('/tasks/')) return 'task';
   if (filePath.includes('/approvals/')) return 'approval';
@@ -59,9 +63,172 @@ function categorizeFilePath(filePath: string): SSEEvent['type'] {
   return 'sync';
 }
 
+function readJsonFile(filePath: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function fallbackEvent(filePath: string, changeType: WatchChangeType): SSEEvent {
+  return {
+    type: categorizeFilePath(filePath),
+    data: { filePath, changeType },
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function normalizeEventType(value: unknown): SSEEvent['type'] {
+  const type = typeof value === 'string' ? value : '';
+  if (['action', 'message', 'task', 'approval', 'error', 'milestone', 'heartbeat', 'event', 'sync'].includes(type)) {
+    return type as EventType | 'event' | 'sync';
+  }
+  return 'event';
+}
+
+function parseData(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'string') return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function eventRowToSSE(filePath: string, changeType: WatchChangeType): SSEEvent | null {
+  const row = db
+    .prepare(
+      `SELECT id, timestamp, agent, org, type, category, severity, data, message, source_file
+       FROM events
+       WHERE source_file = ?
+       ORDER BY timestamp DESC
+       LIMIT 1`,
+    )
+    .get(filePath) as Record<string, unknown> | undefined;
+
+  if (!row) return null;
+
+  return {
+    type: normalizeEventType(row.type),
+    timestamp: row.timestamp as string,
+    data: {
+      ...parseData(row.data),
+      id: row.id,
+      agent: row.agent,
+      org: row.org,
+      category: row.category,
+      severity: row.severity,
+      message: row.message,
+      source_file: row.source_file,
+      filePath,
+      changeType,
+    },
+  };
+}
+
+export function buildSSEEventForFileChange(
+  filePath: string,
+  changeType: WatchChangeType,
+): SSEEvent {
+  if (changeType === 'remove') return fallbackEvent(filePath, changeType);
+
+  if (filePath.includes('/analytics/events/') && filePath.endsWith('.jsonl')) {
+    return eventRowToSSE(filePath, changeType) ?? fallbackEvent(filePath, changeType);
+  }
+
+  if (filePath.includes('/tasks/') && filePath.endsWith('.json')) {
+    const task = readJsonFile(filePath);
+    if (task) {
+      const title = typeof task.title === 'string' ? task.title : 'Untitled task';
+      const status = typeof task.status === 'string' ? task.status : 'updated';
+      const agent = typeof task.assigned_to === 'string'
+        ? task.assigned_to
+        : typeof task.assignee === 'string'
+          ? task.assignee
+          : '';
+      const org = typeof task.org === 'string' ? task.org : '';
+      return {
+        type: 'task',
+        timestamp: typeof task.updated_at === 'string'
+          ? task.updated_at
+          : typeof task.created_at === 'string'
+            ? task.created_at
+            : new Date().toISOString(),
+        data: {
+          id: task.id ?? path.basename(filePath, '.json'),
+          agent,
+          org,
+          category: 'task',
+          severity: 'info',
+          message: `Task ${status}: ${title}`,
+          filePath,
+          changeType,
+        },
+      };
+    }
+  }
+
+  if (filePath.includes('/approvals/') && filePath.endsWith('.json')) {
+    const approval = readJsonFile(filePath);
+    if (approval) {
+      const title = typeof approval.title === 'string' ? approval.title : 'Approval';
+      const status = typeof approval.status === 'string' ? approval.status : 'updated';
+      return {
+        type: 'approval',
+        timestamp: typeof approval.resolved_at === 'string'
+          ? approval.resolved_at
+          : typeof approval.created_at === 'string'
+            ? approval.created_at
+            : new Date().toISOString(),
+        data: {
+          id: approval.id ?? path.basename(filePath, '.json'),
+          agent: approval.requesting_agent ?? approval.agent ?? '',
+          org: approval.org ?? '',
+          category: approval.category ?? 'approval',
+          severity: 'info',
+          message: `Approval ${status}: ${title}`,
+          filePath,
+          changeType,
+        },
+      };
+    }
+  }
+
+  if (filePath.includes('/state/') && filePath.endsWith('heartbeat.json')) {
+    const heartbeat = readJsonFile(filePath);
+    if (heartbeat) {
+      const agent = path.basename(path.dirname(filePath));
+      const status = typeof heartbeat.status === 'string' ? heartbeat.status : 'heartbeat';
+      return {
+        type: 'heartbeat',
+        timestamp: typeof heartbeat.last_heartbeat === 'string'
+          ? heartbeat.last_heartbeat
+          : typeof heartbeat.timestamp === 'string'
+            ? heartbeat.timestamp
+            : new Date().toISOString(),
+        data: {
+          agent,
+          org: heartbeat.org ?? '',
+          category: 'heartbeat',
+          severity: 'info',
+          message: `${agent} heartbeat: ${status}`,
+          filePath,
+          changeType,
+        },
+      };
+    }
+  }
+
+  return fallbackEvent(filePath, changeType);
+}
+
 function handleFileChange(
   filePath: string,
-  changeType: 'change' | 'add' | 'remove',
+  changeType: WatchChangeType,
 ): void {
   console.log(`[watcher] ${changeType}: ${filePath}`);
 
@@ -74,14 +241,7 @@ function handleFileChange(
     }
   }
 
-  // Emit SSE event
-  const sseEvent: SSEEvent = {
-    type: categorizeFilePath(filePath),
-    data: { filePath, changeType },
-    timestamp: new Date().toISOString(),
-  };
-
-  emitter.emit('sse', sseEvent);
+  emitter.emit('sse', buildSSEEventForFileChange(filePath, changeType));
 }
 
 // ---------------------------------------------------------------------------
