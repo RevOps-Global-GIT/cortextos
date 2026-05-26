@@ -470,7 +470,7 @@ export function mapStatus(s: string): string {
 
 export function buildTaskRow(task: Task): Record<string, unknown> {
   return {
-    id: uuidv5(task.id),
+    id: isUuid(task.id) ? task.id : uuidv5(task.id),
     org_id: ORG_ID,
     title: task.title,
     description: task.description || null,

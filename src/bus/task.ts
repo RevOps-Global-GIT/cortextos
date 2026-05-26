@@ -11,6 +11,10 @@ import { logEvent } from './event.js';
 import { snapshotSessionCost } from './task-cost.js';
 import { autoEmitStatusUpdate } from './agent-task-events.js';
 
+function isTaskJsonFile(file: string): boolean {
+  return !file.startsWith('.') && file.endsWith('.json');
+}
+
 // ---------------------------------------------------------------------------
 // Per-task read-modify-write lock
 // ---------------------------------------------------------------------------
@@ -353,9 +357,7 @@ export function checkTaskDependencies(
 export function listBlockedBy(paths: BusPaths, blockerId: string): Task[] {
   let files: string[];
   try {
-    files = readdirSync(paths.taskDir).filter(
-      f => f.startsWith('task_') && f.endsWith('.json'),
-    );
+    files = readdirSync(paths.taskDir).filter(isTaskJsonFile);
   } catch {
     return [];
   }
@@ -807,9 +809,7 @@ function autoUnblockChildren(paths: BusPaths, completedTaskId: string): void {
   // Scan local task dir for children that reference the completed task.
   let files: string[];
   try {
-    files = readdirSync(paths.taskDir).filter(
-      f => f.startsWith('task_') && f.endsWith('.json'),
-    );
+    files = readdirSync(paths.taskDir).filter(isTaskJsonFile);
   } catch {
     return;
   }
@@ -906,9 +906,7 @@ export function listTasks(
   const { taskDir } = paths;
   let files: string[];
   try {
-    files = readdirSync(taskDir).filter(
-      f => f.startsWith('task_') && f.endsWith('.json'),
-    );
+    files = readdirSync(taskDir).filter(isTaskJsonFile);
   } catch (err: unknown) {
     // Surface directory-not-found so callers know the path is wrong,
     // not just that there happen to be zero tasks.
@@ -970,9 +968,7 @@ export function listTasks(
 function readAllTasks(taskDir: string): Task[] {
   let files: string[];
   try {
-    files = readdirSync(taskDir).filter(
-      f => f.startsWith('task_') && f.endsWith('.json'),
-    );
+    files = readdirSync(taskDir).filter(isTaskJsonFile);
   } catch {
     return [];
   }
@@ -1129,7 +1125,7 @@ export function compactTasks(
   const { taskDir } = paths;
   let files: string[];
   try {
-    files = readdirSync(taskDir).filter(f => f.startsWith('task_') && f.endsWith('.json'));
+    files = readdirSync(taskDir).filter(isTaskJsonFile);
   } catch {
     return report;
   }
