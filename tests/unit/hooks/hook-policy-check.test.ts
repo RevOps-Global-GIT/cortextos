@@ -12,7 +12,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync, execSync, execFileSync } from 'child_process';
-import { existsSync, mkdtempSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -216,6 +216,39 @@ describe('hook-policy-check — P2: repo-aware', () => {
 
   it('blocks push origin in a repo that DOES have a grandamenium remote (cd prefix)', () => {
     const r = runPolicyCheck(`cd ${grandameniumRepo} && git push origin main`);
+    expect(r.decision).toBe('block');
+    expect(r.reason).toMatch(/fork/i);
+  });
+
+  it('blocks push origin in a grandamenium/cortextos package checkout even when CI remote is RevOps-only', () => {
+    const ciCheckoutRepo = join(tmpRoot, 'ci-revops-checkout');
+    execFileSync('git', ['init', '-q', ciCheckoutRepo]);
+    execFileSync('git', ['-C', ciCheckoutRepo, 'remote', 'add', 'origin',
+      'git@github.com:RevOps-Global-GIT/cortextos.git']);
+    writeFileSync(join(ciCheckoutRepo, 'package.json'), JSON.stringify({
+      name: 'cortextos',
+      repository: {
+        type: 'git',
+        url: 'https://github.com/grandamenium/cortextos.git',
+      },
+    }));
+
+    const r = runPolicyCheck(`cd ${ciCheckoutRepo} && git push origin main`);
+    expect(r.decision).toBe('block');
+    expect(r.reason).toMatch(/fork/i);
+  });
+
+  it('blocks bare git push in a grandamenium/cortextos package checkout even when CI remote is RevOps-only', () => {
+    const ciCheckoutRepo = join(tmpRoot, 'ci-revops-bare-checkout');
+    execFileSync('git', ['init', '-q', ciCheckoutRepo]);
+    execFileSync('git', ['-C', ciCheckoutRepo, 'remote', 'add', 'origin',
+      'git@github.com:RevOps-Global-GIT/cortextos.git']);
+    writeFileSync(join(ciCheckoutRepo, 'package.json'), JSON.stringify({
+      name: 'cortextos',
+      repository: 'https://github.com/grandamenium/cortextos.git',
+    }));
+
+    const r = runPolicyCheck(`cd ${ciCheckoutRepo} && git push`);
     expect(r.decision).toBe('block');
     expect(r.reason).toMatch(/fork/i);
   });

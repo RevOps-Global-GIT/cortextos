@@ -13,6 +13,8 @@
  */
 
 import { execFileSync } from 'child_process';
+import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { readStdin, parseHookInput } from './index.js';
 
 // ---------------------------------------------------------------------------
@@ -74,7 +76,38 @@ function repoHasGrandameniumRemote(cwd?: string): boolean {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     });
-    return /github\.com[/:]grandamenium\//i.test(out);
+    if (/github\.com[/:]grandamenium\//i.test(out)) return true;
+  } catch {
+    // Keep checking package metadata below. CI checkouts of RevOps PR branches
+    // can have only a RevOps remote even though this package is the protected
+    // grandamenium/cortextos fork relationship.
+  }
+
+  try {
+    const root = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd,
+      timeout: 1500,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const packagePath = join(root, 'package.json');
+    if (!existsSync(packagePath)) return false;
+
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf-8')) as {
+      repository?: string | { url?: string };
+      homepage?: string;
+      bugs?: { url?: string };
+    };
+    const repository = typeof packageJson.repository === 'string'
+      ? packageJson.repository
+      : packageJson.repository?.url;
+    const metadata = [
+      repository,
+      packageJson.homepage,
+      packageJson.bugs?.url,
+    ].filter(Boolean).join('\n');
+
+    return /github\.com[/:]grandamenium\/cortextos\b/i.test(metadata);
   } catch {
     return false;
   }
