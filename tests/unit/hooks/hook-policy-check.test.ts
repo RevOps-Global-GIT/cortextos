@@ -10,9 +10,10 @@
  * deterministic gate: "does the hook binary behave correctly in isolation?"
  */
 
-import { describe, it, expect, beforeAll } from 'vitest';
-import { spawnSync, execSync } from 'child_process';
-import { existsSync } from 'fs';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { spawnSync, execSync, execFileSync } from 'child_process';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { join } from 'path';
 
 // ---------------------------------------------------------------------------
@@ -168,6 +169,98 @@ describe('hook-policy-check — P2: git push target', () => {
       ')"',
     ];
     const r = runPolicyCheck(lines.join('\n'));
+    expect(r.decision).toBe('allow');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P2: Repo-aware gate — only enforce on repos with a grandamenium remote
+// ---------------------------------------------------------------------------
+
+describe('hook-policy-check — P2: repo-aware', () => {
+  let tmpRoot: string;
+  let nonGrandameniumRepo: string;
+  let grandameniumRepo: string;
+
+  beforeAll(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), 'p2-repo-aware-'));
+
+    // Repo with no grandamenium relationship (e.g. ob1-app, rgos).
+    nonGrandameniumRepo = join(tmpRoot, 'non-grandamenium');
+    execFileSync('git', ['init', '-q', nonGrandameniumRepo]);
+    execFileSync('git', ['-C', nonGrandameniumRepo, 'remote', 'add', 'origin',
+      'git@github.com:RevOps-Global-GIT/ob1-app.git']);
+
+    // Repo with a grandamenium remote (cortextos shape).
+    grandameniumRepo = join(tmpRoot, 'grandamenium-fork');
+    execFileSync('git', ['init', '-q', grandameniumRepo]);
+    execFileSync('git', ['-C', grandameniumRepo, 'remote', 'add', 'origin',
+      'git@github.com:grandamenium/cortextos.git']);
+    execFileSync('git', ['-C', grandameniumRepo, 'remote', 'add', 'fork',
+      'git@github.com:RevOps-Global-GIT/cortextos.git']);
+  });
+
+  afterAll(() => {
+    if (tmpRoot) rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('allows push origin from a repo with no grandamenium remote (cd prefix)', () => {
+    const r = runPolicyCheck(`cd ${nonGrandameniumRepo} && git push origin main`);
+    expect(r.decision).toBe('allow');
+  });
+
+  it('allows bare git push from a non-grandamenium repo (cd prefix)', () => {
+    const r = runPolicyCheck(`cd ${nonGrandameniumRepo} && git push`);
+    expect(r.decision).toBe('allow');
+  });
+
+  it('blocks push origin in a repo that DOES have a grandamenium remote (cd prefix)', () => {
+    const r = runPolicyCheck(`cd ${grandameniumRepo} && git push origin main`);
+    expect(r.decision).toBe('block');
+    expect(r.reason).toMatch(/fork/i);
+  });
+
+  it('blocks push origin in a grandamenium/cortextos package checkout even when CI remote is RevOps-only', () => {
+    const ciCheckoutRepo = join(tmpRoot, 'ci-revops-checkout');
+    execFileSync('git', ['init', '-q', ciCheckoutRepo]);
+    execFileSync('git', ['-C', ciCheckoutRepo, 'remote', 'add', 'origin',
+      'git@github.com:RevOps-Global-GIT/cortextos.git']);
+    writeFileSync(join(ciCheckoutRepo, 'package.json'), JSON.stringify({
+      name: 'cortextos',
+      repository: {
+        type: 'git',
+        url: 'https://github.com/grandamenium/cortextos.git',
+      },
+    }));
+
+    const r = runPolicyCheck(`cd ${ciCheckoutRepo} && git push origin main`);
+    expect(r.decision).toBe('block');
+    expect(r.reason).toMatch(/fork/i);
+  });
+
+  it('blocks bare git push in a grandamenium/cortextos package checkout even when CI remote is RevOps-only', () => {
+    const ciCheckoutRepo = join(tmpRoot, 'ci-revops-bare-checkout');
+    execFileSync('git', ['init', '-q', ciCheckoutRepo]);
+    execFileSync('git', ['-C', ciCheckoutRepo, 'remote', 'add', 'origin',
+      'git@github.com:RevOps-Global-GIT/cortextos.git']);
+    writeFileSync(join(ciCheckoutRepo, 'package.json'), JSON.stringify({
+      name: 'cortextos',
+      repository: 'https://github.com/grandamenium/cortextos.git',
+    }));
+
+    const r = runPolicyCheck(`cd ${ciCheckoutRepo} && git push`);
+    expect(r.decision).toBe('block');
+    expect(r.reason).toMatch(/fork/i);
+  });
+
+  it('allows push fork in a grandamenium-remote repo (cd prefix)', () => {
+    const r = runPolicyCheck(`cd ${grandameniumRepo} && git push fork feat/x`);
+    expect(r.decision).toBe('allow');
+  });
+
+  it('honors quoted cd target with spaces', () => {
+    // Sanity: the cd extractor must handle quoted paths.
+    const r = runPolicyCheck(`cd "${nonGrandameniumRepo}" && git push origin main`);
     expect(r.decision).toBe('allow');
   });
 });
