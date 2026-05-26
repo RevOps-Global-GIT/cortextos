@@ -48,7 +48,31 @@
       "name": "theta-wave",
       "type": "recurring",
       "cron": "0 22 * * *",
-      "prompt": "Read .claude/skills/theta-wave/SKILL.md. Initiate the theta wave cycle. First action: message the orchestrator that theta wave is starting and share your initial system scan."
+      "prompt": "Run the artifact-backed theta-wave scheduled workflow from agents/analyst/prompts/cron-theta-wave.md.",
+      "metadata": {
+        "runner": "spawn-codex",
+        "prompt_file": "agents/analyst/prompts/cron-theta-wave.md",
+        "workdir": "agents/analyst",
+        "agent": "analyst",
+        "task_id": "cron:analyst:theta-wave",
+        "timeout_seconds": 5400,
+        "sandbox": "danger-full-access"
+      }
+    },
+    {
+      "name": "theta-freshness-watchdog",
+      "type": "recurring",
+      "cron": "30 23 * * *",
+      "prompt": "Run the read-only theta freshness watchdog from agents/analyst/prompts/cron-theta-freshness-watchdog.md.",
+      "metadata": {
+        "runner": "spawn-codex",
+        "prompt_file": "agents/analyst/prompts/cron-theta-freshness-watchdog.md",
+        "workdir": "agents/analyst",
+        "agent": "analyst",
+        "task_id": "cron:analyst:theta-freshness-watchdog",
+        "timeout_seconds": 900,
+        "sandbox": "workspace-write"
+      }
     },
     {
       "name": "rgos-task-poll",
