@@ -203,6 +203,7 @@ export function getAgentsForOrg(org: string): string[] {
 interface EnabledAgentRegistryEntry {
   enabled?: boolean;
   org?: string;
+  status?: string;
 }
 
 function readEnabledAgentRegistry(): Record<string, EnabledAgentRegistryEntry> {
@@ -228,7 +229,7 @@ export function getAllAgents(): Array<{ name: string; org: string }> {
   // 1. Read enabled-agents.json for explicitly registered agents
   const registry = readEnabledAgentRegistry();
   for (const [name, config] of Object.entries(registry)) {
-    if (config.enabled === false) {
+    if (isDeletedRegistryEntry(name, config) || config.enabled === false) {
       disabled.add(name);
     } else {
       agents.push({ name, org: config.org ?? '' });
@@ -237,7 +238,7 @@ export function getAllAgents(): Array<{ name: string; org: string }> {
   }
 
   for (const name of Object.keys(registry)) {
-    if (registry[name]?.enabled === false) {
+    if (isDeletedRegistryEntry(name, registry[name]) || registry[name]?.enabled === false) {
       disabled.add(name);
     }
   }
@@ -254,6 +255,10 @@ export function getAllAgents(): Array<{ name: string; org: string }> {
   }
 
   return agents;
+}
+
+function isDeletedRegistryEntry(name: string, config?: EnabledAgentRegistryEntry): boolean {
+  return name === 'deleted_agents' || config?.status === 'deleted';
 }
 
 export function getAllowedRootsConfigPath(): string {

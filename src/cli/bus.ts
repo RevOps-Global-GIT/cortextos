@@ -3799,6 +3799,14 @@ busCommand
           mode = hb.mode ?? '';
         } catch { /* skip */ }
       }
+      if (!currentTask) {
+        try {
+          const taskPaths = resolvePaths(name, env.instanceId, info.org || env.org);
+          const activeTasks = listTasks(taskPaths, { agent: name, status: 'in_progress' });
+          const activeTask = activeTasks[0];
+          if (activeTask) currentTask = `${activeTask.id}: ${activeTask.title}`;
+        } catch { /* task store unavailable */ }
+      }
 
       results.push({ name, org: info.org, role, enabled: info.enabled, running, last_heartbeat: lastHeartbeat, current_task: currentTask, mode });
     }
