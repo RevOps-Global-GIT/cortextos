@@ -63,7 +63,7 @@ import { resolveEnv, applySecretsToEnv, validateEnvContent } from '../utils/env.
 import { verifySessionOwnership, SessionOwnershipError } from '../utils/session-lock.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
-import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
+import { logOutboundMessage, cacheLastSent, recordOutboundDogfoodTelegramAudit } from '../telegram/logging.js';
 import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
 
 /**
@@ -2802,6 +2802,7 @@ busCommand
           const paths = resolvePaths(env.agentName, env.instanceId, env.org);
           const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
           logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
+          recordOutboundDogfoodTelegramAudit(paths, env.ctxRoot, env.agentName, env.org, chatId, sentMessageId, dashText);
         } catch { /* non-fatal */ }
       }
 
