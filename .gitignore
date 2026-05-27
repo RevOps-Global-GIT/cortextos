@@ -35,6 +35,10 @@ agents/*/memory/
 # Test artifacts
 test-results/
 *.log
+
+# Backup files left by automated tooling (codex, orca, etc.)
+*.bak
+*.bak-*
 # Spurious directory created when ${APPDATA} env var unexpanded during npm link on Windows
 ${APPDATA}/
 
