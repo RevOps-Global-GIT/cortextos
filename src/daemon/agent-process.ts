@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { atomicWriteSync } from '../utils/atomic.js';
-import { join, sep } from 'path';
+import { join, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { detectDayNightMode } from '../bus/heartbeat.js';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
@@ -741,8 +741,12 @@ export class AgentProcess implements ManagedAgent {
     // Claude projects dir uses the absolute path with all separators replaced by dashes
     // e.g. /Users/foo/agents/boss -> -Users-foo-agents-boss (leading sep becomes -)
     // Use homedir() for cross-platform compatibility (HOME is not set on Windows).
+    // When config.home is set, resolve projects dir from config.home instead of homedir().
+    const effectiveHome = this.config.home
+      ? resolve(this.config.home.replace(/^~/, homedir()))
+      : homedir();
     const convDir = join(
-      homedir(),
+      effectiveHome,
       '.claude',
       'projects',
       launchDir.split(sep).join('-'),
