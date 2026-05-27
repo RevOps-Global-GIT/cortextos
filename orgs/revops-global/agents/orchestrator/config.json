@@ -48,13 +48,13 @@
       "name": "fleet-tick",
       "type": "recurring",
       "interval": "2h",
-      "prompt": "Fleet-tick: light coordination pass — (1) cortextos bus list-tasks; (2) check heartbeats; (3) scan inbox; (4) update heartbeat. Silent unless action needed."
+      "prompt": "Fleet-tick: light coordination pass \u2014 (1) cortextos bus list-tasks; (2) check heartbeats; (3) scan inbox; (4) update heartbeat. Silent unless action needed."
     },
     {
       "name": "kanban-sync",
       "type": "recurring",
       "cron": "0 8,17 * * *",
-      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator — compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
+      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator \u2014 compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
     },
     {
       "name": "blocked-uat-escalator",
@@ -107,11 +107,8 @@
       "enabled": true
     }
   },
-  "model": "gpt-5.5",
   "telegram_polling": true,
   "suppress_restart_telegram": true,
-  "runtime": "codex-app-server",
-  "codex_app_server_transport": "ws",
   "codex_account_pool": [
     {
       "priority": 1,
@@ -161,5 +158,10 @@
   "telegram_owner_note": "2026-05-25 recovery: orchestrator restored as sole @revops_director_bot / Orca front-door Telegram polling owner. Codex app-server runtime uses codex_account_pool with /home/cortextos/.codex-orchestrator-primary primary and labeled backups. orca-orch is voice-project-only and polling disabled.",
   "ctx_autoreset_note": "Disabled temporarily during 2026-05-25 Orca front-door recovery because Codex app-server tokenUsage reported 100% immediately after fresh start and caused restart churn. Restore after account-pool failover/context metric fix.",
   "codex_runtime_reenabled_note": "2026-05-26T23:54:33Z re-enabled Codex app-server front-door after all three CODEX_HOME lanes reported ChatGPT login status.",
-  "codex_home": "/home/cortextos/.codex-greg"
+  "codex_frontdoor_restore_note": "2026-05-27T17:00:41.016Z: heartbeat recovery restored runtime=codex-app-server after config drift removed runtime and Telegram update triggered Claude crash loop.",
+  "home": "/home/cortextos",
+  "tier": "sonnet",
+  "runtime": "claude-code",
+  "codex_app_server_transport": "ws",
+  "claude_handback_note": "2026-05-27T19:22Z: Claude work credits/session restored; orchestrator control plane returned to claude-code. Codex lanes remain execution-only."
 }
