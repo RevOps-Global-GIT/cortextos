@@ -887,7 +887,13 @@ export class AgentManager {
     activityPoller.onMessage((msg) => {
       const from = stripControlChars(msg.from?.first_name || msg.from?.username || 'Unknown');
       const text = stripControlChars(msg.text || msg.caption || '');
-        log(`[activity-channel inbound] msg_id=${msg.message_id} from ${from}: ${text.slice(0, 120)}`);
+      log(`[activity-channel inbound] msg_id=${msg.message_id} from ${from}: ${text.slice(0, 120)}`);
+      try {
+        const primaryPaths = resolvePaths(name, this.instanceId, org);
+        recordInboundTelegram(primaryPaths, this.ctxRoot, name, org, from, msg, log);
+      } catch (err) {
+        log(`recordInboundTelegram(activity-channel) FAILED for msg_id=${msg.message_id}: ${err}`);
+      }
     });
 
     // Single-poller-per-token invariant + conflict self-heal for the
