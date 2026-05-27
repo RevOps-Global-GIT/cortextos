@@ -7,6 +7,7 @@
 import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { logEvent } from '../bus/event.js';
+import { sendMessage } from '../bus/message.js';
 import type { BusPaths, TelegramMessage } from '../types/index.js';
 
 /**
@@ -117,6 +118,100 @@ export function recordInboundTelegram(
     });
   } catch (err) {
     log?.(`logEvent(telegram_received) failed: ${err}`);
+  }
+
+  try {
+    mirrorDogfoodTelegramToOrchestrator(paths, ctxRoot, agentName, org, fromName, msg, text, log);
+  } catch (err) {
+    log?.(`mirrorDogfoodTelegramToOrchestrator failed: ${err}`);
+  }
+}
+
+const DOGFOOD_RESULT_SOURCE_PATTERN = /\b(agentops|estate|ob1|orca|harned)\s+dogfood\b/i;
+const DOGFOOD_RESULT_CONTEXT_PATTERN = /\bdogfood\b/i;
+const DOGFOOD_RESULT_SIGNAL_PATTERN = /\b(pass|fail|failed|blocked|warn|warning|result|proof|report|artifact|scenario|runner|assert|p[0-9]|qa|smoke|audit)\b/i;
+
+function isDogfoodResultText(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  return DOGFOOD_RESULT_SOURCE_PATTERN.test(normalized)
+    || (DOGFOOD_RESULT_CONTEXT_PATTERN.test(normalized) && DOGFOOD_RESULT_SIGNAL_PATTERN.test(normalized));
+}
+
+function dogfoodMirrorKey(agentName: string, msg: TelegramMessage): string {
+  return [
+    'dogfood-telegram',
+    agentName,
+    String(msg.chat?.id ?? 'unknown-chat'),
+    String(msg.message_id),
+  ].join(':');
+}
+
+function alreadyMirroredDogfoodResult(ctxRoot: string, agentName: string, key: string): boolean {
+  const stateDir = join(ctxRoot, 'state', agentName);
+  mkdirSync(stateDir, { recursive: true });
+  const ledgerPath = join(stateDir, 'dogfood-orchestrator-mirror.jsonl');
+  if (existsSync(ledgerPath)) {
+    const raw = readFileSync(ledgerPath, 'utf-8');
+    if (raw.split('\n').some(line => line.includes(`"key":"${key}"`))) {
+      return true;
+    }
+  }
+  appendFileSync(ledgerPath, JSON.stringify({
+    key,
+    mirrored_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  }) + '\n', 'utf-8');
+  return false;
+}
+
+function mirrorDogfoodTelegramToOrchestrator(
+  paths: BusPaths,
+  ctxRoot: string,
+  agentName: string,
+  org: string,
+  fromName: string,
+  msg: TelegramMessage,
+  text: string,
+  log?: (m: string) => void,
+): void {
+  if (agentName === 'orchestrator') return;
+  if (!isDogfoodResultText(text)) return;
+
+  const key = dogfoodMirrorKey(agentName, msg);
+  if (alreadyMirroredDogfoodResult(ctxRoot, agentName, key)) return;
+
+  const originalTimestamp = msg.date
+    ? new Date(msg.date * 1000).toISOString()
+    : new Date().toISOString();
+  const chatId = String(msg.chat?.id ?? '');
+  const threadId = msg.reply_to_message?.message_id ?? null;
+  const sourceMessageId = msg.message_id;
+  const traceId = `dogfood-telegram-${agentName}-${chatId || 'unknown'}-${sourceMessageId}`;
+  const mirrorText = [
+    `DOGFOOD RESULT MIRROR from ${agentName} Telegram`,
+    `Source: chat=${chatId || 'unknown'} message=${sourceMessageId} thread=${threadId ?? 'none'} from=${fromName}`,
+    `Original timestamp: ${originalTimestamp}`,
+    '',
+    text,
+  ].join('\n');
+
+  sendMessage(paths, agentName, 'orchestrator', 'normal', mirrorText, undefined, traceId);
+
+  try {
+    logEvent(paths, agentName, org, 'message', 'dogfood_result_mirrored_to_orchestrator', 'info', {
+      mirror_key: key,
+      source_agent: agentName,
+      source_chat_id: chatId,
+      source_message_id: sourceMessageId,
+      source_thread_message_id: threadId,
+      source_from_name: fromName,
+      source_timestamp: originalTimestamp,
+      target_agent: 'orchestrator',
+      text_chars: text.length,
+      text: text.slice(0, 500),
+    });
+  } catch (err) {
+    log?.(`logEvent(dogfood_result_mirrored_to_orchestrator) failed: ${err}`);
   }
 }
 

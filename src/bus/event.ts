@@ -66,9 +66,13 @@ export function logEvent(
   appendFileSync(join(eventsDir, `${today}.jsonl`), eventLine + '\n', 'utf-8');
 
   // Fire-and-forget mirror to Supabase orch_events. Never awaited — local JSONL is authoritative.
-  setImmediate(() => {
-    mirrorEventToRgos({ id: eventId, agent: agentName, org, timestamp, category, event: eventName, severity, metadata: meta }).catch(() => undefined);
-  });
+  // Skip during tests so synthetic fixture events never leak into the live retry queue.
+  const allowTestMirror = process.env.CTX_ALLOW_TEST_RGOS_EVENT_MIRROR === '1';
+  if (allowTestMirror || (!process.env.VITEST && process.env.NODE_ENV !== 'test')) {
+    setImmediate(() => {
+      mirrorEventToRgos({ id: eventId, agent: agentName, org, timestamp, category, event: eventName, severity, metadata: meta }).catch(() => undefined);
+    });
+  }
 
   // Refresh heartbeat timestamp as a side-effect. See doc comment above.
   refreshHeartbeatTimestamp(paths, timestamp);

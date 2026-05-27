@@ -223,9 +223,13 @@ describe('logEvent — file path', () => {
 });
 
 describe('logEvent — mirrorEventToRgos', () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    delete process.env.CTX_ALLOW_TEST_RGOS_EVENT_MIRROR;
+    cleanup();
+  });
 
   it('calls mirrorEventToRgos with the logged event payload', async () => {
+    process.env.CTX_ALLOW_TEST_RGOS_EVENT_MIRROR = '1';
     vi.clearAllMocks(); // clear any accumulated calls from prior tests' setImmediate callbacks
     logEvent(paths, 'dev', 'revops-global', 'action', 'mirror_test', 'info', { x: 1 });
     // mirrorEventToRgos is called via setImmediate — wait for next tick
@@ -243,6 +247,7 @@ describe('logEvent — mirrorEventToRgos', () => {
   });
 
   it('does not throw if mirrorEventToRgos rejects', async () => {
+    process.env.CTX_ALLOW_TEST_RGOS_EVENT_MIRROR = '1';
     mockMirror.mockRejectedValueOnce(new Error('supabase down'));
     expect(() =>
       logEvent(paths, 'dev', 'revops-global', 'action', 'ev', 'info'),
