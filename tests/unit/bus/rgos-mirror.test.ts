@@ -47,6 +47,7 @@ import {
   mapStatus,
   migrateRetryQueueConstraints,
   migrateRetryQueueReplyToId,
+  resolveExistingTaskMirrorId,
   PostgRESTError,
   _resetDrainLock,
 } from '../../../src/bus/rgos-mirror.js';
@@ -357,7 +358,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     const task = makeTask({ status: 'in_progress', updated_at: '2026-04-25T10:30:00Z' });
     await mirrorTaskToRgos(task, 'update');
 
-    const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[1][1]?.body) as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.status).toBe('in_progress');
     expect(body.updated_at).toBe('2026-04-25T10:30:00Z');
@@ -371,11 +372,103 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     });
     await mirrorTaskToRgos(task, 'complete');
 
-    const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[1][1]?.body) as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.status).toBe('completed');
     expect(body.result).toBe('Shipped the feature');
     expect(body.completed_at).toBe('2026-04-25T11:00:00Z');
+  });
+
+  it('reuses an existing Supabase row with matching metadata.bus_task_id on update', async () => {
+    const existingId = '11111111-2222-5333-8444-555555555555';
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{ id: existingId, updated_at: '2026-04-25T09:00:00Z' }],
+        text: async () => '',
+      })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' }),
+    );
+
+    const task = makeTask({ status: 'in_progress', updated_at: '2026-04-25T10:30:00Z' });
+    await mirrorTaskToRgos(task, 'update');
+
+    const mockFetch = vi.mocked(fetch);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(String(mockFetch.mock.calls[0][0])).toContain('metadata-%3E%3Ebus_task_id=eq.task_1234567890_001');
+    const body = JSON.parse((mockFetch.mock.calls[1][1]?.body) as string);
+    expect(body.id).toBe(existingId);
+    expect(body.metadata.bus_task_id).toBe(task.id);
+    expect(body.status).toBe('in_progress');
+  });
+
+  it('keeps the deterministic UUID when no metadata.bus_task_id row exists', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [],
+        text: async () => '',
+      })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' }),
+    );
+
+    const task = makeTask({ status: 'in_progress' });
+    await mirrorTaskToRgos(task, 'update');
+
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[1][1]?.body) as string);
+    expect(body.id).toBe(uuidv5(task.id));
+  });
+});
+
+describe('rgos-mirror — resolveExistingTaskMirrorId()', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-resolve-test-'));
+    setMirrorEnv(tmpDir);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns the newest existing UUID row for a local bus task id', async () => {
+    const fallbackId = uuidv5('task_local_001');
+    const existingId = 'aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ id: existingId, updated_at: '2026-05-27T09:00:00Z' }],
+      text: async () => '',
+    }));
+
+    await expect(resolveExistingTaskMirrorId('task_local_001', fallbackId)).resolves.toBe(existingId);
+  });
+
+  it('prefers the deterministic UUID if it is already present among duplicate rows', async () => {
+    const fallbackId = uuidv5('task_local_001');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [
+        { id: 'aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee' },
+        { id: fallbackId },
+      ],
+      text: async () => '',
+    }));
+
+    await expect(resolveExistingTaskMirrorId('task_local_001', fallbackId)).resolves.toBe(fallbackId);
+  });
+
+  it('falls back to deterministic UUID when lookup fails', async () => {
+    const fallbackId = uuidv5('task_local_001');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => 'temporary failure',
+    }));
+
+    await expect(resolveExistingTaskMirrorId('task_local_001', fallbackId)).resolves.toBe(fallbackId);
   });
 });
 
@@ -648,6 +741,42 @@ describe('rgos-mirror — retry drain on success (scenario 9)', () => {
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(3);
   });
 
+  it('drains queued task updates into an existing metadata.bus_task_id row', async () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const busTaskId = 'task_shadowed_001';
+    const deterministicId = uuidv5(busTaskId);
+    const existingId = '11111111-2222-5333-8444-555555555555';
+    enqueueRetry({
+      table: 'orch_tasks',
+      row: {
+        id: deterministicId,
+        title: 'Shadowed local task',
+        status: 'in_progress',
+        metadata: { bus_task_id: busTaskId },
+      },
+      ts: '2026-04-25T09:00:00Z',
+    });
+
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [{ id: existingId, updated_at: '2026-05-27T09:00:00Z' }],
+        text: async () => '',
+      })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' }),
+    );
+
+    await drainRetryQueue();
+
+    expect(readRetryQueue(qPath)).toHaveLength(0);
+    const mockFetch = vi.mocked(fetch);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(String(mockFetch.mock.calls[0][0])).toContain('metadata-%3E%3Ebus_task_id=eq.task_shadowed_001');
+    const body = JSON.parse((mockFetch.mock.calls[1][1]?.body) as string);
+    expect(body.id).toBe(existingId);
+    expect(body.metadata.bus_task_id).toBe(busTaskId);
+  });
+
   it('leaves only failed entries after partial drain', async () => {
     const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
 
@@ -896,7 +1025,7 @@ describe('rgos-mirror — migrateRetryQueueIds()', () => {
     await drainRetryQueue();
 
     // The fetch body should contain the UUIDv5 id, not the old bus id
-    const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1]?.body) as string);
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[1][1]?.body) as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.id).toBe(uuidv5(oldId));
     vi.unstubAllGlobals();
