@@ -218,6 +218,65 @@ async function postgrestUpsert(
   }
 }
 
+/**
+ * Look up an existing mirrored RGOS task row by the canonical local bus task ID
+ * preserved in metadata.bus_task_id.
+ *
+ * Early mirror versions and dashboard-side writers could create random-UUID
+ * orch_tasks rows before the UUIDv5 id convention was universal. Reusing that
+ * existing row ID prevents a later status update from creating a second
+ * deterministic UUID shadow row for the same local task.
+ */
+export async function resolveExistingTaskMirrorId(
+  busTaskId: string,
+  fallbackId: string,
+): Promise<string> {
+  const url = process.env.SUPABASE_RGOS_URL!;
+  const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
+  const endpoint = new URL(`${url}/rest/v1/orch_tasks`);
+  endpoint.searchParams.set('select', 'id,updated_at');
+  endpoint.searchParams.set('metadata->>bus_task_id', `eq.${busTaskId}`);
+  endpoint.searchParams.set('order', 'updated_at.desc');
+  endpoint.searchParams.set('limit', '5');
+
+  const res = await fetch(endpoint.toString(), {
+    method: 'GET',
+    headers: {
+      'apikey': serviceKey,
+      'Authorization': `Bearer ${serviceKey}`,
+      'Accept': 'application/json',
+    },
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!res.ok) return fallbackId;
+
+  const rows = typeof res.json === 'function'
+    ? await res.json().catch(() => []) as Array<{ id?: unknown }>
+    : [];
+  const ids = rows
+    .map(row => row.id)
+    .filter((id): id is string => typeof id === 'string' && isUuid(id));
+
+  return ids.find(id => id === fallbackId) ?? ids[0] ?? fallbackId;
+}
+
+async function resolveTaskMirrorRow(row: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const metadata = row.metadata as Record<string, unknown> | undefined;
+  const busTaskId = metadata?.bus_task_id;
+  const fallbackId = row.id;
+  if (
+    typeof busTaskId !== 'string' ||
+    typeof fallbackId !== 'string' ||
+    !isUuid(fallbackId)
+  ) {
+    return row;
+  }
+
+  const resolvedId = await resolveExistingTaskMirrorId(busTaskId, fallbackId);
+  return resolvedId === fallbackId ? row : { ...row, id: resolvedId };
+}
+
 // ---------------------------------------------------------------------------
 // Retry drain (async, module-level concurrency lock)
 // ---------------------------------------------------------------------------
@@ -251,7 +310,10 @@ export async function drainRetryQueue(): Promise<void> {
       }
 
       try {
-        await postgrestUpsert(entry.table, entry.row);
+        const row = entry.table === 'orch_tasks'
+          ? await resolveTaskMirrorRow(entry.row)
+          : entry.row;
+        await postgrestUpsert(entry.table, row);
         countProcessed++;
       } catch (err) {
         if (err instanceof PostgRESTError && err.isPermanent) {
@@ -661,6 +723,9 @@ export async function mirrorTaskToRgos(
 ): Promise<void> {
   if (!isEnabled()) return;
   const row = buildTaskRow(task);
+  if (event !== 'create') {
+    row.id = await resolveExistingTaskMirrorId(task.id, row.id as string);
+  }
   const agentId = task.assigned_to ?? process.env.CTX_AGENT_NAME ?? 'unknown';
   const action = event === 'create' ? 'task_created'
     : event === 'complete' ? 'task_completed'
