@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
   logOutboundMessage,
   logInboundMessage,
   recordInboundTelegram,
+  recordOutboundDogfoodTelegramAudit,
   cacheLastSent,
   readLastSent,
 } from '../../../src/telegram/logging';
@@ -79,7 +80,7 @@ describe('Telegram Logging', () => {
         taskDir: join(ctxRoot, 'tasks'),
         approvalDir: join(ctxRoot, 'approvals'),
         analyticsDir: join(ctxRoot, 'analytics'),
-        heartbeatDir: join(ctxRoot, 'heartbeats'),
+        deliverablesDir: join(ctxRoot, 'orgs', 'eros-os', 'deliverables'),
       };
     }
 
@@ -179,6 +180,135 @@ describe('Telegram Logging', () => {
 
       // Failure surfaced through the log callback.
       expect(logSpy).toHaveBeenCalled();
+    });
+
+    it('audits dogfood result Telegrams with source metadata in the normal event path', () => {
+      const paths = buildPaths(testDir, 'orchestrator');
+      mkdirSync(paths.stateDir, { recursive: true });
+
+      const msg: TelegramMessage = {
+        message_id: 729,
+        date: 1779871800,
+        from: { id: 6595584963, is_bot: false, first_name: 'Greg' },
+        chat: { id: 6595584963, type: 'private' },
+        text: 'AgentOps dogfood 07:10 local: FAIL - Fleet Tasks stale framing proof attached.',
+      };
+
+      recordInboundTelegram(paths, testDir, 'orchestrator', 'revops-global', 'Greg', msg);
+
+      const today = new Date().toISOString().split('T')[0];
+      const eventPath = join(testDir, 'analytics', 'events', 'orchestrator', `${today}.jsonl`);
+      const events = readFileSync(eventPath, 'utf-8').trim().split('\n').map(line => JSON.parse(line));
+      const auditEvent = events.find(event => event.event === 'dogfood_telegram_audited');
+      expect(auditEvent).toMatchObject({
+        agent: 'orchestrator',
+        org: 'revops-global',
+        category: 'message',
+        severity: 'info',
+        metadata: {
+          audit_key: 'dogfood-telegram:orchestrator:inbound:6595584963:729',
+          telegram_agent: 'orchestrator',
+          direction: 'inbound',
+          chat_id: '6595584963',
+          message_id: 729,
+          from_name: 'Greg',
+        },
+      });
+      expect(auditEvent.metadata.text).toContain('AgentOps dogfood 07:10 local: FAIL');
+      expect(existsSync(join(testDir, 'inbox', 'orchestrator'))).toBe(false);
+    });
+
+    it('dedupes repeated dogfood result Telegram audit by agent, direction, chat, and message id', () => {
+      const paths = buildPaths(testDir, 'orchestrator');
+      mkdirSync(paths.stateDir, { recursive: true });
+
+      const msg: TelegramMessage = {
+        message_id: 730,
+        date: 1779871800,
+        from: { id: 6595584963, is_bot: false, first_name: 'Greg' },
+        chat: { id: 6595584963, type: 'private' },
+        text: 'Estate dogfood 07:05 local: BLOCKED - /music hidden-tab runner did not advance.',
+      };
+
+      recordInboundTelegram(paths, testDir, 'orchestrator', 'revops-global', 'Greg', msg);
+      recordInboundTelegram(paths, testDir, 'orchestrator', 'revops-global', 'Greg', msg);
+
+      const today = new Date().toISOString().split('T')[0];
+      const eventPath = join(testDir, 'analytics', 'events', 'orchestrator', `${today}.jsonl`);
+      const auditEvents = readFileSync(eventPath, 'utf-8')
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line))
+        .filter(event => event.event === 'dogfood_telegram_audited');
+      expect(auditEvents).toHaveLength(1);
+
+      const ledgerPath = join(testDir, 'state', 'orchestrator', 'dogfood-telegram-audit.jsonl');
+      const ledgerLines = readFileSync(ledgerPath, 'utf-8').trim().split('\n');
+      expect(ledgerLines).toHaveLength(1);
+    });
+
+    it('does not audit non-dogfood Telegrams but does audit orchestrator-owned dogfood messages', () => {
+      const orchPaths = buildPaths(testDir, 'orchestrator');
+      mkdirSync(orchPaths.stateDir, { recursive: true });
+
+      recordInboundTelegram(orchPaths, testDir, 'orchestrator', 'revops-global', 'Greg', {
+        message_id: 731,
+        date: 1779871800,
+        from: { id: 6595584963, is_bot: false, first_name: 'Greg' },
+        chat: { id: 6595584963, type: 'private' },
+        text: 'Can you check this dashboard?',
+      });
+
+      recordInboundTelegram(orchPaths, testDir, 'orchestrator', 'revops-global', 'Greg', {
+        message_id: 732,
+        date: 1779871800,
+        from: { id: 6595584963, is_bot: false, first_name: 'Greg' },
+        chat: { id: 6595584963, type: 'private' },
+        text: 'AgentOps dogfood 07:10 local: FAIL - already visible to orchestrator.',
+      });
+
+      const today = new Date().toISOString().split('T')[0];
+      const eventPath = join(testDir, 'analytics', 'events', 'orchestrator', `${today}.jsonl`);
+      const auditEvents = readFileSync(eventPath, 'utf-8')
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line))
+        .filter(event => event.event === 'dogfood_telegram_audited');
+      expect(auditEvents).toHaveLength(1);
+      expect(auditEvents[0].metadata.message_id).toBe(732);
+      expect(existsSync(join(testDir, 'inbox', 'orchestrator'))).toBe(false);
+    });
+
+    it('audits outbound dogfood Telegram sends without creating inbox messages', () => {
+      const paths = buildPaths(testDir, 'orchestrator');
+      mkdirSync(paths.stateDir, { recursive: true });
+
+      recordOutboundDogfoodTelegramAudit(
+        paths,
+        testDir,
+        'orchestrator',
+        'revops-global',
+        6595584963,
+        733,
+        'Estate dogfood 07:05 local: PASS - /music runner foreground proof attached.',
+      );
+
+      const today = new Date().toISOString().split('T')[0];
+      const eventPath = join(testDir, 'analytics', 'events', 'orchestrator', `${today}.jsonl`);
+      const auditEvent = readFileSync(eventPath, 'utf-8')
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line))
+        .find(event => event.event === 'dogfood_telegram_audited');
+      expect(auditEvent).toMatchObject({
+        agent: 'orchestrator',
+        metadata: {
+          audit_key: 'dogfood-telegram:orchestrator:outbound:6595584963:733',
+          direction: 'outbound',
+          message_id: 733,
+        },
+      });
+      expect(existsSync(join(testDir, 'inbox', 'orchestrator'))).toBe(false);
     });
   });
 
