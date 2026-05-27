@@ -142,7 +142,7 @@ export function TaskListTable({
               >
                 <TableCell className="relative max-w-[300px] truncate pr-36 font-medium">
                   {task.title}
-                  <AgentCursorStack presence={presenceByTask[task.id]} compact />
+                  <AgentCursorStack presence={presenceByTask[task.id]} compact anchorId={task.id} />
                 </TableCell>
                 <TableCell>
                   <StatusBadge status={task.status} />

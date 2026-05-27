@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { BusPaths, TelegramUpdate, TelegramMessage, TelegramCallbackQuery, TelegramMessageReaction } from '../types/index.js';
 import { TelegramAPI } from './api.js';
@@ -6,9 +6,9 @@ import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { withRetry, isTransientError } from '../utils/retry.js';
 import { logEvent } from '../bus/event.js';
 
-export type MessageHandler = (msg: TelegramMessage) => void;
-export type CallbackHandler = (query: TelegramCallbackQuery) => void;
-export type ReactionHandler = (reaction: TelegramMessageReaction) => void;
+export type MessageHandler = (msg: TelegramMessage) => void | Promise<void>;
+export type CallbackHandler = (query: TelegramCallbackQuery) => void | Promise<void>;
+export type ReactionHandler = (reaction: TelegramMessageReaction) => void | Promise<void>;
 export type ConflictHandler = () => void;
 
 export interface TelegramPollerObservability {
@@ -29,6 +29,7 @@ export function isConflictError(err: unknown): boolean {
  *  conflict handlers. ~8 one-second cycles is long enough to be sure this
  *  poller is a superseded orphan rather than a transient overlap. */
 const PERSISTENT_CONFLICT_STREAK = 8;
+const POISON_UPDATE_RETRY_LIMIT = 3;
 
 /**
  * Telegram polling loop. Replaces the Telegram portion of fast-checker.sh.
@@ -67,6 +68,7 @@ export class TelegramPoller {
   private conflictHandlers: ConflictHandler[] = [];
   private consecutiveNonConflictErrors: number = 0;
   private lastErrSignature: string = '';
+  private poisonUpdateAttempts: Map<number, number> = new Map();
 
   /**
    * @param api Telegram API client scoped to a single bot token.
@@ -274,7 +276,7 @@ export class TelegramPoller {
       if (update.message) {
         for (const handler of this.messageHandlers) {
           try {
-            handler(update.message);
+            await handler(update.message);
           } catch (err) {
             console.error(`[${this.label}] Message handler error:`, err);
             handlerFailed = true;
@@ -286,7 +288,7 @@ export class TelegramPoller {
       if (!handlerFailed && update.callback_query) {
         for (const handler of this.callbackHandlers) {
           try {
-            handler(update.callback_query);
+            await handler(update.callback_query);
           } catch (err) {
             console.error(`[${this.label}] Callback handler error:`, err);
             handlerFailed = true;
@@ -298,7 +300,7 @@ export class TelegramPoller {
       if (!handlerFailed && update.message_reaction) {
         for (const handler of this.reactionHandlers) {
           try {
-            handler(update.message_reaction);
+            await handler(update.message_reaction);
           } catch (err) {
             console.error('[telegram-poller] Reaction handler error:', err);
             handlerFailed = true;
@@ -319,11 +321,27 @@ export class TelegramPoller {
       }
 
       if (handlerFailed) {
-        // Do not advance offset — the update will be redelivered.
-        // Stop processing the rest of this batch to preserve ordering.
+        const attempts = (this.poisonUpdateAttempts.get(update.update_id) ?? 0) + 1;
+        this.poisonUpdateAttempts.set(update.update_id, attempts);
+        this.observability?.log?.(
+          `[${this.label}] handler failed for update_id=${update.update_id} attempt=${attempts}/${POISON_UPDATE_RETRY_LIMIT}`,
+        );
+
+        if (attempts >= POISON_UPDATE_RETRY_LIMIT) {
+          this.writeDeadLetter(update, updateType, attempts);
+          this.poisonUpdateAttempts.delete(update.update_id);
+          this.offset = nextOffset;
+          this.saveOffset();
+          continue;
+        }
+
+        // Do not advance offset until the retry limit is reached — the update
+        // will be redelivered. Stop processing the rest of this batch to
+        // preserve ordering behind the still-retryable update.
         return;
       }
 
+      this.poisonUpdateAttempts.delete(update.update_id);
       this.offset = nextOffset;
       this.saveOffset();
     }
@@ -358,6 +376,27 @@ export class TelegramPoller {
       atomicWriteSync(offsetFile, String(this.offset));
     } catch {
       // Ignore write errors
+    }
+  }
+
+  private writeDeadLetter(update: TelegramUpdate, updateType: string, attempts: number): void {
+    try {
+      ensureDir(this.stateDir);
+      const path = join(this.stateDir, 'telegram-dead-letter.jsonl');
+      writeFileSync(path, JSON.stringify({
+        written_at: new Date().toISOString(),
+        label: this.label,
+        update_id: update.update_id,
+        update_type: updateType,
+        attempts,
+        update,
+      }) + '\n', { encoding: 'utf-8', flag: 'a' });
+      console.error(
+        `[${this.label}] dead-lettered Telegram update_id=${update.update_id} ` +
+        `after ${attempts} handler failures`,
+      );
+    } catch (err) {
+      console.error(`[${this.label}] failed to write Telegram dead-letter:`, err);
     }
   }
 }

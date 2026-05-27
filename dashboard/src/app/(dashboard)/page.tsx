@@ -59,7 +59,7 @@ export default async function OverviewPage({
     heartbeats[hb.agent] = hb;
   }
 
-  const staleAgentCount = healthSummary.stale + healthSummary.down;
+  const staleAgentCount = healthSummary.agents.filter((agent) => agent.needsAttention).length;
   const inProgressTasks = allTasks.filter(t => t.status === 'in_progress').length;
   const pendingTasks = allTasks.filter(t => t.status === 'pending').length;
   const humanTasks = allTasks.filter(t => t.assignee === 'human' && t.status !== 'completed').length;

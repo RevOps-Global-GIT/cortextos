@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Meeting Prep cron — fires at 6am PST weekdays, invokes claude --print one-shot.
-# Replaces the long-lived cortextos daemon agent. No crash recovery surface, no
-# "back online" amplification, no shared context with other agents.
+# Meeting Prep cron — fires at 6am PST weekdays and runs one bounded Codex job.
+# Replaces the long-lived cortextos daemon agent without using Anthropic API
+# spend or a persistent "back online" agent surface.
 #
 # Trigger: cortextos crontab, `CRON_TZ=America/Los_Angeles` then `0 6 * * 1-5`.
 set -euo pipefail
@@ -12,9 +12,10 @@ ORG=revops-global
 AGENT_NAME=meeting-prep
 AGENT_DIR="$FRAMEWORK_ROOT/orgs/$ORG/agents/$AGENT_NAME"
 CTX_ROOT="${CTX_ROOT:-/home/cortextos/.cortextos/cortextos1}"
-LOG_DIR=/var/log/cortextos
+LOG_DIR="${MEETING_PREP_LOG_DIR:-/var/log/cortextos}"
 LOG_FILE="$LOG_DIR/meeting-prep.log"
-PROMPT_FILE="$AGENT_DIR/PROMPT.txt"
+PROMPT_FILE="${MEETING_PREP_PROMPT_FILE:-$AGENT_DIR/PROMPT.txt}"
+TIMEOUT_SECONDS="${MEETING_PREP_TIMEOUT_SECONDS:-1800}"
 
 # -------- PATH (cron is minimal) --------
 export PATH="/home/cortextos/.local/bin:/usr/local/bin:/usr/bin:/bin"
@@ -52,23 +53,34 @@ export TZ="America/Los_Angeles"
 [[ -n "${CHAT_ID:-}" ]] && export CTX_TELEGRAM_CHAT_ID="$CHAT_ID"
 
 # -------- sanity checks --------
-missing=()
-[[ -n "${BOT_TOKEN:-}" ]] || missing+=("BOT_TOKEN")
-[[ -n "${CTX_TELEGRAM_CHAT_ID:-}" ]] || missing+=("CTX_TELEGRAM_CHAT_ID/CHAT_ID")
-if ((${#missing[@]})); then
-  echo "FATAL: missing env: ${missing[*]}" >> "$LOG_FILE"
+if ! command -v cortextos >/dev/null 2>&1; then
+  echo "FATAL: cortextos CLI not found on PATH" >> "$LOG_FILE"
   exit 2
 fi
 
-cd "$AGENT_DIR"
+cd "$FRAMEWORK_ROOT"
 
-# Non-interactive claude invocation. --dangerously-skip-permissions because cron
-# has no TTY for permission prompts; the original daemon agent had never_ask=[]
-# and was running under bypass-permissions anyway, so behavior matches.
-# Prompt on stdin to avoid arg-length limits.
-claude --print \
-       --dangerously-skip-permissions \
-       < "$PROMPT_FILE" \
+# Do not pass Anthropic credentials into the bounded runner. The prompt may still
+# use approved bus/GWS/local tooling, but this wrapper must not spend Claude API.
+unset ANTHROPIC_API_KEY
+unset CLAUDE_API_KEY
+
+if [[ "${MEETING_PREP_DRY_RUN:-}" == "1" ]]; then
+  echo "DRY RUN: would run cortextos bus spawn-codex $PROMPT_FILE" >> "$LOG_FILE"
+  echo "DRY RUN: workdir=$FRAMEWORK_ROOT agent=$AGENT_NAME timeout=$TIMEOUT_SECONDS" >> "$LOG_FILE"
+  echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) meeting-prep cron finished (dry-run) ===" >> "$LOG_FILE"
+  exit 0
+fi
+
+# Bounded Codex invocation. spawn-codex captures durable markdown/JSON artifacts
+# under orgs/$ORG/agents/$AGENT_NAME/output and exits non-zero on failure.
+cortextos bus spawn-codex "$PROMPT_FILE" \
+       --workdir "$FRAMEWORK_ROOT" \
+       --agent "$AGENT_NAME" \
+       --agents-root "$FRAMEWORK_ROOT/orgs/$ORG" \
+       --timeout "$TIMEOUT_SECONDS" \
+       --sandbox workspace-write \
+       --json-output \
        >> "$LOG_FILE" 2>&1
 exit_code=$?
 

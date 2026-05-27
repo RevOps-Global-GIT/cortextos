@@ -3,7 +3,7 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-import { CTX_ROOT, getHeartbeatPath } from '@/lib/config';
+import { CTX_ROOT, getAllAgents, getHeartbeatPath } from '@/lib/config';
 import type { Heartbeat, HealthStatus, HealthSummary } from '@/lib/types';
 
 // Default staleness thresholds (minutes)
@@ -111,6 +111,25 @@ export function getHealthStatus(heartbeat: Heartbeat): HealthStatus {
   return 'down';
 }
 
+export function getAttentionState(
+  health: HealthStatus,
+  heartbeat?: Heartbeat | null,
+): { needsAttention: boolean; attentionLabel: string } {
+  if (health === 'healthy') {
+    return { needsAttention: false, attentionLabel: 'Healthy' };
+  }
+
+  if (heartbeat?.mode === 'night') {
+    return { needsAttention: false, attentionLabel: 'Night mode' };
+  }
+
+  if (health === 'stale') {
+    return { needsAttention: true, attentionLabel: 'Needs attention' };
+  }
+
+  return { needsAttention: true, attentionLabel: 'Down' };
+}
+
 /**
  * Get agents with stale or down heartbeats.
  */
@@ -123,7 +142,7 @@ export async function getStaleAgents(): Promise<Heartbeat[]> {
  * Get a health summary across all agents (optionally filtered by org).
  */
 export async function getHealthSummary(org?: string): Promise<HealthSummary> {
-  const heartbeats = await getHeartbeats(org);
+  const registeredAgents = getAllAgents().filter((agent) => !org || agent.org === org);
 
   const summary: HealthSummary = {
     healthy: 0,
@@ -132,19 +151,23 @@ export async function getHealthSummary(org?: string): Promise<HealthSummary> {
     agents: [],
   };
 
-  for (const hb of heartbeats) {
-    const health = getHealthStatus(hb);
+  for (const agent of registeredAgents) {
+    const hb = await getHeartbeat(agent.name);
+    const health = hb ? getHealthStatus(hb) : 'down';
+    const attention = getAttentionState(health, hb);
 
     if (health === 'healthy') summary.healthy++;
     else if (health === 'stale') summary.stale++;
     else summary.down++;
 
     summary.agents.push({
-      agent: hb.agent,
-      org: hb.org,
+      agent: agent.name,
+      org: agent.org,
       health,
-      lastHeartbeat: hb.last_heartbeat,
-      currentTask: hb.current_task,
+      lastHeartbeat: hb?.last_heartbeat,
+      currentTask: hb?.current_task,
+      mode: hb?.mode,
+      ...attention,
     });
   }
 

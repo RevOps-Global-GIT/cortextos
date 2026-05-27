@@ -1,10 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync, mkdirSync } from 'fs';
 import { basename, join } from 'path';
 import { tmpdir } from 'os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { spawnCodex } from '../../../src/bus/spawn-codex.js';
 
 const previousCodexBin = process.env.CODEX_BIN;
+const previousCodexHome = process.env.CODEX_HOME;
+const previousCtxRoot = process.env.CTX_ROOT;
 
 afterEach(() => {
   vi.useRealTimers();
@@ -12,6 +14,16 @@ afterEach(() => {
     delete process.env.CODEX_BIN;
   } else {
     process.env.CODEX_BIN = previousCodexBin;
+  }
+  if (previousCodexHome === undefined) {
+    delete process.env.CODEX_HOME;
+  } else {
+    process.env.CODEX_HOME = previousCodexHome;
+  }
+  if (previousCtxRoot === undefined) {
+    delete process.env.CTX_ROOT;
+  } else {
+    process.env.CTX_ROOT = previousCtxRoot;
   }
 });
 
@@ -84,6 +96,46 @@ printf 'org=%s\\n' "$CTX_ORG"
     expect(result.output).toContain('agent=dev');
     expect(result.output).toContain(`dir=${join(agentsRoot, 'agents', 'dev')}`);
     expect(result.output).toContain(`org=${basename(agentsRoot)}`);
+  });
+
+  it('uses the orchestrator Codex account pool when scoped cron agents have no pool', () => {
+    makeFakeCodex(`#!/usr/bin/env bash
+printf 'codex_home=%s\\n' "$CODEX_HOME"
+printf 'account=%s\\n' "$CTX_CODEX_ACCOUNT_LABEL"
+`);
+    const { dir, prompt, agentsRoot } = makePrompt();
+    delete process.env.CODEX_HOME;
+    process.env.CTX_ROOT = join(dir, 'ctx');
+
+    mkdirSync(join(agentsRoot, 'agents', 'dev'), { recursive: true });
+    mkdirSync(join(agentsRoot, 'agents', 'orchestrator'), { recursive: true });
+    mkdirSync(join(process.env.CTX_ROOT, 'state', 'orchestrator'), { recursive: true });
+    writeFileSync(join(agentsRoot, 'agents', 'orchestrator', 'config.json'), JSON.stringify({
+      codex_account_pool: [
+        { priority: 1, label: 'stale default', codex_home: '/tmp/stale-codex' },
+        { priority: 2, label: 'funded default', codex_home: '/tmp/funded-codex' },
+      ],
+    }), 'utf-8');
+    writeFileSync(join(process.env.CTX_ROOT, 'state', 'orchestrator', 'codex-account-pool-state.json'), JSON.stringify({
+      accounts: [
+        {
+          label: 'stale default',
+          unhealthyUntil: '2999-01-01T00:00:00.000Z',
+          updatedAt: '2026-05-27T00:00:00.000Z',
+        },
+      ],
+      updatedAt: '2026-05-27T00:00:00.000Z',
+    }), 'utf-8');
+
+    const result = spawnCodex(prompt, {
+      agentsRoot,
+      agentName: 'dev',
+      timeout: 5,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.output).toContain('codex_home=/tmp/funded-codex');
+    expect(result.output).toContain('account=funded default');
   });
 
   it('writes failure metadata when codex exits non-zero', () => {

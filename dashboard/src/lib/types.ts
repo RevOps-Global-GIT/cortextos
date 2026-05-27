@@ -31,6 +31,9 @@ export interface AgentSummary {
   health: HealthStatus;
   currentTask?: string;
   lastHeartbeat?: string;
+  mode?: string;
+  needsAttention?: boolean;
+  attentionLabel?: string;
   runtime?: AgentRuntime;
 }
 
@@ -251,6 +254,9 @@ export interface AgentHealth {
   health: HealthStatus;
   lastHeartbeat?: string;
   currentTask?: string;
+  mode?: string;
+  needsAttention: boolean;
+  attentionLabel: string;
 }
 
 export interface HealthSummary {

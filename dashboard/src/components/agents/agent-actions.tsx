@@ -31,6 +31,7 @@ interface AgentActionsProps {
   agentName: string;
   org: string;
   health: HealthStatus;
+  canUseLifecycleActions?: boolean;
   onAction?: () => void;
 }
 
@@ -40,6 +41,7 @@ export function AgentActions({
   agentName,
   org,
   health,
+  canUseLifecycleActions = true,
   onAction,
 }: AgentActionsProps) {
   const [loading, setLoading] = useState(false);
@@ -103,8 +105,8 @@ export function AgentActions({
     }
   }
 
-  const isDown = health === 'down' || health === 'stale';
-  const isHealthy = health === 'healthy';
+  const isDown = canUseLifecycleActions && (health === 'down' || health === 'stale');
+  const isHealthy = canUseLifecycleActions && health === 'healthy';
 
   return (
     <>
@@ -124,6 +126,11 @@ export function AgentActions({
         </DropdownMenuTrigger>
 
         <DropdownMenuContent align="end" sideOffset={4}>
+          {!canUseLifecycleActions && (
+            <DropdownMenuItem disabled>
+              Night mode - no restart action
+            </DropdownMenuItem>
+          )}
           {isDown && (
             <DropdownMenuItem onClick={() => handleLifecycle('start')}>
               <IconPlayerPlay className="h-4 w-4" />
@@ -136,14 +143,18 @@ export function AgentActions({
               Stop
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem onClick={() => handleLifecycle('restart_continue')}>
-            <IconRefresh className="h-4 w-4" />
-            Restart (Continue)
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => handleLifecycle('restart_fresh')}>
-            <IconRefresh className="h-4 w-4" />
-            Restart (Fresh)
-          </DropdownMenuItem>
+          {canUseLifecycleActions && (
+            <>
+              <DropdownMenuItem onClick={() => handleLifecycle('restart_continue')}>
+                <IconRefresh className="h-4 w-4" />
+                Restart (Continue)
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => handleLifecycle('restart_fresh')}>
+                <IconRefresh className="h-4 w-4" />
+                Restart (Fresh)
+              </DropdownMenuItem>
+            </>
+          )}
 
           <DropdownMenuSeparator />
 

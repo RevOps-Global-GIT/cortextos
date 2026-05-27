@@ -1,22 +1,21 @@
 #!/usr/bin/env node
 /**
  * orgo-codex-bridge — daemon that forwards bus messages to the Orgo VM's
- * Claude Code CLI (claude -p), running tasks headlessly without touching Greg's Mac.
+ * Codex CLI, running tasks headlessly without touching Greg's Mac.
  *
  * Architecture:
  *   Any agent sends:  cortextos bus send-message orgo-codex normal '<prompt>'
  *   Bridge receives:  inbox message via two channels:
  *     1. PTY stdin   — daemon fast-checker injects messages here (primary path)
  *     2. poll        — check-inbox fallback for any messages fast-checker missed
- *   Bridge executes:  Orgo VM exec API → claude --print '<prompt>' (headless, background tmux)
+ *   Bridge executes:  Orgo VM exec API → codex exec --skip-git-repo-check (background tmux)
  *   Bridge replies:   cortextos bus send-message <from> normal '<session_id>' <msg_id>
  *                     Caller gets a session name; output accumulates in /tmp/orgo-<id>.log
  *
- * Uses Claude Code CLI (not Codex CLI) because:
- *   - ANTHROPIC_API_KEY is available in secrets.env
- *   - codex CLI requires ChatGPT OAuth for support@revopsglobal.com (pending HUMAN task)
- *   - claude -p is fully headless, no interactive auth needed
- * When support@ ChatGPT OAuth is completed, swap to: codex exec --skip-git-repo-check
+ * Anthropic fallback is disabled by default. To use Claude for a one-off approved
+ * fallback, set ORGO_ENABLE_ANTHROPIC_FALLBACK=1 and
+ * ORGO_ANTHROPIC_APPROVAL_ID=<approval/task id>. Without both, Codex auth/tooling
+ * failures are reported as blockers instead of silently spending Anthropic budget.
  *
  * Set runtime='script' + script_path='scripts/orgo-codex-bridge.js' in config.json.
  */
@@ -40,7 +39,7 @@ const ORGO_CONTROL_URL = 'http://91.242.214.39:43585';
 let _orgoVncPw = null;
 let _anthropicApiKey = null;
 
-function loadSecrets() {
+function loadAnthropicSecret() {
   if (_anthropicApiKey) return;
   const candidates = [
     path.join(__dirname, '..', 'orgs', 'revops-global', 'secrets.env'),
@@ -57,6 +56,15 @@ function loadSecrets() {
     break;
   }
   if (!_anthropicApiKey) throw new Error('ANTHROPIC_API_KEY not found in secrets.env');
+}
+
+function anthropicFallbackAllowed() {
+  return process.env.ORGO_ENABLE_ANTHROPIC_FALLBACK === '1' &&
+    Boolean(process.env.ORGO_ANTHROPIC_APPROVAL_ID);
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
 async function fetchVncPassword() {
@@ -155,7 +163,6 @@ function checkInbox() {
  * - Fire-and-forget: bridge returns as soon as tmux session is started.
  */
 async function execOnOrgo(prompt) {
-  loadSecrets();
   const nonce = Date.now();
   const promptFile = `/tmp/orgo-prompt-${nonce}.txt`;
   const logFile = `/tmp/orgo-session-${nonce}.log`;
@@ -170,25 +177,44 @@ async function execOnOrgo(prompt) {
     throw new Error(`Failed to write prompt file: ${JSON.stringify(writeResult)}`);
   }
 
-  // Launch codex exec in a detached tmux session — fire-and-forget
-  // Uses claude -p (Claude Code CLI) — swap to `codex exec --skip-git-repo-check`
-  // once support@revopsglobal.com ChatGPT OAuth is completed on this VM.
-  const codexCmd = [
-    `ANTHROPIC_API_KEY=${_anthropicApiKey}`,
-    'claude --print',
-    `< ${promptFile}`,
-    `> ${logFile} 2>&1`,
-    `; rm -f ${promptFile}`,
-  ].join(' ');
+  const codexProbe = await orgoExec('command -v codex >/dev/null 2>&1 && echo codex-ok || echo codex-missing');
+  const codexAvailable = codexProbe.output?.includes('codex-ok');
 
-  const tmuxCmd = `tmux new-session -d -s '${sessionName}' '${codexCmd}'`;
+  let commandLabel = 'codex';
+  let execCmd;
+  if (codexAvailable) {
+    execCmd = [
+      'codex exec --skip-git-repo-check',
+      `< ${shellQuote(promptFile)}`,
+      `> ${shellQuote(logFile)} 2>&1`,
+      `; rm -f ${shellQuote(promptFile)}`,
+    ].join(' ');
+  } else if (anthropicFallbackAllowed()) {
+    loadAnthropicSecret();
+    commandLabel = `claude-approved:${process.env.ORGO_ANTHROPIC_APPROVAL_ID}`;
+    execCmd = [
+      `ANTHROPIC_API_KEY=${shellQuote(_anthropicApiKey)}`,
+      'claude --print',
+      `< ${shellQuote(promptFile)}`,
+      `> ${shellQuote(logFile)} 2>&1`,
+      `; rm -f ${shellQuote(promptFile)}`,
+    ].join(' ');
+  } else {
+    await orgoExec(`rm -f ${shellQuote(promptFile)}`);
+    throw new Error(
+      'Codex CLI unavailable on Orgo VM and Anthropic fallback is disabled. ' +
+      'Set ORGO_ENABLE_ANTHROPIC_FALLBACK=1 with ORGO_ANTHROPIC_APPROVAL_ID only after approval, or fix Codex auth/tooling on Orgo.',
+    );
+  }
+
+  const tmuxCmd = `tmux new-session -d -s ${shellQuote(sessionName)} ${shellQuote(execCmd)}`;
   const tmuxResult = await orgoExec(tmuxCmd);
 
   if (tmuxResult.exit_code !== 0) {
     throw new Error(`tmux start failed: ${tmuxResult.output?.slice(0, 200)}`);
   }
 
-  return { sessionName, logFile };
+  return { sessionName, logFile, commandLabel };
 }
 
 async function processMessage(msg) {
@@ -208,8 +234,8 @@ async function processMessage(msg) {
   let ok = false;
 
   try {
-    const { sessionName, logFile } = await execOnOrgo(text || '');
-    result = `dispatched — claude running in Orgo VM (session=${sessionName}, log=${logFile})`;
+    const { sessionName, logFile, commandLabel } = await execOnOrgo(text || '');
+    result = `dispatched — ${commandLabel} running in Orgo VM (session=${sessionName}, log=${logFile})`;
     ok = true;
     log(`Dispatched in ${((Date.now() - start) / 1000).toFixed(1)}s — ${sessionName}`);
   } catch (e) {

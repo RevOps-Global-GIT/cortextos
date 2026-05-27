@@ -10,6 +10,7 @@ import { createHash } from 'crypto';
 import { spawn, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { basename, join, resolve } from 'path';
+import { homedir } from 'os';
 import {
   appendAgentLiveLog,
   createAgentLiveStateHandle,
@@ -22,6 +23,8 @@ export interface SpawnCodexOptions {
   timeout?: number;
   agentName?: string;
   agentsRoot?: string;
+  codexHome?: string;
+  codexAccountLabel?: string;
   telegramChatId?: string;
   model?: string;
   effort?: string;
@@ -87,6 +90,99 @@ function codexBin(): string {
   return process.env.CODEX_BIN ?? 'codex';
 }
 
+function expandHome(value: string): string {
+  if (value === '~') return homedir();
+  if (value.startsWith('~/')) return join(homedir(), value.slice(2));
+  return value;
+}
+
+function readJsonObject(filePath: string): Record<string, unknown> | null {
+  try {
+    if (!existsSync(filePath)) return null;
+    const parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+interface CodexAccountSelection {
+  codexHome: string;
+  label?: string;
+}
+
+function accountConfigCandidates(opts: SpawnCodexOptions): Array<{ agentName: string; configPath: string }> {
+  if (!opts.agentsRoot) return [];
+  const candidates: Array<{ agentName: string; configPath: string }> = [];
+  const add = (agentName?: string) => {
+    if (!agentName) return;
+    const configPath = join(opts.agentsRoot!, 'agents', agentName, 'config.json');
+    if (!candidates.some((entry) => entry.configPath === configPath)) {
+      candidates.push({ agentName, configPath });
+    }
+  };
+  add(opts.agentName);
+  add('orchestrator');
+  return candidates;
+}
+
+function selectFromConfig(config: Record<string, unknown>, statePath?: string): CodexAccountSelection | null {
+  const pool = Array.isArray(config.codex_account_pool) ? config.codex_account_pool : [];
+  if (pool.length > 0) {
+    const unhealthy = new Set<string>();
+    const state = statePath ? readJsonObject(statePath) : null;
+    const now = Date.now();
+    for (const account of Array.isArray(state?.accounts) ? state.accounts : []) {
+      if (!account || typeof account !== 'object') continue;
+      const rec = account as Record<string, unknown>;
+      const label = typeof rec.label === 'string' ? rec.label : '';
+      const unhealthyUntil = typeof rec.unhealthyUntil === 'string' ? rec.unhealthyUntil : '';
+      if (label && unhealthyUntil && new Date(unhealthyUntil).getTime() > now) unhealthy.add(label);
+    }
+
+    const selected = pool
+      .map((entry, index) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const rec = entry as Record<string, unknown>;
+        const codexHome = typeof rec.codex_home === 'string' ? rec.codex_home.trim() : '';
+        const label = typeof rec.label === 'string' ? rec.label.trim() : codexHome;
+        const priority = typeof rec.priority === 'number' && Number.isFinite(rec.priority)
+          ? rec.priority
+          : index + 1;
+        if (!codexHome || !label) return null;
+        return { codexHome: expandHome(codexHome), label, priority };
+      })
+      .filter((entry): entry is { codexHome: string; label: string; priority: number } => Boolean(entry))
+      .sort((a, b) => a.priority - b.priority)
+      .find((entry) => !unhealthy.has(entry.label));
+
+    if (selected) return selected;
+  }
+
+  const codexHome = typeof config.codex_home === 'string' ? config.codex_home.trim() : '';
+  return codexHome ? { codexHome: expandHome(codexHome) } : null;
+}
+
+function resolveCodexAccount(opts: SpawnCodexOptions): CodexAccountSelection | null {
+  if (opts.codexHome) {
+    return { codexHome: expandHome(opts.codexHome), label: opts.codexAccountLabel };
+  }
+
+  for (const candidate of accountConfigCandidates(opts)) {
+    const config = readJsonObject(candidate.configPath);
+    if (!config) continue;
+    const statePath = process.env.CTX_ROOT
+      ? join(process.env.CTX_ROOT, 'state', candidate.agentName, 'codex-account-pool-state.json')
+      : undefined;
+    const selected = selectFromConfig(config, statePath);
+    if (selected) return selected;
+  }
+
+  return null;
+}
+
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -120,6 +216,14 @@ function spawnEnv(opts: SpawnCodexOptions): NodeJS.ProcessEnv {
   if (opts.agentsRoot && opts.agentName) {
     env.CTX_AGENT_DIR = join(opts.agentsRoot, 'agents', opts.agentName);
     env.CTX_ORG = basename(opts.agentsRoot);
+  }
+
+  if (!env.CODEX_HOME) {
+    const account = resolveCodexAccount(opts);
+    if (account) {
+      env.CODEX_HOME = account.codexHome;
+      if (account.label) env.CTX_CODEX_ACCOUNT_LABEL = account.label;
+    }
   }
 
   return env;

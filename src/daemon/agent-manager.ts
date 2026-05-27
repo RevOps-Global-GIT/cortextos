@@ -22,6 +22,8 @@ import { processMediaMessage } from '../telegram/media.js';
 import { stripBom } from '../utils/strip-bom.js';
 
 type LogFn = (msg: string) => void;
+const TELEGRAM_RECEIPT_KEY_LIMIT = 1000;
+const TELEGRAM_ACK_TIMEOUT_MS = 1500;
 
 /**
  * Manages all agents in a cortextOS instance.
@@ -141,7 +143,7 @@ export class AgentManager {
    * Discover and start all enabled agents.
    */
   async discoverAndStart(): Promise<void> {
-    const agentDirs = this.discoverAgents();
+    const agentDirs = this.prioritizeStartupAgents(this.discoverAgents());
 
     // BUG-028: read instance-level enabled-agents.json so the daemon respects
     // the user's explicit enable/disable choices written by the CLI
@@ -186,6 +188,48 @@ export class AgentManager {
     // are normal operation and should fire the real BUG-011 alarm if a
     // race ever does leak through PR #11's protection.
     this.clearDaemonCrashMarkers();
+  }
+
+  /**
+   * Start human-facing control planes before subordinate lanes.
+   *
+   * Agent startup is serial. If sub-orchestrators run first, slow bootstrap
+   * checks can leave Greg's primary Telegram interface unavailable after a
+   * daemon restart even though PM2 reports the daemon online.
+   */
+  private prioritizeStartupAgents(
+    agentDirs: Array<{ name: string; dir: string; org: string; config: AgentConfig }>,
+  ): Array<{ name: string; dir: string; org: string; config: AgentConfig }> {
+    const orgOrchestrators = new Map<string, string>();
+
+    for (const agent of agentDirs) {
+      if (orgOrchestrators.has(agent.org)) continue;
+      try {
+        const contextPath = join(this.frameworkRoot, 'orgs', agent.org, 'context.json');
+        const context = JSON.parse(stripBom(readFileSync(contextPath, 'utf-8')));
+        if (typeof context.orchestrator === 'string' && context.orchestrator.trim()) {
+          orgOrchestrators.set(agent.org, context.orchestrator.trim());
+        }
+      } catch {
+        // Missing/corrupt context keeps legacy discovery order except for
+        // explicit telegram_polling primaries below.
+      }
+    }
+
+    const score = (agent: { name: string; org: string; config: AgentConfig }): number => {
+      if (orgOrchestrators.get(agent.org) === agent.name) return 0;
+      if (agent.config.telegram_polling === true) return 1;
+      if (agent.name === 'orchestrator') return 2;
+      return 10;
+    };
+
+    return agentDirs
+      .map((agent, index) => ({ agent, index }))
+      .sort((a, b) => {
+        const byScore = score(a.agent) - score(b.agent);
+        return byScore || a.index - b.index;
+      })
+      .map(({ agent }) => agent);
   }
 
   /**
@@ -553,7 +597,7 @@ export class AgentManager {
       const REJECT_ALERT_THRESHOLD = 3;
       const REJECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 
-      poller.onMessage((msg) => {
+      poller.onMessage(async (msg) => {
         // ALLOWED_USER gate: if configured, ignore messages from other users.
         // Use numeric comparison to avoid string coercion issues.
         if (allowedUserId) {
@@ -589,6 +633,24 @@ export class AgentManager {
         const msgChatId = msg.chat?.id;
         const effectiveChatId = msgChatId ?? chatId ?? '';
         const stateDir = join(this.ctxRoot, 'state', name);
+        const receivedAt = new Date().toISOString();
+        const queueTelegramEnvelope = (
+          formatted: string,
+          kind: 'text' | 'photo' | 'document' | 'voice' | 'video',
+          textOrCaption?: string,
+        ) => checker.queueTelegramEnvelope({
+          chat_id: effectiveChatId,
+          message_id: msg.message_id,
+          message_thread_id: msg.message_thread_id,
+          reply_to_message_id: msg.reply_to_message?.message_id,
+          from,
+          received_at: receivedAt,
+          text_or_caption: textOrCaption,
+          formatted,
+          kind,
+        });
+
+        await acknowledgeTelegramReceipt(telegramApi, effectiveChatId, msg.message_id, log);
 
         // Persist the inbound message to JSONL AND emit a
         // `message/telegram_received` bus event in one helper so
@@ -598,7 +660,12 @@ export class AgentManager {
         // agents — the JSONL had the data but it never reached the
         // event log.
         try {
-          recordInboundTelegram(paths, this.ctxRoot, name, resolvedOrg, from, msg, log);
+          if (isTelegramReceiptRecorded(stateDir, msg)) {
+            log(`Duplicate Telegram inbound persistence suppressed: ${telegramReceiptKey(msg)}`);
+          } else {
+            recordInboundTelegram(paths, this.ctxRoot, name, resolvedOrg, from, msg, log);
+            markTelegramReceiptRecorded(stateDir, msg);
+          }
         } catch (err) {
           log(`recordInboundTelegram FAILED for msg_id=${msg.message_id}: ${err}`);
           logEvent(paths, name, resolvedOrg, 'error', 'inbound_persistence_failed', 'error', {
@@ -617,8 +684,8 @@ export class AgentManager {
             if (!media) {
               log('Media processing returned null - falling back to text format');
               const text = stripControlChars(msg.caption || '');
-              const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot, msg.message_id);
-              if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted);
+              const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot, undefined, undefined, undefined, msg.message_id, msg.message_thread_id);
+              if (!checker.isDuplicate(formatted)) queueTelegramEnvelope(formatted, 'text', text);
               return;
             }
 
@@ -635,14 +702,14 @@ export class AgentManager {
             log(`[DEBUG] media.type=${media.type} image_path=${JSON.stringify(relImagePath)} file_path=${JSON.stringify(relFilePath)}`);
             let formatted: string;
             if (media.type === 'photo') {
-              formatted = FastChecker.formatTelegramPhotoMessage(from, effectiveChatId, media.text, relImagePath);
+              formatted = FastChecker.formatTelegramPhotoMessage(from, effectiveChatId, media.text, relImagePath, msg.message_id, msg.message_thread_id);
             } else if (media.type === 'document') {
-              formatted = FastChecker.formatTelegramDocumentMessage(from, effectiveChatId, media.text, relFilePath, media.file_name!);
+              formatted = FastChecker.formatTelegramDocumentMessage(from, effectiveChatId, media.text, relFilePath, media.file_name!, msg.message_id, msg.message_thread_id);
             } else if (media.type === 'voice' || media.type === 'audio') {
-              formatted = FastChecker.formatTelegramVoiceMessage(from, effectiveChatId, relFilePath, media.duration, media.transcript);
+              formatted = FastChecker.formatTelegramVoiceMessage(from, effectiveChatId, relFilePath, media.duration, media.transcript, msg.message_id, msg.message_thread_id);
             } else {
               // video or video_note
-              formatted = FastChecker.formatTelegramVideoMessage(from, effectiveChatId, media.text, relFilePath, media.file_name || '', media.duration);
+              formatted = FastChecker.formatTelegramVideoMessage(from, effectiveChatId, media.text, relFilePath, media.file_name || '', media.duration, msg.message_id, msg.message_thread_id);
             }
 
             if (checker.isDuplicate(formatted)) {
@@ -650,12 +717,17 @@ export class AgentManager {
               return;
             }
             log(`Media message received: type=${media.type}, path=${media.image_path || media.file_path}`);
-            checker.queueTelegramMessage(formatted);
+            const kind = media.type === 'audio' || media.type === 'voice'
+              ? 'voice'
+              : media.type === 'video_note'
+                ? 'video'
+                : media.type;
+            queueTelegramEnvelope(formatted, kind as 'photo' | 'document' | 'voice' | 'video', media.text);
           }).catch((err) => {
             log(`Media processing error: ${err} - falling back to text format`);
             const text = stripControlChars(msg.caption || '');
-            const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot, msg.message_id);
-            if (!checker.isDuplicate(formatted)) checker.queueTelegramMessage(formatted);
+            const formatted = FastChecker.formatTelegramTextMessage(from, effectiveChatId, text, this.frameworkRoot, undefined, undefined, undefined, msg.message_id, msg.message_thread_id);
+            if (!checker.isDuplicate(formatted)) queueTelegramEnvelope(formatted, 'text', text);
           });
           return;
         }
@@ -672,17 +744,18 @@ export class AgentManager {
           effectiveChatId,
           text,
           this.frameworkRoot,
-          msg.message_id,
           replyToText,
           lastSent ?? undefined,
           recentHistory,
+          msg.message_id,
+          msg.message_thread_id,
         );
 
         if (checker.isDuplicate(formatted)) {
           log('Duplicate Telegram message suppressed');
           return;
         }
-        checker.queueTelegramMessage(formatted);
+        queueTelegramEnvelope(formatted, 'text', text);
       });
 
       poller.onCallback((query) => {
@@ -1696,4 +1769,58 @@ export function buildReplyContext(
   if (replyMsg.audio) return '[audio]';
   if (replyMsg.document) return `[document: ${replyMsg.document.file_name ?? 'file'}]`;
   return undefined;
+}
+
+export function telegramReceiptKey(msg: Pick<TelegramMessage, 'chat' | 'message_thread_id' | 'message_id'>): string {
+  const chatId = msg.chat?.id ?? 'unknown';
+  const threadId = msg.message_thread_id ?? 'main';
+  return `${chatId}:${threadId}:${msg.message_id}`;
+}
+
+export function isTelegramReceiptRecorded(stateDir: string, msg: Pick<TelegramMessage, 'chat' | 'message_thread_id' | 'message_id'>): boolean {
+  const path = join(stateDir, '.telegram-received-keys');
+  if (!existsSync(path)) return false;
+  try {
+    const key = telegramReceiptKey(msg);
+    return readFileSync(path, 'utf-8').split(/\r?\n/).includes(key);
+  } catch {
+    return false;
+  }
+}
+
+export function markTelegramReceiptRecorded(stateDir: string, msg: Pick<TelegramMessage, 'chat' | 'message_thread_id' | 'message_id'>): void {
+  const path = join(stateDir, '.telegram-received-keys');
+  const key = telegramReceiptKey(msg);
+  let keys: string[] = [];
+  try {
+    if (existsSync(path)) keys = readFileSync(path, 'utf-8').split(/\r?\n/).filter(Boolean);
+  } catch {
+    keys = [];
+  }
+
+  if (!keys.includes(key)) keys.push(key);
+  if (keys.length > TELEGRAM_RECEIPT_KEY_LIMIT) {
+    keys = keys.slice(keys.length - TELEGRAM_RECEIPT_KEY_LIMIT);
+  }
+
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(path, keys.join('\n') + '\n', 'utf-8');
+}
+
+async function acknowledgeTelegramReceipt(
+  telegramApi: TelegramAPI | null,
+  chatId: string | number,
+  messageId: number | undefined,
+  log: LogFn,
+): Promise<void> {
+  if (!telegramApi || !chatId || !messageId) return;
+
+  try {
+    await Promise.race([
+      telegramApi.setMessageReaction(chatId, messageId, '👀'),
+      new Promise((resolve) => setTimeout(resolve, TELEGRAM_ACK_TIMEOUT_MS)),
+    ]);
+  } catch (err) {
+    log(`Telegram received-ack reaction failed: ${err}`);
+  }
 }

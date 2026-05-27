@@ -120,7 +120,6 @@ export function getFleetHealth(org: string): FleetHealth | null {
       const hb = data.heartbeats || 1;
       // Stability based on real errors, not total restarts (which include planned restarts)
       const stability = Math.round(((hb - data.real_errors) / hb) * 100);
-      if (data.is_stale) staleCount++;
       errorCount += data.real_errors;
       totalStability += stability;
 
@@ -137,10 +136,13 @@ export function getFleetHealth(org: string): FleetHealth | null {
         }
       } catch { /* use report data as fallback */ }
 
+      const liveIsStale = liveAgeMin > 300; // 5 hours = stale
+      if (liveIsStale) staleCount++;
+
       agents.push({
         name,
         heartbeatAgeMin: liveAgeMin,
-        isStale: liveAgeMin > 300, // 5 hours = stale
+        isStale: liveIsStale,
         events: data.events,
         realErrors: data.real_errors,
         crashes: data.crashes,
@@ -196,6 +198,7 @@ export function getFleetHealth(org: string): FleetHealth | null {
   if (fs.existsSync(inboxDir)) {
     for (const ad of fs.readdirSync(inboxDir, { withFileTypes: true })) {
       if (!ad.isDirectory()) continue;
+      if (!orgAgentNames.has(ad.name)) continue;
       try { totalPending += fs.readdirSync(path.join(inboxDir, ad.name)).length; } catch { /* skip */ }
     }
   }

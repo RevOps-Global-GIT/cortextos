@@ -13,7 +13,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -75,6 +75,23 @@ function emitBusEvent(capId, passed, payload) {
       timeout: 5000,
     });
   } catch { /* non-fatal — probe result is written to JSON regardless */ }
+}
+
+function parseDate(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function minutesSince(value, now = new Date()) {
+  const date = parseDate(value);
+  if (!date) return null;
+  return Math.round(((now.getTime() - date.getTime()) / 60000) * 10) / 10;
+}
+
+function isStandbyComplete(readiness = {}) {
+  const workload = `${readiness.current_workload ?? readiness.current_focus ?? ''}`.toLowerCase();
+  return workload.includes('standby') && workload.includes('complete');
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
@@ -253,34 +270,103 @@ async function probeHubQa(env) {
   }
 }
 
-/** orgo_exec: ping the Orgo API to verify the fleet is reachable */
+/** orgo_exec: use the live cortextOS Orgo lease/fleet ledger as lane authority */
 async function probeOrgo(env) {
-  const apiKey = env['ORGO_API_KEY'];
-  if (!apiKey) return { status: 'blocked', observed: 'ORGO_API_KEY not in secrets.env', proof: null };
   const checked_at = new Date().toISOString();
-  const projectId = '4a86b7a4-7fa5-45e0-8ed1-8e8d47a6b35c'; // from reference memory
+  const now = new Date(checked_at);
   try {
-    const r = await fetchWithTimeout(`https://www.orgo.ai/api/projects/${projectId}/vms`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+    const raw = execFileSync('cortextos', ['bus', 'orgo-lease-status', '--json'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 10000,
     });
-    if (r.status === 401 || r.status === 403) {
-      return { status: 'fail', checked_at, observed: `Orgo API ${r.status} — ORGO_API_KEY invalid`, proof: null };
+    const nodes = JSON.parse(raw);
+    const execNodes = nodes.filter(node => Array.isArray(node.capabilities) && node.capabilities.includes('exec'));
+    if (!execNodes.length) {
+      return {
+        status: 'fail',
+        checked_at,
+        authority: 'cortextos bus orgo-lease-status',
+        observed: 'No exec-capable Orgo lanes in live lease/fleet status',
+        proof: 'orgo-lease-status returned 0 nodes with capabilities[]=exec',
+      };
     }
-    if (!r.ok) {
-      return { status: 'warn', checked_at, observed: `Orgo API ${r.status}`, proof: null };
+
+    const healthy = [];
+    const degraded = [];
+    const stale = [];
+
+    for (const node of execNodes) {
+      const readiness = node.app_readiness ?? {};
+      const lane = node.node_key ?? node.display_name ?? 'unknown-lane';
+      const statusApi = readiness.status_api ?? node.status ?? 'unknown';
+      const lastCheck = readiness.last_check ?? node.last_heartbeat_at ?? null;
+      const ageMinutes = minutesSince(lastCheck, now);
+      const lastExecOk = readiness.last_exec_ok;
+      const failureReason = readiness.failure_reason ?? node.last_fallback_reason ?? null;
+      const blocked = readiness.restart_blocked ?? null;
+      const freshFlag = readiness.fresh;
+      const hasRecentCheck = ageMinutes !== null && ageMinutes <= 45;
+      const isRunning = ['running', 'idle'].includes(statusApi);
+
+      if (ageMinutes === null || ageMinutes > 45 || freshFlag === false) {
+        stale.push(`${lane}: last_check=${lastCheck ?? 'missing'} age=${ageMinutes ?? 'unknown'}m`);
+        continue;
+      }
+
+      if (failureReason || blocked || statusApi === 'unreachable' || node.failure_count > 0) {
+        degraded.push(`${lane}: ${failureReason ?? blocked ?? `status=${statusApi}; failures=${node.failure_count ?? 0}`}`);
+        continue;
+      }
+
+      if (lastExecOk === false && !isStandbyComplete(readiness)) {
+        degraded.push(`${lane}: last_exec_ok=false`);
+        continue;
+      }
+
+      if ((lastExecOk === true && isRunning && hasRecentCheck) || isStandbyComplete(readiness)) {
+        healthy.push(`${lane}: last_exec_ok=${lastExecOk === false ? 'standby-complete' : 'true'} status=${statusApi}`);
+      } else {
+        degraded.push(`${lane}: exec status unclear (last_exec_ok=${lastExecOk ?? 'missing'}, status=${statusApi})`);
+      }
     }
-    const data = await r.json();
-    const vms = Array.isArray(data) ? data : (data.vms ?? data.data ?? []);
-    const running = vms.filter(v => v.status === 'running' || v.state === 'running').length;
+
+    const observedParts = [
+      `${healthy.length}/${execNodes.length} exec-capable Orgo lanes healthy`,
+      degraded.length ? `${degraded.length} degraded` : null,
+      stale.length ? `${stale.length} stale` : null,
+    ].filter(Boolean);
+    const proof = [
+      `healthy=[${healthy.join('; ')}]`,
+      degraded.length ? `degraded=[${degraded.join('; ')}]` : null,
+      stale.length ? `stale=[${stale.join('; ')}]` : null,
+    ].filter(Boolean).join(' ');
+
+    if (!healthy.length) {
+      return {
+        status: 'fail',
+        checked_at,
+        authority: 'cortextos bus orgo-lease-status',
+        observed: observedParts.join('; '),
+        proof,
+      };
+    }
+
     return {
-      status: 'ok',
+      status: degraded.length || stale.length ? 'warn' : 'ok',
       checked_at,
-      authority: 'orgo.ai API',
-      observed: `${vms.length} VMs in project, ${running} running`,
-      proof: `GET /vms ok; count=${vms.length}`,
+      authority: 'cortextos bus orgo-lease-status',
+      observed: observedParts.join('; '),
+      proof,
     };
   } catch (e) {
-    return { status: 'fail', checked_at, observed: `Request failed: ${e.message}`, proof: null };
+    return {
+      status: 'fail',
+      checked_at,
+      authority: 'cortextos bus orgo-lease-status',
+      observed: `Lease/fleet status probe failed: ${e.message}`,
+      proof: null,
+    };
   }
 }
 

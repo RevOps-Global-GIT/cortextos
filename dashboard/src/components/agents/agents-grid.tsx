@@ -51,7 +51,7 @@ export function AgentsGrid({ initialAgents }: AgentsGridProps) {
         </span>
         <span className="flex items-center gap-1.5">
           <HealthDot status="stale" />
-          {agents.filter((a) => a.health === 'stale').length} stale
+          {agents.filter((a) => a.needsAttention).length} need attention
         </span>
         <span className="flex items-center gap-1.5">
           <HealthDot status="down" />

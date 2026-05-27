@@ -81,6 +81,20 @@ export function formatValidateError(result: Extract<ValidateCredentialsResult, {
   }
 }
 
+type TelegramThreadReplyOptions = {
+  replyToMessageId?: number;
+  messageThreadId?: number;
+  allowSendingWithoutReply?: boolean;
+};
+
+export type TelegramSendOptions = {
+  parseMode?: 'HTML' | null;
+  replyToMessageId?: number;
+  messageThreadId?: number;
+  allowSendingWithoutReply?: boolean;
+  onParseFallback?: (reason: string) => void;
+};
+
 export class TelegramAPI {
   private baseUrl: string;
   private lastSendTime: Map<string, number> = new Map();
@@ -199,11 +213,7 @@ export class TelegramAPI {
     chatId: string | number,
     text: string,
     replyMarkup?: object,
-    opts?: {
-      parseMode?: 'HTML' | null;
-      replyToMessageId?: number;
-      onParseFallback?: (reason: string) => void;
-    },
+    opts?: TelegramSendOptions,
   ): Promise<any> {
     const plainText = opts?.parseMode === null;
     const html = this.markdownToHtml(text, plainText);
@@ -221,7 +231,11 @@ export class TelegramAPI {
         chunk,
         plainText ? null : 'HTML',
         isLastChunk ? replyMarkup : undefined,
-        i === 0 ? opts?.replyToMessageId : undefined,
+        {
+          messageThreadId: opts?.messageThreadId,
+          replyToMessageId: i === 0 ? opts?.replyToMessageId : undefined,
+          allowSendingWithoutReply: opts?.allowSendingWithoutReply,
+        },
       );
     }
     return lastResult;
@@ -235,14 +249,14 @@ export class TelegramAPI {
     text: string,
     parseMode: 'HTML' | null,
     replyMarkup: object | undefined,
-    replyToMessageId?: number,
+    opts?: TelegramThreadReplyOptions,
   ): Promise<any> {
     const basePayload: Record<string, unknown> = {
       chat_id: chatId,
       text,
       ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-      ...(replyToMessageId ? { reply_to_message_id: replyToMessageId, allow_sending_without_reply: true } : {}),
     };
+    this.addThreadReplyOptions(basePayload, opts);
 
     const payload =
       parseMode === null ? basePayload : { ...basePayload, parse_mode: parseMode };
@@ -287,6 +301,18 @@ export class TelegramAPI {
     );
   }
 
+  private addThreadReplyOptions(payload: Record<string, unknown>, opts?: TelegramThreadReplyOptions): void {
+    if (opts?.messageThreadId !== undefined) {
+      payload.message_thread_id = opts.messageThreadId;
+    }
+    if (opts?.replyToMessageId !== undefined) {
+      payload.reply_parameters = {
+        message_id: opts.replyToMessageId,
+        allow_sending_without_reply: opts.allowSendingWithoutReply ?? true,
+      };
+    }
+  }
+
   /**
    * Send a photo with optional caption and reply markup.
    * Uses multipart/form-data via built-in Node.js APIs.
@@ -296,6 +322,7 @@ export class TelegramAPI {
     imagePath: string,
     caption?: string,
     replyMarkup?: object,
+    opts?: TelegramThreadReplyOptions,
   ): Promise<any> {
     if (!existsSync(imagePath)) {
       throw new Error(`Image file not found: ${imagePath}`);
@@ -315,6 +342,15 @@ export class TelegramAPI {
     }
     if (replyMarkup) {
       formData.append('reply_markup', JSON.stringify(replyMarkup));
+    }
+    if (opts?.messageThreadId !== undefined) {
+      formData.append('message_thread_id', String(opts.messageThreadId));
+    }
+    if (opts?.replyToMessageId !== undefined) {
+      formData.append('reply_parameters', JSON.stringify({
+        message_id: opts.replyToMessageId,
+        allow_sending_without_reply: opts.allowSendingWithoutReply ?? true,
+      }));
     }
 
     return withRetry(
@@ -356,6 +392,7 @@ export class TelegramAPI {
     filePath: string,
     caption?: string,
     replyMarkup?: object,
+    opts?: TelegramThreadReplyOptions,
   ): Promise<any> {
     if (!existsSync(filePath)) {
       throw new Error(`File not found: ${filePath}`);
@@ -374,6 +411,15 @@ export class TelegramAPI {
     }
     if (replyMarkup) {
       formData.append('reply_markup', JSON.stringify(replyMarkup));
+    }
+    if (opts?.messageThreadId !== undefined) {
+      formData.append('message_thread_id', String(opts.messageThreadId));
+    }
+    if (opts?.replyToMessageId !== undefined) {
+      formData.append('reply_parameters', JSON.stringify({
+        message_id: opts.replyToMessageId,
+        allow_sending_without_reply: opts.allowSendingWithoutReply ?? true,
+      }));
     }
 
     return withRetry(
@@ -590,12 +636,19 @@ export class TelegramAPI {
   async setMessageReaction(
     chatId: string | number,
     messageId: number,
-    emojis: string[] = [],
+    emoji: string | string[] | null = '👍',
+    isBig: boolean = false,
   ): Promise<any> {
+    const emojis = Array.isArray(emoji)
+      ? emoji
+      : emoji
+        ? [emoji]
+        : [];
     return this.post('setMessageReaction', {
       chat_id: chatId,
       message_id: messageId,
       reaction: emojis.map((emoji) => ({ type: 'emoji', emoji })),
+      is_big: isBig,
     });
   }
 

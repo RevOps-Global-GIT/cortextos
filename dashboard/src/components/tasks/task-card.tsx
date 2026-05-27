@@ -78,7 +78,7 @@ export function TaskCard({ task, presence, onClick, onStatusChange }: TaskCardPr
       data-task-id={task.id}
       onClick={() => onClick?.(task)}
     >
-      {inViewport && <AgentCursorStack presence={presence} />}
+      {inViewport && <AgentCursorStack presence={presence} anchorId={task.id} />}
       <div className="space-y-2">
         <p className={cn('text-sm font-medium leading-snug line-clamp-2', presence?.length && 'pr-40')}>
           {task.title}

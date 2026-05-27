@@ -248,6 +248,10 @@ export class AgentPTY {
       args.push('--continue');
     }
 
+    if (this.config.claude_bare) {
+      args.push('--bare');
+    }
+
     args.push('--dangerously-skip-permissions');
 
     const model = resolveModel(this.config);

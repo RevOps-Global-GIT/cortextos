@@ -22,6 +22,9 @@ export default async function AgentsPage({
     role: (a as unknown as Record<string, string>).role ?? '',
     health: a.health,
     currentTask: a.currentTask,
+    mode: a.mode,
+    needsAttention: a.needsAttention,
+    attentionLabel: a.attentionLabel,
     tasksToday: (a as unknown as Record<string, number>).tasksToday ?? 0,
     runtime: a.runtime,
   }));

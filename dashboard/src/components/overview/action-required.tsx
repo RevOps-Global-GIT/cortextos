@@ -52,7 +52,7 @@ export function ActionRequired({
     },
     {
       icon: <IconHeartOff size={18} className="text-destructive" />,
-      label: 'stale agent',
+      label: 'agent needing attention',
       count: staleAgents,
       href: '/agents',
     },

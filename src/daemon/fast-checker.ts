@@ -4,7 +4,7 @@ import { execFile, execFileSync, spawn } from 'child_process';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import { hardRestart } from '../bus/system.js';
-import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
+import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery, TelegramEnvelope } from '../types/index.js';
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval, listPendingApprovals } from '../bus/approval.js';
 import { listTasks } from '../bus/task.js';
@@ -16,11 +16,32 @@ import { stripControlChars } from '../utils/validate.js';
 
 type LogFn = (msg: string) => void;
 
+function coerceTelegramText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return stripControlChars(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') {
+    const maybeMessage = value as { text?: unknown; caption?: unknown; message_id?: unknown };
+    if (typeof maybeMessage.text === 'string') return stripControlChars(maybeMessage.text);
+    if (typeof maybeMessage.caption === 'string') return stripControlChars(maybeMessage.caption);
+    if (maybeMessage.message_id != null) return `[message ${String(maybeMessage.message_id)}]`;
+    try {
+      return stripControlChars(JSON.stringify(value));
+    } catch {
+      return String(value);
+    }
+  }
+  return stripControlChars(String(value));
+}
+
 /**
  * Fast message checker for a single agent.
  * Replaces fast-checker.sh: polls Telegram and inbox, injects into PTY.
  */
 export class FastChecker {
+  private static usageCheckInFlight: Promise<void> | null = null;
+  private static usageCheckBackoffUntil: number = 0;
+  private static usageCheckLastErrorLogAt: number = 0;
   private agent: AgentProcess;
   private paths: BusPaths;
   private running: boolean = false;
@@ -38,8 +59,9 @@ export class FastChecker {
   private chatId?: string;
   private allowedUserId?: number;
 
-  // External Telegram handler (set by daemon)
-  private telegramMessages: Array<{ formatted: string; ackIds: string[] }> = [];
+  // External Telegram handler (set by daemon). Messages are structured so
+  // unrelated group threads cannot block or collapse into one opaque turn.
+  private telegramMessages: TelegramEnvelope[] = [];
 
   // Persistent dedup: message hashes to prevent duplicate delivery
   private seenHashes: Set<string> = new Set();
@@ -82,6 +104,9 @@ export class FastChecker {
   private usageTier: 0 | 1 | 2 = 0; // 0=normal, 1=high(≥85%), 2=critical(≥95%)
   private usageTierFile: string = '';
   private readonly USAGE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+  private readonly USAGE_CHECK_TIMEOUT_MS = 8_000;
+  private readonly USAGE_ERROR_BACKOFF_MS = 5 * 60 * 1000;
+  private readonly USAGE_RATE_LIMIT_BACKOFF_MS = 30 * 60 * 1000;
 
   // Context-exhaustion + frozen-stdout watchdog state
   private bootstrappedAt: number = 0;
@@ -391,7 +416,71 @@ export class FastChecker {
    * Called by the daemon's Telegram handler.
    */
   queueTelegramMessage(formatted: string): void {
-    this.telegramMessages.push({ formatted, ackIds: [] });
+    this.queueTelegramEnvelope({
+      chat_id: this.chatId ?? 'unknown',
+      from: 'telegram',
+      received_at: new Date().toISOString(),
+      formatted,
+    });
+  }
+
+  queueTelegramEnvelope(envelope: TelegramEnvelope): void {
+    const withKeys: TelegramEnvelope = {
+      ...envelope,
+      batch_key: envelope.batch_key ?? this.telegramBatchKey(envelope),
+      dedup_key: envelope.dedup_key ?? this.telegramDedupKey(envelope),
+    };
+
+    if (withKeys.dedup_key && this.telegramMessages.some((msg) => msg.dedup_key === withKeys.dedup_key)) {
+      this.log(`Duplicate Telegram envelope suppressed: ${withKeys.dedup_key}`);
+      return;
+    }
+
+    this.telegramMessages.push(withKeys);
+  }
+
+  private telegramBatchKey(envelope: TelegramEnvelope): string {
+    return `${envelope.chat_id}:${envelope.message_thread_id ?? 'main'}`;
+  }
+
+  private telegramDedupKey(envelope: TelegramEnvelope): string {
+    return envelope.message_id !== undefined
+      ? `${envelope.chat_id}:${envelope.message_id}`
+      : `${envelope.chat_id}:${envelope.received_at}:${createHash('sha256').update(envelope.formatted).digest('hex').slice(0, 12)}`;
+  }
+
+  private takeNextTelegramBatch(): TelegramEnvelope[] {
+    if (this.telegramMessages.length === 0) return [];
+
+    const batchKey = this.telegramMessages[0].batch_key ?? this.telegramBatchKey(this.telegramMessages[0]);
+    const batch: TelegramEnvelope[] = [];
+    const remaining: TelegramEnvelope[] = [];
+
+    for (const msg of this.telegramMessages) {
+      const msgBatchKey = msg.batch_key ?? this.telegramBatchKey(msg);
+      if (msgBatchKey === batchKey) {
+        batch.push(msg);
+      } else {
+        remaining.push(msg);
+      }
+    }
+
+    this.telegramMessages = remaining;
+    return batch;
+  }
+
+  private writeTelegramDeadLetter(envelope: TelegramEnvelope, reason: string): void {
+    try {
+      const deadLetterPath = join(this.paths.stateDir, 'telegram-dead-letter.jsonl');
+      const row = {
+        reason,
+        written_at: new Date().toISOString(),
+        envelope,
+      };
+      writeFileSync(deadLetterPath, JSON.stringify(row) + '\n', { encoding: 'utf-8', flag: 'a' });
+    } catch (err) {
+      this.log(`telegram dead-letter write failed: ${err}`);
+    }
   }
 
   /**
@@ -417,8 +506,12 @@ export class FastChecker {
 
     // Process queued Telegram messages
     let hasTelegramMessage = false;
-    while (this.telegramMessages.length > 0) {
-      const msg = this.telegramMessages.shift()!;
+    const telegramBatch = this.takeNextTelegramBatch();
+    for (const msg of telegramBatch) {
+      if (!msg.formatted) {
+        this.writeTelegramDeadLetter(msg, 'missing formatted payload');
+        continue;
+      }
       messageBlock += msg.formatted;
       hasTelegramMessage = true;
     }
@@ -645,26 +738,50 @@ export class FastChecker {
   private async checkUsageTier(): Promise<void> {
     const now = Date.now();
     if (now - this.usageLastCheckedAt < this.USAGE_CHECK_INTERVAL_MS) return;
+    if (now < FastChecker.usageCheckBackoffUntil) return;
+    if (FastChecker.usageCheckInFlight) return;
     this.usageLastCheckedAt = now;
 
-    let rawJson = '';
-    try {
-      rawJson = await new Promise<string>((resolve, reject) => {
-        // Pass high warn thresholds to suppress the script's own Telegram alerts —
-        // we handle alerting ourselves on tier transitions only.
-        execFile('cortextos', ['bus', 'check-usage-api', '--json'], { timeout: this.POLL_CYCLE_TIMEOUT_MS }, (err, stdout) => {
-          if (err) { reject(err); return; }
-          resolve(stdout);
-        });
+    FastChecker.usageCheckInFlight = this.fetchUsageTierJson()
+      .then((rawJson) => {
+        if (rawJson) this.applyUsageTierJson(rawJson);
+      })
+      .finally(() => {
+        FastChecker.usageCheckInFlight = null;
       });
-    } catch (err) {
-      const errMsg = String(err);
-      if (!errMsg.includes('No OAuth token') && !errMsg.includes('accounts.json')) {
-        this.log(`Usage check failed: ${errMsg}`);
-      }
-      return;
-    }
+  }
 
+  private fetchUsageTierJson(): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
+      // Pass high warn thresholds to suppress the script's own Telegram alerts —
+      // we handle alerting ourselves on tier transitions only.
+      execFile('cortextos', ['bus', 'check-usage-api', '--json'], { timeout: this.USAGE_CHECK_TIMEOUT_MS }, (err, stdout) => {
+        if (err) {
+          const errMsg = String(err);
+          if (errMsg.includes('429') || /rate[_ -]?limit/i.test(errMsg)) {
+            FastChecker.usageCheckBackoffUntil = Date.now() + this.USAGE_RATE_LIMIT_BACKOFF_MS;
+          } else {
+            FastChecker.usageCheckBackoffUntil = Date.now() + this.USAGE_ERROR_BACKOFF_MS;
+          }
+          if (!errMsg.includes('No OAuth token') && !errMsg.includes('accounts.json')) {
+            this.logUsageCheckError(errMsg);
+          }
+          resolve(null);
+          return;
+        }
+        resolve(stdout);
+      });
+    });
+  }
+
+  private logUsageCheckError(errMsg: string): void {
+    const now = Date.now();
+    if (now - FastChecker.usageCheckLastErrorLogAt < this.USAGE_ERROR_BACKOFF_MS) return;
+    FastChecker.usageCheckLastErrorLogAt = now;
+    this.log(`Usage check failed: ${errMsg}`);
+  }
+
+  private applyUsageTierJson(rawJson: string): void {
     let utilization = -1;
     try {
       const data = JSON.parse(rawJson);
@@ -767,44 +884,56 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     chatId: string | number,
     text: string,
     frameworkRoot: string,
-    messageId?: number,
     replyToText?: string,
     lastSentText?: string,
     recentHistory?: string,
+    messageId?: number,
+    messageThreadId?: number,
   ): string {
+    const safeText = coerceTelegramText(text);
+    const safeReplyToText = coerceTelegramText(replyToText);
+    const safeLastSentText = coerceTelegramText(lastSentText);
+    const safeRecentHistory = coerceTelegramText(recentHistory);
     let replyCx = '';
-    if (replyToText) {
-      replyCx = `[Replying to: "${replyToText.slice(0, 500)}"]\n`;
+    if (safeReplyToText) {
+      replyCx = `[Replying to: "${safeReplyToText.slice(0, 500)}"]\n`;
     }
 
     let lastSentCtx = '';
-    if (lastSentText) {
-      lastSentCtx = `[Your last message: "${lastSentText.slice(0, 500)}"]\n`;
+    if (safeLastSentText) {
+      lastSentCtx = `[Your last message: "${safeLastSentText.slice(0, 500)}"]\n`;
     }
 
     let historyCx = '';
-    if (recentHistory) {
-      historyCx = `[Recent conversation:]\n${recentHistory}\n`;
+    if (safeRecentHistory) {
+      historyCx = `[Recent conversation:]\n${safeRecentHistory}\n`;
     }
 
     // Use [USER: ...] wrapper to prevent prompt injection via crafted display names
     // Slash commands (text starting with /) are NOT wrapped in backticks so Claude Code
     // can recognize and invoke them via the Skill tool (e.g. /loop, /commit, /restart).
-    const isSlashCommand = /^\/[a-zA-Z]/.test(text.trim());
+    const isSlashCommand = /^\/[a-zA-Z]/.test(safeText.trim());
     const body = isSlashCommand
-      ? text.trim()
-      : `\`\`\`\n${text}\n\`\`\``;
-    const messageIdCx = messageId ? ` [message_id:${messageId}]` : '';
+      ? safeText.trim()
+      : `\`\`\`\n${safeText}\n\`\`\``;
+    const metaLine = [
+      messageId !== undefined ? `message_id:${messageId}` : '',
+      messageThreadId !== undefined ? `thread_id:${messageThreadId}` : '',
+    ].filter(Boolean).join(' ');
+    const replyFlags = [
+      messageId !== undefined ? `--reply-to ${messageId}` : '',
+      messageThreadId !== undefined ? `--thread-id ${messageThreadId}` : '',
+    ].filter(Boolean).join(' ');
     const reactionInstruction = messageId
       ? `For acknowledgement, eyes, like, receipt, or "on this post/thread" requests, react first with: cortextos bus react-telegram ${chatId} ${messageId} 👀\n`
       : '';
     const threadedReplyInstruction = messageId
-      ? `Threaded reply: cortextos bus send-telegram ${chatId} '<your reply>' --reply-to ${messageId}\n`
+      ? `Threaded reply: cortextos bus send-telegram ${chatId}${replyFlags ? ` ${replyFlags}` : ''} '<your reply>'\n`
       : '';
 
-    return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId})${messageIdCx} ===
+    return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId}${metaLine ? ` ${metaLine}` : ''}) ===
 ${replyCx}${historyCx}${body}
-${lastSentCtx}${reactionInstruction}${threadedReplyInstruction}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+${lastSentCtx}${reactionInstruction}${threadedReplyInstruction}Reply using: cortextos bus send-telegram ${chatId}${replyFlags ? ` ${replyFlags}` : ''} '<your reply>'
 
 `;
   }
@@ -849,14 +978,20 @@ ${lastSentCtx}${reactionInstruction}${threadedReplyInstruction}Reply using: cort
     chatId: string | number,
     caption: string,
     imagePath: string,
+    messageId?: number,
+    messageThreadId?: number,
   ): string {
+    const replyFlags = [
+      messageId !== undefined ? `--reply-to ${messageId}` : '',
+      messageThreadId !== undefined ? `--thread-id ${messageThreadId}` : '',
+    ].filter(Boolean).join(' ');
     return `=== TELEGRAM PHOTO from ${from} (chat_id:${chatId}) ===
 caption:
 \`\`\`
 ${caption}
 \`\`\`
 local_file: ${imagePath}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId}${replyFlags ? ` ${replyFlags}` : ''} '<your reply>'
 
 `;
   }
@@ -871,7 +1006,13 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     caption: string,
     filePath: string,
     fileName: string,
+    messageId?: number,
+    messageThreadId?: number,
   ): string {
+    const replyFlags = [
+      messageId !== undefined ? `--reply-to ${messageId}` : '',
+      messageThreadId !== undefined ? `--thread-id ${messageThreadId}` : '',
+    ].filter(Boolean).join(' ');
     return `=== TELEGRAM DOCUMENT from ${from} (chat_id:${chatId}) ===
 caption:
 \`\`\`
@@ -879,7 +1020,7 @@ ${caption}
 \`\`\`
 local_file: ${filePath}
 file_name: ${fileName}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId}${replyFlags ? ` ${replyFlags}` : ''} '<your reply>'
 
 `;
   }
@@ -899,15 +1040,21 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     filePath: string,
     duration: number | undefined,
     transcript?: string,
+    messageId?: number,
+    messageThreadId?: number,
   ): string {
     const dur = duration !== undefined ? duration : 'unknown';
     const transcriptBlock = transcript && transcript.trim()
       ? `transcript:\n\`\`\`\n${transcript.trim()}\n\`\`\`\n`
       : '';
+    const replyFlags = [
+      messageId !== undefined ? `--reply-to ${messageId}` : '',
+      messageThreadId !== undefined ? `--thread-id ${messageThreadId}` : '',
+    ].filter(Boolean).join(' ');
     return `=== TELEGRAM VOICE from ${from} (chat_id:${chatId}) ===
 duration: ${dur}s
 local_file: ${filePath}
-${transcriptBlock}Reply using: cortextos bus send-telegram-voice ${chatId} '<your reply>'
+${transcriptBlock}Reply using: cortextos bus send-telegram-voice ${chatId}${replyFlags ? ` ${replyFlags}` : ''} '<your reply>'
 
 `;
   }
@@ -923,8 +1070,14 @@ ${transcriptBlock}Reply using: cortextos bus send-telegram-voice ${chatId} '<you
     filePath: string,
     fileName: string,
     duration: number | undefined,
+    messageId?: number,
+    messageThreadId?: number,
   ): string {
     const dur = duration !== undefined ? duration : 'unknown';
+    const replyFlags = [
+      messageId !== undefined ? `--reply-to ${messageId}` : '',
+      messageThreadId !== undefined ? `--thread-id ${messageThreadId}` : '',
+    ].filter(Boolean).join(' ');
     return `=== TELEGRAM VIDEO from ${from} (chat_id:${chatId}) ===
 caption:
 \`\`\`
@@ -933,7 +1086,7 @@ ${caption}
 duration: ${dur}s
 local_file: ${filePath}
 file_name: ${fileName}
-Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
+Reply using: cortextos bus send-telegram ${chatId}${replyFlags ? ` ${replyFlags}` : ''} '<your reply>'
 
 `;
   }

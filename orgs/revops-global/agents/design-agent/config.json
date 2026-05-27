@@ -35,5 +35,7 @@
     ],
     "never_ask": []
   },
-  "telegram_polling": false
+  "telegram_polling": false,
+  "home": "/home/cortextos/.claude-team",
+  "provider_account_note": "2026-05-27: route RevOps Claude Code work through greg@revopsglobal.com work/team profile; personal Max resets 2026-05-27 11:00 Pacific and should not be the default autonomous lane while depleted."
 }

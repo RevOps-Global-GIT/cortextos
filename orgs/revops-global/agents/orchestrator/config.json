@@ -114,28 +114,52 @@
   "codex_app_server_transport": "ws",
   "codex_account_pool": [
     {
-      "label": "gregharned@gmail personal primary",
-      "codex_home": "/home/cortextos/.codex-orchestrator-primary",
-      "email": "gregharned@gmail.com",
-      "workspace": "personal",
-      "priority": 1
-    },
-    {
-      "label": "greg@revopsglobal.com personal backup",
+      "priority": 1,
+      "label": "greg@revopsglobal.com personal primary",
+      "email_or_workspace_label": "greg@revopsglobal.com",
+      "product_surface": "Codex Desktop",
+      "tier": "Pro 20x / funded credits",
       "codex_home": "/home/cortextos/.codex-greg",
-      "email": "greg@revopsglobal.com",
-      "workspace": "personal",
-      "priority": 2
+      "status": "active",
+      "intended_lanes": [
+        "primary-interface",
+        "telegram",
+        "standard-work"
+      ],
+      "requires_human_approval": false
     },
     {
+      "priority": 2,
+      "label": "gregharned@gmail personal backup",
+      "email_or_workspace_label": "gregharned@gmail.com",
+      "product_surface": "Codex Desktop",
+      "tier": "Pro 20x",
+      "codex_home": "/home/cortextos/.codex-orchestrator-primary",
+      "status": "standby",
+      "intended_lanes": [
+        "backup-interface",
+        "standard-work"
+      ],
+      "requires_human_approval": false
+    },
+    {
+      "priority": 3,
       "label": "greg@revopsglobal.com work backup",
+      "email_or_workspace_label": "greg@revopsglobal.com",
+      "product_surface": "Codex Desktop",
+      "tier": "work/shared",
       "codex_home": "/home/cortextos/.codex-work",
-      "email": "greg@revopsglobal.com",
-      "workspace": "work",
-      "priority": 3
+      "status": "standby",
+      "intended_lanes": [
+        "work-runtime",
+        "backup-interface"
+      ],
+      "requires_human_approval": false
     }
   ],
   "codex_runtime_note": "P0 2026-05-24: Claude Code session hit org monthly usage limit while receiving Telegram; switched orchestrator Telegram owner to Codex app-server runtime so inbound Telegram can respond.",
   "telegram_owner_note": "2026-05-25 recovery: orchestrator restored as sole @revops_director_bot / Orca front-door Telegram polling owner. Codex app-server runtime uses codex_account_pool with /home/cortextos/.codex-orchestrator-primary primary and labeled backups. orca-orch is voice-project-only and polling disabled.",
-  "ctx_autoreset_note": "Disabled temporarily during 2026-05-25 Orca front-door recovery because Codex app-server tokenUsage reported 100% immediately after fresh start and caused restart churn. Restore after account-pool failover/context metric fix."
+  "ctx_autoreset_note": "Disabled temporarily during 2026-05-25 Orca front-door recovery because Codex app-server tokenUsage reported 100% immediately after fresh start and caused restart churn. Restore after account-pool failover/context metric fix.",
+  "codex_runtime_reenabled_note": "2026-05-26T23:54:33Z re-enabled Codex app-server front-door after all three CODEX_HOME lanes reported ChatGPT login status.",
+  "codex_home": "/home/cortextos/.codex-greg"
 }

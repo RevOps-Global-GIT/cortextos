@@ -364,6 +364,12 @@ export interface AgentConfig {
    * max_crashes_per_day and do NOT trigger the git watchdog.
    */
   rate_limit_pause_seconds?: number;
+  /**
+   * Run Claude Code in API-key-only bare mode.
+   * Useful for a primary interface fallback when OAuth subscription lanes are
+   * capped but an Anthropic API lane is healthy.
+   */
+  claude_bare?: boolean;
   working_directory?: string;
   enabled?: boolean;
   crons?: CronEntry[];
@@ -773,6 +779,7 @@ export interface TelegramMessageReaction {
 
 export interface TelegramMessage {
   message_id: number;
+  message_thread_id?: number;
   date?: number;
   from?: TelegramUser;
   chat: TelegramChat;
@@ -785,6 +792,24 @@ export interface TelegramMessage {
   video_note?: TelegramVideoNote;
   caption?: string;
   reply_to_message?: TelegramMessage;
+}
+
+export interface TelegramEnvelope {
+  chat_id: string | number;
+  message_id?: number;
+  message_thread_id?: number;
+  reply_to_message_id?: number;
+  from: string;
+  received_at: string;
+  text_or_caption?: string;
+  formatted: string;
+  kind?: 'text' | 'photo' | 'document' | 'voice' | 'video' | 'reaction' | 'callback';
+  batch_key?: string;
+  dedup_key?: string;
+  media?: Record<string, unknown>;
+  callback_data?: string;
+  reaction?: TelegramMessageReaction;
+  recent_thread_context?: string;
 }
 
 export interface TelegramCallbackQuery {

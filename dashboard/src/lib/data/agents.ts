@@ -9,7 +9,7 @@ import {
   getHeartbeatPath,
   getAllAgents,
 } from '@/lib/config';
-import { getHeartbeat, getHealthStatus } from '@/lib/data/heartbeats';
+import { getAttentionState, getHeartbeat, getHealthStatus } from '@/lib/data/heartbeats';
 import { getTasksByAgent } from '@/lib/data/tasks';
 import { parseIdentityMd } from '@/lib/markdown-parser';
 import type {
@@ -137,6 +137,7 @@ export async function discoverAgents(org?: string): Promise<AgentSummary[]> {
       if (hb) {
         health = getHealthStatus(hb);
       }
+      const attention = getAttentionState(health, hb);
 
       // Get tasks for today count and current task
       let currentTask: string | undefined;
@@ -169,6 +170,8 @@ export async function discoverAgents(org?: string): Promise<AgentSummary[]> {
         health,
         lastHeartbeat: hb?.last_heartbeat,
         currentTask,
+        mode: hb?.mode,
+        ...attention,
         emoji: identity.emoji,
         role: identity.role,
         tasksToday,

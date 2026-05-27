@@ -49,6 +49,11 @@ export function AgentStatusGrid({ agents, heartbeats }: AgentStatusGridProps) {
                       {agent.name}
                     </span>
                     <HealthDot status={agent.health} />
+                    {agent.attentionLabel === 'Night mode' && (
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                        Night
+                      </span>
+                    )}
                   </div>
                   {taskPreview && (
                     <p className="text-[11px] text-muted-foreground truncate">

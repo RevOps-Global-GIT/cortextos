@@ -55,10 +55,12 @@ export function AgentCursor({
   presence,
   index = 0,
   compact = false,
+  anchorId,
 }: {
   presence: AgentPresencePayload;
   index?: number;
   compact?: boolean;
+  anchorId?: string;
 }) {
   const label =
     presence.action_label ||
@@ -78,7 +80,6 @@ export function AgentCursor({
 
   return (
     <motion.div
-      layoutId={`agent-cursor-${presence.actor_id}`}
       initial={{ opacity: 0, scale: 0.96, x: x + 10, y }}
       animate={{ opacity: stale ? 0.54 : 1, scale: 1, x, y }}
       exit={{ opacity: 0, scale: 0.96, x: x + 10, y }}
@@ -89,6 +90,9 @@ export function AgentCursor({
       )}
       style={style}
       data-agent-cursor={presence.actor_id}
+      data-agent-cursor-anchor={
+        anchorId ?? presence.anchor_task_id ?? presence.task_id ?? presence.current_task_id ?? 'parked'
+      }
       data-agent-cursor-stale={stale ? 'true' : 'false'}
       aria-label={`${presence.name} is active on this task`}
       title={`${presence.name}: ${label}`}
@@ -147,9 +151,11 @@ export function AgentCursor({
 export function AgentCursorStack({
   presence,
   compact,
+  anchorId,
 }: {
   presence?: AgentPresencePayload[];
   compact?: boolean;
+  anchorId?: string;
 }) {
   if (!presence?.length) return null;
 
@@ -157,7 +163,13 @@ export function AgentCursorStack({
     <>
       <AnimatePresence initial={false}>
         {presence.slice(0, 3).map((item, index) => (
-          <AgentCursor key={item.actor_id} presence={item} index={index} compact={compact} />
+          <AgentCursor
+            key={`${anchorId ?? 'task'}-${item.actor_id}`}
+            presence={item}
+            index={index}
+            compact={compact}
+            anchorId={anchorId}
+          />
         ))}
       </AnimatePresence>
       {presence.length > 3 && (

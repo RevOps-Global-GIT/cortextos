@@ -20,6 +20,9 @@ export interface AgentCardData {
   role: string;
   health: HealthStatus;
   currentTask?: string;
+  mode?: string;
+  needsAttention?: boolean;
+  attentionLabel?: string;
   tasksToday: number;
   runtime?: AgentRuntime;
 }
@@ -33,7 +36,9 @@ export function AgentCard({ agent }: AgentCardProps) {
 
   const healthLabel =
     agent.health === 'healthy' ? 'Online' :
-    agent.health === 'stale' ? 'Stale' : 'Offline';
+    agent.attentionLabel === 'Night mode' ? 'Night mode' :
+    agent.health === 'stale' ? 'Needs attention' : 'Offline';
+  const canUseLifecycleActions = agent.attentionLabel !== 'Night mode';
 
   return (
     <Link href={`/agents/${encodeURIComponent(agent.systemName)}`}>
@@ -62,6 +67,7 @@ export function AgentCard({ agent }: AgentCardProps) {
               agentName={agent.systemName}
               org={agent.org}
               health={agent.health}
+              canUseLifecycleActions={canUseLifecycleActions}
               onAction={() => router.refresh()}
             />
           </div>

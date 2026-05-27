@@ -20,7 +20,7 @@ export function SystemHealth({ summary }: SystemHealthProps) {
   const [expanded, setExpanded] = useState(false);
 
   const total = summary.healthy + summary.stale + summary.down;
-  const unhealthy = summary.stale + summary.down;
+  const needsAttention = summary.agents.filter((agent) => agent.needsAttention).length;
 
   return (
     <Card>
@@ -42,13 +42,13 @@ export function SystemHealth({ summary }: SystemHealthProps) {
               <div className="flex items-center gap-2">
                 <IconHeartbeat size={18} className="text-primary" />
                 <span className="text-sm font-medium">
-                  {unhealthy === 0 ? (
+                  {needsAttention === 0 ? (
                     <span className="text-success">
-                      {total}/{total} agents healthy
+                      No agents need attention
                     </span>
                   ) : (
                     <span className="text-destructive">
-                      {unhealthy} agent{unhealthy !== 1 ? 's' : ''} down
+                      {needsAttention} agent{needsAttention !== 1 ? 's' : ''} need attention
                     </span>
                   )}
                 </span>
@@ -71,6 +71,11 @@ export function SystemHealth({ summary }: SystemHealthProps) {
                     <div className="flex items-center gap-2">
                       <HealthDot status={agent.health} />
                       <span>{agent.agent}</span>
+                      {!agent.needsAttention && agent.attentionLabel !== 'Healthy' && (
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                          {agent.attentionLabel}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       {agent.currentTask && (

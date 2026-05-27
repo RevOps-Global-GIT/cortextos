@@ -2,7 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { buildReplyContext } from '../../../src/daemon/agent-manager.js';
+import {
+  buildReplyContext,
+  isTelegramReceiptRecorded,
+  markTelegramReceiptRecorded,
+  telegramReceiptKey,
+} from '../../../src/daemon/agent-manager.js';
 
 // Mock the PTY layer so we don't load native bindings or spawn real processes.
 // AgentManager → AgentProcess → AgentPTY → node-pty. We mock at AgentProcess.
@@ -108,6 +113,34 @@ describe('AgentManager.discoverAndStart - BUG-028 fix', () => {
 
     // Empty object means no overrides — all discovered agents start
     expect(startSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts the org context orchestrator before app sub-orchestrators', async () => {
+    const agentsRoot = join(frameworkRoot, 'orgs', 'acme', 'agents');
+    mkdirSync(join(agentsRoot, 'agentops-orch'), { recursive: true });
+    mkdirSync(join(agentsRoot, 'orchestrator'), { recursive: true });
+    writeFileSync(join(agentsRoot, 'agentops-orch', 'AGENTS.md'), '# agentops-orch');
+    writeFileSync(join(agentsRoot, 'orchestrator', 'AGENTS.md'), '# orchestrator');
+    writeFileSync(
+      join(frameworkRoot, 'orgs', 'acme', 'context.json'),
+      JSON.stringify({ orchestrator: 'orchestrator' }),
+    );
+    writeFileSync(
+      join(agentsRoot, 'agentops-orch', 'config.json'),
+      JSON.stringify({ telegram_polling: false }),
+    );
+    writeFileSync(
+      join(agentsRoot, 'orchestrator', 'config.json'),
+      JSON.stringify({ telegram_polling: true }),
+    );
+
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const startSpy = vi.spyOn(am, 'startAgent').mockResolvedValue();
+
+    await am.discoverAndStart();
+
+    expect(startSpy.mock.calls[0][0]).toBe('orchestrator');
+    expect(startSpy.mock.calls.map(call => call[0])).toContain('agentops-orch');
   });
 
   it('still respects per-agent config.json enabled: false (existing behavior)', async () => {
@@ -457,6 +490,31 @@ describe('buildReplyContext - Telegram reply context (BUG fix: media replies los
     const msg = { message_id: 11, chat: { id: 1 }, text: 'Hello\x00world' };
     const result = buildReplyContext(msg);
     expect(result).not.toContain('\x00');
+  });
+});
+
+describe('Telegram receipt persistence dedup', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-telegram-receipt-'));
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('keys receipts by chat, thread, and message id', () => {
+    expect(telegramReceiptKey({ chat: { id: 123 }, message_id: 456 })).toBe('123:main:456');
+    expect(telegramReceiptKey({ chat: { id: 123 }, message_thread_id: 9, message_id: 456 })).toBe('123:9:456');
+  });
+
+  it('remembers Telegram messages already persisted to the inbound archive', () => {
+    const msg = { chat: { id: 123 }, message_id: 456 };
+
+    expect(isTelegramReceiptRecorded(testDir, msg)).toBe(false);
+    markTelegramReceiptRecorded(testDir, msg);
+    expect(isTelegramReceiptRecorded(testDir, msg)).toBe(true);
   });
 });
 

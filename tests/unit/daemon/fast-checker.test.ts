@@ -394,6 +394,19 @@ describe('FastChecker', () => {
       expect(result).toContain('[Your last message: "Last sent text"]');
     });
 
+    it('does not throw when Telegram reply context is accidentally passed as an object', () => {
+      const result = FastChecker.formatTelegramTextMessage(
+        'alice',
+        '999',
+        'Hello',
+        '/opt/cortextos',
+        { message_id: 123, text: 'Original object text' } as unknown as string,
+      );
+
+      expect(result).toContain('[Replying to: "Original object text"]');
+      expect(result).toContain('Hello');
+    });
+
     it('instruction uses single quotes to prevent shell variable expansion of $-numbers', () => {
       const result = FastChecker.formatTelegramTextMessage('alice', '999', 'Hello', '/opt/cortextos');
       expect(result).toContain("send-telegram 999 '<your reply>'");

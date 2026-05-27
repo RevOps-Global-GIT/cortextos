@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { randomBytes } from 'crypto';
@@ -6,6 +6,7 @@ import { createConnection } from 'net';
 import type { AgentConfig, CtxEnv } from '../types/index.js';
 import { OutputBuffer } from './output-buffer.js';
 import type { TelegramAPI } from '../telegram/api.js';
+import { cacheLastSent, logOutboundMessage } from '../telegram/logging.js';
 import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { resolveAgentCwd, resolvePaths } from '../utils/paths.js';
 import { logEvent } from '../bus/event.js';
@@ -70,6 +71,7 @@ interface CodexAccountHealth {
 interface CodexAccountPoolState {
   activeLabel?: string;
   accounts: CodexAccountHealth[];
+  lastUnavailableNotifiedAt?: string;
   updatedAt: string;
 }
 
@@ -99,6 +101,14 @@ interface GoalResponse {
   } | null;
 }
 
+interface TelegramTurnMirrorState {
+  chatId: string;
+  replyToMessageId?: number;
+  messageThreadId?: number;
+  outboundSize: number;
+  text: string;
+}
+
 const THREAD_PERMISSION_OVERRIDES = {
   approvalPolicy: 'never',
   sandbox: 'danger-full-access',
@@ -116,6 +126,9 @@ const DEFAULT_WS_HOST = '127.0.0.1';
 const CODEX_ACCOUNT_POOL_STATE = 'codex-account-pool-state.json';
 const QUOTA_UNHEALTHY_MS = 4 * 60 * 60 * 1000;
 const AUTH_UNHEALTHY_MS = 24 * 60 * 60 * 1000;
+const ACCOUNT_POOL_UNAVAILABLE_NOTIFY_MS = 10 * 60 * 1000;
+const TELEGRAM_PREEMPT_AFTER_MS = 45 * 1000;
+const TELEGRAM_PREEMPT_RESTART_DELAY_MS = 100;
 
 const SLASH_REWRITE_RE = /^\/([a-z][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
 const LOCAL_SLASH_COMMANDS = new Set(['goal']);
@@ -139,6 +152,8 @@ export class CodexAppServerPTY {
     reject: (err: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   } | null = null;
+  private _activeTurnStartedAt: number | null = null;
+  private _preemptRestart: Promise<void> | null = null;
   private _spawnFn: SpawnFn | null = null;
   private _appServerPty: IPty | null = null;
   private _rpc: WsUnixJsonRpcClient | null = null;
@@ -157,6 +172,7 @@ export class CodexAppServerPTY {
   private _chatId: string | null = null;
   private _typingLastSent = 0;
   private _activeAccount: CodexAccountPoolEntry | null = null;
+  private _activeTelegramTurn: TelegramTurnMirrorState | null = null;
 
   constructor(env: CtxEnv, config: AgentConfig, logPath?: string) {
     this._env = env;
@@ -307,13 +323,16 @@ export class CodexAppServerPTY {
     const chatIdMatch = content.match(/^=== TELEGRAM[^\n]*\(chat_id:(-?\d+)\)/);
     const chatId = chatIdMatch?.[1] ?? null;
 
+    const replyCommand = this.extractTelegramReplyCommand(content);
+    const effectiveChatId = replyCommand?.chatId ?? chatId;
+
     const beforeReply = content
       .split('\n[Your last message:', 1)[0]
       .split('\nReply using:', 1)[0];
 
     const replyToContext = this.extractReplyToContext(beforeReply);
-    const replyDirective = chatId
-      ? `Reply via: cortextos bus send-telegram ${chatId} '<your reply>' — this is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
+    const replyDirective = effectiveChatId
+      ? `Reply via: cortextos bus send-telegram ${effectiveChatId}${replyCommand?.args ? ` ${replyCommand.args}` : ''} '<your reply>' — this is the only path that surfaces in Telegram and on the dashboard. Do not reply through the codex channel.`
       : null;
     const wrap = (payload: string | null): { payload: string; replyDirective: string | null } | null => {
       if (!payload) return null;
@@ -358,6 +377,16 @@ export class CodexAppServerPTY {
     return null;
   }
 
+  private extractTelegramReplyCommand(content: string): { chatId: string; args: string } | null {
+    const match = content.match(/\nReply using:\s*cortextos bus send-telegram\s+(-?\d+)([^\n]*)/);
+    if (!match) return null;
+    const args = (match[2] || '')
+      .replace(/\s*'<your reply>'[\s\S]*$/, '')
+      .replace(/\s*"[^"]*"[\s\S]*$/, '')
+      .trim();
+    return { chatId: match[1], args };
+  }
+
   private buildMediaPayload(mediaType: string, beforeReply: string): string | null {
     const captionMatch = beforeReply.match(/caption:\s*\n```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n```/);
     const caption = captionMatch?.[1]?.trim() ?? '';
@@ -396,7 +425,7 @@ export class CodexAppServerPTY {
     const messageId = replyToMatch[1];
 
     try {
-      const outboundLog = join(this._stateDir, 'outbound-messages.jsonl');
+      const outboundLog = this.outboundTelegramLogPath();
       if (!existsSync(outboundLog)) return `[in reply to message ${messageId}]`;
       const fileLines = readFileSync(outboundLog, 'utf-8').split('\n').filter((l) => l.trim());
       for (let i = fileLines.length - 1; i >= 0; i -= 1) {
@@ -578,7 +607,10 @@ export class CodexAppServerPTY {
   }
 
   private queueTurn(input: unknown[]): void {
-    this._turnQueue.push(input);
+    this.enqueueTurn(input);
+    if (this.shouldPreemptForTelegram(input)) {
+      this.preemptActiveTurnForTelegram();
+    }
     if (this._executing) return;
     this._executing = true;
     this.drainQueue()
@@ -595,6 +627,7 @@ export class CodexAppServerPTY {
 
   private async drainQueue(): Promise<void> {
     while (this._alive && this._turnQueue.length > 0) {
+      if (this._preemptRestart) await this._preemptRestart;
       const input = this._turnQueue.shift()!;
       if (Array.isArray(input) && input.length === 0) continue;
       await this.startTurn(input);
@@ -604,17 +637,78 @@ export class CodexAppServerPTY {
   private async startTurn(input: unknown[], replayAttempt = 0): Promise<void> {
     if (!this._threadId) throw new Error('No Codex app-server thread is active');
     const completion = this.createTurnCompletion();
+    const telegramTurn = this.createTelegramTurnMirror(input);
+    this._activeTelegramTurn = telegramTurn;
+    this._activeTurnStartedAt = Date.now();
     try {
       await this.request('turn/start', { threadId: this._threadId, input, ...TURN_PERMISSION_OVERRIDES });
       await completion;
     } catch (err) {
       this.clearTurnCompletion();
+      if (this._activeTelegramTurn === telegramTurn) {
+        this._activeTelegramTurn = null;
+      }
       if (await this.rotateAccountForFailure(err, input, replayAttempt)) {
         await this.startTurn(input, replayAttempt + 1);
         return;
       }
       throw err;
+    } finally {
+      this._activeTurnStartedAt = null;
+      if (this._activeTelegramTurn === telegramTurn) {
+        this._activeTelegramTurn = null;
+      }
     }
+  }
+
+  private enqueueTurn(input: unknown[]): void {
+    if (!this.isTelegramTurn(input)) {
+      this._turnQueue.push(input);
+      return;
+    }
+
+    let lastTelegramIndex = -1;
+    for (let i = this._turnQueue.length - 1; i >= 0; i--) {
+      if (this.isTelegramTurn(this._turnQueue[i])) {
+        lastTelegramIndex = i;
+        break;
+      }
+    }
+    this._turnQueue.splice(lastTelegramIndex + 1, 0, input);
+  }
+
+  private isTelegramTurn(input: unknown[]): boolean {
+    const first = input[0];
+    if (!isRecord(first) || typeof first.text !== 'string') return false;
+    return first.text.startsWith('=== TELEGRAM') || first.text.includes('\n\nReply via: cortextos bus send-telegram ');
+  }
+
+  private shouldPreemptForTelegram(input: unknown[]): boolean {
+    if (!this.isTelegramTurn(input) || !this._executing || !this._turnCompletion || this._preemptRestart) return false;
+    const activeForMs = this._activeTurnStartedAt ? Date.now() - this._activeTurnStartedAt : 0;
+    return activeForMs >= TELEGRAM_PREEMPT_AFTER_MS;
+  }
+
+  private preemptActiveTurnForTelegram(): void {
+    this._outputBuffer.push('[codex-app-server] preempting active turn for live Telegram input\n');
+    this.rejectTurnCompletion(new Error('Preempted by live Telegram input'));
+    this._preemptRestart = (async () => {
+      this._rpc?.close();
+      this._rpc = null;
+      this.cleanupSpawnAttempt();
+      await sleep(TELEGRAM_PREEMPT_RESTART_DELAY_MS);
+      await this.startAppServerWithRetry();
+      await this.connectRpc();
+      await this.initializeRpc();
+      await this.startOrResumeThread('continue');
+    })()
+      .catch((err) => {
+        this._outputBuffer.push(`[codex-app-server] Telegram preempt restart failed: ${err}\n`);
+        throw err;
+      })
+      .finally(() => {
+        this._preemptRestart = null;
+      });
   }
 
   /**
@@ -720,16 +814,21 @@ export class CodexAppServerPTY {
       case 'turn/completed':
         this.writeIdleFlag();
         this._outputBuffer.push('[codex-app-server] turn completed\n');
+        this.flushTelegramTurnMirror();
         this.resolveTurnCompletion();
         break;
       case 'item/agentMessage/delta':
         if (typeof params.delta === 'string') {
           this._outputBuffer.push(params.delta);
+          this.captureTelegramTurnDelta(params.delta);
         }
         this.maybeFireTyping();
         break;
       case 'item/completed':
         if (isRecord(params.item) && params.item.type === 'agentMessage' && typeof params.item.text === 'string') {
+          if (this._activeTelegramTurn && !this._activeTelegramTurn.text.trim()) {
+            this._activeTelegramTurn.text = params.item.text;
+          }
           this._outputBuffer.push('\n');
         }
         break;
@@ -770,6 +869,98 @@ export class CodexAppServerPTY {
   private request<T>(method: string, params: unknown): Promise<JsonRpcResponse<T>> {
     if (!this._rpc) throw new Error('Codex app-server RPC is not connected');
     return this._rpc.request<T>(method, params);
+  }
+
+  private createTelegramTurnMirror(input: unknown[]): TelegramTurnMirrorState | null {
+    const first = input[0];
+    if (!isRecord(first) || typeof first.text !== 'string') return null;
+
+    const replyMatch = first.text.match(/(?:^|\n)Reply (?:via|using):\s*cortextos bus send-telegram\s+(-?\d+)([^\n]*)/);
+    if (!replyMatch) return null;
+
+    const args = replyMatch[2] || '';
+    const replyToMessageId = this.extractNumericFlag(args, 'reply-to');
+    const messageThreadId = this.extractNumericFlag(args, 'thread-id');
+
+    return {
+      chatId: replyMatch[1],
+      replyToMessageId,
+      messageThreadId,
+      outboundSize: this.currentOutboundTelegramLogSize(),
+      text: '',
+    };
+  }
+
+  private extractNumericFlag(text: string, flag: string): number | undefined {
+    const match = text.match(new RegExp(`--${flag}\\s+(\\d+)`));
+    if (!match) return undefined;
+    const value = Number(match[1]);
+    return Number.isFinite(value) ? value : undefined;
+  }
+
+  private captureTelegramTurnDelta(delta: string): void {
+    if (!this._activeTelegramTurn) return;
+    this._activeTelegramTurn.text += delta;
+  }
+
+  private flushTelegramTurnMirror(): void {
+    const turn = this._activeTelegramTurn;
+    if (!turn) return;
+    this._activeTelegramTurn = null;
+
+    const text = turn.text.trim();
+    if (!text || !this._telegramApi) return;
+    if (this.currentOutboundTelegramLogSize() > turn.outboundSize) return;
+
+    this._telegramApi.sendMessage(turn.chatId, text, undefined, {
+      parseMode: null,
+      replyToMessageId: turn.replyToMessageId,
+      messageThreadId: turn.messageThreadId,
+      allowSendingWithoutReply: true,
+    })
+      .then((result) => {
+        const messageId = typeof result?.result?.message_id === 'number'
+          ? result.result.message_id
+          : typeof result?.message_id === 'number'
+            ? result.message_id
+            : 0;
+        logOutboundMessage(this._env.ctxRoot, this._env.agentName, turn.chatId, text, messageId, {
+          parseMode: 'none',
+        });
+        cacheLastSent(this._env.ctxRoot, this._env.agentName, turn.chatId, text);
+        this.emitTelegramAutoMirrorEvent(turn, messageId);
+      })
+      .catch((err) => {
+        this._outputBuffer.push(`[codex-app-server] Telegram auto-mirror failed: ${err}\n`);
+      });
+  }
+
+  private outboundTelegramLogPath(): string {
+    return join(this._env.ctxRoot, 'logs', this._env.agentName, 'outbound-messages.jsonl');
+  }
+
+  private currentOutboundTelegramLogSize(): number {
+    try {
+      return statSync(this.outboundTelegramLogPath()).size;
+    } catch {
+      return 0;
+    }
+  }
+
+  private emitTelegramAutoMirrorEvent(turn: TelegramTurnMirrorState, messageId: number): void {
+    try {
+      const paths = resolvePaths(this._env.agentName, this._env.instanceId, this._env.org);
+      logEvent(paths, this._env.agentName, this._env.org, 'message', 'telegram_auto_mirrored', 'info', {
+        runtime: 'codex-app-server',
+        chat_id: turn.chatId,
+        reply_to_message_id: turn.replyToMessageId ?? null,
+        message_thread_id: turn.messageThreadId ?? null,
+        message_id: messageId,
+        thread_id: this._threadId,
+      });
+    } catch {
+      // Non-fatal; outbound log/cache are the primary user-visible proof.
+    }
   }
 
   private createTurnCompletion(timeoutMs = 30 * 60 * 1000): Promise<void> {
@@ -956,6 +1147,7 @@ export class CodexAppServerPTY {
       return {
         activeLabel: parsed.activeLabel,
         accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
+        lastUnavailableNotifiedAt: parsed.lastUnavailableNotifiedAt,
         updatedAt: parsed.updatedAt || new Date().toISOString(),
       };
     } catch {
@@ -984,9 +1176,7 @@ export class CodexAppServerPTY {
         .map((account) => [account.label, account]),
     );
 
-    const selected = pool.find((entry) => entry.label !== excludeLabel && !unhealthy.has(entry.label))
-      ?? pool.find((entry) => entry.label !== excludeLabel)
-      ?? null;
+    const selected = pool.find((entry) => entry.label !== excludeLabel && !unhealthy.has(entry.label)) ?? null;
     if (selected) {
       state.activeLabel = selected.label;
       state.updatedAt = new Date().toISOString();
@@ -1039,6 +1229,7 @@ export class CodexAppServerPTY {
     const next = this.selectHealthyAccount(previous.label);
     if (!next || next.label === previous.label) {
       this.emitAccountFailoverEvent('codex_account_failover_unavailable', previous, null, failure);
+      this.sendPoolUnavailableAck(previous, failure.failureClass);
       return false;
     }
 
@@ -1070,6 +1261,25 @@ export class CodexAppServerPTY {
   ): void {
     if (!this._telegramApi || !this._chatId) return;
     const text = `Codex runtime degraded (${failureClass}) on ${previous.label}; switching to ${next.label} and replaying your message.`;
+    this._telegramApi.sendMessage(this._chatId, text, undefined, { parseMode: null }).catch(() => {});
+  }
+
+  private sendPoolUnavailableAck(
+    previous: CodexAccountPoolEntry,
+    failureClass: 'auth' | 'quota',
+  ): void {
+    if (!this._telegramApi || !this._chatId) return;
+
+    const state = this.readAccountPoolState();
+    const now = Date.now();
+    const last = state.lastUnavailableNotifiedAt ? Date.parse(state.lastUnavailableNotifiedAt) : 0;
+    if (Number.isFinite(last) && last > 0 && now - last < ACCOUNT_POOL_UNAVAILABLE_NOTIFY_MS) return;
+
+    state.lastUnavailableNotifiedAt = new Date(now).toISOString();
+    state.updatedAt = state.lastUnavailableNotifiedAt;
+    this.writeAccountPoolState(state);
+
+    const text = `Codex runtime unavailable: all configured Codex account lanes are unhealthy (${failureClass} on ${previous.label}). I stopped replaying the account-switch loop; Codex front-door replies need a verified healthy lane or a non-Codex fallback.`;
     this._telegramApi.sendMessage(this._chatId, text, undefined, { parseMode: null }).catch(() => {});
   }
 

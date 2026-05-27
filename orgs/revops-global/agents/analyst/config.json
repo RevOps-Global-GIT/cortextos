@@ -4,6 +4,7 @@
   "startup_delay": 0,
   "max_session_seconds": 255600,
   "max_crashes_per_day": 10,
+  "home": "/home/cortextos/.claude-team",
   "working_directory": "/home/cortextos/cortextos/orgs/revops-global/agents/analyst",
   "timezone": "America/Los_Angeles",
   "day_mode_start": "07:00",
@@ -48,7 +49,31 @@
       "name": "theta-wave",
       "type": "recurring",
       "cron": "0 22 * * *",
-      "prompt": "Read .claude/skills/theta-wave/SKILL.md. Initiate the theta wave cycle. First action: message the orchestrator that theta wave is starting and share your initial system scan."
+      "prompt": "Run the artifact-backed theta-wave scheduled workflow from agents/analyst/prompts/cron-theta-wave.md.",
+      "metadata": {
+        "runner": "spawn-codex",
+        "prompt_file": "agents/analyst/prompts/cron-theta-wave.md",
+        "workdir": "agents/analyst",
+        "agent": "analyst",
+        "task_id": "cron:analyst:theta-wave",
+        "timeout_seconds": 5400,
+        "sandbox": "danger-full-access"
+      }
+    },
+    {
+      "name": "theta-freshness-watchdog",
+      "type": "recurring",
+      "cron": "30 23 * * *",
+      "prompt": "Run the read-only theta freshness watchdog from agents/analyst/prompts/cron-theta-freshness-watchdog.md.",
+      "metadata": {
+        "runner": "spawn-codex",
+        "prompt_file": "agents/analyst/prompts/cron-theta-freshness-watchdog.md",
+        "workdir": "agents/analyst",
+        "agent": "analyst",
+        "task_id": "cron:analyst:theta-freshness-watchdog",
+        "timeout_seconds": 900,
+        "sandbox": "workspace-write"
+      }
     },
     {
       "name": "rgos-task-poll",
@@ -169,12 +194,6 @@
       "type": "recurring",
       "interval": "4h",
       "prompt": "Run detection-shadow monitor: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/detection-shadow-monitor.py. Detects three classes of detection-shadow failures: red-main (any of 5 RevOps repos failing CI on main), stale-lock-d (>15min .lock.d in agent inbox), ack-loop (3+ generic acks in 10min without artifact). Alerts orchestrator on each new incident (6h dedup). Per theta-2026-05-24 Phase 7."
-    },
-    {
-      "name": "cache-split-monitor",
-      "type": "recurring",
-      "interval": "30m",
-      "prompt": "Run cache-split fast-cycle monitor: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/cache-split-monitor.py. Detects thin-body 200 responses on configured agentops.revopsglobal.com routes (cache split symptom). Alerts orchestrator when consecutive thin passes >= 2 per route (1h dedup, severity high). Per dev 2026-05-24 detection-shadow-monitor v4 expansion."
     }
   ],
   "ctx_autoreset_threshold": 45,

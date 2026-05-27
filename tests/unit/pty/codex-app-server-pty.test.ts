@@ -247,6 +247,13 @@ describe('CodexAppServerPTY account pool', () => {
 });
 
 describe('CodexAppServerPTY command mapping', () => {
+  async function flushAsync() {
+    await Promise.resolve();
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
+  }
+
   function makeReadyPty() {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _alive: boolean })._alive = true;
@@ -611,8 +618,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(requestMock).toHaveBeenCalledTimes(1);
 
     internals.handleRpcMessage({ method: 'turn/completed', params: {} });
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushAsync();
     expect(requestMock).toHaveBeenCalledTimes(2);
     expect(requestMock).toHaveBeenLastCalledWith('turn/start', {
       threadId: 'thread-1',
@@ -622,6 +628,85 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     });
 
     internals.handleRpcMessage({ method: 'turn/completed', params: {} });
+  });
+
+  it('prioritizes queued Telegram turns ahead of background text turns', async () => {
+    requestMock.mockResolvedValue({ result: {} });
+    const pty = makeReadyPty();
+    const internals = pty as unknown as { handleRpcMessage(message: unknown): void };
+
+    pty.write('background one');
+    pty.write('\r');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    pty.write('background two');
+    pty.write('\r');
+    pty.write(`=== TELEGRAM from [USER: Greg] (chat_id:7940429114) ===
+hello?
+Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+`);
+    pty.write('\r');
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+
+    internals.handleRpcMessage({ method: 'turn/completed', params: {} });
+    await flushAsync();
+
+    expect(requestMock).toHaveBeenCalledTimes(2);
+    const secondText = (requestMock.mock.calls[1][1] as { input: Array<{ text: string }> }).input[0].text;
+    expect(secondText).toContain('hello?');
+
+    internals.handleRpcMessage({ method: 'turn/completed', params: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requestMock).toHaveBeenCalledTimes(3);
+    const thirdText = (requestMock.mock.calls[2][1] as { input: Array<{ text: string }> }).input[0].text;
+    expect(thirdText).toBe('background two');
+  });
+
+  it('preempts a long-running active turn when live Telegram arrives', async () => {
+    requestMock.mockResolvedValue({ result: {} });
+    const pty = makeReadyPty();
+    const internals = pty as unknown as {
+      _activeTurnStartedAt: number | null;
+      _rpc: { request: typeof requestMock; respondError: typeof respondErrorMock; close: typeof closeMock };
+      startAppServerWithRetry: () => Promise<void>;
+      connectRpc: () => Promise<void>;
+      initializeRpc: () => Promise<void>;
+      startOrResumeThread: (mode: 'continue') => Promise<void>;
+    };
+    internals._rpc = { request: requestMock, respondError: respondErrorMock, close: closeMock };
+    internals.startAppServerWithRetry = vi.fn().mockResolvedValue(undefined);
+    internals.connectRpc = vi.fn().mockImplementation(async () => {
+      internals._rpc = { request: requestMock, respondError: respondErrorMock, close: closeMock };
+    });
+    internals.initializeRpc = vi.fn().mockResolvedValue(undefined);
+    internals.startOrResumeThread = vi.fn().mockResolvedValue(undefined);
+
+    pty.write('long background task');
+    pty.write('\r');
+    await Promise.resolve();
+    await Promise.resolve();
+    internals._activeTurnStartedAt = Date.now() - 60_000;
+
+    pty.write(`=== TELEGRAM from [USER: Greg] (chat_id:7940429114) ===
+are you?
+Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
+`);
+    pty.write('\r');
+    await new Promise((resolve) => setTimeout(resolve, 130));
+    await flushAsync();
+
+    expect(closeMock).toHaveBeenCalled();
+    expect(pty.getOutputBuffer().getRecent()).toContain('preempting active turn for live Telegram input');
+    expect(requestMock.mock.calls.some((call) => {
+      if (call[0] !== 'turn/start') return false;
+      const text = (call[1] as { input: Array<{ text: string }> }).input[0].text;
+      return text.includes('are you?');
+    })).toBe(true);
   });
 });
 
