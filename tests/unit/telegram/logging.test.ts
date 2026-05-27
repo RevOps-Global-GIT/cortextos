@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -79,7 +79,7 @@ describe('Telegram Logging', () => {
         taskDir: join(ctxRoot, 'tasks'),
         approvalDir: join(ctxRoot, 'approvals'),
         analyticsDir: join(ctxRoot, 'analytics'),
-        heartbeatDir: join(ctxRoot, 'heartbeats'),
+        deliverablesDir: join(ctxRoot, 'orgs', 'eros-os', 'deliverables'),
       };
     }
 
@@ -179,6 +179,109 @@ describe('Telegram Logging', () => {
 
       // Failure surfaced through the log callback.
       expect(logSpy).toHaveBeenCalled();
+    });
+
+    it('mirrors dogfood result Telegrams to orchestrator inbox with source metadata', () => {
+      const paths = buildPaths(testDir, 'hub-dogfood');
+      mkdirSync(paths.stateDir, { recursive: true });
+
+      const msg: TelegramMessage = {
+        message_id: 729,
+        date: 1779871800,
+        from: { id: 6595584963, is_bot: false, first_name: 'Greg' },
+        chat: { id: 6595584963, type: 'private' },
+        text: 'AgentOps dogfood 07:10 local: FAIL - Fleet Tasks stale framing proof attached.',
+      };
+
+      recordInboundTelegram(paths, testDir, 'hub-dogfood', 'revops-global', 'Greg', msg);
+
+      const inboxDir = join(testDir, 'inbox', 'orchestrator');
+      const inboxFiles = readdirSync(inboxDir).filter(file => file.endsWith('.json'));
+      expect(inboxFiles).toHaveLength(1);
+
+      const mirrored = JSON.parse(readFileSync(join(inboxDir, inboxFiles[0]), 'utf-8'));
+      expect(mirrored).toMatchObject({
+        from: 'hub-dogfood',
+        to: 'orchestrator',
+        priority: 'normal',
+        trace_id: 'dogfood-telegram-hub-dogfood-6595584963-729',
+      });
+      expect(mirrored.text).toContain('DOGFOOD RESULT MIRROR from hub-dogfood Telegram');
+      expect(mirrored.text).toContain('Source: chat=6595584963 message=729 thread=none from=Greg');
+      expect(mirrored.text).toContain('AgentOps dogfood 07:10 local: FAIL');
+
+      const today = new Date().toISOString().split('T')[0];
+      const eventPath = join(testDir, 'analytics', 'events', 'hub-dogfood', `${today}.jsonl`);
+      const events = readFileSync(eventPath, 'utf-8').trim().split('\n').map(line => JSON.parse(line));
+      const mirrorEvent = events.find(event => event.event === 'dogfood_result_mirrored_to_orchestrator');
+      expect(mirrorEvent).toMatchObject({
+        agent: 'hub-dogfood',
+        org: 'revops-global',
+        category: 'message',
+        severity: 'info',
+        metadata: {
+          mirror_key: 'dogfood-telegram:hub-dogfood:6595584963:729',
+          source_agent: 'hub-dogfood',
+          source_chat_id: '6595584963',
+          source_message_id: 729,
+          source_from_name: 'Greg',
+          target_agent: 'orchestrator',
+        },
+      });
+    });
+
+    it('dedupes repeated dogfood result Telegram mirroring by source chat and message id', () => {
+      const paths = buildPaths(testDir, 'hub-dogfood');
+      mkdirSync(paths.stateDir, { recursive: true });
+
+      const msg: TelegramMessage = {
+        message_id: 730,
+        date: 1779871800,
+        from: { id: 6595584963, is_bot: false, first_name: 'Greg' },
+        chat: { id: 6595584963, type: 'private' },
+        text: 'Estate dogfood 07:05 local: BLOCKED - /music hidden-tab runner did not advance.',
+      };
+
+      recordInboundTelegram(paths, testDir, 'hub-dogfood', 'revops-global', 'Greg', msg);
+      recordInboundTelegram(paths, testDir, 'hub-dogfood', 'revops-global', 'Greg', msg);
+
+      const inboxDir = join(testDir, 'inbox', 'orchestrator');
+      const inboxFiles = readdirSync(inboxDir).filter(file => file.endsWith('.json'));
+      expect(inboxFiles).toHaveLength(1);
+
+      const today = new Date().toISOString().split('T')[0];
+      const eventPath = join(testDir, 'analytics', 'events', 'hub-dogfood', `${today}.jsonl`);
+      const mirrorEvents = readFileSync(eventPath, 'utf-8')
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line))
+        .filter(event => event.event === 'dogfood_result_mirrored_to_orchestrator');
+      expect(mirrorEvents).toHaveLength(1);
+    });
+
+    it('does not mirror non-dogfood Telegrams or orchestrator-owned dogfood messages', () => {
+      const hubPaths = buildPaths(testDir, 'hub-dogfood');
+      const orchPaths = buildPaths(testDir, 'orchestrator');
+      mkdirSync(hubPaths.stateDir, { recursive: true });
+      mkdirSync(orchPaths.stateDir, { recursive: true });
+
+      recordInboundTelegram(hubPaths, testDir, 'hub-dogfood', 'revops-global', 'Greg', {
+        message_id: 731,
+        date: 1779871800,
+        from: { id: 6595584963, is_bot: false, first_name: 'Greg' },
+        chat: { id: 6595584963, type: 'private' },
+        text: 'Can you check this dashboard?',
+      });
+
+      recordInboundTelegram(orchPaths, testDir, 'orchestrator', 'revops-global', 'Greg', {
+        message_id: 732,
+        date: 1779871800,
+        from: { id: 6595584963, is_bot: false, first_name: 'Greg' },
+        chat: { id: 6595584963, type: 'private' },
+        text: 'AgentOps dogfood 07:10 local: FAIL - already visible to orchestrator.',
+      });
+
+      expect(existsSync(join(testDir, 'inbox', 'orchestrator'))).toBe(false);
     });
   });
 
