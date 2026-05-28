@@ -15,7 +15,7 @@ export function formatTelegramTextMessage(
   recentHistory?: string,
 ): string {
   let replyCx = '';
-  if (replyToText) {
+  if (typeof replyToText === 'string' && replyToText) {
     replyCx = `[Replying to: "${replyToText.slice(0, 500)}"]\n`;
   }
 
