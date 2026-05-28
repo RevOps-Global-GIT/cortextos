@@ -10,15 +10,13 @@
  * marker exists, unless `force: true` is passed (which deletes the marker first).
  *
  * ## One-shot crons
- * CronDefinition supports interval-based and cron-expression schedules only —
- * there is no "fire once at time T" field in the external schema (as of Subtask 1.1).
- * One-shot crons from config.json (type:"once" with fire_at) are therefore:
- *   - Skipped with a log message if fire_at is in the past.
- *   - Skipped with a log message if fire_at is in the future (not representable in CronDefinition).
- *
- * TODO (future subtask): add a `fire_at` field to CronDefinition and teach
- * CronScheduler to fire them once then remove them.  When that lands, the
- * one-shot migration path below can be uncommented/extended.
+ * CronDefinition carries a `fire_at` field for one-shot crons (ISO 8601 UTC).
+ * One-shot crons from config.json (type:"once" with fire_at) are handled as:
+ *   - Skipped with a log message if fire_at is missing or unparseable.
+ *   - Skipped with a log message if fire_at is in the past (already fired/expired).
+ *   - Migrated into CronDefinition with fire_at set if fire_at is in the future.
+ *     The `schedule` field is set to the fire_at ISO string; CronScheduler will
+ *     skip it with a warning until explicit one-shot dispatch support is added.
  *
  * ## Non-destructive
  * The original `crons` array in config.json is never modified.
@@ -185,12 +183,11 @@ function convertEntry(
     return { cron: def };
   }
 
-  // One-shot crons — CronDefinition has no fire_at field yet
+  // One-shot crons — CronDefinition.fire_at carries the target timestamp.
   if (effectiveType === 'once') {
     if (!fire_at) {
       return {
-        skip: `cron "${name}" has type "once" but no fire_at timestamp — skipping. ` +
-          `TODO: once CronDefinition supports fire_at, migrate this entry.`,
+        skip: `cron "${name}" has type "once" but no fire_at timestamp — skipping (cannot infer target time)`,
       };
     }
     const fireAtMs = Date.parse(fire_at);
@@ -204,11 +201,20 @@ function convertEntry(
         skip: `cron "${name}" has type "once" with past fire_at "${fire_at}" — skipping (already fired or expired)`,
       };
     }
-    // Future one-shot — still not representable in CronDefinition as of Subtask 1.1
-    return {
-      skip: `cron "${name}" has type "once" with future fire_at "${fire_at}" — skipping. ` +
-        `TODO: once CronDefinition supports fire_at, migrate this as a one-shot.`,
+    // Future one-shot — migrate with fire_at set. schedule is set to the ISO
+    // timestamp; CronScheduler will log a warning and skip dispatch until it
+    // gains explicit fire_at one-shot support, but the record persists correctly.
+    const def: CronDefinition = {
+      name,
+      prompt: prompt ?? '',
+      schedule: fire_at,
+      fire_at,
+      enabled: true,
+      created_at: new Date().toISOString(),
+      description: `One-shot migrated from config.json (fire_at: ${fire_at})`,
+      metadata: { migrated_from_config: true, original_type: 'once' },
     };
+    return { cron: def };
   }
 
   // Recurring cron — requires a schedule
