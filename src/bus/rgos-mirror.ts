@@ -239,15 +239,21 @@ export async function resolveExistingTaskMirrorId(
   endpoint.searchParams.set('order', 'updated_at.desc');
   endpoint.searchParams.set('limit', '5');
 
-  const res = await fetch(endpoint.toString(), {
-    method: 'GET',
-    headers: {
-      'apikey': serviceKey,
-      'Authorization': `Bearer ${serviceKey}`,
-      'Accept': 'application/json',
-    },
-    signal: AbortSignal.timeout(10_000),
-  });
+  let res: Response;
+  try {
+    res = await fetch(endpoint.toString(), {
+      method: 'GET',
+      headers: {
+        'apikey': serviceKey,
+        'Authorization': `Bearer ${serviceKey}`,
+        'Accept': 'application/json',
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    // Network error — treat as no existing row found.
+    return fallbackId;
+  }
 
   if (!res.ok) return fallbackId;
 
@@ -723,9 +729,10 @@ export async function mirrorTaskToRgos(
 ): Promise<void> {
   if (!isEnabled()) return;
   const row = buildTaskRow(task);
-  if (event !== 'create') {
-    row.id = await resolveExistingTaskMirrorId(task.id, row.id as string);
-  }
+  // Always resolve the existing mirror row ID — not just on update/complete.
+  // A retried create from the retry queue must land on the same row, not
+  // insert a second shadow row that inflates the completed-task count.
+  row.id = await resolveExistingTaskMirrorId(task.id, row.id as string);
   const agentId = task.assigned_to ?? process.env.CTX_AGENT_NAME ?? 'unknown';
   const action = event === 'create' ? 'task_created'
     : event === 'complete' ? 'task_completed'
