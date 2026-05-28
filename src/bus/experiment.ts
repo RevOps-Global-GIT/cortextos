@@ -575,6 +575,44 @@ export function manageCycle(
 // Supabase sync — non-blocking, fail-open
 // ---------------------------------------------------------------------------
 
+/**
+ * Scan the agent's pending approval directory for an approval whose description
+ * starts with the first 120 chars of `hypothesis`. If found and the file does
+ * not already have a `linked_orch_approval_id`, patch it in so the Telegram
+ * callback in fast-checker.ts can sync the decision to Supabase.
+ *
+ * Best-effort: errors are silently swallowed — the main sync path must not fail.
+ */
+function backfillLocalApproval(agentDir: string, hypothesis: string, orchApprovalId: string): void {
+  try {
+    const { homedir } = require('os');
+    const instanceId = process.env.CTX_INSTANCE_ID || '';
+    const org = process.env.CTX_ORG || '';
+    if (!instanceId || !org) return;
+    const pendingDir = join(homedir(), '.cortextos', instanceId, 'orgs', org, 'approvals', 'pending');
+    if (!existsSync(pendingDir)) return;
+    const prefix = hypothesis.slice(0, 120).toLowerCase();
+    const files = readdirSync(pendingDir).filter(f => f.endsWith('.json'));
+    for (const file of files) {
+      try {
+        const raw = readFileSync(join(pendingDir, file), 'utf-8');
+        const approval = JSON.parse(raw);
+        if (approval.linked_orch_approval_id) continue; // already linked
+        const desc: string = (approval.description ?? '').toLowerCase();
+        const title: string = (approval.title ?? '').toLowerCase();
+        if (desc.includes(prefix) || title.includes(prefix.slice(0, 80))) {
+          atomicWriteSync(join(pendingDir, file), JSON.stringify({ ...approval, linked_orch_approval_id: orchApprovalId }));
+          return; // link at most one approval per experiment
+        }
+      } catch {
+        // skip corrupt file
+      }
+    }
+  } catch {
+    // non-fatal
+  }
+}
+
 // orch_approvals.org_id is a UUID FK to organizations.id (RevOps Global).
 const REVOPS_ORG_UUID =
   process.env.SUPABASE_RGOS_ORG_UUID || 'a1b2c3d4-0000-0000-0000-000000000001';
@@ -714,6 +752,10 @@ export async function syncExperimentToSupabase(
         const approvalId = await createApprovalRow(url, key, experiment);
         if (approvalId) {
           payload.approval_id = approvalId;
+          // Backfill: if the agent already created a bus approval for this
+          // experiment, patch the local file with linked_orch_approval_id so
+          // the Telegram callback can later sync the decision to Supabase.
+          backfillLocalApproval(agentDir, experiment.hypothesis, approvalId);
         }
       }
 
