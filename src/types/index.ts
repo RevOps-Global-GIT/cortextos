@@ -275,6 +275,10 @@ export interface Approval {
   resolved_at: string | null;
   resolved_by: string | null;
   email_meta?: EmailMeta;
+  /** UUID of the paired orch_approvals row in Supabase (if any). When set,
+   *  routeApprovalCallback also PATCHes that row so the Hub reflects the
+   *  Telegram decision in real-time. */
+  linked_orch_approval_id?: string;
 }
 
 // Agent Steer Types

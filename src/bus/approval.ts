@@ -200,6 +200,7 @@ export async function createApproval(
   frameworkRoot?: string,
   agentDir?: string,
   emailMeta?: EmailMeta,
+  linkedOrchApprovalId?: string,
 ): Promise<string> {
   validateApprovalCategory(category);
 
@@ -221,6 +222,7 @@ export async function createApproval(
     resolved_at: null,
     resolved_by: null,
     ...(emailMeta ? { email_meta: emailMeta } : {}),
+    ...(linkedOrchApprovalId ? { linked_orch_approval_id: linkedOrchApprovalId } : {}),
   };
 
   const pendingDir = join(paths.approvalDir, 'pending');

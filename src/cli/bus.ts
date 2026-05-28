@@ -3290,7 +3290,8 @@ busCommand
   .argument('<category>', 'Category: external-comms, financial, deployment, data-deletion, other')
   .argument('[context]', 'Additional context')
   .option('--email-meta <json>', 'JSON email metadata for send-approved-email: {"to":"...","subject":"...","body":"..."}')
-  .action(async (title: string, category: string, context?: string, opts?: { emailMeta?: string }) => {
+  .option('--linked-orch-approval-id <uuid>', 'UUID of a paired orch_approvals row in Supabase — when set, the Telegram callback will also update that row so the Hub reflects the decision in real-time')
+  .action(async (title: string, category: string, context?: string, opts?: { emailMeta?: string; linkedOrchApprovalId?: string }) => {
     const validCategories: ApprovalCategory[] = ['external-comms', 'financial', 'deployment', 'data-deletion', 'other'];
     if (!validCategories.includes(category as ApprovalCategory)) {
       console.error(`Invalid category '${category}'. Must be one of: ${validCategories.join(', ')}`);
@@ -3311,7 +3312,7 @@ busCommand
     }
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir, emailMeta);
+    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir, emailMeta, opts?.linkedOrchApprovalId);
     console.log(id);
     await logImplicitInvocation('approvals', env.agentDir ?? '', env.agentName);
   });
