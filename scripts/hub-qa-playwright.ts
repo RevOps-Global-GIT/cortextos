@@ -2854,6 +2854,30 @@ async function main() {
         }]);
       }
     }
+    // Mirror the same session cookie on agentops subdomain — /app/* redirects there
+    if (sessionJson.length <= CHUNK_SIZE) {
+      await context.addCookies([{
+        name: storageKey,
+        value: sessionJson,
+        domain: 'agentops.revopsglobal.com',
+        path: '/',
+        httpOnly: false,
+        secure: true,
+        sameSite: 'Lax',
+      }]);
+    } else {
+      for (let i = 0; i * CHUNK_SIZE < sessionJson.length; i++) {
+        await context.addCookies([{
+          name: `${storageKey}.${i}`,
+          value: sessionJson.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
+          domain: 'agentops.revopsglobal.com',
+          path: '/',
+          httpOnly: false,
+          secure: true,
+          sameSite: 'Lax',
+        }]);
+      }
+    }
     // Also inject into localStorage as fallback for client-side Supabase
     await context.addInitScript(({ key, val }: { key: string; val: string }) => {
       try { localStorage.setItem(key, val); } catch {}
@@ -2863,6 +2887,8 @@ async function main() {
     const PAGE_URL_MAP: Record<string, string> = {
       'cortex-theta': '/app/cortex/theta',
       'linkedin-presence': '/app/presence',
+      '/analytics': '/app/analytics',
+      '/fleet': '/app/fleet',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
