@@ -48,7 +48,17 @@
       "name": "theta-wave",
       "type": "recurring",
       "cron": "0 22 * * *",
+      "runner": "spawn-worker",
+      "prompt_file": "agents/analyst/prompts/cron-theta-wave.md",
       "prompt": "Read .claude/skills/theta-wave/SKILL.md. Initiate the theta wave cycle. First action: message the orchestrator that theta wave is starting and share your initial system scan."
+    },
+    {
+      "name": "theta-freshness-watchdog",
+      "type": "recurring",
+      "cron": "30 23 * * *",
+      "runner": "spawn-worker",
+      "prompt_file": "agents/analyst/prompts/cron-theta-freshness-watchdog.md",
+      "prompt": "Run the read-only theta freshness watchdog from agents/analyst/prompts/cron-theta-freshness-watchdog.md."
     },
     {
       "name": "rgos-task-poll",
