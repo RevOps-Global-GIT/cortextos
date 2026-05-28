@@ -435,6 +435,12 @@ export class FastChecker {
     // Check agent inbox
     const inboxMessages = checkInbox(this.paths);
     for (const msg of inboxMessages) {
+      // Silently drop short ACK chatter from agent-to-agent bus so it never
+      // reaches the Claude PTY and gets relayed to the user's Telegram chat.
+      if (FastChecker.isAgentAck(msg)) {
+        ackIds.push(msg.id);
+        continue;
+      }
       messageBlock += this.formatInboxMessage(msg);
       ackIds.push(msg.id);
     }
@@ -750,6 +756,31 @@ export class FastChecker {
     } catch {
       // Non-critical
     }
+  }
+
+  /**
+   * Returns true for short agent-to-agent ACK chatter that should be silently
+   * consumed without being injected into the Claude PTY.
+   *
+   * Criteria: text is <=50 chars after trimming, OR the trimmed text is an
+   * exact (case-insensitive) match to a known ACK phrase.  Only applies to
+   * messages whose sender is NOT the user (i.e. from another agent, not from
+   * the Telegram/user path).
+   *
+   * Why this exists: orchestrator sends short acknowledgements ("ACK",
+   * "Done, thanks.", "Good catch") back to dev over the bus.  Without this
+   * filter, Claude processes them and sometimes relays them to Greg's Telegram
+   * chat, creating noise.
+   */
+  private static isAgentAck(msg: InboxMessage): boolean {
+    const ACK_PHRASES = new Set([
+      'ack', 'done', 'done, thanks.', 'done, thanks', 'good catch',
+      'roger', 'noted', 'ok', 'okay', 'thanks', 'thank you', '👍', '✅',
+    ]);
+    const trimmed = msg.text.trim();
+    if (trimmed.length <= 50) return true;
+    if (ACK_PHRASES.has(trimmed.toLowerCase())) return true;
+    return false;
   }
 
   /**
