@@ -43,6 +43,19 @@ export class AgentManager {
   // Tracks agents that received a start request while still stopping.
   // stopAgent() honors these after cleanup completes so restart-all is race-free.
   private pendingRestarts: Set<string> = new Set();
+  /**
+   * Per-agent in-flight stopAgent() promise. When a startAgent() arrives for
+   * the same name while a stop is still running, the new start awaits this
+   * promise before proceeding, which eliminates the IPC-level race where
+   * `cortextos stop foo && cortextos start foo` arrives at the daemon faster
+   * than the PTY can actually shut down (6-15s) and lands both handlers in
+   * parallel. PR #11 closed the PTY-level race inside AgentProcess.stop(),
+   * but the IPC server (ipc-server.ts) dispatches both handlers
+   * fire-and-forget, so the registry-overlap window in AgentManager can
+   * still trip without this serialization. See startAgent() / stopAgent()
+   * for how this is consumed.
+   */
+  private inFlightStops: Map<string, Promise<void>> = new Map();
   /** Per-agent health probe interval timers. Keyed by agent name. */
   private probeTimers: Map<string, NodeJS.Timeout> = new Map();
   /** Per-agent stale-heartbeat watcher timers (started in startAgent, cleared in stopAgent). */
@@ -302,31 +315,45 @@ export class AgentManager {
   }
 
   async startAgent(name: string, agentDir: string, config?: AgentConfig, org?: string): Promise<void> {
+    // BUG-011 race fix: the cortextos IPC server (ipc-server.ts) dispatches
+    // stop-agent and start-agent handlers fire-and-forget, so
+    //     cortextos stop foo && cortextos start foo
+    // can arrive at the daemon with both handlers executing in parallel.
+    // stopAgent() is typically still awaiting PTY exit (6-15s) when
+    // startAgent() fires. Without serializing here, startAgent would land
+    // on `if (this.agents.has(name))` (true, because stopAgent has not yet
+    // reached agents.delete) and bail into the pendingRestarts fallback,
+    // noisily emitting the BUG-011 REGRESSION CHECK warning for what is in
+    // fact the expected concurrent-IPC pattern. The same pattern fires on
+    // restart-all and on rapid dashboard toggles.
+    //
+    // Awaiting the in-flight stop here lets the usual fresh-start path run
+    // cleanly. The pendingRestarts fallback below is kept as a safety net
+    // for any future code path that mutates this.agents without going
+    // through stopAgent (none known today).
+    const inFlightStop = this.inFlightStops.get(name);
+    if (inFlightStop) {
+      console.log(`[agent-manager] startAgent(${name}) waiting for in-flight stopAgent to complete`);
+      try {
+        await inFlightStop;
+      } catch {
+        // stopAgent failures are logged at their source; ignore here and
+        // proceed to the fresh-start path so the agent is not stuck off.
+      }
+    }
+
     if (this.agents.has(name)) {
-      // BUG-031: this branch was the workaround for the BUG-011 PTY race
-      // (restart-all could send stop+start simultaneously, and the new
-      // start would arrive while the old stop's PTY exit was still in
-      // flight). PR #11 closed BUG-011 by making `AgentProcess.stop()`
-      // await the actual PTY exit before resolving — which means this
-      // branch should NEVER fire under normal restart paths.
-      //
-      // We log a regression warning here instead of deleting the branch
-      // entirely, so we'll know IMMEDIATELY if BUG-011 ever regresses
-      // (a future change accidentally breaks the exit-await). Phase 4 of
-      // the core stability test plan + cycle 2 of PR #13 both confirmed
-      // this branch is dormant. Once we have weeks of zero-warning
-      // production data, we can delete the queue mechanism entirely.
+      // Safety net: a startAgent arrived while the name is still in the
+      // registry AND we have no in-flight stopAgent promise for it. With
+      // the inFlightStops await above, the common stop+start IPC race no
+      // longer reaches this branch. The remaining triggers are:
+      //   * post-daemon-crash discoverAndStart overlap (expected, quiet log)
+      //   * a code path that mutates this.agents without going through
+      //     stopAgent (none known today; warn so we notice immediately)
       if (this.daemonJustCrashed) {
-        // Post-crash startup. The previous daemon exited via
-        // uncaughtException without running stopAll(), so the in-memory
-        // registry from the prior process is gone — but the post-crash
-        // discoverAndStart pass can briefly re-enter startAgent for an
-        // agent whose pendingRestarts entry survived. This is benign and
-        // distinct from the BUG-011 in-flight race PR #11 closed. Log at
-        // info level so operators don't think PR #11 has regressed.
         console.log(`[agent-manager] ${name} already in registry (post-crash discovery overlap, expected). Queueing restart.`);
       } else {
-        console.warn(`[agent-manager] BUG-011 REGRESSION CHECK: ${name} still in registry during startAgent — pendingRestarts queueing engaged. This should not happen with PR #11 in place.`);
+        console.warn(`[agent-manager] BUG-011 REGRESSION CHECK: ${name} still in registry during startAgent — pendingRestarts queueing engaged. This should not happen with PR #11 + inFlightStops in place.`);
       }
       this.pendingRestarts.add(name);
       return;
@@ -969,8 +996,28 @@ export class AgentManager {
 
   /**
    * Stop a specific agent.
+   *
+   * Thin wrapper over _doStopAgent() that registers the in-flight stop
+   * promise in inFlightStops so a concurrent startAgent() for the same
+   * name can await it instead of racing into the BUG-011 pendingRestarts
+   * fallback. Parallel stopAgent() calls for the same name coalesce onto
+   * the same promise (idempotent), so back-to-back stops do not duplicate
+   * tear-down work.
    */
   async stopAgent(name: string): Promise<void> {
+    const existing = this.inFlightStops.get(name);
+    if (existing) return existing;
+
+    const stopPromise = this._doStopAgent(name);
+    this.inFlightStops.set(name, stopPromise);
+    try {
+      await stopPromise;
+    } finally {
+      this.inFlightStops.delete(name);
+    }
+  }
+
+  private async _doStopAgent(name: string): Promise<void> {
     const entry = this.agents.get(name);
     if (!entry) {
       console.log(`[agent-manager] Agent ${name} not found`);
@@ -1009,10 +1056,11 @@ export class AgentManager {
     } catch { /* non-fatal */ }
 
     // BUG-031: honor any restart that was queued while we were stopping.
-    // After PR #11 (BUG-011 fix) this branch should never fire — see the
-    // matching warning comment in startAgent(). The honor logic is preserved
-    // as a safety net in case BUG-011 regresses; the warn line tells us
-    // immediately if it ever does.
+    // With the inFlightStops mechanism in startAgent(), the common IPC
+    // stop+start race no longer routes through pendingRestarts (the new
+    // start awaits the in-flight stop first). This branch now only fires
+    // for the post-crash discoverAndStart overlap case and for any future
+    // code path that mutates this.agents without going through stopAgent.
     if (this.pendingRestarts.has(name)) {
       if (this.daemonJustCrashed) {
         console.log(`[agent-manager] pendingRestarts fired for ${name} (post-crash safety net, expected). Honoring queued restart.`);

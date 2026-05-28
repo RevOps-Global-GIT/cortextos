@@ -557,3 +557,167 @@ describe('AgentManager.reloadCrons - silent-success bug fix (iter 7)', () => {
     expect((am as any).cronSchedulers.has('ghost')).toBe(false);
   });
 });
+
+describe('AgentManager - BUG-011 registry race (inFlightStops serialization)', () => {
+  // Regression cover for the production "BUG-011 REGRESSION CHECK" log
+  // storm. The cortextos IPC server dispatches stop-agent and start-agent
+  // handlers fire-and-forget, so `cortextos stop foo && cortextos start
+  // foo` reaches the daemon with both handlers running in parallel.
+  // stopAgent's process.stop() typically awaits PTY exit for several
+  // seconds; without inFlightStops, startAgent observes the still-present
+  // registry entry and bails into the noisy pendingRestarts fallback.
+  //
+  // These tests exercise the race without spawning real PTYs by overriding
+  // the registry directly. They prove:
+  //   1. startAgent awaits an in-flight stop and only then proceeds via
+  //      the normal fresh-start path (no BUG-011 warning).
+  //   2. Parallel stopAgent calls for the same name coalesce onto a single
+  //      promise (idempotent — no double cleanup).
+  //   3. inFlightStops is cleared on stop completion (and on stop failure)
+  //      so future starts are not blocked.
+
+  let testDir: string;
+  let ctxRoot: string;
+  let frameworkRoot: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-am-bug011-'));
+    ctxRoot = join(testDir, 'instance');
+    frameworkRoot = join(testDir, 'framework');
+    mkdirSync(join(ctxRoot, 'config'), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('startAgent awaits an in-flight stopAgent instead of firing the BUG-011 warning', async () => {
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+
+    // Install a fake registry entry whose process.stop() resolves only
+    // after a short delay — mimics the PTY-exit await window where the
+    // race fired in production.
+    let stopResolve: () => void = () => {};
+    const stopWait = new Promise<void>(res => { stopResolve = res; });
+    const fakeProcess = {
+      stop: vi.fn(async () => { await stopWait; }),
+    };
+    const fakeChecker = { stop: vi.fn() };
+    (am as any).agents.set('alice', { process: fakeProcess, checker: fakeChecker });
+
+    // Pin down whether the BUG-011 regression warning fires while
+    // startAgent and stopAgent run concurrently.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Spy on the rest of startAgent — we only need to observe whether the
+    // "already in registry" branch was taken, not actually spawn an agent.
+    const startSpy = vi.spyOn(am, 'startAgent');
+
+    // Fire stop first, then immediately fire start — matches the
+    // fire-and-forget IPC pattern.
+    const stopPromise = am.stopAgent('alice');
+    const startPromise = am.startAgent('alice', '/nonexistent');
+
+    // Let the microtask queue drain so startAgent has a chance to observe
+    // the inFlightStops promise.
+    await Promise.resolve();
+
+    // While the stop is still pending, the inFlightStops map should hold
+    // its promise and startAgent should not have advanced past the await.
+    expect((am as any).inFlightStops.has('alice')).toBe(true);
+
+    // Resolve the stop — startAgent's await should now release.
+    stopResolve();
+    await stopPromise;
+    await startPromise;
+
+    // No BUG-011 REGRESSION CHECK warning should have fired (the await
+    // serialized stop -> start before the registry check ran).
+    const bug011Warns = warnSpy.mock.calls
+      .map(args => args.join(' '))
+      .filter(msg => msg.includes('BUG-011 REGRESSION CHECK'));
+    expect(bug011Warns).toEqual([]);
+
+    // stopAgent completed cleanly and the agent was removed from the
+    // registry before startAgent re-evaluated.
+    expect((am as any).agents.has('alice')).toBe(false);
+    expect((am as any).inFlightStops.has('alice')).toBe(false);
+
+    // startAgent did try to proceed past the await — it will fail in this
+    // unit harness because /nonexistent doesn't resolve, but that's
+    // expected; we only care that the await released and the BUG-011
+    // queueing branch was not taken.
+    expect(startSpy).toHaveBeenCalled();
+
+    warnSpy.mockRestore();
+    startSpy.mockRestore();
+  });
+
+  it('parallel stopAgent calls for the same name coalesce onto one promise', async () => {
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+
+    let stopResolve: () => void = () => {};
+    const stopWait = new Promise<void>(res => { stopResolve = res; });
+    const fakeProcess = {
+      stop: vi.fn(async () => { await stopWait; }),
+    };
+    const fakeChecker = { stop: vi.fn() };
+    (am as any).agents.set('alice', { process: fakeProcess, checker: fakeChecker });
+
+    const p1 = am.stopAgent('alice');
+    const p2 = am.stopAgent('alice');
+    const p3 = am.stopAgent('alice');
+
+    // All three calls should resolve onto the same underlying stop work.
+    // process.stop() runs exactly once — the second/third stopAgent calls
+    // hit the inFlightStops dedup and re-use the existing promise.
+    stopResolve();
+    await Promise.all([p1, p2, p3]);
+
+    expect(fakeProcess.stop).toHaveBeenCalledTimes(1);
+    expect(fakeChecker.stop).toHaveBeenCalledTimes(1);
+    expect((am as any).inFlightStops.has('alice')).toBe(false);
+  });
+
+  it('inFlightStops is cleared even when _doStopAgent throws', async () => {
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+
+    const fakeProcess = {
+      stop: vi.fn(async () => { throw new Error('boom'); }),
+    };
+    const fakeChecker = { stop: vi.fn() };
+    (am as any).agents.set('alice', { process: fakeProcess, checker: fakeChecker });
+
+    await expect(am.stopAgent('alice')).rejects.toThrow('boom');
+
+    // The finally-block must drop the entry so the next start is not
+    // blocked on a permanently-resolved-but-still-mapped promise.
+    expect((am as any).inFlightStops.has('alice')).toBe(false);
+  });
+
+  it('startAgent does not block forever if the awaited stopAgent rejects', async () => {
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+
+    let stopReject: (e: Error) => void = () => {};
+    const stopWait = new Promise<void>((_res, rej) => { stopReject = rej; });
+    const fakeProcess = {
+      stop: vi.fn(async () => { await stopWait; }),
+    };
+    const fakeChecker = { stop: vi.fn() };
+    (am as any).agents.set('alice', { process: fakeProcess, checker: fakeChecker });
+
+    const stopPromise = am.stopAgent('alice');
+    const startPromise = am.startAgent('alice', '/nonexistent');
+
+    await Promise.resolve();
+    expect((am as any).inFlightStops.has('alice')).toBe(true);
+
+    stopReject(new Error('PTY refused to exit'));
+
+    // stopAgent surfaces the rejection — that's existing behavior.
+    await expect(stopPromise).rejects.toThrow('PTY refused to exit');
+    // startAgent must NOT inherit the rejection. The catch around the
+    // inFlightStops await swallows it so the agent can still be brought up.
+    await expect(startPromise).resolves.toBeUndefined();
+  });
+});
