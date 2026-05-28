@@ -115,6 +115,10 @@ export class FastChecker {
   private sessionRefreshInProgress: boolean = false; // serialise concurrent forceContextRestart calls
   // Persisted to disk so --continue restarts don't reset the circuit breaker
   private ctxCircuitFile: string = '';
+  // Cascade guard cache: avoids hammering the handoffs dir with readdirSync+statSync
+  // on every 1s poll cycle when ctx thresholds are crossed but a recent handoff exists.
+  private ctxCascadeGuardCachedAt: number = 0;
+  private ctxCascadeGuardCachedResult: boolean = false;
 
   constructor(
     agent: AgentProcess,
@@ -1471,9 +1475,15 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     const config = this.agent.getConfig();
     const raw = config.ctx_autoreset_threshold;
     const autoreset = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : 0;
+    // Treat 0 as "use default" (disabled) — a threshold of 0 means "fire at 0% context"
+    // which is never the intent. Agents that want to disable the monitor set thresholds
+    // to 0; treating those as the default (70/80) keeps the feature off for them since
+    // their context will rarely reach 70-80% before a natural session boundary.
+    const warnRaw = config.ctx_warning_threshold;
+    const handoffRaw = config.ctx_handoff_threshold;
     return {
-      warn: config.ctx_warning_threshold ?? 70,
-      handoff: config.ctx_handoff_threshold ?? 80,
+      warn: typeof warnRaw === 'number' && warnRaw > 0 ? warnRaw : 70,
+      handoff: typeof handoffRaw === 'number' && handoffRaw > 0 ? handoffRaw : 80,
       autoreset,
     };
   }
@@ -1583,9 +1593,13 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     // the three thresholds being explicitly set arms the monitor; an agent
     // that sets only ctx_autoreset_threshold still gets Tier 0.
     const cfg = this.agent.getConfig();
+    // A threshold of 0 means "disabled" — only arm the monitor when at least one
+    // threshold is explicitly set to a positive value. This prevents agents that
+    // set all thresholds to 0 (to disable the feature) from accidentally triggering
+    // the monitor at every poll cycle (0% context always satisfies 0% threshold).
     const anyThresholdSet =
-      cfg.ctx_handoff_threshold !== undefined ||
-      cfg.ctx_warning_threshold !== undefined ||
+      (typeof cfg.ctx_handoff_threshold === 'number' && cfg.ctx_handoff_threshold > 0) ||
+      (typeof cfg.ctx_warning_threshold === 'number' && cfg.ctx_warning_threshold > 0) ||
       (typeof cfg.ctx_autoreset_threshold === 'number' && cfg.ctx_autoreset_threshold > 0);
     if (!anyThresholdSet) return;
 
@@ -1682,17 +1696,27 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
       // is still stabilising after a handoff cascade. Skip Tier 2 until the window passes so
       // we don't inject the handoff prompt again into a session that is fresh from a handoff.
       // Does not latch ctxHandoffFiredAt, so Tier 2 can still fire once the guard expires.
+      //
+      // Result is cached for 60s to avoid hammering the handoffs directory with
+      // readdirSync+statSync on every 1s poll cycle. A 60s lag in detecting when the
+      // cascade window expires is acceptable — Tier 2 fires at most 60s late.
+      const GUARD_CACHE_MS = 60_000;
       try {
         const handoffsDir = join(this.agent.getAgentDir(), 'memory', 'handoffs');
-        if (existsSync(handoffsDir)) {
+        let recentDoc: boolean;
+        if (now - this.ctxCascadeGuardCachedAt < GUARD_CACHE_MS) {
+          recentDoc = this.ctxCascadeGuardCachedResult;
+        } else {
           const fiveMinAgo = now - 5 * 60_000;
-          const recentDoc = readdirSync(handoffsDir)
+          recentDoc = existsSync(handoffsDir) && readdirSync(handoffsDir)
             .filter(f => f.startsWith('handoff-') && f.endsWith('.md'))
             .some(f => statSync(join(handoffsDir, f)).mtimeMs >= fiveMinAgo);
-          if (recentDoc) {
-            this.log(`Cascade guard: recent handoff doc found — skipping Tier 2 at ${Math.round(effectivePct)}% (session age ${Math.round(sessionAge / 1000)}s)`);
-            return;
-          }
+          this.ctxCascadeGuardCachedAt = now;
+          this.ctxCascadeGuardCachedResult = recentDoc;
+        }
+        if (recentDoc) {
+          this.log(`Cascade guard: recent handoff doc found — skipping Tier 2 at ${Math.round(effectivePct)}% (session age ${Math.round(sessionAge / 1000)}s)`);
+          return;
         }
       } catch { /* non-fatal — proceed to Tier 2 if guard check fails */ }
       this.ctxHandoffFiredAt = now;

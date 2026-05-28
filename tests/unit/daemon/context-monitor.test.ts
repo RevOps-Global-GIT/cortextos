@@ -386,3 +386,68 @@ describe('.restart-planned staleness check', () => {
     expect(markerIsFresh(now + 5 * 60_000, now)).toBe(false);
   });
 });
+
+// --- threshold=0 means disabled (PR fix: ctx-threshold-zero-disabled) ---
+//
+// Agents that want to disable the context monitor set all thresholds to 0.
+// Previously, 0 was interpreted as "fire at 0%" (always), causing constant
+// warning/handoff injection. The fix treats 0 as "use default / disabled".
+
+describe('threshold=0 treated as disabled', () => {
+  // Mirror of getCtxThresholds() logic: 0 → use default (70/80)
+  function resolveThresholds(warn: number | undefined, handoff: number | undefined) {
+    return {
+      warn: typeof warn === 'number' && warn > 0 ? warn : 70,
+      handoff: typeof handoff === 'number' && handoff > 0 ? handoff : 80,
+    };
+  }
+
+  // Mirror of anyThresholdSet logic: 0 does NOT count as "set"
+  function anyThresholdSet(opts: { warn?: number; handoff?: number; autoreset?: number }) {
+    return (
+      (typeof opts.handoff === 'number' && opts.handoff > 0) ||
+      (typeof opts.warn === 'number' && opts.warn > 0) ||
+      (typeof opts.autoreset === 'number' && opts.autoreset > 0)
+    );
+  }
+
+  it('warn=0 resolves to default 70 (not 0)', () => {
+    expect(resolveThresholds(0, undefined).warn).toBe(70);
+  });
+
+  it('handoff=0 resolves to default 80 (not 0)', () => {
+    expect(resolveThresholds(undefined, 0).handoff).toBe(80);
+  });
+
+  it('warn=undefined resolves to default 70', () => {
+    expect(resolveThresholds(undefined, undefined).warn).toBe(70);
+  });
+
+  it('warn=50 is preserved as-is', () => {
+    expect(resolveThresholds(50, undefined).warn).toBe(50);
+  });
+
+  it('handoff=75 is preserved as-is', () => {
+    expect(resolveThresholds(undefined, 75).handoff).toBe(75);
+  });
+
+  it('all thresholds=0 → anyThresholdSet is false (monitor disabled)', () => {
+    expect(anyThresholdSet({ warn: 0, handoff: 0, autoreset: 0 })).toBe(false);
+  });
+
+  it('all thresholds undefined → anyThresholdSet is false (observe-only)', () => {
+    expect(anyThresholdSet({})).toBe(false);
+  });
+
+  it('warn=70, others 0/undef → anyThresholdSet is true', () => {
+    expect(anyThresholdSet({ warn: 70 })).toBe(true);
+  });
+
+  it('handoff=80, others 0/undef → anyThresholdSet is true', () => {
+    expect(anyThresholdSet({ handoff: 80 })).toBe(true);
+  });
+
+  it('only autoreset=60 → anyThresholdSet is true (arms Tier 0)', () => {
+    expect(anyThresholdSet({ autoreset: 60 })).toBe(true);
+  });
+});
