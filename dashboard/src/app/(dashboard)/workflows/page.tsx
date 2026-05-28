@@ -47,6 +47,7 @@ interface Cron {
   last_fired_at?: string;
   fire_count?: number;
   description?: string;
+  metadata?: Record<string, unknown>;
 }
 
 interface CronSummaryRow {
@@ -127,6 +128,21 @@ function cronBadgeLabel(cron: Cron): string {
   if (!schedule) return 'schedule unknown';
   return formatSchedule(schedule);
 }
+
+type CronRunner = 'Claude' | 'Codex' | 'PTY';
+
+function inferCronRunner(cron: Cron): CronRunner {
+  const runner = cron.metadata?.runner as string | undefined;
+  if (runner === 'spawn-codex') return 'Codex';
+  if (runner === 'pty') return 'PTY';
+  return 'Claude';
+}
+
+const RUNNER_CLASSES: Record<CronRunner, string> = {
+  Claude: 'bg-amber-500/10 text-amber-600 border-amber-500/30',
+  Codex: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/30',
+  PTY: 'bg-sky-500/10 text-sky-600 border-sky-500/30',
+};
 
 function rowToCron(row: CronSummaryRow): Cron {
   const schedule = cronSchedule(row.cron);
@@ -664,6 +680,7 @@ export default function WorkflowsPage() {
                   <th className="pb-2 pr-4 font-medium text-muted-foreground text-xs uppercase tracking-wide">Agent</th>
                   <th className="pb-2 pr-4 font-medium text-muted-foreground text-xs uppercase tracking-wide">Cron</th>
                   <th className="pb-2 pr-4 font-medium text-muted-foreground text-xs uppercase tracking-wide hidden sm:table-cell">Schedule</th>
+                  <th className="pb-2 pr-4 font-medium text-muted-foreground text-xs uppercase tracking-wide hidden sm:table-cell">Runtime</th>
                   <th className="pb-2 pr-4 font-medium text-muted-foreground text-xs uppercase tracking-wide hidden md:table-cell">Next Fire</th>
                   <th className="pb-2 pr-4 font-medium text-muted-foreground text-xs uppercase tracking-wide hidden md:table-cell">Last Fire</th>
                   <th className="pb-2 font-medium text-muted-foreground text-xs uppercase tracking-wide">Status</th>
@@ -672,13 +689,13 @@ export default function WorkflowsPage() {
               <tbody>
                 {statusLoading && filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                    <td colSpan={7} className="py-8 text-center text-muted-foreground">
                       Loading...
                     </td>
                   </tr>
                 ) : filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 text-center text-muted-foreground">
+                    <td colSpan={7} className="py-8 text-center text-muted-foreground">
                       {searchQuery || agentFilter !== 'all'
                         ? 'No crons match the current filters'
                         : 'No crons found'}
@@ -731,6 +748,16 @@ export default function WorkflowsPage() {
                               {formatSchedule(row.cron.schedule ?? '')}
                             </Badge>
                           </td>
+                          <td className="py-2.5 pr-4 hidden sm:table-cell">
+                            {(() => {
+                              const runner = inferCronRunner(row.cron);
+                              return (
+                                <Badge variant="outline" className={`text-[10px] font-normal ${RUNNER_CLASSES[runner]}`}>
+                                  {runner}
+                                </Badge>
+                              );
+                            })()}
+                          </td>
                           <td className="py-2.5 pr-4 text-xs text-muted-foreground hidden md:table-cell">
                             {formatRelative(row.nextFire)}
                           </td>
@@ -750,7 +777,7 @@ export default function WorkflowsPage() {
                         {/* Execution detail panel — inline expanded row */}
                         {isSelected && (
                           <tr key={`${row.agent}::${row.cron.name}::detail`}>
-                            <td colSpan={6} className="pb-3 pt-0">
+                            <td colSpan={7} className="pb-3 pt-0">
                               <div className="rounded-md bg-muted/40 border border-muted px-4 py-3">
                                 <div className="flex items-center justify-between mb-2">
                                   <p className="text-xs font-medium flex items-center gap-1.5">
