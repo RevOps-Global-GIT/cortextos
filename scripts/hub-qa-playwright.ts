@@ -2702,8 +2702,17 @@ async function runFleetChecks(page: Page): Promise<CheckResult[]> {
   if (loadResult.status === 'FAIL') return results;
 
   // CHECK 2: Agent cards or rows visible
+  // Wait for fleet content to hydrate — agent cards load lazily after the
+  // shell renders, so checks run before data appears without this wait.
+  // Conditional to this function so other pages see no added latency.
+  await Promise.race([
+    page.waitForSelector(
+      'table tbody tr, [class*="agent"], [class*="Agent"], [class*="card"], [class*="Card"], [role="row"]:not([role="columnheader"]), [role="listitem"]',
+      { timeout: 12000 }
+    ).catch(() => {}),
+    new Promise<void>(r => setTimeout(r, 12000)),
+  ]);
   try {
-    await new Promise<void>(r => setTimeout(r, 2000));
     await Promise.race([page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-list.png`) }).catch(() => {}), new Promise<void>(r => setTimeout(r, 5000))]);
     const counts = await Promise.race([
       page.evaluate(() => {
