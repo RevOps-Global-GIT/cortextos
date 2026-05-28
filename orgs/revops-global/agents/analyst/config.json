@@ -48,7 +48,27 @@
       "name": "theta-wave",
       "type": "recurring",
       "cron": "0 22 * * *",
-      "prompt": "Read .claude/skills/theta-wave/SKILL.md. Initiate the theta wave cycle. First action: message the orchestrator that theta wave is starting and share your initial system scan."
+      "prompt": "Read .claude/skills/theta-wave/SKILL.md. Initiate the artifact-backed theta wave cycle. First action: message the orchestrator that theta wave is starting and share your initial system scan.",
+      "metadata": {
+        "runner": "spawn-codex",
+        "prompt_file": "agents/analyst/prompts/cron-theta-wave.md",
+        "workdir": "agents/analyst",
+        "agent": "analyst",
+        "task_id": "cron:analyst:theta-wave"
+      }
+    },
+    {
+      "name": "theta-freshness-watchdog",
+      "type": "recurring",
+      "cron": "30 23 * * *",
+      "prompt": "Run the read-only theta freshness watchdog. Check that the theta-wave cron produced an artifact for today (analyst/output/YYYY-MM-DD-theta*.md). If no artifact is found, log an error event and notify orchestrator: cortextos bus log-event error missing_theta_artifact error --meta '{\"date\":\"'$(date +%Y-%m-%d)'\",\"agent\":\"analyst\"}' && cortextos bus send-message orchestrator normal 'Missing theta-wave artifact for today. Possible session instability or cron misfire.'",
+      "metadata": {
+        "runner": "spawn-codex",
+        "prompt_file": "agents/analyst/prompts/cron-theta-freshness-watchdog.md",
+        "workdir": "agents/analyst",
+        "agent": "analyst",
+        "task_id": "cron:analyst:theta-freshness-watchdog"
+      }
     },
     {
       "name": "rgos-task-poll",
