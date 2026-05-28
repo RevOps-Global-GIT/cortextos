@@ -30,6 +30,8 @@ export async function updateHeartbeat(
   const activeTask = resolveCurrentTask(paths, agentName, explicitCurrentTask);
   const currentTaskText = explicitCurrentTask || (activeTask ? `${activeTask.id}: ${activeTask.title}` : '');
 
+  const activeParallelCount = countActiveParallelBatches(paths, agentName);
+
   const heartbeat: Heartbeat = {
     agent: agentName,
     org: options?.org ?? '',
@@ -39,6 +41,7 @@ export async function updateHeartbeat(
     mode,
     last_heartbeat: ts,
     loop_interval: options?.loopInterval ?? '',
+    active_parallel_count: activeParallelCount,
   };
 
   atomicWriteSync(
@@ -104,6 +107,41 @@ function parseCurrentTaskRef(currentTask: string): ActiveTaskRef | null {
   };
 }
 
+/**
+ * Count distinct dispatch_batch_id groups across the agent's local
+ * in_progress tasks. Returns 0 when nothing is in flight or task dir is
+ * missing. Used by the orch_agent_heartbeats upsert so fleet views can
+ * surface "agent X has N parallel batches running" without re-scanning
+ * task files.
+ */
+function countActiveParallelBatches(paths: BusPaths, agentName: string): number {
+  const taskDirs = [paths.taskDir, join(paths.ctxRoot, 'tasks')]
+    .filter((dir, index, list) => dir && list.indexOf(dir) === index);
+  const batchIds = new Set<string>();
+  for (const taskDir of taskDirs) {
+    if (!existsSync(taskDir)) continue;
+    let files: string[];
+    try {
+      files = readdirSync(taskDir).filter(file => file.startsWith('task_') && file.endsWith('.json'));
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      try {
+        const task = JSON.parse(readFileSync(join(taskDir, file), 'utf-8')) as Task;
+        if (task.archived) continue;
+        if (task.status !== 'in_progress') continue;
+        if (task.assigned_to !== agentName) continue;
+        if (!task.dispatch_batch_id) continue;
+        batchIds.add(task.dispatch_batch_id);
+      } catch {
+        // Skip corrupt task files.
+      }
+    }
+  }
+  return batchIds.size;
+}
+
 function resolveCurrentTask(paths: BusPaths, agentName: string, currentTask: string): ActiveTaskRef | null {
   const explicit = parseCurrentTaskRef(currentTask);
   if (explicit) return explicit;
@@ -167,6 +205,9 @@ async function pushHeartbeatToSupabase(agentName: string, hb: Heartbeat): Promis
     loop_interval: hb.loop_interval ?? '',
     last_heartbeat: hb.last_heartbeat,
     updated_at: new Date().toISOString(),
+    ...(typeof hb.active_parallel_count === 'number'
+      ? { active_parallel_count: hb.active_parallel_count }
+      : {}),
   };
 
   const endpoint = `${url}/rest/v1/orch_agent_heartbeats`;

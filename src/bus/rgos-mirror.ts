@@ -597,6 +597,8 @@ export function buildTaskRow(task: Task): Record<string, unknown> {
     completed_at: task.completed_at ?? null,
     due_date: task.due_date ?? null,
     project_id: null,
+    ...(task.dispatch_batch_id ? { dispatch_batch_id: task.dispatch_batch_id } : {}),
+    ...(typeof task.parallel_count === 'number' ? { parallel_count: task.parallel_count } : {}),
     metadata: {
       bus_task_id: task.id,
       org: task.org,
