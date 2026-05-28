@@ -331,8 +331,9 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     await mirrorTaskToRgos(task, 'create');
 
     const mockFetch = vi.mocked(fetch);
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    const [url, opts] = mockFetch.mock.calls[0];
+    // 2 calls: first is resolveExistingTaskMirrorId (GET), second is the upsert (POST).
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    const [url, opts] = mockFetch.mock.calls[1]; // upsert is the second call
     expect(url).toBe('https://test.supabase.co/rest/v1/orch_tasks');
     expect((opts?.headers as Record<string, string>)['apikey']).toBe('test-service-key');
     expect((opts?.headers as Record<string, string>)['Authorization']).toBe('Bearer test-service-key');
@@ -344,7 +345,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     await mirrorTaskToRgos(task, 'create');
 
     const mockFetch = vi.mocked(fetch);
-    const [, opts] = mockFetch.mock.calls[0];
+    const [, opts] = mockFetch.mock.calls[1]; // upsert is the second call (after resolve GET)
     const body = JSON.parse(opts?.body as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.id).toBe(uuidv5(task.id));
@@ -1518,8 +1519,9 @@ describe('rgos-mirror — FK constraint retry (23503)', () => {
 
     await mirrorTaskToRgos(task as any, 'create');
 
-    // Only 1 call — no FK retry for orch_tasks
-    expect(calls).toHaveLength(1);
+    // 2 calls: first is resolveExistingTaskMirrorId (GET), second is the upsert (POST).
+    // No FK retry for orch_tasks — the 23503 path only applies to cortex_messages.reply_to_id.
+    expect(calls).toHaveLength(2);
   });
 });
 
