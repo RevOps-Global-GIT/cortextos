@@ -141,6 +141,13 @@ export interface Task {
    */
   source_hierarchy?: string;
   /**
+   * Batch dispatch grouping. Tasks created in the same `bus dispatch-batch`
+   * call share a UUID and `parallel_count`, allowing fleet views to render
+   * the group as one row with N progress dots.
+   */
+  dispatch_batch_id?: string;
+  parallel_count?: number;
+  /**
    * Goal guard — auto-created when a high-stakes task has a
    * success_criteria. Lifecycle: active → met (task completes) or failed.
    */
@@ -238,6 +245,12 @@ export interface Heartbeat {
   mode: 'day' | 'night';
   last_heartbeat: string; // ISO 8601
   loop_interval: string;
+  /**
+   * How many distinct `dispatch_batch_id` groups this agent currently has in
+   * `in_progress`. Populated by updateHeartbeat() so fleet views can show
+   * "agent X is running N parallel batches" without re-scanning task files.
+   */
+  active_parallel_count?: number;
   // Legacy field — sync.ts falls back to this if last_heartbeat absent
   timestamp?: string;
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, type ReactNode } from 'react';
 import {
   Table,
   TableHeader,
@@ -20,6 +20,13 @@ const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatu
   pending:     { label: 'Start',    next: 'in_progress' },
   in_progress: { label: 'Complete', next: 'completed' },
   blocked:     { label: 'Unblock',  next: 'in_progress' },
+};
+
+const BATCH_DOT_COLOR: Record<TaskStatus, string> = {
+  pending: 'bg-muted-foreground/40',
+  in_progress: 'bg-blue-500',
+  completed: 'bg-green-500',
+  blocked: 'bg-red-500',
 };
 
 type SortField = 'title' | 'status' | 'priority' | 'assignee' | 'org' | 'created_at';
@@ -103,6 +110,22 @@ export function TaskListTable({
 
   const colSpan = onStatusChange ? 7 : 6;
 
+  // Pre-compute batch groups so we can render a header row above siblings
+  // sharing the same dispatch_batch_id. Members keep the sorted order they
+  // already have; the header inherits the agent + parallel_count from any
+  // member (they all share these fields by construction).
+  const batchGroups = useMemo(() => {
+    const groups = new Map<string, Task[]>();
+    for (const t of sorted) {
+      const bid = t.dispatch_batch_id;
+      if (!bid) continue;
+      const arr = groups.get(bid);
+      if (arr) arr.push(t);
+      else groups.set(bid, [t]);
+    }
+    return groups;
+  }, [sorted]);
+
   return (
     <Table>
       <TableHeader>
@@ -130,52 +153,93 @@ export function TaskListTable({
             </TableCell>
           </TableRow>
         ) : (
-          sorted.map((task) => {
-            const action = QUICK_ACTIONS[task.status];
-            return (
-              <TableRow
-                key={task.id}
-                className="relative cursor-pointer transition-shadow duration-200 ease-out"
-                style={presenceRingStyle(presenceByTask[task.id])}
-                data-task-id={task.id}
-                onClick={() => onTaskClick(task)}
-              >
-                <TableCell className="relative max-w-[300px] truncate pr-36 font-medium">
-                  {task.title}
-                  <AgentCursorStack presence={presenceByTask[task.id]} compact />
-                </TableCell>
-                <TableCell>
-                  <StatusBadge status={task.status} />
-                </TableCell>
-                <TableCell>
-                  <PriorityBadge priority={task.priority} />
-                </TableCell>
-                <TableCell className="text-muted-foreground">
-                  {task.assignee ?? '-'}
-                </TableCell>
-                <TableCell>
-                  <OrgBadge org={task.org} />
-                </TableCell>
-                <TableCell>
-                  <TimeAgo date={task.created_at} />
-                </TableCell>
-                {onStatusChange && (
-                  <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                    {action && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7 px-2 text-xs"
-                        onClick={() => onStatusChange(task.id, action.next)}
-                      >
-                        {action.label}
-                      </Button>
-                    )}
+          (() => {
+            const emittedBatches = new Set<string>();
+            const rows: ReactNode[] = [];
+            for (const task of sorted) {
+              const bid = task.dispatch_batch_id;
+              if (bid && !emittedBatches.has(bid)) {
+                emittedBatches.add(bid);
+                const members = batchGroups.get(bid) ?? [];
+                const headerAgent = members[0]?.assignee ?? task.assignee ?? '-';
+                const headerCount = members[0]?.parallel_count ?? members.length;
+                rows.push(
+                  <TableRow
+                    key={`batch-${bid}`}
+                    className="bg-muted/40 border-y border-border/60 text-xs"
+                    data-batch-id={bid}
+                  >
+                    <TableCell colSpan={colSpan} className="py-1.5">
+                      <div className="flex items-center gap-3 font-mono">
+                        <span className="text-muted-foreground">batch</span>
+                        <span className="rounded bg-background px-1.5 py-0.5 font-semibold">
+                          {bid.slice(0, 8)}
+                        </span>
+                        <span className="text-muted-foreground">→</span>
+                        <span className="font-medium">{headerAgent}</span>
+                        <span className="text-muted-foreground">×{headerCount}</span>
+                        <span className="ml-2 inline-flex items-center gap-1">
+                          {members.map((m) => (
+                            <span
+                              key={m.id}
+                              title={`${m.title} — ${m.status}`}
+                              className={`inline-block size-2 rounded-full ${BATCH_DOT_COLOR[m.status] ?? 'bg-muted-foreground/40'}`}
+                            />
+                          ))}
+                        </span>
+                      </div>
+                    </TableCell>
+                  </TableRow>,
+                );
+              }
+              const action = QUICK_ACTIONS[task.status];
+              rows.push(
+                <TableRow
+                  key={task.id}
+                  className={`relative cursor-pointer transition-shadow duration-200 ease-out${bid ? ' [&>td:first-child]:pl-6' : ''}`}
+                  style={presenceRingStyle(presenceByTask[task.id])}
+                  data-task-id={task.id}
+                  data-batch-id={bid ?? undefined}
+                  onClick={() => onTaskClick(task)}
+                >
+                  <TableCell className="relative max-w-[300px] truncate pr-36 font-medium">
+                    {task.title}
+                    <AgentCursorStack presence={presenceByTask[task.id]} compact />
                   </TableCell>
-                )}
-              </TableRow>
-            );
-          })
+                  <TableCell>
+                    <StatusBadge status={task.status} />
+                  </TableCell>
+                  <TableCell>
+                    <PriorityBadge priority={task.priority} />
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {task.assignee ?? '-'}
+                  </TableCell>
+                  <TableCell>
+                    <OrgBadge org={task.org} />
+                  </TableCell>
+                  <TableCell>
+                    <TimeAgo date={task.created_at} />
+                  </TableCell>
+                  {onStatusChange && (
+                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                      {action && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => onStatusChange(task.id, action.next)}
+                        >
+                          {action.label}
+                        </Button>
+                      )}
+                    </TableCell>
+                  )}
+                </TableRow>,
+              );
+            }
+            return rows;
+          })()
         )}
       </TableBody>
     </Table>

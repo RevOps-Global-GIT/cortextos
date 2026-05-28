@@ -54,6 +54,7 @@ import {
 import { sendHumanBlockersDigest, digestHumanBlockers } from '../bus/human-blockers-digest.js';
 import { logImplicitInvocation } from '../bus/skill-instrument.js';
 import { registerCronCommands } from './bus-cmds-crons.js';
+import { registerBatchCommands } from './bus-cmds-batch.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -4231,6 +4232,7 @@ busCommand
   });
 
 registerCronCommands(busCommand);
+registerBatchCommands(busCommand);
 
 busCommand
   .command('hook-context-status')

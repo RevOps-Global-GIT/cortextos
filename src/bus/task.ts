@@ -136,6 +136,11 @@ export function createTask(
     skipBriefValidation?: boolean;
     /** Explicit loop config. If omitted, inferred from description when polling language is found. */
     linkedLoop?: { cron: string; prompt: string };
+    /** Batch dispatch grouping — set by `cortextos bus dispatch-batch`. */
+    dispatchBatchId?: string;
+    parallelCount?: number;
+    /** Initial status override — batch dispatch creates tasks already in_progress. */
+    initialStatus?: TaskStatus;
   } = {},
 ): string {
   const {
@@ -158,6 +163,9 @@ export function createTask(
     goalAncestry,
     skipBriefValidation = false,
     linkedLoop: explicitLoop,
+    dispatchBatchId,
+    parallelCount,
+    initialStatus,
   } = options;
 
   // Brief-contract validation: all 8 fields required unless bypassed.
@@ -224,7 +232,7 @@ export function createTask(
     description,
     type: 'agent',
     needs_approval: needsApproval,
-    status: 'pending',
+    status: initialStatus ?? 'pending',
     assigned_to: assignee,
     created_by: agentName,
     org,
@@ -249,6 +257,8 @@ export function createTask(
     ...(goalAncestry ? { goal_ancestry: goalAncestry } : {}),
     ...(linkedGoal ? { linked_goal: linkedGoal } : {}),
     ...(linkedLoop ? { linked_loop: linkedLoop } : {}),
+    ...(dispatchBatchId ? { dispatch_batch_id: dispatchBatchId } : {}),
+    ...(typeof parallelCount === 'number' ? { parallel_count: parallelCount } : {}),
   };
 
   ensureDir(paths.taskDir);
@@ -264,7 +274,7 @@ export function createTask(
   for (const depId of blockedBy) addSymmetricEdge(paths, depId, 'blocks', taskId);
   for (const downId of blocks) addSymmetricEdge(paths, downId, 'blocked_by', taskId);
 
-  appendTaskAudit(paths, taskId, { event: 'create', agent: agentName, to: 'pending', note: title });
+  appendTaskAudit(paths, taskId, { event: 'create', agent: agentName, to: task.status, note: title });
 
   return taskId;
 }

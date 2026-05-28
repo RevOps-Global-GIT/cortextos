@@ -109,6 +109,9 @@ export interface Task {
   linked_goal?: LinkedGoal;
   /** Polling loop config — auto-suggested when description implies recurring checks. */
   linked_loop?: LinkedLoop;
+  /** Batch dispatch grouping (set by `cortextos bus dispatch-batch`). */
+  dispatch_batch_id?: string;
+  parallel_count?: number;
   meta?: {
     brief?: TaskBrief;
     [key: string]: unknown;
