@@ -6,7 +6,7 @@
  *  1. Migrate clean agent (config has 4 crons → crons.json has same 4)
  *  2. Idempotency: migrate twice → no duplicates, second run is no-op (marker present)
  *  3. Migrate with --force → re-runs even with marker, overwrites crons.json
- *  4. type:"once" with future fire_at → skipped with explicit log (not representable in CronDefinition)
+ *  4. type:"once" with future fire_at → migrated into CronDefinition with fire_at + schedule set
  *  5. type:"once" with past fire_at → skipped with log
  *  6. Missing `type` field → defaults to recurring
  *  7. Multiple agents migrated via migrateAllAgents()
@@ -207,10 +207,10 @@ describe('migrateCronsForAgent', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 4: type:"once" with future fire_at → skipped with log
+  // Test 4: type:"once" with future fire_at → migrated with fire_at set
   // ---------------------------------------------------------------------------
 
-  it('skips type:"once" with future fire_at (not representable in CronDefinition)', () => {
+  it('migrates type:"once" with future fire_at into CronDefinition with fire_at set', () => {
     const agentDir = join(tmpFrameworkRoot, 'orgs', 'testorg', 'agents', 'gamma');
     const futureTs = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
     writeConfigJson(agentDir, [
@@ -225,17 +225,18 @@ describe('migrateCronsForAgent', () => {
     });
 
     expect(result.status).toBe('migrated');
-    expect(result.cronsMigrated).toBe(1);
-    expect(result.cronsSkipped).toContain('one-shot');
+    expect(result.cronsMigrated).toBe(2);
+    expect(result.cronsSkipped).not.toContain('one-shot');
 
-    // one-shot must not appear in crons.json
+    // one-shot must appear in crons.json with fire_at set
     const crons = readCrons('gamma');
-    expect(crons).toHaveLength(1);
-    expect(crons[0].name).toBe('heartbeat');
-
-    // Log must mention the skip reason
-    const skipLog = logs.find(l => l.includes('one-shot') && l.includes('skip'));
-    expect(skipLog).toBeTruthy();
+    expect(crons).toHaveLength(2);
+    const oneShot = crons.find(c => c.name === 'one-shot');
+    expect(oneShot).toBeDefined();
+    expect(oneShot?.fire_at).toBe(futureTs);
+    expect(oneShot?.schedule).toBe(futureTs);
+    expect(oneShot?.enabled).toBe(true);
+    expect(oneShot?.metadata).toMatchObject({ migrated_from_config: true, original_type: 'once' });
 
     expect(markerExists(tmpCtxRoot, 'gamma')).toBe(true);
   });
