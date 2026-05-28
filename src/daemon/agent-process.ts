@@ -553,6 +553,27 @@ export class AgentProcess implements ManagedAgent {
 
     this.pty = null;
     this.clearSessionTimer();
+
+    // Boot-failure guard: if the heartbeat.json still reads "starting" (the
+    // agent never progressed past its first cortextos bus update-heartbeat
+    // call), rewrite it to "crashed" so the fleet view shows the true state
+    // instead of leaving a stale "starting" entry indefinitely. Only overwrite
+    // when the current status is exactly "starting" — never clobber a
+    // legitimate "online", "offline", or already-written "crashed" value.
+    try {
+      const hbPath = join(this.env.ctxRoot, 'state', this.name, 'heartbeat.json');
+      if (existsSync(hbPath)) {
+        const hbData = JSON.parse(readFileSync(hbPath, 'utf-8'));
+        if (hbData.status === 'starting') {
+          hbData.status = 'crashed';
+          atomicWriteSync(hbPath, JSON.stringify(hbData));
+          this.log('Boot-failure: heartbeat.json updated from "starting" to "crashed"');
+        }
+      }
+    } catch {
+      /* non-fatal — heartbeat correction must never block crash recovery */
+    }
+
     // Detach from CronScheduler so no fires race a dead PTY. A subsequent
     // start() (crash recovery, session refresh) re-attaches with the new
     // generation; detaching here also ensures the scheduler doesn't hold a

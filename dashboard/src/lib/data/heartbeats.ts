@@ -18,13 +18,29 @@ export async function getHeartbeat(agentName: string): Promise<Heartbeat | null>
   try {
     const raw = await fs.readFile(hbPath, 'utf-8');
     const data = JSON.parse(raw);
+    const lastHeartbeat = data.last_heartbeat ?? data.timestamp ?? undefined;
+
+    // Stale-starting guard: if the agent wrote a "starting" heartbeat on boot
+    // but never progressed to "online" (crash before first update-heartbeat
+    // call), the heartbeat.json stays at "starting" indefinitely. Any
+    // "starting" entry older than 10 minutes is a boot failure — surface it
+    // as "offline" so fleet views show the true state rather than implying
+    // the agent is in the middle of booting up.
+    let status: string = data.status ?? 'unknown';
+    if (status === 'starting' && lastHeartbeat) {
+      const ageMs = Date.now() - new Date(lastHeartbeat).getTime();
+      if (ageMs > 10 * 60 * 1000) {
+        status = 'offline';
+      }
+    }
+
     return {
       agent: agentName,
       org: data.org ?? '',
-      status: data.status ?? 'unknown',
+      status,
       current_task: data.current_task ?? undefined,
       mode: data.mode ?? undefined,
-      last_heartbeat: data.last_heartbeat ?? data.timestamp ?? undefined,
+      last_heartbeat: lastHeartbeat,
       loop_interval: data.loop_interval ?? undefined,
       uptime_seconds: data.uptime_seconds ?? undefined,
     };
