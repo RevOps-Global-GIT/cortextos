@@ -1901,7 +1901,7 @@ async function runReportsChecks(page: Page): Promise<CheckResult[]> {
 // ---------------------------------------------------------------------------
 // /app/fleet/tasks checks
 // ---------------------------------------------------------------------------
-async function runFleetTasksChecks(page: Page): Promise<CheckResult[]> {
+async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'app-fleet-tasks';
 
@@ -1946,46 +1946,61 @@ async function runFleetTasksChecks(page: Page): Promise<CheckResult[]> {
   }
 
   // CHECK 4: Click first task → detail or expand (P1: assert detail shows correct task title)
+  // In dogfood mode we navigate to the known qa-pending-1 fixture URL for a deterministic check.
   try {
     await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
-    const urlBefore = page.url();
-    const firstRow  = page.locator('table tbody tr, [class*="task-row"], [class*="taskRow"], [role="row"]:not([role="columnheader"]), [role="listitem"]').first();
-    if (await firstRow.count() > 0) {
-      // Capture row text before clicking — we will assert the detail panel/heading reflects this task
-      const rowText = (await firstRow.textContent().catch(() => ''))?.trim().slice(0, 80) ?? '';
-      // Extract a distinctive keyword from the row text (first 30 chars, skip nav-menu terms)
-      const rowKeyword = rowText.slice(0, 30).replace(/\s+/g, ' ').trim();
-      await firstRow.click();
-      await page.waitForTimeout(1000);
-      await shot(page, `${sp}-4-detail`);
-      const urlAfter = page.url();
-      const detailVisible = await page.locator('[class*="detail"], [class*="panel"], [role="dialog"], h1, h2').count() > 0;
-      if (urlAfter !== urlBefore || detailVisible) {
-        // P1: verify detail heading/panel text contains the row keyword
-        const detailText = await Promise.race([
-          page.evaluate(() => {
-            const detailEl = document.querySelector('[class*="detail"], [class*="panel"], [role="dialog"], h1, h2');
-            return detailEl ? (detailEl.textContent ?? '') : (document.querySelector('main')?.textContent ?? '');
-          }).catch(() => ''),
-          new Promise<string>(r => setTimeout(() => r(''), 3000)),
-        ]);
-        const titleMatch = rowKeyword.length > 3 && detailText.toLowerCase().includes(rowKeyword.toLowerCase().slice(0, 20));
-        if (urlAfter !== urlBefore) {
-          await page.goto(`https://hub.revopsglobal.com/app/fleet/tasks`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
-        }
-        if (titleMatch) {
-          results.push({ check: 'CHECK 4 Task click → detail', status: 'PASS', evidence: `Clicked "${rowText.slice(0, 40)}". Detail heading matches row text. URL: ${urlBefore} → ${urlAfter}. Returned.` });
-        } else if (detailVisible || urlAfter !== urlBefore) {
-          // Detail opened but title match failed — DEFERRED not FAIL (selector may miss heading container)
-          results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: `Clicked "${rowText.slice(0, 40)}". Detail opened but heading text mismatch — expected keyword "${rowKeyword.slice(0, 20)}" in detail. URL: ${urlBefore} → ${urlAfter}.` });
+
+    if (dogfoodMode) {
+      // Dogfood path: navigate directly to the fixture task detail URL so we assert against
+      // known content rather than whatever first row happens to exist in production.
+      const fixtureUrl = `https://hub.revopsglobal.com/app/fleet/tasks?task=qa-pending-1`;
+      await page.goto(fixtureUrl, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      await shot(page, `${sp}-4-dogfood-detail`);
+      const detailText = (await page.locator('main, [role="dialog"], [class*="detail"], [class*="panel"]').first().textContent().catch(() => '')) ?? '';
+      const hasFixture = detailText.toLowerCase().includes('qa-pending') || detailText.toLowerCase().includes('qa-pending-1');
+      // Return to base list page for subsequent checks
+      await page.goto(`https://hub.revopsglobal.com/app/fleet/tasks`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+      results.push({ check: 'CHECK 4 Task click → detail', status: hasFixture ? 'PASS' : 'DEFERRED', evidence: hasFixture ? 'Dogfood fixture qa-pending-1 detail rendered correctly.' : `Dogfood: navigated to ?task=qa-pending-1 but fixture text not found in detail panel. Detail text (100 chars): "${detailText.trim().slice(0, 100)}".` });
+    } else {
+      const urlBefore = page.url();
+      const firstRow  = page.locator('table tbody tr, [class*="task-row"], [class*="taskRow"], [role="row"]:not([role="columnheader"]), [role="listitem"]').first();
+      if (await firstRow.count() > 0) {
+        const rowText = (await firstRow.textContent().catch(() => ''))?.trim().slice(0, 80) ?? '';
+        // Use the first 40 chars of text as keyword — trim whitespace to avoid false-miss on layout chars
+        const rowKeyword = rowText.replace(/\s+/g, ' ').trim().slice(0, 40);
+        await firstRow.click();
+        await page.waitForTimeout(1000);
+        await shot(page, `${sp}-4-detail`);
+        const urlAfter = page.url();
+        const detailVisible = await page.locator('[class*="detail"], [class*="panel"], [role="dialog"], h1, h2').count() > 0;
+        if (urlAfter !== urlBefore || detailVisible) {
+          const detailText = await Promise.race([
+            page.evaluate(() => {
+              const detailEl = document.querySelector('[class*="detail"], [class*="panel"], [role="dialog"], h1, h2');
+              return detailEl ? (detailEl.textContent ?? '') : (document.querySelector('main')?.textContent ?? '');
+            }).catch(() => ''),
+            new Promise<string>(r => setTimeout(() => r(''), 3000)),
+          ]);
+          // Match against a 20-char window from the keyword — enough to be specific without being brittle
+          const matchKeyword = rowKeyword.slice(0, 20).toLowerCase();
+          const titleMatch = matchKeyword.length > 3 && detailText.toLowerCase().includes(matchKeyword);
+          if (urlAfter !== urlBefore) {
+            await page.goto(`https://hub.revopsglobal.com/app/fleet/tasks`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+          }
+          if (titleMatch) {
+            results.push({ check: 'CHECK 4 Task click → detail', status: 'PASS', evidence: `Clicked "${rowText.slice(0, 40)}". Detail heading matches row text. URL: ${urlBefore} → ${urlAfter}. Returned.` });
+          } else if (detailVisible || urlAfter !== urlBefore) {
+            results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: `Clicked "${rowText.slice(0, 40)}". Detail opened but heading text mismatch — expected keyword "${matchKeyword}" in detail. URL: ${urlBefore} → ${urlAfter}.` });
+          } else {
+            results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: `Clicked task but URL/content unchanged. Text: "${rowText.slice(0, 40)}".` });
+          }
         } else {
           results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: `Clicked task but URL/content unchanged. Text: "${rowText.slice(0, 40)}".` });
         }
       } else {
-        results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: `Clicked task but URL/content unchanged. Text: "${rowText.slice(0, 40)}".` });
+        results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: 'No task rows to click.' });
       }
-    } else {
-      results.push({ check: 'CHECK 4 Task click → detail', status: 'DEFERRED', evidence: 'No task rows to click.' });
     }
   } catch (e) {
     results.push({ check: 'CHECK 4 Task click → detail', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
@@ -2071,10 +2086,27 @@ async function runFleetTasksChecks(page: Page): Promise<CheckResult[]> {
           new Promise<boolean>(r => setTimeout(() => r(false), 9000)),
         ]);
 
-        if (found) {
-          results.push({ check: 'CHECK 6 Create task persists', status: 'PASS', evidence: `Task "${testTitle}" found in list after form submit — persistence confirmed.` });
+        // Cleanup: delete the test task via Supabase REST so it does not pollute the kanban.
+        // Best-effort — a cleanup failure does not change the check result.
+        let cleanupNote = '';
+        if (serviceKey) {
+          try {
+            const delRes = await fetch(
+              `${SUPA_URL}/rest/v1/orch_tasks?title=eq.${encodeURIComponent(testTitle)}`,
+              { method: 'DELETE', headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Prefer: 'return=minimal' } },
+            );
+            cleanupNote = delRes.ok ? ' (test task deleted)' : ` (cleanup ${delRes.status} — task may linger)`;
+          } catch {
+            cleanupNote = ' (cleanup error — task may linger)';
+          }
         } else {
-          results.push({ check: 'CHECK 6 Create task persists', status: 'FAIL', evidence: `Task "${testTitle}" NOT found in list after form submit — create silently failed (known RGOS e585eb4f pattern).` });
+          cleanupNote = ' (no serviceKey — task not cleaned up)';
+        }
+
+        if (found) {
+          results.push({ check: 'CHECK 6 Create task persists', status: 'PASS', evidence: `Task "${testTitle}" found in list after form submit — persistence confirmed.${cleanupNote}` });
+        } else {
+          results.push({ check: 'CHECK 6 Create task persists', status: 'FAIL', evidence: `Task "${testTitle}" NOT found in list after form submit — create silently failed (known RGOS e585eb4f pattern).${cleanupNote}` });
         }
       }
     }
@@ -3437,7 +3469,7 @@ async function main() {
     } else if (targetPage === '/pipeline') {
       results = await runWithTimeout(() => runPipelineChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/tasks') {
-      results = await runWithTimeout(() => runFleetTasksChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runFleetTasksChecks(page, serviceKey), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/agents') {
       results = await runWithTimeout(() => runFleetAgentsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/social-content') {
