@@ -2583,7 +2583,18 @@ busCommand
   .option('--cycle <name>', 'Cycle name')
   .action((action: string, agent: string, opts: { metric?: string; metricType?: string; surface?: string; direction?: string; window?: string; measurement?: string; loopInterval?: string; enabled?: string; cycle?: string }) => {
     const env = resolveEnv();
-    const agentDir = env.agentDir || process.cwd();
+    // Resolve the TARGET agent's experiments dir from the <agent> argument, not the
+    // caller's env. Without this, `bus manage-cycle create orchestrator ...` from
+    // an analyst shell wrote the cycle into analyst/experiments/config.json — where
+    // the row has agent="orchestrator" but lives in the wrong file, invisible to
+    // orchestrator's autoresearch runtime which reads its OWN experiments/config.json.
+    // Symptom: paused experiment-signal-ratio cron firing into cycles:[] (2026-05-29).
+    let agentDir: string;
+    if (env.projectRoot && env.org) {
+      agentDir = join(env.projectRoot, 'orgs', env.org, 'agents', agent);
+    } else {
+      agentDir = env.agentDir || process.cwd();
+    }
     if (opts.direction && opts.direction !== 'higher' && opts.direction !== 'lower') {
       console.error(`Invalid --direction '${opts.direction}'. Must be 'higher' or 'lower'`);
       process.exit(1);
