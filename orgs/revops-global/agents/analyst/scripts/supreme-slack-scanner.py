@@ -61,6 +61,15 @@ MAX_CONVERSATIONS = 200
 MAX_MESSAGES_PER_CONV = 100
 API_DELAY_MS = 1200
 SLACK_MAX_RETRIES = 3
+# Wall-clock budget for the scan() function. Cap total elapsed time so a sustained
+# Slack 429 storm fails fast (recorded as scanner_timeout in scanner_triggers) instead
+# of looping ~55 min as observed 2026-05-29. Override via SUPREME_SCANNER_BUDGET_SECS.
+SCAN_WALL_CLOCK_BUDGET_SECS = int(os.environ.get("SUPREME_SCANNER_BUDGET_SECS", "300"))
+
+
+class ScanBudgetExceeded(Exception):
+    """Raised when scan() exceeds SCAN_WALL_CLOCK_BUDGET_SECS — caller should record a
+    scanner_timeout failure instead of returning partial results that look successful."""
 REQUIRED_ENV_KEYS = (
     "SUPABASE_RGOS_URL",
     "SUPABASE_RGOS_SERVICE_KEY",
@@ -322,7 +331,16 @@ def pinned_messages(token: str, channel_id: str) -> List[Dict[str, Any]]:
 
 def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
     since_ts = time.time() - since_seconds
+    scan_start = time.time()
     items: List[Dict[str, Any]] = []
+
+    def check_budget() -> None:
+        elapsed = time.time() - scan_start
+        if elapsed > SCAN_WALL_CLOCK_BUDGET_SECS:
+            raise ScanBudgetExceeded(
+                f"scan exceeded wall-clock budget: {elapsed:.0f}s > {SCAN_WALL_CLOCK_BUDGET_SECS}s "
+                f"(likely sustained Slack 429 rate-limit storm; partial results discarded)"
+            )
 
     # Resolve user display names for both sender labels and @mention previews.
     user_cache: Dict[str, str] = build_user_map(token)
@@ -350,6 +368,7 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
     print(f"[scanner] {len(convs)} conversations", file=sys.stderr)
 
     for conv in convs[:MAX_CONVERSATIONS]:
+        check_budget()
         ch_id = conv["id"]
         ch_name = conv.get("name") or ""
         is_dm = bool(conv.get("is_im"))
@@ -575,8 +594,16 @@ def main() -> int:
         print(f"ERROR: bad token shape: {token[:20] if token else 'empty'}", file=sys.stderr)
         return 1
 
-    print(f"[scanner] starting; since_hours={args.since_hours}", file=sys.stderr)
-    items = scan(token, since_seconds=args.since_hours * 3600)
+    print(f"[scanner] starting; since_hours={args.since_hours} budget_secs={SCAN_WALL_CLOCK_BUDGET_SECS}", file=sys.stderr)
+    try:
+        items = scan(token, since_seconds=args.since_hours * 3600)
+    except ScanBudgetExceeded as e:
+        # Fail-fast surface for sustained Slack 429 storms. The scanner_triggers row
+        # written by the cron wrapper will record error_code=scanner_timeout, matching
+        # the existing failure-detection contract. Exit 2 distinguishes budget exhaust
+        # from a clean exit 0 or env/auth error exit 1.
+        print(f"[scanner] ERROR: scanner_timeout — {e}", file=sys.stderr)
+        return 2
     print(f"[scanner] found {len(items)} outstanding items", file=sys.stderr)
 
     snapshot = write_snapshot(items, on_demand=args.on_demand)
