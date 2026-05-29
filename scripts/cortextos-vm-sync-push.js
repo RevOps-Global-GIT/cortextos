@@ -818,7 +818,7 @@ async function syncHubQaStatus() {
     updated_at: new Date().toISOString(),
   };
 
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/orch_fleet_nodes`, {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/orch_fleet_nodes?on_conflict=org_id,node_key`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${serviceKey}`,
