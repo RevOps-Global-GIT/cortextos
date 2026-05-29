@@ -38,6 +38,10 @@ npm test
 - File operations use atomic writes (see `src/utils/atomic.ts`)
 - All bus operations go through `src/bus/` modules
 
+## Task Creation
+
+Always use `cortextos bus create-task` — direct Supabase task inserts are not permitted.
+
 ## Skill Catalog Notes
 
 - Night/day behavior is configured through agent `config.json`
