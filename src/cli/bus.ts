@@ -606,7 +606,8 @@ busCommand
   .command('create-task')
   .argument('<title>', 'Task title')
   .option('--desc <description>', 'Task description')
-  .option('--assignee <agent>', 'Assigned agent')
+  .option('--assignee <agent>', 'Assigned agent (single). Use --assignees for multi-agent comma list.')
+  .option('--assignees <agents>', 'Comma-separated list of assignees. Primary assignee (first) is set on the task; all are stored in meta.assignees.')
   .option('--priority <p>', 'Priority (urgent, high, normal, low)', 'normal')
   .option('--project <name>', 'Project name')
   .option('--needs-approval', 'Require human approval before execution')
@@ -628,6 +629,7 @@ busCommand
   .action(async (title: string, opts: {
     desc?: string;
     assignee?: string;
+    assignees?: string;
     priority: string;
     project?: string;
     needsApproval?: boolean;
@@ -662,6 +664,17 @@ busCommand
       } catch (err) {
         console.error(`--meta is not valid JSON: ${(err as Error).message}`);
         process.exit(1);
+      }
+    }
+    // Multi-assignee resolution: --assignees overrides --assignee.
+    // The primary assignee (first entry) is stored in assigned_to; all are
+    // stored in meta.assignees so downstream readers can fan-out notifications.
+    let primaryAssignee: string | undefined = opts.assignee;
+    let assigneeList: string[] | undefined;
+    if (opts.assignees) {
+      assigneeList = parseList(opts.assignees);
+      if (assigneeList.length > 0) {
+        primaryAssignee = assigneeList[0];
       }
     }
     if (!opts.skipBriefValidation) {
@@ -719,13 +732,17 @@ busCommand
     const autoTraceId = randomString(12);
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
-      assignee: opts.assignee,
+      assignee: primaryAssignee,
       priority: opts.priority as Priority,
       project: opts.project,
       needsApproval: opts.needsApproval ?? false,
       blockedBy: parseList(opts.blockedBy),
       blocks: parseList(opts.blocks),
-      meta: { trace_id: autoTraceId, ...(meta ?? {}) },
+      meta: {
+        trace_id: autoTraceId,
+        ...(assigneeList && assigneeList.length > 1 ? { assignees: assigneeList } : {}),
+        ...(meta ?? {}),
+      },
       successCriteria: opts.successCriteria,
       outOfScope: opts.outOfScope,
       escalationTriggers: opts.escalationTriggers,
@@ -738,12 +755,16 @@ busCommand
       ...(opts.loopCron && opts.loopPrompt ? { linkedLoop: { cron: opts.loopCron, prompt: opts.loopPrompt } } : {}),
     });
     console.log(taskId);
-    // Auto-notify assignee so the task is visible immediately (issue #78)
-    if (opts.assignee && opts.assignee !== env.agentName) {
-      const assigneePaths = resolvePaths(opts.assignee, env.instanceId, env.org);
-      const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
-      sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
-        `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
+    // Auto-notify assignee(s) so the task is visible immediately (issue #78).
+    // For multi-assignee tasks, all agents beyond the caller receive a notification.
+    const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
+    const notifyTargets = assigneeList && assigneeList.length > 1 ? assigneeList : (primaryAssignee ? [primaryAssignee] : []);
+    for (const target of notifyTargets) {
+      if (target !== env.agentName) {
+        const targetPaths = resolvePaths(target, env.instanceId, env.org);
+        sendMessage(targetPaths, env.agentName, target, 'normal',
+          `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
+      }
     }
     await logImplicitInvocation('tasks', env.agentDir ?? '', env.agentName);
     // Exit after all local writes complete. createTask() fires mirrorTaskToRgos
