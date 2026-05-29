@@ -3130,6 +3130,117 @@ function writeReport(results: CheckResult[], reportPath: string) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// /app/capabilities checks
+// ---------------------------------------------------------------------------
+async function runCapabilitiesChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'capabilities';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Capabilities list visible',
+    '[class*="capability"],[class*="Capability"],[class*="card"],[class*="tile"],table tbody tr',
+    /no capabilities|no results|empty/i));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /app/config-behavior checks
+// ---------------------------------------------------------------------------
+async function runConfigBehaviorChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'config-behavior';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  try {
+    const state = await Promise.race([
+      page.evaluate(() => {
+        const inputs = document.querySelectorAll('input,select,textarea,button[role="switch"],[role="checkbox"]').length;
+        const headings = Array.from(document.querySelectorAll('h1,h2,h3')).map(h => h.textContent?.trim() ?? '').filter(Boolean);
+        const sections = document.querySelectorAll('[class*="config"],[class*="behavior"],[class*="setting"],fieldset').length;
+        return { inputs, headings, sections };
+      }),
+      new Promise<{ inputs: number; headings: string[]; sections: number }>(r => setTimeout(() => r({ inputs: -1, headings: [], sections: -1 }), 5000)),
+    ]);
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-controls.png`) }).catch(() => {});
+    if (state.inputs > 0 || state.sections > 0) {
+      results.push({ check: 'CHECK 2 Config controls visible', status: 'PASS', evidence: `${state.inputs} input(s), ${state.sections} section(s). Headings: ${state.headings.slice(0, 3).join(', ')}` });
+    } else {
+      results.push({ check: 'CHECK 2 Config controls visible', status: 'DEFERRED', evidence: `No recognized config controls found (inputs=${state.inputs}, sections=${state.sections}). Headings: ${state.headings.slice(0, 3).join(', ')}` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Config controls visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /app/dream-log checks
+// ---------------------------------------------------------------------------
+async function runDreamLogChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'dream-log';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Dream log entries visible',
+    '[class*="dream"],[class*="Dream"],[class*="log"],[class*="entry"],table tbody tr,[class*="card"]',
+    /no dreams|no entries|no results|empty/i));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /app/memory checks
+// ---------------------------------------------------------------------------
+async function runMemoryChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'memory';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Memory entries visible',
+    '[class*="memory"],[class*="Memory"],[class*="record"],[class*="entry"],table tbody tr,[class*="card"]',
+    /no memories|no results|empty/i));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /app/wiki-graph checks
+// ---------------------------------------------------------------------------
+async function runWikiGraphChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'wiki-graph';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 2000));
+  try {
+    const state = await Promise.race([
+      page.evaluate(() => {
+        const canvas = document.querySelectorAll('canvas,svg,[class*="graph"],[class*="Graph"],[class*="network"],[class*="node"]').length;
+        const headings = Array.from(document.querySelectorAll('h1,h2,h3')).map(h => h.textContent?.trim() ?? '').filter(Boolean);
+        return { canvas, headings };
+      }),
+      new Promise<{ canvas: number; headings: string[] }>(r => setTimeout(() => r({ canvas: -1, headings: [] }), 5000)),
+    ]);
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-graph.png`) }).catch(() => {});
+    if (state.canvas > 0) {
+      results.push({ check: 'CHECK 2 Graph canvas/SVG visible', status: 'PASS', evidence: `${state.canvas} graph element(s). Headings: ${state.headings.slice(0, 3).join(', ')}` });
+    } else {
+      results.push({ check: 'CHECK 2 Graph canvas/SVG visible', status: 'DEFERRED', evidence: `No canvas/SVG/graph elements found (canvas=${state.canvas}) — may still be rendering. Headings: ${state.headings.slice(0, 3).join(', ')}` });
+    }
+  } catch (e) {
+    results.push({ check: 'CHECK 2 Graph canvas/SVG visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+  return results;
+}
+
 async function main() {
   const env = loadEnv(SECRETS_ENV);
   // Use the RGOS-specific service key (project yyizocyaehmqrottmnaz)
@@ -3324,8 +3435,18 @@ async function main() {
       results = await runWithTimeout(() => runAnalyticsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy; manual check recommended' }]);
     } else if (targetPage === '/fleet') {
       results = await runWithTimeout(() => runFleetChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy; manual check recommended' }]);
+    } else if (targetPage === '/app/capabilities') {
+      results = await runWithTimeout(() => runCapabilitiesChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/app/config-behavior') {
+      results = await runWithTimeout(() => runConfigBehaviorChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/app/dream-log') {
+      results = await runWithTimeout(() => runDreamLogChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/app/memory') {
+      results = await runWithTimeout(() => runMemoryChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/app/wiki-graph') {
+      results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/dream-log, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);

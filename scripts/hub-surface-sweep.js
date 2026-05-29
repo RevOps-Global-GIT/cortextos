@@ -114,6 +114,7 @@ const KNOWN_QA_ROUTES = new Set([
   '/app/context-sales-process',
   '/app/cortex-knowledge-base', '/app/cortex-sources',
   '/app/enrichment-hub', '/app/experiments', '/app/portal-capabilities',
+  '/app/capabilities', '/app/config-behavior', '/app/dream-log', '/app/memory', '/app/wiki-graph',
   '/app/tool-library',
   '/app/marketplace', '/app/model-settings', '/app/nl-query',
   '/app/onboarding', '/app/play-builder', '/app/plays', '/app/rules',
