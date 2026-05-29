@@ -3,6 +3,7 @@ import { join } from 'path';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { withRetry, isTransientError } from '../utils/retry.js';
 import { randomString } from '../utils/random.js';
+import { emitExperimentSpan, patchExperimentTraceId } from './otel-tracer.js';
 
 // --- Types ---
 
@@ -29,6 +30,8 @@ export interface Experiment {
   changes_description: string | null;
   /** UUID assigned by orch_experiments on first sync. Stored here to enable PATCH on subsequent state changes. */
   orch_id?: string;
+  /** OpenTelemetry trace ID assigned on first span emit. Shared across create/run/evaluate spans. */
+  otel_trace_id?: string;
 }
 
 export interface ExperimentCreateOptions {
@@ -196,6 +199,27 @@ export function createExperiment(
 
   saveExperiment(agentDir, experiment);
 
+  // Emit OTel span for experiment creation (fire-and-forget, non-blocking)
+  emitExperimentSpan({
+    experiment_id: id,
+    hypothesis: hypothesis.slice(0, 200),
+    baseline_metric: metric,
+    delta_after_treatment: null,
+    agent_name: agentName,
+    span_kind: 'create',
+    status: 'proposed',
+  }).then(({ trace_id }) => {
+    // Persist trace_id on the local experiment file for continuity
+    try {
+      const saved = loadExperiment(agentDir, id);
+      if (!saved.otel_trace_id) {
+        saveExperiment(agentDir, { ...saved, otel_trace_id: trace_id });
+      }
+    } catch {
+      // non-fatal
+    }
+  }).catch(() => {/* non-fatal */});
+
   return id;
 }
 
@@ -254,6 +278,28 @@ export function runExperiment(
   const activeDir = join(agentDir, 'experiments');
   ensureDir(activeDir);
   atomicWriteSync(join(activeDir, 'active.json'), JSON.stringify(experiment, null, 2));
+
+  // Emit OTel span (fire-and-forget)
+  const existingTraceId = experiment.otel_trace_id;
+  emitExperimentSpan({
+    experiment_id: experimentId,
+    hypothesis: (experiment.hypothesis ?? '').slice(0, 200),
+    baseline_metric: experiment.metric,
+    delta_after_treatment: null,
+    agent_name: experiment.agent,
+    span_kind: 'run',
+    status: 'running',
+  }, existingTraceId).then(({ trace_id }) => {
+    if (!existingTraceId) {
+      try {
+        const saved = loadExperiment(agentDir, experimentId);
+        saveExperiment(agentDir, { ...saved, otel_trace_id: trace_id });
+      } catch { /* non-fatal */ }
+    }
+    if (experiment.orch_id) {
+      patchExperimentTraceId(experiment.orch_id, trace_id).catch(() => {/* non-fatal */});
+    }
+  }).catch(() => {/* non-fatal */});
 
   return experiment;
 }
@@ -379,6 +425,32 @@ export function evaluateExperiment(
       // ignore
     }
   }
+
+  // Emit OTel span for evaluate (fire-and-forget)
+  const evalTraceId = experiment.otel_trace_id;
+  const deltaAfter =
+    typeof experiment.result_value === 'number' && typeof experiment.baseline_value === 'number'
+      ? experiment.result_value - experiment.baseline_value
+      : null;
+  emitExperimentSpan({
+    experiment_id: experimentId,
+    hypothesis: (experiment.hypothesis ?? '').slice(0, 200),
+    baseline_metric: experiment.metric,
+    delta_after_treatment: deltaAfter,
+    agent_name: experiment.agent,
+    span_kind: 'evaluate',
+    status: 'completed',
+  }, evalTraceId).then(({ trace_id }) => {
+    if (!evalTraceId) {
+      try {
+        const saved = loadExperiment(agentDir, experimentId);
+        saveExperiment(agentDir, { ...saved, otel_trace_id: trace_id });
+      } catch { /* non-fatal */ }
+    }
+    if (experiment.orch_id) {
+      patchExperimentTraceId(experiment.orch_id, trace_id).catch(() => {/* non-fatal */});
+    }
+  }).catch(() => {/* non-fatal */});
 
   return experiment;
 }
@@ -728,6 +800,10 @@ export async function syncExperimentToSupabase(
     },
     token_budget: 0,
     tokens_used: 0,
+    ...(experiment.otel_trace_id ? {
+      otel_trace_id: experiment.otel_trace_id,
+      last_span_at: new Date().toISOString(),
+    } : {}),
   };
 
   try {
