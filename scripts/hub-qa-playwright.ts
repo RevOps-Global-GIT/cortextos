@@ -6,6 +6,11 @@
  *
  * Usage:
  *   npx tsx hub-qa-playwright.ts --page /time --user greg@revopsglobal.com --no-send
+ *   npx tsx hub-qa-playwright.ts --page /app/fleet/tasks --dogfood --no-send
+ *
+ * --dogfood  Sets localStorage agentops_dogfood=1 so dogfood lifecycle fixtures
+ *            (qa-pending-1, qa-in-progress-1, etc.) are visible for validation.
+ *            Omit for normal operator-view QA (fixtures hidden by default).
  */
 
 import { chromium, Browser, Page } from 'playwright';
@@ -28,6 +33,7 @@ const targetPage   = getArg('--page', '/time');
 const userEmail    = getArg('--user', 'greg@revopsglobal.com');
 const noSend       = argv.includes('--no-send');
 const sessionFile  = getArg('--session-file', '');
+const dogfoodMode  = argv.includes('--dogfood');
 
 // ---------------------------------------------------------------------------
 // Config — resolve paths relative to this file's location
@@ -2883,6 +2889,12 @@ async function main() {
     await context.addInitScript(({ key, val }: { key: string; val: string }) => {
       try { localStorage.setItem(key, val); } catch {}
     }, { key: storageKey, val: sessionJson });
+
+    if (dogfoodMode) {
+      await context.addInitScript(() => {
+        try { localStorage.setItem('agentops_dogfood', '1'); } catch {}
+      });
+    }
 
     // Alias → canonical URL map for short-form --page args
     const PAGE_URL_MAP: Record<string, string> = {
