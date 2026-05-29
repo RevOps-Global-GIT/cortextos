@@ -10,6 +10,7 @@ import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
 import { parseDurationMs } from '../bus/cron-state.js';
 import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
+import { atomicWriteSync } from '../utils/atomic.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
 
@@ -682,9 +683,23 @@ export class IPCServer {
             if (!underCtxRoot && !underCwd) {
               response = { success: false, error: 'Invalid worker dir' };
             } else {
-              this.agentManager.spawnWorker(d.name, resolvedDir, d.prompt, d.parent, d.model, d.home)
-                .catch(err => console.error(`[ipc] spawn-worker failed:`, err));
-              response = { success: true, data: `Spawning worker ${d.name}` };
+              const workerName = d.name;
+              const ctxRootForWorker = resolveCtxRoot();
+              this.agentManager.spawnWorker(workerName, resolvedDir, d.prompt, d.parent, d.model, d.home)
+                .catch(err => {
+                  console.error(`[ipc] spawn-worker failed:`, err);
+                  try {
+                    const statusPath = join(ctxRootForWorker, 'workers', `${workerName}-status.json`);
+                    atomicWriteSync(statusPath, JSON.stringify({
+                      status: 'failed',
+                      error: err instanceof Error ? err.message : String(err),
+                      timestamp: new Date().toISOString(),
+                    }, null, 2));
+                  } catch (writeErr) {
+                    console.error(`[ipc] failed to write worker failure artifact:`, writeErr);
+                  }
+                });
+              response = { success: true, data: `Spawning worker ${workerName}` };
             }
           }
           break;
