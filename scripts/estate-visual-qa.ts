@@ -668,8 +668,10 @@ async function checkOrcaVoice(browser: import('playwright').Browser): Promise<vo
     if (charPresent) {
       record('Orca Voice', 'Character element present (.orca-aura)', 'PASS', '.orca-aura img visible');
     } else {
-      // Character may be behind auth gate — check if we're on the auth screen
-      const onAuth = await page.locator('.auth-shell, .auth-card').isVisible().catch(() => false);
+      // Character may be behind auth gate — check if we're on the auth screen.
+      // Use count()>0 rather than isVisible() — the auth-shell main element is a root
+      // container that Playwright may score as non-visible even when the login UI is rendered.
+      const onAuth = await page.locator('.voice-shell.auth-shell, .auth-shell, .auth-card').count().then(n => n > 0).catch(() => false);
       if (onAuth) {
         record('Orca Voice', 'Character element present (.orca-aura)', 'WARN', 'App on auth screen — character not visible without session');
       } else {
