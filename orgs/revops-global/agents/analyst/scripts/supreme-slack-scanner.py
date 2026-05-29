@@ -70,6 +70,20 @@ SCAN_WALL_CLOCK_BUDGET_SECS = int(os.environ.get("SUPREME_SCANNER_BUDGET_SECS", 
 class ScanBudgetExceeded(Exception):
     """Raised when scan() exceeds SCAN_WALL_CLOCK_BUDGET_SECS — caller should record a
     scanner_timeout failure instead of returning partial results that look successful."""
+
+
+RATE_LIMIT_SLEEP_BUDGET_SECS: int = int(
+    os.environ.get("SUPREME_SCANNER_RATE_LIMIT_BUDGET_SECS", "120")
+)
+
+
+class ScanRateLimited(Exception):
+    """Raised when cumulative 429 sleep exceeds RATE_LIMIT_SLEEP_BUDGET_SECS, or when a
+    single Retry-After header exceeds 60 s. Peer to ScanBudgetExceeded; caller exits 3."""
+
+
+_rl_state: Dict[str, int] = {"sleep_spent": 0}
+
 REQUIRED_ENV_KEYS = (
     "SUPABASE_RGOS_URL",
     "SUPABASE_RGOS_SERVICE_KEY",
@@ -196,11 +210,23 @@ def slack_get(token: str, method: str, params: Dict[str, str]) -> Dict[str, Any]
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < SLACK_MAX_RETRIES:
                 retry_after = int(e.headers.get("Retry-After") or "30")
+                if retry_after > 60:
+                    raise ScanRateLimited(
+                        f"Retry-After {retry_after}s exceeds single-request bail threshold"
+                    )
+                projected = _rl_state["sleep_spent"] + retry_after
+                if projected > RATE_LIMIT_SLEEP_BUDGET_SECS:
+                    raise ScanRateLimited(
+                        f"cumulative rate-limit sleep {projected}s would exceed "
+                        f"budget {RATE_LIMIT_SLEEP_BUDGET_SECS}s"
+                    )
                 print(
-                    f"[scanner] Slack rate limited {method}; sleeping {retry_after}s",
+                    f"[scanner] Slack rate limited {method}; sleeping {retry_after}s "
+                    f"(cumulative {projected}s / {RATE_LIMIT_SLEEP_BUDGET_SECS}s budget)",
                     file=sys.stderr,
                 )
                 time.sleep(retry_after)
+                _rl_state["sleep_spent"] += retry_after
                 continue
             return {"ok": False, "error": f"http_{e.code}"}
     return {"ok": False, "error": "retry_exhausted"}
@@ -594,7 +620,12 @@ def main() -> int:
         print(f"ERROR: bad token shape: {token[:20] if token else 'empty'}", file=sys.stderr)
         return 1
 
-    print(f"[scanner] starting; since_hours={args.since_hours} budget_secs={SCAN_WALL_CLOCK_BUDGET_SECS}", file=sys.stderr)
+    print(
+        f"[scanner] starting; since_hours={args.since_hours} "
+        f"budget_secs={SCAN_WALL_CLOCK_BUDGET_SECS} "
+        f"rate_limit_budget_secs={RATE_LIMIT_SLEEP_BUDGET_SECS}",
+        file=sys.stderr,
+    )
     try:
         items = scan(token, since_seconds=args.since_hours * 3600)
     except ScanBudgetExceeded as e:
@@ -604,6 +635,11 @@ def main() -> int:
         # from a clean exit 0 or env/auth error exit 1.
         print(f"[scanner] ERROR: scanner_timeout — {e}", file=sys.stderr)
         return 2
+    except ScanRateLimited as e:
+        # Cumulative 429 sleep exceeded budget or a single Retry-After was too large.
+        # Exit 3 = rate_limited_budget_exceeded — distinct from wall-clock timeout (2).
+        print(f"[scanner] ERROR: rate_limited_budget_exceeded — {e}", file=sys.stderr)
+        return 3
     print(f"[scanner] found {len(items)} outstanding items", file=sys.stderr)
 
     snapshot = write_snapshot(items, on_demand=args.on_demand)
