@@ -263,15 +263,42 @@ async function scanWebSurfaces() {
 // ---------------------------------------------------------------------------
 // Category B: Zombie Cron Detection
 // ---------------------------------------------------------------------------
+
+/** Returns a Set of agent names currently running (from `cortextos status`). */
+function getRunningAgents() {
+  const raw = run('cortextos status 2>/dev/null', { silent: true });
+  const running = new Set();
+  for (const line of raw.split('\n')) {
+    const m = line.match(/^\s+(\S+)\s+running\b/);
+    if (m) running.add(m[1]);
+  }
+  return running;
+}
+
+/**
+ * Returns true if a cron prompt uses spawn-codex / spawn-worker patterns —
+ * these crons depend on an external auth token and stale last-fire may reflect
+ * a blocked worker rather than a dead cron.
+ */
+function isSpawnWorkerCron(prompt) {
+  return /spawn[-_]?codex|spawn[-_]?worker|computer[-_]?use/i.test(prompt || '');
+}
+
 function scanZombieCrons() {
   const agents = fs.readdirSync(AGENTS_DIR).filter(a => {
     const cfgPath = path.join(AGENTS_DIR, a, 'config.json');
     return fs.existsSync(cfgPath) && a !== '_archive';
   });
 
-  const zombies  = [];
-  const healthy  = [];
-  const noData   = [];
+  // Rule 1: only flag crons belonging to agents that are actually running.
+  // Stopped agents have legitimately dormant crons — they are not zombies.
+  const runningAgents = getRunningAgents();
+
+  const zombies          = [];
+  const healthy          = [];
+  const noData           = [];
+  const disabledCrons    = [];   // Rule 2: intentionally disabled — not zombies
+  const stoppedAgentCrons = [];  // Rule 1: agent not running — not zombies
 
   for (const agent of agents) {
     const cfgPath = path.join(AGENTS_DIR, agent, 'config.json');
@@ -283,6 +310,14 @@ function scanZombieCrons() {
 
     const crons = cfg.crons || [];
     if (crons.length === 0) continue;
+
+    // Rule 1: skip agents not currently running — their crons are dormant by design
+    if (!runningAgents.has(agent)) {
+      for (const cron of crons) {
+        stoppedAgentCrons.push({ agent, name: cron.name });
+      }
+      continue;
+    }
 
     // Get live cron data from daemon
     const raw = run(`cortextos bus list-crons ${agent} 2>/dev/null`, { silent: true });
@@ -307,6 +342,7 @@ function scanZombieCrons() {
       const name     = cron.name;
       const interval = cron.interval;
       const cronExpr = cron.cron;
+      const prompt   = cron.prompt || '';
       const live     = cronMap[name];
 
       if (!live) {
@@ -314,8 +350,9 @@ function scanZombieCrons() {
         continue;
       }
 
+      // Rule 2: disabled crons are intentional — separate bucket, not zombies
       if (live.enabled !== 'yes') {
-        zombies.push({ agent, name, reason: 'disabled', lastFire: live.lastFire, schedule: live.schedule });
+        disabledCrons.push({ agent, name, lastFire: live.lastFire, schedule: live.schedule });
         continue;
       }
 
@@ -369,10 +406,18 @@ function scanZombieCrons() {
       }
 
       if (ratio > 2) {
-        const status = hasRecentSuccess ? 'fired-but-check-success' : 'zombie';
+        // Rule 3: spawn-codex / spawn-worker crons — stale last-fire may reflect
+        // a blocked worker (e.g. auth token invalid) rather than a dead cron.
+        // Flag separately so ops can verify the worker auth rather than the cron itself.
+        const spawnWorker = isSpawnWorkerCron(prompt);
+        const status = spawnWorker
+          ? 'blocked-by-worker'
+          : (hasRecentSuccess ? 'fired-but-check-success' : 'zombie');
         zombies.push({
           agent, name,
-          reason: `age=${Math.round(ageMs/60000)}m > 2x interval=${Math.round(intervalMs/60000)}m`,
+          reason: spawnWorker
+            ? `spawn-worker stale — verify worker auth (age=${Math.round(ageMs/60000)}m)`
+            : `age=${Math.round(ageMs/60000)}m > 2x interval=${Math.round(intervalMs/60000)}m`,
           lastFire: lastFireStr,
           schedule: live.schedule,
           hasRecentSuccess,
@@ -384,7 +429,7 @@ function scanZombieCrons() {
     }
   }
 
-  return { zombies, healthy, noData };
+  return { zombies, healthy, noData, disabledCrons, stoppedAgentCrons };
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +453,8 @@ function runRepeatRegressionEscalator(webResult, cronResult) {
   for (const { route, repo } of webResult.blindSpots) {
     todayFlags.push({ key: `route:${route}`, type: 'blind-spot', date: TODAY, surface: `${route} (${repo.split('/')[1]})` });
   }
-  for (const z of cronResult.zombies) {
+  // Only true zombies count for escalation — not disabled, stopped-agent, or worker-blocked
+  for (const z of cronResult.zombies.filter(z => z.status !== 'blocked-by-worker')) {
     todayFlags.push({ key: `cron:${z.agent}/${z.name}`, type: 'zombie', date: TODAY, surface: `${z.agent}/${z.name}` });
   }
 
@@ -483,15 +529,17 @@ function buildReport(webResult, cronResult, escalations) {
   // ── Category B ──
   lines.push('## Category B: Automation Zombies');
   lines.push('');
-  lines.push(`**Healthy:** ${cronResult.healthy.length}  **Zombies:** ${cronResult.zombies.length}  **No data:** ${cronResult.noData.length}`);
+  const trueZombies = cronResult.zombies.filter(z => z.status !== 'blocked-by-worker');
+  const workerBlocked = cronResult.zombies.filter(z => z.status === 'blocked-by-worker');
+  lines.push(`**Healthy:** ${cronResult.healthy.length}  **Zombies:** ${trueZombies.length}  **Worker-blocked:** ${workerBlocked.length}  **No data:** ${cronResult.noData.length}  **Disabled:** ${cronResult.disabledCrons.length}  **Agent stopped:** ${cronResult.stoppedAgentCrons.length}`);
   lines.push('');
 
-  if (cronResult.zombies.length > 0) {
+  if (trueZombies.length > 0) {
     lines.push('### Zombie Crons');
     lines.push('');
     lines.push('| Agent | Cron | Reason | Last Fire | Success Signal |');
     lines.push('|-------|------|--------|-----------|----------------|');
-    for (const z of cronResult.zombies) {
+    for (const z of trueZombies) {
       const success = z.hasRecentSuccess ? 'yes' : 'no';
       lines.push(`| ${z.agent} | ${z.name} | ${z.reason} | ${z.lastFire || '-'} | ${success} |`);
     }
@@ -501,12 +549,45 @@ function buildReport(webResult, cronResult, escalations) {
     lines.push('');
   }
 
+  if (workerBlocked.length > 0) {
+    lines.push('### Worker-Blocked Crons (verify auth, not cron)');
+    lines.push('');
+    lines.push('> These crons use spawn-codex / spawn-worker. Stale last-fire may reflect a blocked worker token rather than a dead cron. Verify worker auth before treating as a zombie.');
+    lines.push('');
+    lines.push('| Agent | Cron | Last Fire |');
+    lines.push('|-------|------|-----------|');
+    for (const z of workerBlocked) {
+      lines.push(`| ${z.agent} | ${z.name} | ${z.lastFire || '-'} |`);
+    }
+    lines.push('');
+  }
+
   if (cronResult.noData.length > 0) {
     lines.push('### Crons With No Fire Data');
     lines.push('');
     for (const n of cronResult.noData) {
       lines.push(`- **${n.agent}/${n.name}**: ${n.reason}`);
     }
+    lines.push('');
+  }
+
+  if (cronResult.disabledCrons.length > 0) {
+    lines.push('<details><summary>Disabled crons (intentional — not zombies)</summary>');
+    lines.push('');
+    for (const d of cronResult.disabledCrons) {
+      lines.push(`- **${d.agent}/${d.name}** (last fire: ${d.lastFire || '-'})`);
+    }
+    lines.push('</details>');
+    lines.push('');
+  }
+
+  if (cronResult.stoppedAgentCrons.length > 0) {
+    lines.push('<details><summary>Stopped-agent crons (agent not running — not zombies)</summary>');
+    lines.push('');
+    for (const s of cronResult.stoppedAgentCrons) {
+      lines.push(`- **${s.agent}/${s.name}**`);
+    }
+    lines.push('</details>');
     lines.push('');
   }
 
@@ -525,16 +606,19 @@ function buildReport(webResult, cronResult, escalations) {
   }
 
   // Summary
-  const issueCount = webResult.blindSpots.length + cronResult.zombies.length;
+  const trueZombieCount = cronResult.zombies.filter(z => z.status !== 'blocked-by-worker').length;
+  const issueCount = webResult.blindSpots.length + trueZombieCount;
   lines.push('## Summary');
   lines.push('');
   if (issueCount === 0 && escalations.length === 0) {
     lines.push('No issues found. All surfaces covered, all crons healthy.');
   } else {
     const parts = [];
-    if (webResult.blindSpots.length > 0) parts.push(`${webResult.blindSpots.length} uncovered route(s)`);
-    if (cronResult.zombies.length > 0)   parts.push(`${cronResult.zombies.length} zombie cron(s)`);
-    if (escalations.length > 0)          parts.push(`${escalations.length} repeat-regression MERGE-BLOCKER(s)`);
+    if (webResult.blindSpots.length > 0)        parts.push(`${webResult.blindSpots.length} uncovered route(s)`);
+    if (trueZombieCount > 0)                    parts.push(`${trueZombieCount} zombie cron(s)`);
+    if (cronResult.zombies.filter(z => z.status === 'blocked-by-worker').length > 0)
+      parts.push(`${cronResult.zombies.filter(z => z.status === 'blocked-by-worker').length} worker-blocked cron(s) (auth check needed)`);
+    if (escalations.length > 0)                 parts.push(`${escalations.length} repeat-regression MERGE-BLOCKER(s)`);
     lines.push(`**${parts.join(', ')}.**`);
   }
   lines.push('');
