@@ -496,6 +496,7 @@ export class CodexAppServerPTY {
             threadId: persisted.threadId,
             cwd: this._cwd,
             ...THREAD_PERMISSION_OVERRIDES,
+            config: { features: { goals: true } },
             excludeTurns: true,
             persistExtendedHistory: true,
           });
@@ -505,7 +506,9 @@ export class CodexAppServerPTY {
           this._outputBuffer.push(`[codex-app-server] persisted resume failed: ${err}\n`);
         }
       }
+    }
 
+    if (mode === 'continue') {
       const latest = await this.findLatestThreadForCwd();
       if (latest) {
         const resumed = await this.request<ThreadResponse>('thread/resume', {
