@@ -5,7 +5,7 @@
  * Emits capability_check_passed / capability_check_failed bus events.
  *
  * Usage: node scripts/capability-probe.mjs [--capability <id>]
- *   --capability hub_qa | telegram_poller | github_token | gmail_token | orgo_exec | linkedin_session
+ *   --capability hub_qa | telegram_poller | github_token | gmail_token | linkedin_session
  *   (omit to probe all)
  *
  * Run by the capability-probe cron (every 30m).
@@ -412,7 +412,6 @@ const PROBES = {
   github_token: probeGithub,
   gmail_token: probeGmail,
   hub_qa: probeHubQa,
-  orgo_exec: probeOrgo,
   linkedin_session: probeLinkedIn,
 };
 
