@@ -507,7 +507,11 @@ function runRepeatRegressionEscalator(webResult, cronResult) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8');
 
-  // Find surfaces at or above threshold
+  // Find surfaces at or above threshold — MUST also appear in today's scan.
+  // Resolved surfaces (fixed since last flag) drop out immediately even if
+  // they have a historical pattern; this prevents escalating already-closed issues.
+  const todayFlagKeys = new Set(todayFlags.map(f => f.key));
+
   const byKey = {};
   for (const f of history.flags) {
     if (!byKey[f.key]) byKey[f.key] = { count: 0, surface: f.surface, type: f.type, dates: [] };
@@ -516,7 +520,7 @@ function runRepeatRegressionEscalator(webResult, cronResult) {
   }
 
   return Object.entries(byKey)
-    .filter(([, v]) => v.count >= ESCALATION_THRESHOLD)
+    .filter(([key, v]) => v.count >= ESCALATION_THRESHOLD && todayFlagKeys.has(key))
     .map(([key, v]) => ({ key, ...v }))
     .sort((a, b) => b.count - a.count);
 }
