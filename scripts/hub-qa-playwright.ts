@@ -16,6 +16,7 @@
 import { chromium, Browser, Page } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
 
 // ---------------------------------------------------------------------------
 // Args
@@ -3357,7 +3358,19 @@ async function main() {
   const SUPA_PROJECT = 'yyizocyaehmqrottmnaz';
   const storageKey   = `sb-${SUPA_PROJECT}-auth-token`;
 
-  const browser: Browser = await chromium.launch({ headless: true });
+  let browser: Browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (launchErr: unknown) {
+    const msg = launchErr instanceof Error ? launchErr.message : String(launchErr);
+    if (msg.includes("Executable doesn't exist") || msg.includes('browserType.launch')) {
+      console.log('[auto-install] Chromium binary missing — running playwright install chromium...');
+      execSync('npx playwright install chromium', { stdio: 'inherit' });
+      browser = await chromium.launch({ headless: true });
+    } else {
+      throw launchErr;
+    }
+  }
   try {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
 
