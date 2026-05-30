@@ -50,11 +50,13 @@ export async function updateHeartbeat(
   );
 
   // Fire-and-forget Supabase upsert — no-ops gracefully if env vars are absent.
-  pushHeartbeatToSupabase(agentName, heartbeat).catch(() => {
-    // Intentionally swallowed: Supabase unavailability must not affect local operation.
+  // Errors are non-fatal (local heartbeat must always succeed) but ARE logged so
+  // schema/payload mismatches surface immediately instead of going silently dark.
+  pushHeartbeatToSupabase(agentName, heartbeat).catch((err: unknown) => {
+    console.error(`[heartbeat] RGOS upsert failed (orch_agent_heartbeats): ${err instanceof Error ? err.message : String(err)}`);
   });
-  pushAgentStatusToSupabase(agentName, heartbeat, activeTask).catch(() => {
-    // Intentionally swallowed: Supabase unavailability must not affect local operation.
+  pushAgentStatusToSupabase(agentName, heartbeat, activeTask).catch((err: unknown) => {
+    console.error(`[heartbeat] RGOS upsert failed (orch_agents): ${err instanceof Error ? err.message : String(err)}`);
   });
 
   // Await presence broadcast so the WS has time to flush before process.exit(0).
