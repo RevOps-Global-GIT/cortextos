@@ -1696,7 +1696,7 @@ async function runProjectsChecks(page: Page): Promise<CheckResult[]> {
 // ---------------------------------------------------------------------------
 // /pipeline checks
 // ---------------------------------------------------------------------------
-async function runPipelineChecks(page: Page): Promise<CheckResult[]> {
+async function runPipelineChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'pipeline';
 
@@ -1705,24 +1705,34 @@ async function runPipelineChecks(page: Page): Promise<CheckResult[]> {
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECK 2: Deal/pipeline items visible (table rows, kanban cards, or list items)
+  // CHECK 2: Deal rows have non-empty names (Supabase correctness)
   try {
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    await page.locator('table tbody tr, [class*="deal-row"], [class*="dealRow"], [class*="pipeline-row"], [class*="kanban-card"], [class*="kanbanCard"], [role="row"]:not([role="columnheader"])').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(500);
     await shot(page, `${sp}-2-list`);
-    const rowCount   = await page.locator('table tbody tr, [class*="deal-row"], [class*="dealRow"], [class*="pipeline-row"]').count();
-    const cardCount  = await page.locator('[class*="deal-card"], [class*="dealCard"], [class*="kanban-card"], [class*="kanbanCard"]').count();
-    const roleCount  = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
-    const total = rowCount || cardCount || roleCount;
-    if (total > 0) {
-      results.push({ check: '[LIVENESS] CHECK 2 Deal list visible', status: 'PASS', evidence: `${total} deal/pipeline item(s) visible (rows:${rowCount}, cards:${cardCount}, listitems:${roleCount}).` });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 Deal rows have non-empty names', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const emptyText = await page.getByText(/no deals|empty pipeline|no results|add your first/i).count();
-      results.push({ check: '[LIVENESS] CHECK 2 Deal list visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty pipeline state shown.' : 'No deal rows/cards found — may use unrecognized layout.' });
+      const resp = await fetch(`${SUPA_URL}/rest/v1/deals?select=id,name&order=created_at.desc&limit=10`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Deal rows have non-empty names', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ id: string; name: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 2 Deal rows have non-empty names', status: 'DEFERRED', evidence: 'No deals in pipeline — nothing to assert' });
+        } else {
+          const emptyNames = rows.filter(r => !r.name || r.name.trim().length === 0);
+          if (emptyNames.length > 0) {
+            results.push({ check: '[CORRECTNESS] CHECK 2 Deal rows have non-empty names', status: 'FAIL', evidence: `${emptyNames.length}/${rows.length} deals have empty/null names. IDs: ${emptyNames.map(r => r.id).join(', ').slice(0, 200)}` });
+          } else {
+            results.push({ check: '[CORRECTNESS] CHECK 2 Deal rows have non-empty names', status: 'PASS', evidence: `All ${rows.length} recent deals have non-empty names. Sample: "${rows[0].name?.slice(0, 60)}"` });
+          }
+        }
+      }
     }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 2 Deal list visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 2 Deal rows have non-empty names', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   // CHECK 3: Pipeline view controls visible (stage columns, filters, or view toggle)
@@ -1768,25 +1778,39 @@ async function runPipelineChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: '[LIVENESS] CHECK 4 Deal click → detail', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 5: Key data fields present — deal name, value/amount, stage, owner
+  // CHECK 5: Deal amount is numeric and stage label is non-empty
   try {
     await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
     await shot(page, `${sp}-5-columns`);
-    const pageText  = (await page.locator('body').textContent().catch(() => '')) ?? '';
-    const hasName   = /deal|opportunity|name/i.test(pageText);
-    const hasValue  = /value|\$|amount|revenue|arr|mrr/i.test(pageText);
-    const hasStage  = /stage|phase|status|qualify|close|prospect|negotiat/i.test(pageText);
-    const cols: string[] = [];
-    if (hasName)  cols.push('deal/name');
-    if (hasValue) cols.push('value/$');
-    if (hasStage) cols.push('stage/status');
-    if (cols.length >= 2) {
-      results.push({ check: '[LIVENESS] CHECK 5 Key fields present', status: 'PASS', evidence: `Fields detected: ${cols.join(', ')}.` });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 5 Deal amount + stage label valid', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      results.push({ check: '[LIVENESS] CHECK 5 Key fields present', status: 'DEFERRED', evidence: `Only found: ${cols.join(', ') || 'none'}.` });
+      const resp = await fetch(`${SUPA_URL}/rest/v1/deals?select=id,name,amount,deal_stage_label&order=created_at.desc&limit=10`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 5 Deal amount + stage label valid', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ id: string; name: string | null; amount: number | null; deal_stage_label: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 5 Deal amount + stage label valid', status: 'DEFERRED', evidence: 'No deals in pipeline — nothing to assert' });
+        } else {
+          const noStage = rows.filter(r => !r.deal_stage_label || r.deal_stage_label.trim().length === 0);
+          const badAmount = rows.filter(r => r.amount !== null && (typeof r.amount !== 'number' || r.amount < 0));
+          const issues: string[] = [];
+          if (noStage.length > 0) issues.push(`${noStage.length}/${rows.length} deals have no stage label`);
+          if (badAmount.length > 0) issues.push(`${badAmount.length}/${rows.length} deals have invalid amount`);
+          if (issues.length > 0) {
+            results.push({ check: '[CORRECTNESS] CHECK 5 Deal amount + stage label valid', status: 'FAIL', evidence: issues.join('; ') });
+          } else {
+            const sample = rows[0];
+            results.push({ check: '[CORRECTNESS] CHECK 5 Deal amount + stage label valid', status: 'PASS', evidence: `All ${rows.length} deals OK. Sample: "${sample.name?.slice(0, 40)}" stage="${sample.deal_stage_label}" amount=${sample.amount ?? 'null'}` });
+          }
+        }
+      }
     }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 5 Key fields present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 5 Deal amount + stage label valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   return results;
@@ -3534,7 +3558,7 @@ async function main() {
     } else if (targetPage === '/reports') {
       results = await runWithTimeout(() => runReportsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/pipeline') {
-      results = await runWithTimeout(() => runPipelineChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runPipelineChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/tasks') {
       results = await runWithTimeout(() => runFleetTasksChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/agents') {
