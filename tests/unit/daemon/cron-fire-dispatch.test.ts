@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { dispatchCronFire, extractSkillSlugsFromCronPrompt } from '../../../src/daemon/cron-fire-dispatch.js';
+import { dispatchCronFire, extractSkillSlugsFromCronPrompt, type SpawnWorkerOptions, type SpawnWorkerResult } from '../../../src/daemon/cron-fire-dispatch.js';
 import type { CronDefinition } from '../../../src/types/index.js';
 import type { SpawnCodexResult } from '../../../src/bus/spawn-codex.js';
 
@@ -329,6 +329,86 @@ describe('dispatchCronFire', () => {
     expect(spawnCodexImpl).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
       sandbox: 'danger-full-access',
     }));
+  });
+
+  it('dispatches spawn-worker crons without injecting into PTY', async () => {
+    const injectAgent = vi.fn();
+    const spawnWorkerImpl = vi.fn().mockResolvedValue({ ok: true, exitCode: 0 } satisfies SpawnWorkerResult);
+
+    await dispatchCronFire(cron({
+      name: 'theta-wave',
+      prompt: 'Run theta-wave now.',
+      metadata: { runner: 'spawn-worker' },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent,
+      spawnWorkerImpl,
+    });
+
+    expect(injectAgent).not.toHaveBeenCalled();
+    expect(spawnWorkerImpl).toHaveBeenCalledWith({
+      workerName: 'cron:orchestrator:theta-wave',
+      dir: '/repo/orgs/revops-global/agents/orchestrator',
+      prompt: 'Run theta-wave now.',
+      parent: 'orchestrator',
+      model: undefined,
+      home: undefined,
+    } satisfies SpawnWorkerOptions);
+  });
+
+  it('spawn-worker uses metadata.worker_name and metadata.agent when provided', async () => {
+    const spawnWorkerImpl = vi.fn().mockResolvedValue({ ok: true, exitCode: 0 } satisfies SpawnWorkerResult);
+
+    await dispatchCronFire(cron({
+      name: 'theta-freshness-watchdog',
+      prompt: 'Check freshness.',
+      metadata: {
+        runner: 'spawn-worker',
+        worker_name: 'theta-freshness-1',
+        agent: 'analyst',
+        model: 'claude-haiku-4-5',
+      },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent: vi.fn(),
+      spawnWorkerImpl,
+    });
+
+    expect(spawnWorkerImpl).toHaveBeenCalledWith(expect.objectContaining({
+      workerName: 'theta-freshness-1',
+      dir: '/repo/orgs/revops-global/agents/analyst',
+      model: 'claude-haiku-4-5',
+    }));
+  });
+
+  it('throws when spawn-worker cron fails', async () => {
+    await expect(dispatchCronFire(cron({
+      name: 'theta-wave',
+      metadata: { runner: 'spawn-worker' },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent: vi.fn(),
+      spawnWorkerImpl: vi.fn().mockResolvedValue({ ok: false, exitCode: 1 } satisfies SpawnWorkerResult),
+    })).rejects.toThrow(/spawn-worker cron "theta-wave" failed with exit code 1/);
+  });
+
+  it('throws when spawn-worker prompt_file is not readable', async () => {
+    await expect(dispatchCronFire(cron({
+      name: 'theta-wave',
+      metadata: { runner: 'spawn-worker', prompt_file: 'prompts/nonexistent.md' },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent: vi.fn(),
+      spawnWorkerImpl: vi.fn(),
+    })).rejects.toThrow(/spawn-worker prompt_file.*not readable/);
   });
 
 });

@@ -1,3 +1,5 @@
+import { spawnSync } from 'child_process';
+import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
 import type { CronDefinition } from '../types/index.js';
 import { spawnCodexAsync, type SpawnCodexResult } from '../bus/spawn-codex.js';
@@ -8,12 +10,29 @@ type SpawnCodexFn = typeof spawnCodexAsync;
 type MirrorReviewFn = typeof mirrorReviewToRgos;
 type LogImplicitInvocationFn = typeof logImplicitInvocation;
 
+export interface SpawnWorkerOptions {
+  workerName: string;
+  dir: string;
+  prompt: string;
+  parent: string;
+  model?: string;
+  home?: string;
+}
+
+export interface SpawnWorkerResult {
+  ok: boolean;
+  exitCode: number | null;
+}
+
+type SpawnWorkerFn = (opts: SpawnWorkerOptions) => Promise<SpawnWorkerResult>;
+
 export interface CronFireDispatchOptions {
   agentName: string;
   frameworkRoot: string;
   org: string;
   injectAgent: (agentName: string, message: string) => boolean;
   spawnCodexImpl?: SpawnCodexFn;
+  spawnWorkerImpl?: SpawnWorkerFn;
   mirrorReviewImpl?: MirrorReviewFn;
   logImplicitInvocationImpl?: LogImplicitInvocationFn;
   now?: () => Date;
@@ -121,6 +140,19 @@ function logCronSkillInvocations(
   ).catch(() => undefined);
 }
 
+async function spawnWorkerDefault(opts: SpawnWorkerOptions): Promise<SpawnWorkerResult> {
+  const args = [
+    'bus', 'spawn-worker', opts.workerName,
+    '--dir', opts.dir,
+    '--prompt', opts.prompt,
+    '--parent', opts.parent,
+  ];
+  if (opts.model) args.push('--model', opts.model);
+  if (opts.home) args.push('--home', opts.home);
+  const result = spawnSync('cortextos', args, { stdio: 'pipe', timeout: 30_000 });
+  return { ok: result.status === 0, exitCode: result.status };
+}
+
 async function mirrorSpawnCodexReview(
   cron: CronDefinition,
   opts: CronFireDispatchOptions,
@@ -202,6 +234,50 @@ export async function dispatchCronFire(cron: CronDefinition, opts: CronFireDispa
     }
     await mirrorSpawnCodexReview(cron, opts, result);
     return result;
+  }
+
+  if (runner === 'spawn-worker') {
+    const workerName = metadataString(cron, 'worker_name') ?? `cron:${opts.agentName}:${cron.name}`;
+
+    let prompt: string;
+    const promptFile = metadataString(cron, 'prompt_file');
+    if (promptFile) {
+      const resolvedFile = resolveOrgPath(opts.frameworkRoot, opts.org, promptFile);
+      try {
+        prompt = readFileSync(resolvedFile, 'utf-8');
+      } catch (err) {
+        throw new Error(
+          `cron "${cron.name}" spawn-worker prompt_file "${resolvedFile}" not readable: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } else {
+      prompt = cron.prompt ?? `[cron] ${cron.name} fired`;
+    }
+
+    const targetAgent = metadataString(cron, 'agent') ?? metadataString(cron, 'target_agent') ?? opts.agentName;
+    logCronSkillInvocations(prompt, opts, targetAgent);
+
+    const workdir = metadataString(cron, 'workdir');
+    const resolvedWorkdir = workdir
+      ? resolveOrgPath(opts.frameworkRoot, opts.org, workdir)
+      : agentDirFor(opts, targetAgent);
+
+    const spawnFn = opts.spawnWorkerImpl ?? spawnWorkerDefault;
+    const result = await spawnFn({
+      workerName,
+      dir: resolvedWorkdir,
+      prompt,
+      parent: opts.agentName,
+      model: metadataString(cron, 'model'),
+      home: metadataString(cron, 'home'),
+    });
+
+    if (!result.ok) {
+      throw new Error(
+        `spawn-worker cron "${cron.name}" failed with exit code ${result.exitCode}`,
+      );
+    }
+    return;
   }
 
   if (runner !== 'pty') {
