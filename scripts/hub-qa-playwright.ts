@@ -1910,23 +1910,34 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECK 2: Task items visible
+  // CHECK 2: Per-row title non-empty (Supabase correctness)
   try {
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    await page.locator('table tbody tr, [class*="task-row"], [class*="taskRow"], [role="row"]:not([role="columnheader"]), [role="listitem"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(500);
     await shot(page, `${sp}-2-list`);
-    const rowCount  = await page.locator('table tbody tr, [class*="task-row"], [class*="taskRow"]').count();
-    const roleCount = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
-    const total = rowCount || roleCount;
-    if (total > 0) {
-      results.push({ check: '[LIVENESS] CHECK 2 Task list visible', status: 'PASS', evidence: `${total} task item(s) visible (rows:${rowCount}, listitems:${roleCount}).` });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 Task rows have non-empty titles', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const emptyText = await page.getByText(/no tasks|empty|no results/i).count();
-      results.push({ check: '[LIVENESS] CHECK 2 Task list visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty state shown — no tasks.' : 'No task rows found — may use unrecognized layout.' });
+      const resp = await fetch(`${SUPA_URL}/rest/v1/orch_tasks?select=id,title&order=created_at.desc&limit=10`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Task rows have non-empty titles', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ id: string; title: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 2 Task rows have non-empty titles', status: 'DEFERRED', evidence: 'No tasks in orch_tasks — nothing to assert' });
+        } else {
+          const emptyTitles = rows.filter(r => !r.title || r.title.trim().length === 0);
+          if (emptyTitles.length > 0) {
+            results.push({ check: '[CORRECTNESS] CHECK 2 Task rows have non-empty titles', status: 'FAIL', evidence: `${emptyTitles.length}/${rows.length} recent tasks have empty/null titles. IDs: ${emptyTitles.map(r => r.id).join(', ').slice(0, 200)}` });
+          } else {
+            results.push({ check: '[CORRECTNESS] CHECK 2 Task rows have non-empty titles', status: 'PASS', evidence: `All ${rows.length} recent tasks have non-empty titles. Sample: "${rows[0].title?.slice(0, 60)}"` });
+          }
+        }
+      }
     }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 2 Task list visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 2 Task rows have non-empty titles', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   // [LIVENESS] CHECK 3: Filter/tab controls visible (agent, status, priority filters)
@@ -2120,25 +2131,37 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
     results.push({ check: '[CORRECTNESS] CHECK 6 Create task persists', status: isTimeout ? 'DEFERRED' : 'FAIL', evidence: `${isTimeout ? 'Button located but click timed out (not actionable)' : 'Error'}: ${msg.split('\n')[0]}` });
   }
 
-  // CHECK 5: Key columns — task name, agent/assignee, status, priority
+  // CHECK 5: Task status values are valid enum members
   try {
     await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
     await shot(page, `${sp}-5-columns`);
-    const pageText   = (await page.locator('body').textContent().catch(() => '')) ?? '';
-    const hasName    = /task|title|name/i.test(pageText);
-    const hasAgent   = /agent|assignee|owner|assigned/i.test(pageText);
-    const hasStatus  = /status|pending|in.progress|complete|done/i.test(pageText);
-    const cols: string[] = [];
-    if (hasName)   cols.push('task/name');
-    if (hasAgent)  cols.push('agent/assignee');
-    if (hasStatus) cols.push('status');
-    if (cols.length >= 2) {
-      results.push({ check: '[LIVENESS] CHECK 5 Key columns present', status: 'PASS', evidence: `Columns detected: ${cols.join(', ')}.` });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      results.push({ check: '[LIVENESS] CHECK 5 Key columns present', status: 'DEFERRED', evidence: `Only found: ${cols.join(', ') || 'none'}.` });
+      const resp = await fetch(`${SUPA_URL}/rest/v1/orch_tasks?select=id,status&order=created_at.desc&limit=25`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ id: string; status: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'DEFERRED', evidence: 'No tasks in orch_tasks — nothing to assert' });
+        } else {
+          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed']);
+          const invalid = rows.filter(r => !r.status || !VALID_STATUSES.has(r.status));
+          if (invalid.length > 0) {
+            const sample = invalid.slice(0, 5).map(r => `${r.id}:${r.status}`).join(', ');
+            results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'FAIL', evidence: `${invalid.length}/${rows.length} tasks have invalid/null status. Sample: ${sample}` });
+          } else {
+            const dist = rows.reduce<Record<string, number>>((acc, r) => { acc[r.status!] = (acc[r.status!] ?? 0) + 1; return acc; }, {});
+            results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'PASS', evidence: `All ${rows.length} recent tasks have valid status values. Distribution: ${JSON.stringify(dist)}` });
+          }
+        }
+      }
     }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 5 Key columns present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   return results;
