@@ -2147,7 +2147,7 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
 // ---------------------------------------------------------------------------
 // /app/fleet/agents checks
 // ---------------------------------------------------------------------------
-async function runFleetAgentsChecks(page: Page): Promise<CheckResult[]> {
+async function runFleetAgentsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'app-fleet-agents';
 
@@ -2176,19 +2176,36 @@ async function runFleetAgentsChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: '[LIVENESS] CHECK 2 Agent list visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 3: Agent status indicators visible (online/offline/running badges)
+  // CHECK 3: Agent status values are valid enum members (Supabase correctness)
   try {
     await shot(page, `${sp}-3-status`);
-    const statusBadge = await page.locator('[class*="status"], [class*="badge"], [class*="indicator"], [class*="online"], [class*="offline"], [class*="running"]').count();
-    const pageText    = (await page.locator('body').textContent().catch(() => '')) ?? '';
-    const hasStatus   = /online|offline|running|idle|error|dead|alive|active/i.test(pageText);
-    if (statusBadge > 0 || hasStatus) {
-      results.push({ check: '[LIVENESS] CHECK 3 Status indicators visible', status: 'PASS', evidence: `Status elements: badges:${statusBadge}, text matches: ${hasStatus}.` });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 3 Agent status enum valid', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      results.push({ check: '[LIVENESS] CHECK 3 Status indicators visible', status: 'DEFERRED', evidence: 'No status badges or status text found.' });
+      const resp = await fetch(`${SUPA_URL}/rest/v1/orch_agents?select=role_id,status&order=updated_at.desc&limit=25`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 3 Agent status enum valid', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ role_id: string; status: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 3 Agent status enum valid', status: 'DEFERRED', evidence: 'No agents in orch_agents — nothing to assert' });
+        } else {
+          const VALID_STATUSES = new Set(['online', 'offline', 'running', 'idle', 'starting', 'stopped', 'error', 'degraded', 'dead', 'unknown', 'active', 'inactive']);
+          const invalid = rows.filter(r => r.status !== null && !VALID_STATUSES.has(r.status));
+          if (invalid.length > 0) {
+            const sample = invalid.slice(0, 5).map(r => `${r.role_id}:${r.status}`).join(', ');
+            results.push({ check: '[CORRECTNESS] CHECK 3 Agent status enum valid', status: 'FAIL', evidence: `${invalid.length}/${rows.length} agents have unrecognized status values. Sample: ${sample}` });
+          } else {
+            const dist = rows.reduce<Record<string, number>>((acc, r) => { const k = r.status ?? 'null'; acc[k] = (acc[k] ?? 0) + 1; return acc; }, {});
+            results.push({ check: '[CORRECTNESS] CHECK 3 Agent status enum valid', status: 'PASS', evidence: `All ${rows.length} agents have valid status values. Distribution: ${JSON.stringify(dist)}` });
+          }
+        }
+      }
     }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 3 Status indicators visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 3 Agent status enum valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   // CHECK 4: Click first agent → detail panel or navigation
@@ -2218,25 +2235,39 @@ async function runFleetAgentsChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: '[LIVENESS] CHECK 4 Agent click → detail', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 5: Key fields — agent name, type/role, last-seen/heartbeat, status
+  // CHECK 5: Agent last_heartbeat timestamps are parseable ISO strings (Supabase correctness)
   try {
     await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
     await shot(page, `${sp}-5-fields`);
-    const pageText    = (await page.locator('body').textContent().catch(() => '')) ?? '';
-    const hasName     = /agent|name/i.test(pageText);
-    const hasHeartbeat = /heartbeat|last.seen|last.active|updated|ping/i.test(pageText);
-    const hasType     = /type|role|analyst|orchestrator|codex|dev|sales/i.test(pageText);
-    const found: string[] = [];
-    if (hasName)      found.push('agent/name');
-    if (hasType)      found.push('type/role');
-    if (hasHeartbeat) found.push('heartbeat/last-seen');
-    if (found.length >= 2) {
-      results.push({ check: '[LIVENESS] CHECK 5 Key fields present', status: 'PASS', evidence: `Fields detected: ${found.join(', ')}.` });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 5 Agent heartbeat timestamps parseable', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      results.push({ check: '[LIVENESS] CHECK 5 Key fields present', status: 'DEFERRED', evidence: `Only found: ${found.join(', ') || 'none'}.` });
+      const resp = await fetch(`${SUPA_URL}/rest/v1/orch_agents?select=role_id,last_heartbeat&order=updated_at.desc&limit=25`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 5 Agent heartbeat timestamps parseable', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ role_id: string; last_heartbeat: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 5 Agent heartbeat timestamps parseable', status: 'DEFERRED', evidence: 'No agents in orch_agents — nothing to assert' });
+        } else {
+          const withHeartbeat = rows.filter(r => r.last_heartbeat !== null);
+          const unparseable = withHeartbeat.filter(r => isNaN(new Date(r.last_heartbeat!).getTime()));
+          if (unparseable.length > 0) {
+            const sample = unparseable.slice(0, 5).map(r => `${r.role_id}:"${r.last_heartbeat}"`).join(', ');
+            results.push({ check: '[CORRECTNESS] CHECK 5 Agent heartbeat timestamps parseable', status: 'FAIL', evidence: `${unparseable.length}/${withHeartbeat.length} agents have unparseable last_heartbeat. Sample: ${sample}` });
+          } else {
+            const noHeartbeat = rows.length - withHeartbeat.length;
+            const sample = withHeartbeat[0];
+            const ageMin = sample ? Math.round((Date.now() - new Date(sample.last_heartbeat!).getTime()) / 60000) : null;
+            results.push({ check: '[CORRECTNESS] CHECK 5 Agent heartbeat timestamps parseable', status: 'PASS', evidence: `All ${withHeartbeat.length}/${rows.length} agents with heartbeats have valid timestamps. ${noHeartbeat > 0 ? `${noHeartbeat} with null heartbeat. ` : ''}Most recent: ${ageMin}m ago (${sample?.role_id})` });
+          }
+        }
+      }
     }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 5 Key fields present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 5 Agent heartbeat timestamps parseable', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   // CHECK 6: Timestamp freshness (P1) — fleet agents page must show at least one < 30 min timestamp
@@ -3477,7 +3508,7 @@ async function main() {
     } else if (targetPage === '/app/fleet/tasks') {
       results = await runWithTimeout(() => runFleetTasksChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/agents') {
-      results = await runWithTimeout(() => runFleetAgentsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runFleetAgentsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/social-content') {
       results = await runWithTimeout(() => runSocialContentChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/content-review') {
