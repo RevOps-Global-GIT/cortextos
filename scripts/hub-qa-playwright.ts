@@ -1032,7 +1032,7 @@ async function runTasksChecks(page: Page): Promise<CheckResult[]> {
 // ---------------------------------------------------------------------------
 // / (Dashboard) checks
 // ---------------------------------------------------------------------------
-async function runDashboardChecks(page: Page): Promise<CheckResult[]> {
+async function runDashboardChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'dashboard';
 
@@ -1052,13 +1052,41 @@ async function runDashboardChecks(page: Page): Promise<CheckResult[]> {
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECK 2: Metric cards visible (revenue, clients, deals, etc.)
+  // CHECK 2: Dashboard metric sources have non-null values (Supabase correctness)
+  // Verifies that invoice totals and deal names — the core dashboard metric sources — are
+  // non-null so that dashboard cards always have real data to pair with their labels.
   try {
-    const cards = await page.locator('[class*="card"], [class*="metric"], [class*="stat"], [class*="KPI"]').count();
     await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-cards.png`) });
-    results.push({ check: '[LIVENESS] CHECK 2 Metric cards visible', status: cards > 0 ? 'PASS' : 'DEFERRED', evidence: cards > 0 ? `${cards} metric/stat card(s) visible.` : 'No metric cards found.' });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 Dashboard metric sources valid', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
+    } else {
+      const [invResp, dealResp] = await Promise.all([
+        fetch(`${SUPA_URL}/rest/v1/invoices?select=id,total&order=created_at.desc&limit=10`, {
+          headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+        }),
+        fetch(`${SUPA_URL}/rest/v1/deals?select=id,name&order=created_at.desc&limit=10`, {
+          headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+        }),
+      ]);
+      if (!invResp.ok || !dealResp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Dashboard metric sources valid', status: 'FAIL', evidence: `Supabase query failed: invoices=${invResp.status} deals=${dealResp.status}` });
+      } else {
+        const invoices = await invResp.json() as Array<{ id: string; total: number | null }>;
+        const deals    = await dealResp.json() as Array<{ id: string; name: string | null }>;
+        const nullTotals = invoices.filter(r => r.total === null || r.total === undefined);
+        const nullNames  = deals.filter(r => !r.name || r.name.trim().length === 0);
+        const issues: string[] = [];
+        if (nullTotals.length > 0) issues.push(`${nullTotals.length}/${invoices.length} invoices have null total`);
+        if (nullNames.length > 0)  issues.push(`${nullNames.length}/${deals.length} deals have empty name`);
+        if (issues.length > 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 2 Dashboard metric sources valid', status: 'FAIL', evidence: issues.join('; ') });
+        } else {
+          results.push({ check: '[CORRECTNESS] CHECK 2 Dashboard metric sources valid', status: 'PASS', evidence: `Metric sources OK: ${invoices.length} invoices (all have total), ${deals.length} deals (all have name)` });
+        }
+      }
+    }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 2 Metric cards visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 2 Dashboard metric sources valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   // CHECK 3: Key numbers rendered (non-placeholder) — P2: assert at least one metric > 0
@@ -1794,7 +1822,7 @@ async function runPipelineChecks(page: Page): Promise<CheckResult[]> {
 // ---------------------------------------------------------------------------
 // /reports checks
 // ---------------------------------------------------------------------------
-async function runReportsChecks(page: Page): Promise<CheckResult[]> {
+async function runReportsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'reports';
 
@@ -1803,25 +1831,41 @@ async function runReportsChecks(page: Page): Promise<CheckResult[]> {
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECK 2: Report list or report content visible
+  // CHECK 2: Time-entry report data — hours and entry_date are valid (Supabase correctness)
+  // time_entries is the primary reports data source; null hours or unparseable dates would
+  // silently render blank cells in report charts/tables.
   try {
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    await page.locator('table tbody tr, [class*="report-row"], [class*="reportRow"], [class*="report-card"], [class*="reportCard"], [role="row"]:not([role="columnheader"]), [role="listitem"], canvas, svg[class*="chart"], [class*="chart"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(500);
     await shot(page, `${sp}-2-content`);
-    const rowCount    = await page.locator('table tbody tr, [class*="report-row"], [class*="reportRow"]').count();
-    const cardCount   = await page.locator('[class*="report-card"], [class*="reportCard"]').count();
-    const chartCount  = await page.locator('canvas, svg[class*="chart"], [class*="chart"], [class*="graph"]').count();
-    const listCount   = await page.locator('[role="row"]:not([role="columnheader"]), [role="listitem"]').count();
-    const total = rowCount + cardCount + chartCount + listCount;
-    if (total > 0) {
-      results.push({ check: '[LIVENESS] CHECK 2 Report content visible', status: 'PASS', evidence: `Content found: rows:${rowCount}, cards:${cardCount}, charts:${chartCount}, listitems:${listCount}.` });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 Time-entry report data valid', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const emptyText = await page.getByText(/no reports|empty|no data|no results/i).count();
-      results.push({ check: '[LIVENESS] CHECK 2 Report content visible', status: 'DEFERRED', evidence: emptyText > 0 ? 'Empty state shown — no report data.' : 'No recognizable report content found.' });
+      const resp = await fetch(`${SUPA_URL}/rest/v1/time_entries?select=id,hours,entry_date&order=created_at.desc&limit=25`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Time-entry report data valid', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ id: string; hours: number | null; entry_date: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 2 Time-entry report data valid', status: 'DEFERRED', evidence: 'No time entries — reports will show empty state (expected for new account)' });
+        } else {
+          const nullHours   = rows.filter(r => r.hours === null || r.hours === undefined || r.hours < 0);
+          const badDates    = rows.filter(r => r.entry_date && isNaN(new Date(r.entry_date).getTime()));
+          const issues: string[] = [];
+          if (nullHours.length > 0) issues.push(`${nullHours.length}/${rows.length} entries have null/negative hours`);
+          if (badDates.length > 0)  issues.push(`${badDates.length}/${rows.length} entries have unparseable entry_date`);
+          if (issues.length > 0) {
+            results.push({ check: '[CORRECTNESS] CHECK 2 Time-entry report data valid', status: 'FAIL', evidence: issues.join('; ') });
+          } else {
+            const totalHours = rows.reduce((sum, r) => sum + (r.hours ?? 0), 0);
+            results.push({ check: '[CORRECTNESS] CHECK 2 Time-entry report data valid', status: 'PASS', evidence: `All ${rows.length} recent time entries valid. Total hours in sample: ${totalHours.toFixed(1)}h. Date range: ${rows[rows.length - 1]?.entry_date} → ${rows[0]?.entry_date}` });
+          }
+        }
+      }
     }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 2 Report content visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 2 Time-entry report data valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   // CHECK 3: Navigation controls (tabs, filters, date range, report type selector)
@@ -3457,7 +3501,7 @@ async function main() {
     } else if (targetPage === '/tasks') {
       results = await runWithTimeout(() => runTasksChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/' || targetPage === '/dashboard') {
-      results = await runWithTimeout(() => runDashboardChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runDashboardChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/orchestrator') {
       results = await runWithTimeout(() => runOrchestratorChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/activity') {
@@ -3471,7 +3515,7 @@ async function main() {
     } else if (targetPage === '/projects') {
       results = await runWithTimeout(() => runProjectsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/reports') {
-      results = await runWithTimeout(() => runReportsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runReportsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/pipeline') {
       results = await runWithTimeout(() => runPipelineChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/tasks') {
