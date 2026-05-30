@@ -30,7 +30,9 @@
       "name": "nightly-metrics",
       "type": "recurring",
       "interval": "24h",
-      "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Review the output and report any anomalies via Telegram to the orchestrator."
+      "runner": "spawn-codex",
+      "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-nightly-metrics.md",
+      "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Then run Q6 budget tier flagger: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/budget-tier-flagger.py. Review both outputs. If anomalies (budget tier crossings or metric anomalies), report via: cortextos bus send-message orchestrator normal '<summary>'. For stale-heartbeat anomalies specifically: FILTER to running=true enabled=true agents only before reporting (disabled/non-running agents never heartbeat = expected silence, not a failure). Also exclude codex/codex-2/codex-3/orgo-1 (out of credits 5/28 / Orgo cancelled 5/28) and deleted_agents (tombstone bucket). If only those known-down lanes are stale, treat as zero anomaly. ALSO: if state/heartbeat-liveness-watch-note.md exists, include its content verbatim in the report to orch. Per orch directive 2026-05-30. If clean, do nothing."
     },
     {
       "name": "auto-commit",
