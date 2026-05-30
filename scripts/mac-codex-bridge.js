@@ -20,6 +20,8 @@
 'use strict';
 
 const { execFileSync, spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 
 const AGENT_NAME = process.env.CTX_AGENT_NAME || 'mac-codex';
 const POLL_INTERVAL_MS = 2_000;
@@ -117,6 +119,25 @@ async function probeDbThreadCount() {
 
 function log(msg) {
   process.stdout.write(`[${new Date().toISOString()}] [mac-codex-bridge] ${msg}\n`);
+}
+
+function writeMemoryEntry(from, threadId, durationMs, prompt) {
+  try {
+    const ctxRoot = process.env.CTX_ROOT;
+    const instanceId = process.env.CTX_INSTANCE_ID;
+    if (!ctxRoot || !instanceId) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const memDir = path.join(ctxRoot, 'orgs', process.env.CTX_ORG || 'revops-global',
+      'agents', AGENT_NAME, 'memory');
+    fs.mkdirSync(memDir, { recursive: true });
+    const memFile = path.join(memDir, `${today}.md`);
+    const hhmm = new Date().toISOString().slice(11, 16);
+    const preview = (prompt || '').slice(0, 120).replace(/\n/g, ' ');
+    const entry = `\n## ${hhmm} UTC — Dispatch to Codex.app\n` +
+      `Thread: ${threadId}, from: ${from}, duration: ${durationMs}ms\n` +
+      `Prompt: ${preview}${prompt && prompt.length > 120 ? '…' : ''}\n`;
+    fs.appendFileSync(memFile, entry, 'utf-8');
+  } catch { /* non-fatal — never crash bridge on memory write */ }
 }
 
 function bus(...args) {
@@ -266,6 +287,7 @@ async function processMessage(msg) {
     lastDispatch.from = from;
     lastDispatch.durationMs = durationMs;
     log(`Dispatched in ${(durationMs / 1000).toFixed(1)}s — thread ${tid}`);
+    writeMemoryEntry(from, tid, durationMs, text);
   } catch (e) {
     result = `mac-codex error: ${e.message.slice(0, 500)}`;
     log(`Error: ${result}`);
