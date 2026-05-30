@@ -3250,17 +3250,17 @@ async function runConfigBehaviorChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
-// /app/dream-log checks
+// /app/fleet/dreams checks
 // ---------------------------------------------------------------------------
-async function runDreamLogChecks(page: Page): Promise<CheckResult[]> {
+async function runFleetDreamsChecks(page: Page): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
-  const sp = 'dream-log';
+  const sp = 'fleet-dreams';
   const loadResult = await checkLoad(page, sp);
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
-  await new Promise<void>(r => setTimeout(r, 1500));
-  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Dream log entries visible',
-    '[class*="dream"],[class*="Dream"],[class*="log"],[class*="entry"],table tbody tr,[class*="card"]',
+  await new Promise<void>(r => setTimeout(r, 2000));
+  results.push(await checkDataOrEmpty(page, sp, 'CHECK 2 Dream log entries visible (>=1 card)',
+    '[class*="dream"],[class*="Dream"],[class*="prescription"],[class*="Prescription"],[class*="card"],[class*="grid"] > *,table tbody tr',
     /no dreams|no entries|no results|empty/i));
   return results;
 }
@@ -3510,14 +3510,14 @@ async function main() {
       results = await runWithTimeout(() => runCapabilitiesChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/config-behavior') {
       results = await runWithTimeout(() => runConfigBehaviorChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
-    } else if (targetPage === '/app/dream-log') {
-      results = await runWithTimeout(() => runDreamLogChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/app/fleet/dreams' || targetPage === '/app/dream-log') {
+      results = await runWithTimeout(() => runFleetDreamsChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/memory') {
       results = await runWithTimeout(() => runMemoryChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: 'CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/dream-log, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
