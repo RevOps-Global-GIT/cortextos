@@ -248,19 +248,24 @@ export class AgentPTY {
       args.push('--continue');
     }
 
-    args.push('--dangerously-skip-permissions');
-
-    const model = resolveModel(this.config);
-    if (model) {
-      args.push('--model', model);
-    }
-
+    // --mcp-config is variadic (Claude CLI: `--mcp-config <configs...>`): it
+    // greedily consumes every following arg until the next flag. It must NEVER be
+    // the last flag before the positional prompt, or the prompt is swallowed as an
+    // extra config path -> ENAMETOOLONG -> agent boot crash loop. Emit it first so
+    // the always-present --dangerously-skip-permissions flag terminates the variadic.
     if (this.config.strict_mcp) {
       args.push('--strict-mcp-config');
       const mcpPath = this.writeMergedMcpConfig();
       if (mcpPath) {
         args.push('--mcp-config', mcpPath);
       }
+    }
+
+    args.push('--dangerously-skip-permissions');
+
+    const model = resolveModel(this.config);
+    if (model) {
+      args.push('--model', model);
     }
 
     // Local override pattern (feat #20): concatenate {agentDir}/local/*.md files
