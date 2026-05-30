@@ -277,12 +277,49 @@ function getRunningAgents() {
 }
 
 /**
- * Returns true if a cron prompt uses spawn-codex / spawn-worker patterns —
- * these crons depend on an external auth token and stale last-fire may reflect
+ * Returns true if a cron uses spawn-codex / spawn-worker patterns —
+ * checks metadata.runner first (authoritative), then falls back to prompt text.
+ * These crons depend on an external auth token; stale last-fire may reflect
  * a blocked worker rather than a dead cron.
  */
-function isSpawnWorkerCron(prompt) {
+function isSpawnWorkerCron(prompt, metadata) {
+  const runner = metadata?.runner;
+  if (runner === 'spawn-worker' || runner === 'spawn-codex') return true;
   return /spawn[-_]?codex|spawn[-_]?worker|computer[-_]?use/i.test(prompt || '');
+}
+
+/**
+ * Classify why a blocked-by-worker cron is stale by reading recent sidecar
+ * files from the agent's output dir. Returns 'token_invalidated' (401),
+ * 'resource_exhausted' (429), or 'unknown'.
+ */
+function classifyWorkerBlock(agent) {
+  const outputDir = path.join(AGENTS_DIR, agent, 'output');
+  try {
+    const sidecars = fs.readdirSync(outputDir)
+      .filter(f => f.endsWith('.json'))
+      .map(f => {
+        try { return { f, mtime: fs.statSync(path.join(outputDir, f)).mtimeMs }; }
+        catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 10);
+
+    for (const { f } of sidecars) {
+      try {
+        const sidecar = JSON.parse(fs.readFileSync(path.join(outputDir, f), 'utf8'));
+        const stderr  = (sidecar.stderr_excerpt || sidecar.stderr || '');
+        if (/401|unauthorized|token.*invalid|invalid.*token|authentication.*failed/i.test(stderr)) {
+          return 'token_invalidated';
+        }
+        if (/429|rate.*limit|resource.*exhaust|quota.*exceed/i.test(stderr)) {
+          return 'resource_exhausted';
+        }
+      } catch { /* skip unreadable sidecar */ }
+    }
+  } catch { /* output dir absent */ }
+  return 'unknown';
 }
 
 function scanZombieCrons() {
@@ -410,19 +447,19 @@ function scanZombieCrons() {
         // Rule 3: spawn-codex / spawn-worker crons — stale last-fire may reflect
         // a blocked worker (e.g. auth token invalid) rather than a dead cron.
         // Flag separately so ops can verify the worker auth rather than the cron itself.
-        const spawnWorker = isSpawnWorkerCron(prompt);
-        const status = spawnWorker
-          ? 'blocked-by-worker'
-          : (hasRecentSuccess ? 'fired-but-check-success' : 'zombie');
+        const spawnWorker = isSpawnWorkerCron(prompt, cron.metadata);
+        let status, reason;
+        if (spawnWorker) {
+          const blockClass = classifyWorkerBlock(agent);
+          status = `blocked-by-worker:${blockClass}`;
+          reason = `spawn-worker stale — ${blockClass === 'token_invalidated' ? 'token invalidated (401)' : blockClass === 'resource_exhausted' ? 'quota exhausted (429)' : 'verify worker auth'} (age=${Math.round(ageMs/60000)}m)`;
+        } else {
+          status = hasRecentSuccess ? 'fired-but-check-success' : 'zombie';
+          reason = `age=${Math.round(ageMs/60000)}m > 2x interval=${Math.round(intervalMs/60000)}m`;
+        }
         zombies.push({
-          agent, name,
-          reason: spawnWorker
-            ? `spawn-worker stale — verify worker auth (age=${Math.round(ageMs/60000)}m)`
-            : `age=${Math.round(ageMs/60000)}m > 2x interval=${Math.round(intervalMs/60000)}m`,
-          lastFire: lastFireStr,
-          schedule: live.schedule,
-          hasRecentSuccess,
-          status,
+          agent, name, reason, lastFire: lastFireStr,
+          schedule: live.schedule, hasRecentSuccess, status,
         });
       } else {
         healthy.push({ agent, name, lastFire: lastFireStr, ratio: Math.round(ratio * 10) / 10 });
@@ -455,7 +492,7 @@ function runRepeatRegressionEscalator(webResult, cronResult) {
     todayFlags.push({ key: `route:${route}`, type: 'blind-spot', date: TODAY, surface: `${route} (${repo.split('/')[1]})` });
   }
   // Only true zombies count for escalation — not disabled, stopped-agent, or worker-blocked
-  for (const z of cronResult.zombies.filter(z => z.status !== 'blocked-by-worker')) {
+  for (const z of cronResult.zombies.filter(z => !z.status.startsWith('blocked-by-worker'))) {
     todayFlags.push({ key: `cron:${z.agent}/${z.name}`, type: 'zombie', date: TODAY, surface: `${z.agent}/${z.name}` });
   }
 
@@ -530,8 +567,8 @@ function buildReport(webResult, cronResult, escalations) {
   // ── Category B ──
   lines.push('## Category B: Automation Zombies');
   lines.push('');
-  const trueZombies = cronResult.zombies.filter(z => z.status !== 'blocked-by-worker');
-  const workerBlocked = cronResult.zombies.filter(z => z.status === 'blocked-by-worker');
+  const trueZombies = cronResult.zombies.filter(z => !z.status.startsWith('blocked-by-worker'));
+  const workerBlocked = cronResult.zombies.filter(z => z.status.startsWith('blocked-by-worker'));
   lines.push(`**Healthy:** ${cronResult.healthy.length}  **Zombies:** ${trueZombies.length}  **Worker-blocked:** ${workerBlocked.length}  **No data:** ${cronResult.noData.length}  **Disabled:** ${cronResult.disabledCrons.length}  **Agent stopped:** ${cronResult.stoppedAgentCrons.length}`);
   lines.push('');
 
@@ -555,10 +592,11 @@ function buildReport(webResult, cronResult, escalations) {
     lines.push('');
     lines.push('> These crons use spawn-codex / spawn-worker. Stale last-fire may reflect a blocked worker token rather than a dead cron. Verify worker auth before treating as a zombie.');
     lines.push('');
-    lines.push('| Agent | Cron | Last Fire |');
-    lines.push('|-------|------|-----------|');
+    lines.push('| Agent | Cron | Block Class | Last Fire |');
+    lines.push('|-------|------|-------------|-----------|');
     for (const z of workerBlocked) {
-      lines.push(`| ${z.agent} | ${z.name} | ${z.lastFire || '-'} |`);
+      const blockClass = z.status.includes(':') ? z.status.split(':')[1] : 'unknown';
+      lines.push(`| ${z.agent} | ${z.name} | ${blockClass} | ${z.lastFire || '-'} |`);
     }
     lines.push('');
   }
@@ -607,7 +645,8 @@ function buildReport(webResult, cronResult, escalations) {
   }
 
   // Summary
-  const trueZombieCount = cronResult.zombies.filter(z => z.status !== 'blocked-by-worker').length;
+  const trueZombieCount = cronResult.zombies.filter(z => !z.status.startsWith('blocked-by-worker')).length;
+  const workerBlockedCount = cronResult.zombies.filter(z => z.status.startsWith('blocked-by-worker')).length;
   const issueCount = webResult.blindSpots.length + trueZombieCount;
   lines.push('## Summary');
   lines.push('');
@@ -615,10 +654,10 @@ function buildReport(webResult, cronResult, escalations) {
     lines.push('No issues found. All surfaces covered, all crons healthy.');
   } else {
     const parts = [];
-    if (webResult.blindSpots.length > 0)        parts.push(`${webResult.blindSpots.length} uncovered route(s)`);
-    if (trueZombieCount > 0)                    parts.push(`${trueZombieCount} zombie cron(s)`);
-    if (cronResult.zombies.filter(z => z.status === 'blocked-by-worker').length > 0)
-      parts.push(`${cronResult.zombies.filter(z => z.status === 'blocked-by-worker').length} worker-blocked cron(s) (auth check needed)`);
+    if (webResult.blindSpots.length > 0)  parts.push(`${webResult.blindSpots.length} uncovered route(s)`);
+    if (trueZombieCount > 0)              parts.push(`${trueZombieCount} zombie cron(s)`);
+    if (workerBlockedCount > 0)
+      parts.push(`${workerBlockedCount} worker-blocked cron(s) (auth check needed)`);
     if (escalations.length > 0)                 parts.push(`${escalations.length} repeat-regression MERGE-BLOCKER(s)`);
     lines.push(`**${parts.join(', ')}.**`);
   }
