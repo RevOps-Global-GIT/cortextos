@@ -2555,7 +2555,7 @@ async function runWikiChecks(page: Page): Promise<CheckResult[]> {
 // Validates PR#688 fix: ThetaSession FE field reads (challenger_notes,
 // synthesis_summary, consolidated_memories_count) + status 'complete' render.
 // ---------------------------------------------------------------------------
-async function runCortexThetaChecks(page: Page): Promise<CheckResult[]> {
+async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'cortex-theta';
 
@@ -2646,13 +2646,38 @@ async function runCortexThetaChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: '[CORRECTNESS] CHECK 4 PR#688 fields render', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 5: Page has substantial content (not blank/empty render)
+  // CHECK 5: Latest orch_experiments row has no parse_error and recommendation !== 'malformed'
   try {
-    const bodyLen = (await page.locator('main, [class*="content"], body').first().innerText().catch(() => '')).trim().length;
     await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-5-full.png`), fullPage: true });
-    results.push({ check: '[LIVENESS] CHECK 5 Page content not blank', status: bodyLen > 150 ? 'PASS' : 'DEFERRED', evidence: `Body text length: ${bodyLen} chars. ${bodyLen > 150 ? 'Substantial content present.' : 'Page appears sparse — may be no theta sessions yet.'}` });
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase directly; skipping DB correctness check' });
+    } else {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/orch_experiments?select=recommendation,results_json&order=created_at.desc&limit=1`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ recommendation: string; results_json: unknown }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'DEFERRED', evidence: 'No orch_experiments rows yet — theta pipeline has not run' });
+        } else {
+          const row = rows[0];
+          const rj = row.results_json as Record<string, unknown> | null;
+          const hasParseError = rj && typeof rj === 'object' && 'parse_error' in rj;
+          const isMalformed = row.recommendation === 'malformed';
+          if (hasParseError) {
+            results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Latest row has parse_error in results_json: ${JSON.stringify(rj?.['parse_error'])?.slice(0, 200)}` });
+          } else if (isMalformed) {
+            results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Latest row recommendation is 'malformed' — theta output could not be parsed` });
+          } else {
+            results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'PASS', evidence: `Latest orch_experiments row OK: recommendation="${row.recommendation}", no parse_error` });
+          }
+        }
+      }
+    }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 5 Page content not blank', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   return results;
@@ -3485,7 +3510,7 @@ async function main() {
     } else if (targetPage === '/app/wiki') {
       results = await runWithTimeout(() => runWikiChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/cortex/theta' || targetPage === 'cortex-theta') {
-      results = await runWithTimeout(() => runCortexThetaChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runCortexThetaChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/presence' || targetPage === 'linkedin-presence') {
       results = await runWithTimeout(() => runLinkedInPresenceChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/signals' || targetPage === '/signals') {
