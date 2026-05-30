@@ -442,7 +442,6 @@ export class AgentProcess implements ManagedAgent {
     const forceFreshExists = existsSync(join(this.env.ctxRoot, 'state', this.name, '.force-fresh'));
     const rotationType = forceFreshExists ? 'context-handoff' : 'soft';
     this.writeRotationEvent(rotationType, 'session timer reached limit').catch(() => {});
-
     await this.stop();
     await this.start();
     this.updateRotationResumeSuccess().catch(() => {});
