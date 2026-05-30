@@ -409,8 +409,8 @@ export class CronScheduler {
       // We intentionally use only last_fired_at, not last_fire_attempted_at:
       // attempted_at is updated on every failed dispatch and would be recent
       // during an ongoing outage, masking the overdue status.
-      if (sc.nextFireAt > now && sc.definition.last_fired_at) {
-        const def = sc.definition;
+      const def = sc.definition;
+      if (sc.nextFireAt > now && def.last_fired_at) {
         const lastFiredMs = new Date(def.last_fired_at).getTime();
         const expectedNext = computeNextFireAt(def, lastFiredMs, this.timezone);
         if (!isNaN(expectedNext) && expectedNext <= now) {
