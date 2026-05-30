@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from html.parser import HTMLParser
@@ -61,6 +62,107 @@ SNAPSHOT_DIR_BASE = os.path.join(
 MAX_PAGE_CHARS = 4000   # truncate fetched text per page
 REQUEST_TIMEOUT = 12
 SLEEP_BETWEEN_FETCHES = 1.5
+
+
+# ─── Acquisition history ──────────────────────────────────────────────────────
+#
+# Two complementary checks run during each scan:
+#
+#   1. Live redirect check (_fetch_raw + _RedirectResult) — detects domains
+#      that 301/302 to a different brand's hostname (e.g. carabinergroup.com
+#      → sbigrowth.com).  Suppresses content diff on the destination site.
+#
+#   2. Known-acquisitions lookup (check_acquisition_history) — cross-references
+#      entities that were acquired but still serve their own site.  Downgrades
+#      apparent "launch" signals to parent-co PR activity for entities acquired
+#      within ACQUISITION_LOOKBACK_DAYS.
+#
+# How to add entries: edit KNOWN_ACQUISITIONS_FILE (JSON array, see schema
+# below) or hard-code entries in KNOWN_ACQUISITIONS_FALLBACK.
+#
+# Schema per entry:
+#   {
+#     "entity":       "Carabiner Group",          # monitored competitor name (exact match)
+#     "acquired_by":  "SBI Growth Advisory",
+#     "acquired_on":  "2024-05-28",               # ISO date
+#     "source":       "https://..."               # optional attribution URL
+#   }
+#
+# TODO: replace/supplement with a Crunchbase API lookup when
+#       CRUNCHBASE_API_KEY is available in the environment.
+#       Pattern: GET https://api.crunchbase.com/api/v4/entities/organizations/{slug}
+#                ?user_key={key}&field_ids=acquired_by,short_description
+#       Map response.properties.acquired_by.value → acquired_by string and
+#       response.properties.ipo_status == "was_acquired" → flag.
+
+KNOWN_ACQUISITIONS_FILE = os.path.join(
+    os.environ.get("CTX_FRAMEWORK_ROOT", os.path.expanduser("~/cortextos")),
+    "orgs", os.environ.get("CTX_ORG", "revops-global"),
+    "agents", "analyst", "data", "known-acquisitions.json"
+)
+
+KNOWN_ACQUISITIONS_FALLBACK: list[dict] = [
+    {
+        "entity": "Carabiner Group",
+        "acquired_by": "SBI Growth Advisory",
+        "acquired_on": "2024-05-28",
+        "source": "https://www.privsource.com/acquisitions/deal/sbi-acquires-revops-as-a-service-provider-carabiner-group-bWSnLZ",
+    },
+]
+
+# Any entity acquired within this many days is considered "recently acquired"
+# and will have its launch signals downgraded.
+ACQUISITION_LOOKBACK_DAYS = 730  # ~2 years
+
+
+def _load_known_acquisitions() -> list[dict]:
+    """Load the acquisitions list from file (if present) else fall back to hardcoded list."""
+    entries = list(KNOWN_ACQUISITIONS_FALLBACK)
+    if os.path.exists(KNOWN_ACQUISITIONS_FILE):
+        try:
+            with open(KNOWN_ACQUISITIONS_FILE) as f:
+                file_entries = json.load(f)
+            if isinstance(file_entries, list):
+                entries = file_entries + entries
+        except Exception as e:
+            print(f"  [acquisition-check] failed to load {KNOWN_ACQUISITIONS_FILE}: {e}",
+                  file=sys.stderr)
+    return entries
+
+
+def check_acquisition_history(entity_name: str) -> dict | None:
+    """Return acquisition metadata if this entity was acquired within the lookback window.
+
+    Returns a dict with keys: entity, acquired_by, acquired_on, source, days_since_acquisition
+    or None if not found / outside the lookback window.
+
+    TODO: When CRUNCHBASE_API_KEY is set, supplement the static list with a live
+    Crunchbase lookup before falling back to KNOWN_ACQUISITIONS_FALLBACK.
+    Pattern:
+        key = os.environ.get("CRUNCHBASE_API_KEY")
+        if key:
+            slug = entity_name.lower().replace(" ", "-")
+            url = f"https://api.crunchbase.com/api/v4/entities/organizations/{slug}?user_key={key}&field_ids=acquired_by,ipo_status"
+            # parse response.properties.acquired_by.value for acquiring company
+    """
+    acquisitions = _load_known_acquisitions()
+    today = datetime.now(timezone.utc).date()
+
+    for entry in acquisitions:
+        if entry.get("entity", "").lower() != entity_name.lower():
+            continue
+        acquired_on_str = entry.get("acquired_on", "")
+        try:
+            acquired_date = datetime.strptime(acquired_on_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        days_since = (today - acquired_date).days
+        if days_since <= ACQUISITION_LOOKBACK_DAYS:
+            return {
+                **entry,
+                "days_since_acquisition": days_since,
+            }
+    return None
 
 
 # ─── HTML → text ──────────────────────────────────────────────────────────────
@@ -106,12 +208,8 @@ def html_to_text(html: str) -> str:
 
 # ─── HTTP ─────────────────────────────────────────────────────────────────────
 
-import urllib.parse
-
-
 class _RedirectResult:
-    """Returned by fetch_url_with_redirect_info when the root page redirects
-    to a different brand domain (different registered hostname)."""
+    """Returned by _fetch_raw when the root page redirects to a different brand domain."""
 
     def __init__(self, original_url: str, final_url: str, html: str | None):
         self.original_url = original_url
@@ -458,17 +556,35 @@ def scan_company(company: dict, today: str) -> dict:
 
     # Diff against last snapshot
     last = find_last_snapshot(slug, today)
+    raw_changes = diff_snapshots(last, snapshot) if last else ["(first scan — no diff)"]
 
-    # If the domain is redirecting cross-brand, suppress the content diff —
-    # the diff is noise from the acquiring company's site, not the monitored
-    # competitor's own activity.
+    # ── Signal classification ─────────────────────────────────────────────────
+    # Priority: live redirect > known acquisition history > plain content diff
+    acquisition_info: dict | None = None
     if acquisition_redirect:
+        # Cross-domain redirect — suppress content diff, surface as low-urgency signal
         changes = [
             f"[acquisition_redirect] {domain} → {acquisition_redirect['redirect_destination']} "
             "(301/302 cross-domain redirect — classify as acquisition artifact, not launch)"
         ]
     else:
-        changes = diff_snapshots(last, snapshot) if last else ["(first scan — no diff)"]
+        # Check known-acquisitions list for entities still serving their own site
+        acquisition_info = check_acquisition_history(name)
+        if acquisition_info and raw_changes and raw_changes != ["(first scan — no diff)"]:
+            acq_note = (
+                f"[acquisition-downgrade] {name} was acquired by "
+                f"{acquisition_info['acquired_by']} on {acquisition_info['acquired_on']} "
+                f"({acquisition_info['days_since_acquisition']}d ago) — "
+                "page changes likely reflect parent-co activity, not a new competitor launch"
+            )
+            changes = [acq_note] + [f"  (raw diff suppressed) {c}" for c in raw_changes]
+            print(
+                f"  [acquisition-downgrade] {name}: acquired {acquisition_info['acquired_on']}; "
+                "suppressing launch classification",
+                file=sys.stderr,
+            )
+        else:
+            changes = raw_changes
 
     # Extract hiring roles from careers page text
     careers_text = pages.get("_careers", "")
@@ -481,6 +597,7 @@ def scan_company(company: dict, today: str) -> dict:
         "careers_active": bool(careers_text.strip()),
         "hiring_roles": hiring_roles,
         "acquisition_redirect": acquisition_redirect,
+        "acquisition_info": acquisition_info,
     }
 
 
@@ -492,18 +609,27 @@ def format_digest(competitor_results: list[dict], vendor_results: list[dict], to
     lines.append("*COMPETITORS*")
     for r in competitor_results:
         acq_redirect = r.get("acquisition_redirect")
+        acq_info = r.get("acquisition_info")
         hiring_roles = r.get("hiring_roles", [])
         hiring = " 🔥 *hiring*" if r["careers_active"] else ""
         lines.append(f"\n*{r['name']}*{hiring}")
         if hiring_roles:
             lines.append(f"  Roles: {', '.join(hiring_roles[:5])}")
         if acq_redirect:
-            # Surface as a low-urgency acquisition artifact, not a launch
+            # Live cross-domain redirect — low-urgency acquisition artifact
             lines.append(
                 f"  Signal: [acquisition_redirect] {acq_redirect['original_domain']} "
                 f"→ {acq_redirect['redirect_destination']} (low urgency — "
                 "301/302 cross-domain, likely acquisition artifact)"
             )
+        elif acq_info:
+            # Known acquisition — signals downgraded
+            lines.append(
+                f"  Acquired by {acq_info['acquired_by']} ({acq_info['acquired_on']}, "
+                f"{acq_info['days_since_acquisition']}d ago) — signals downgraded"
+            )
+            changes_str = "; ".join(r["changes"]) if r["changes"] else "no changes detected"
+            lines.append(f"  Changes: {changes_str}")
         else:
             changes_str = "; ".join(r["changes"]) if r["changes"] else "no changes detected"
             lines.append(f"  Changes: {changes_str}")
