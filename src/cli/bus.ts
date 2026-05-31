@@ -57,6 +57,7 @@ import { registerCronCommands } from './bus-cmds-crons.js';
 import { registerBatchCommands } from './bus-cmds-batch.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
+import { recordSpan } from '../utils/observe.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv, applySecretsToEnv, validateEnvContent } from '../utils/env.js';
 import { verifySessionOwnership, SessionOwnershipError } from '../utils/session-lock.js';
@@ -488,6 +489,7 @@ busCommand
     try {
       logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null, trace_id: opts.traceId ?? null, mode: agentExists ? null : mode }));
     } catch { /* non-fatal */ }
+    recordSpan('bus.send_message', { taskId: opts.traceId, attributes: { to, priority, msg_id: msgId } });
 
     // -----------------------------------------------------------------------
     // Telegram mirror — when replying to the user, also deliver on Telegram
@@ -755,6 +757,7 @@ busCommand
       ...(opts.loopCron && opts.loopPrompt ? { linkedLoop: { cron: opts.loopCron, prompt: opts.loopPrompt } } : {}),
     });
     console.log(taskId);
+    recordSpan('bus.create_task', { taskId, attributes: { title, priority: opts.priority, assignee: primaryAssignee ?? '' } });
     // Auto-notify assignee(s) so the task is visible immediately (issue #78).
     // For multi-assignee tasks, all agents beyond the caller receive a notification.
     const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';

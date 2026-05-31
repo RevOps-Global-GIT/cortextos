@@ -105,3 +105,32 @@ export function observe<Args extends unknown[], R>(
   return (...args: Args): Promise<R> =>
     withSpan(spanName, () => fn(...args), opts);
 }
+
+/**
+ * Fire-and-forget span insert for synchronous operations where wrapping is
+ * impractical. The span records the moment the operation completed; duration_ms
+ * is 0. Non-fatal — never throws.
+ */
+export function recordSpan(name: string, opts: SpanOptions = {}): void {
+  const now = new Date();
+  const row = {
+    trace_id: generateId(16),
+    span_id: generateId(8),
+    parent_span_id: null,
+    agent: opts.agent ?? process.env.CTX_AGENT_NAME ?? 'unknown',
+    task_id: opts.taskId ?? null,
+    name: opts.name ?? name,
+    kind: opts.kind ?? 'INTERNAL',
+    started_at: now.toISOString(),
+    ended_at: now.toISOString(),
+    duration_ms: 0,
+    attributes: opts.attributes ?? {},
+    status: 'OK',
+  };
+
+  try {
+    appendFileSync(join(spansDir(), 'orch-spans.ndjson'), JSON.stringify(row) + '\n', 'utf-8');
+  } catch { /* non-fatal */ }
+
+  postSpan(row).catch(() => { /* non-fatal */ });
+}
