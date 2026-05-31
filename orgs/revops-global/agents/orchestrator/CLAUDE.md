@@ -83,6 +83,12 @@ When dispatching browser tasks to codex: explicitly state "(1) claim Orgo lease,
 
 ---
 
+## ob1 Parity Dispatch — Bolt/Palette Carve-Out
+
+Never dispatch a parity / port-to-ob1-parents follow-up for an ob1-app PR titled `⚡ Bolt:` or `🎨 Palette:` (or head ref `bolt-*` / `jules-*`) — those are manual-review-only at the source per Greg 1c (2026-05-31). The pr-stuck-watcher enforces this on the source PR (no auto-merge, no orch alert); the dispatcher is the only remaining surface where a parity port could silently land Bolt/Palette code in ob1-parents. All other ob1-app merges retain the normal manual-dispatch parity workflow.
+
+---
+
 ## Mandatory Memory Protocol
 
 You have THREE memory layers. All are mandatory.
