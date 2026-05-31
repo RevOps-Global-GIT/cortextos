@@ -139,4 +139,116 @@ describe('pr-stuck-watcher', () => {
     });
     expect(result.alertPrs.map(pr => pr.number)).toEqual([21]);
   });
+
+  it('treats Palette/Bolt ob1-app PRs as manual-review-only', () => {
+    vi.mocked(execFileSync).mockReturnValue(JSON.stringify([
+      {
+        number: 342,
+        title: '⚡ Bolt: Use cached Intl.DateTimeFormat for faster date rendering',
+        url: 'https://github.com/RevOps-Global-GIT/ob1-app/pull/342',
+        createdAt: '2026-05-01T00:00:00Z',
+        updatedAt: '2026-05-01T00:00:00Z',
+        headRefName: 'bolt-cached-datetime-formatter-4368978276833109193',
+        author: { login: 'revopsglobal' },
+        reviewDecision: null,
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        labels: [],
+        reviews: [],
+        isDraft: false,
+      },
+      {
+        number: 343,
+        title: '🎨 Palette: Improve Vendor Form Accessibility & UX',
+        url: 'https://github.com/RevOps-Global-GIT/ob1-app/pull/343',
+        createdAt: '2026-05-01T00:00:00Z',
+        updatedAt: '2026-05-01T00:00:00Z',
+        headRefName: 'jules-3860853350944772031-17d4f227',
+        author: { login: 'revopsglobal' },
+        reviewDecision: null,
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        labels: [],
+        reviews: [],
+        isDraft: false,
+      },
+      {
+        number: 999,
+        title: 'Regular ob1-app PR from a contributor',
+        url: 'https://github.com/RevOps-Global-GIT/ob1-app/pull/999',
+        createdAt: '2026-05-01T00:00:00Z',
+        updatedAt: '2026-05-01T00:00:00Z',
+        headRefName: 'feat/contributor-fix',
+        author: { login: 'dev' },
+        reviewDecision: null,
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        labels: [],
+        reviews: [],
+        isDraft: false,
+      },
+    ]));
+
+    const outputDir = join(root, 'output');
+    const result = runPrStuckWatcher(makePaths(root), 'analyst', 'revops-global', {
+      repos: ['RevOps-Global-GIT/ob1-app'],
+      stuckHours: 1,
+      alertHours: 1,
+      outputDir,
+    });
+
+    const bolt = result.stuckPrs.find(pr => pr.number === 342);
+    const palette = result.stuckPrs.find(pr => pr.number === 343);
+    const regular = result.stuckPrs.find(pr => pr.number === 999);
+
+    expect(bolt).toMatchObject({
+      isManualReviewOnly: true,
+      autoMergeEligible: false,
+      alertSuppressedReason: 'manual review only',
+    });
+    expect(palette).toMatchObject({
+      isManualReviewOnly: true,
+      autoMergeEligible: false,
+      alertSuppressedReason: 'manual review only',
+    });
+    expect(regular).toMatchObject({
+      isManualReviewOnly: false,
+      autoMergeEligible: true,
+      alertSuppressedReason: null,
+    });
+
+    expect(result.alertPrs.map(pr => pr.number)).toEqual([999]);
+  });
+
+  it('does not treat bolt-prefixed PRs in other repos as manual-review-only', () => {
+    vi.mocked(execFileSync).mockReturnValue(JSON.stringify([
+      {
+        number: 50,
+        title: '⚡ Bolt: not actually on ob1-app',
+        url: 'https://github.com/RevOps-Global-GIT/cortextos/pull/50',
+        createdAt: '2026-05-01T00:00:00Z',
+        updatedAt: '2026-05-01T00:00:00Z',
+        headRefName: 'bolt-foo',
+        author: { login: 'dev' },
+        reviewDecision: null,
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        labels: [],
+        reviews: [],
+        isDraft: false,
+      },
+    ]));
+
+    const result = runPrStuckWatcher(makePaths(root), 'analyst', 'revops-global', {
+      repos: ['RevOps-Global-GIT/cortextos'],
+      stuckHours: 1,
+      alertHours: 1,
+    });
+
+    expect(result.stuckPrs[0]).toMatchObject({
+      isManualReviewOnly: false,
+      autoMergeEligible: true,
+    });
+    expect(result.alertPrs.map(pr => pr.number)).toEqual([50]);
+  });
 });
