@@ -265,14 +265,35 @@ async function scanWebSurfaces() {
 // Category B: Zombie Cron Detection
 // ---------------------------------------------------------------------------
 
-/** Returns a Set of agent names currently running (from `cortextos status`). */
+/**
+ * Returns a Set of agent names currently running.
+ * Uses `cortextos bus list-agents` for primary state; cross-checks
+ * heartbeat_age_minutes so agents mid --continue restart (running=false
+ * but heartbeat fresh within 30min) are not falsely bucketed as stopped.
+ */
 function getRunningAgents() {
-  const raw = run('cortextos status 2>/dev/null', { silent: true });
+  // Primary: cortextos status (fast, local)
+  const statusRaw = run('cortextos status 2>/dev/null', { silent: true });
   const running = new Set();
-  for (const line of raw.split('\n')) {
+  for (const line of statusRaw.split('\n')) {
     const m = line.match(/^\s+(\S+)\s+running\b/);
     if (m) running.add(m[1]);
   }
+
+  // Restart-window tolerance: list-agents gives heartbeat_age_minutes.
+  // If an agent is NOT in the running set but its last heartbeat is <30min
+  // old, it is likely mid --continue restart — treat as running to avoid
+  // false stopped-agent bucket.
+  try {
+    const agentsRaw = run('cortextos bus list-agents 2>/dev/null', { silent: true });
+    const agents = JSON.parse(agentsRaw);
+    for (const a of agents) {
+      if (!running.has(a.name) && typeof a.heartbeat_age_minutes === 'number' && a.heartbeat_age_minutes < 30) {
+        running.add(a.name);
+      }
+    }
+  } catch { /* list-agents unavailable or non-JSON — fall back to status only */ }
+
   return running;
 }
 
@@ -479,6 +500,38 @@ function loadHistory() {
   catch { return { flags: [] }; }
 }
 
+/**
+ * RCA cross-reference: returns the path of the most recent output artifact
+ * (across all agents) that references `surfaceKey` and was written after
+ * `firstFlaggedDate`. Treats this as evidence a root-cause analysis was
+ * completed and the surface is being validated, not actively broken.
+ */
+function findRcaArtifact(surfaceKey, firstFlaggedDate) {
+  const cutoffMs = new Date(firstFlaggedDate + 'T00:00:00Z').getTime();
+  // Surface key is "cron:agent/name" or "route:/path" — extract the bare token
+  const searchTerm = surfaceKey.replace(/^(?:cron:|route:)/, '');
+  const rcaPattern = /\brca\b|root.?cause|rca.?task|rca.?on.?file|fixed|resolved/i;
+
+  try {
+    const agentsDir = path.join(REPO_ROOT, 'orgs/revops-global/agents');
+    for (const agent of fs.readdirSync(agentsDir)) {
+      const outDir = path.join(agentsDir, agent, 'output');
+      let files;
+      try { files = fs.readdirSync(outDir); } catch { continue; }
+      for (const f of files) {
+        if (!f.endsWith('.md') && !f.endsWith('.json') && !f.endsWith('.txt')) continue;
+        const fPath = path.join(outDir, f);
+        try {
+          if (fs.statSync(fPath).mtimeMs < cutoffMs) continue;
+          const content = fs.readFileSync(fPath, 'utf8');
+          if (content.includes(searchTerm) && rcaPattern.test(content)) return fPath;
+        } catch { /* skip unreadable */ }
+      }
+    }
+  } catch { /* agents dir absent */ }
+  return null;
+}
+
 function runRepeatRegressionEscalator(webResult, cronResult) {
   const history = loadHistory();
   const cutoff  = Date.now() - ESCALATION_WINDOW_MS;
@@ -507,24 +560,42 @@ function runRepeatRegressionEscalator(webResult, cronResult) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2), 'utf8');
 
-  // Find surfaces at or above threshold
+  // Find surfaces at or above threshold — MUST also appear in today's scan.
+  // Resolved surfaces (fixed since last flag) drop out immediately even if
+  // they have a historical pattern; this prevents escalating already-closed issues.
+  const todayFlagKeys = new Set(todayFlags.map(f => f.key));
+
   const byKey = {};
   for (const f of history.flags) {
-    if (!byKey[f.key]) byKey[f.key] = { count: 0, surface: f.surface, type: f.type, dates: [] };
+    if (!byKey[f.key]) byKey[f.key] = { count: 0, surface: f.surface, type: f.type, dates: [], firstDate: f.date };
     byKey[f.key].count++;
     byKey[f.key].dates.push(f.date);
+    if (f.date < byKey[f.key].firstDate) byKey[f.key].firstDate = f.date;
   }
 
-  return Object.entries(byKey)
-    .filter(([, v]) => v.count >= ESCALATION_THRESHOLD)
-    .map(([key, v]) => ({ key, ...v }))
-    .sort((a, b) => b.count - a.count);
+  const escalations = [];
+  const rcaOnFile   = [];
+
+  for (const [key, v] of Object.entries(byKey)) {
+    if (v.count < ESCALATION_THRESHOLD || !todayFlagKeys.has(key)) continue;
+
+    // RCA cross-reference: if a completed output artifact references this surface
+    // and post-dates the first flag, suppress escalation — mark as validating.
+    const rcaPath = findRcaArtifact(key, v.firstDate);
+    if (rcaPath) {
+      rcaOnFile.push({ key, ...v, rcaArtifact: rcaPath });
+    } else {
+      escalations.push({ key, ...v });
+    }
+  }
+
+  return { escalations: escalations.sort((a, b) => b.count - a.count), rcaOnFile };
 }
 
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
-function buildReport(webResult, cronResult, escalations) {
+function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
   const lines = [];
   const ts = new Date().toISOString();
   lines.push(`# Hub Surface Sweep — ${TODAY}`);
@@ -644,21 +715,36 @@ function buildReport(webResult, cronResult, escalations) {
     lines.push('');
   }
 
+  // ── Category C: RCA-on-file (suppressed escalations) ──
+  if (rcaOnFile.length > 0) {
+    lines.push('## Category C: RCA-on-file — Validating (suppressed from merge-blocker)');
+    lines.push('');
+    lines.push(`> ${rcaOnFile.length} surface(s) met the repeat-regression threshold but have a post-flag RCA artifact on file. Not escalated — monitoring for resolution.`);
+    lines.push('');
+    lines.push('| Surface | Type | Flags (7d) | RCA Artifact |');
+    lines.push('|---------|------|-----------|--------------|');
+    for (const e of rcaOnFile) {
+      const artifactName = path.basename(e.rcaArtifact);
+      lines.push(`| \`${e.surface}\` | ${e.type} | ${e.count} | ${artifactName} |`);
+    }
+    lines.push('');
+  }
+
   // Summary
   const trueZombieCount = cronResult.zombies.filter(z => !z.status.startsWith('blocked-by-worker')).length;
   const workerBlockedCount = cronResult.zombies.filter(z => z.status.startsWith('blocked-by-worker')).length;
   const issueCount = webResult.blindSpots.length + trueZombieCount;
   lines.push('## Summary');
   lines.push('');
-  if (issueCount === 0 && escalations.length === 0) {
+  if (issueCount === 0 && escalations.length === 0 && rcaOnFile.length === 0) {
     lines.push('No issues found. All surfaces covered, all crons healthy.');
   } else {
     const parts = [];
     if (webResult.blindSpots.length > 0)  parts.push(`${webResult.blindSpots.length} uncovered route(s)`);
     if (trueZombieCount > 0)              parts.push(`${trueZombieCount} zombie cron(s)`);
-    if (workerBlockedCount > 0)
-      parts.push(`${workerBlockedCount} worker-blocked cron(s) (auth check needed)`);
-    if (escalations.length > 0)                 parts.push(`${escalations.length} repeat-regression MERGE-BLOCKER(s)`);
+    if (workerBlockedCount > 0)           parts.push(`${workerBlockedCount} worker-blocked cron(s) (auth check needed)`);
+    if (escalations.length > 0)           parts.push(`${escalations.length} repeat-regression MERGE-BLOCKER(s)`);
+    if (rcaOnFile.length > 0)             parts.push(`${rcaOnFile.length} RCA-on-file validating`);
     lines.push(`**${parts.join(', ')}.**`);
   }
   lines.push('');
@@ -681,15 +767,15 @@ function buildReport(webResult, cronResult, escalations) {
   console.log(`[surface-sweep] ${cronResult.zombies.length} zombies, ${cronResult.healthy.length} healthy, ${cronResult.noData.length} no-data`);
 
   console.log('[surface-sweep] Running repeat-regression escalator...');
-  const escalations = runRepeatRegressionEscalator(webResult, cronResult);
-  console.log(`[surface-sweep] ${escalations.length} surface(s) escalated to merge-blocker`);
+  const { escalations, rcaOnFile } = runRepeatRegressionEscalator(webResult, cronResult);
+  console.log(`[surface-sweep] ${escalations.length} surface(s) escalated to merge-blocker, ${rcaOnFile.length} suppressed (RCA-on-file)`);
 
-  const report = buildReport(webResult, cronResult, escalations);
+  const report = buildReport(webResult, cronResult, escalations, rcaOnFile);
   fs.writeFileSync(REPORT, report, 'utf8');
   console.log(`[surface-sweep] Report written: ${REPORT}`);
 
   // Log event
-  run(`cortextos bus log-event action surface_sweep info --meta '{"blind_spots":${webResult.blindSpots.length},"zombies":${cronResult.zombies.length},"escalations":${escalations.length}}'`, { silent: true });
+  run(`cortextos bus log-event action surface_sweep info --meta '{"blind_spots":${webResult.blindSpots.length},"zombies":${cronResult.zombies.length},"escalations":${escalations.length},"rca_suppressed":${rcaOnFile.length}}'`, { silent: true });
 
   // Spawn RGOS tasks for newly-escalated surfaces
   for (const e of escalations) {
@@ -705,6 +791,7 @@ function buildReport(webResult, cronResult, escalations) {
     if (webResult.blindSpots.length > 0) parts.push(`${webResult.blindSpots.length} blind spot(s)`);
     if (cronResult.zombies.length > 0)   parts.push(`${cronResult.zombies.length} zombie cron(s)`);
     if (escalations.length > 0)          parts.push(`${escalations.length} MERGE-BLOCKER repeat regression(s)`);
+    if (rcaOnFile.length > 0)            parts.push(`${rcaOnFile.length} RCA-on-file validating`);
     const summary = `Surface sweep: ${parts.join(', ')}. Report: ${REPORT}`;
     run(`cortextos bus send-message orchestrator normal '${summary.replace(/'/g, "\\'")}' `, { silent: true });
   }
