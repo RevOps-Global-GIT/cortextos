@@ -220,11 +220,11 @@ describe('pr-stuck-watcher', () => {
     expect(result.alertPrs.map(pr => pr.number)).toEqual([999]);
   });
 
-  it('does not treat bolt-prefixed PRs in other repos as manual-review-only', () => {
+  it('treats Palette/Bolt PRs in non-ob1-app repos as manual-review-only', () => {
     vi.mocked(execFileSync).mockReturnValue(JSON.stringify([
       {
         number: 50,
-        title: '⚡ Bolt: not actually on ob1-app',
+        title: '⚡ Bolt: cross-repo bolt PR on cortextos',
         url: 'https://github.com/RevOps-Global-GIT/cortextos/pull/50',
         createdAt: '2026-05-01T00:00:00Z',
         updatedAt: '2026-05-01T00:00:00Z',
@@ -237,18 +237,37 @@ describe('pr-stuck-watcher', () => {
         reviews: [],
         isDraft: false,
       },
+      {
+        number: 51,
+        title: '🎨 Palette: cross-repo palette PR on rgos',
+        url: 'https://github.com/RevOps-Global-GIT/rgos/pull/51',
+        createdAt: '2026-05-01T00:00:00Z',
+        updatedAt: '2026-05-01T00:00:00Z',
+        headRefName: 'jules-foo',
+        author: { login: 'dev' },
+        reviewDecision: null,
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        labels: [],
+        reviews: [],
+        isDraft: false,
+      },
     ]));
 
     const result = runPrStuckWatcher(makePaths(root), 'analyst', 'revops-global', {
-      repos: ['RevOps-Global-GIT/cortextos'],
+      repos: ['RevOps-Global-GIT/cortextos', 'RevOps-Global-GIT/rgos'],
       stuckHours: 1,
       alertHours: 1,
     });
 
-    expect(result.stuckPrs[0]).toMatchObject({
-      isManualReviewOnly: false,
-      autoMergeEligible: true,
+    expect(result.stuckPrs.find(pr => pr.number === 50)).toMatchObject({
+      isManualReviewOnly: true,
+      autoMergeEligible: false,
     });
-    expect(result.alertPrs.map(pr => pr.number)).toEqual([50]);
+    expect(result.stuckPrs.find(pr => pr.number === 51)).toMatchObject({
+      isManualReviewOnly: true,
+      autoMergeEligible: false,
+    });
+    expect(result.alertPrs.map(pr => pr.number)).toEqual([]);
   });
 });
