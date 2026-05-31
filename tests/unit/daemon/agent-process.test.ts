@@ -181,8 +181,10 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     // restarts.log must have received a CRASH entry with the exit code and
     // crash counter. Before the fix, daemon-classified crashes only wrote
     // to stdout and left restarts.log empty.
-    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
-    const [logPath, logLine] = fsMocks.appendFileSync.mock.calls[0];
+    // Filter to restarts.log writes only — span telemetry also calls appendFileSync.
+    const restartsLogCalls1 = fsMocks.appendFileSync.mock.calls.filter(([p]: [unknown]) => String(p).includes('restarts.log'));
+    expect(restartsLogCalls1).toHaveLength(1);
+    const [logPath, logLine] = restartsLogCalls1[0];
     expect(String(logPath)).toContain('/logs/alice/restarts.log');
     expect(String(logLine)).toMatch(/\] CRASH: exit_code=1 crash_count=1 backoff_s=5\b/);
     expect(String(logLine).endsWith('\n')).toBe(true);
@@ -211,7 +213,9 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     // Agent state is 'running' still — handleExit returned early without
     // toggling status. No crash write, no log append, no restart scheduled.
     expect(ap.getStatus().status).toBe('running');
-    expect(fsMocks.appendFileSync).not.toHaveBeenCalled();
+    // Span telemetry may fire appendFileSync; assert no restarts.log writes.
+    const restartsLogCalls2 = fsMocks.appendFileSync.mock.calls.filter(([p]: [unknown]) => String(p).includes('restarts.log'));
+    expect(restartsLogCalls2).toHaveLength(0);
     expect(fsMocks.writeFileSync).not.toHaveBeenCalledWith(
       expect.stringContaining('.crash_count_today'),
       expect.anything(),
@@ -233,8 +237,9 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     capturedOnExit!(1, 0);
 
     expect(ap.getStatus().status).toBe('crashed');
-    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
-    expect(String(fsMocks.appendFileSync.mock.calls[0][1])).toMatch(/\] CRASH: /);
+    const restartsLogCalls3 = fsMocks.appendFileSync.mock.calls.filter(([p]: [unknown]) => String(p).includes('restarts.log'));
+    expect(restartsLogCalls3).toHaveLength(1);
+    expect(String(restartsLogCalls3[0][1])).toMatch(/\] CRASH: /);
   });
 
   it('sessionRefresh() delegates to stop() then start() (in order)', async () => {
@@ -531,8 +536,9 @@ describe('AgentProcess — premature voluntary exit guard', () => {
 
       // The classification line landed in restarts.log with the
       // PREMATURE_EXIT kind, not CRASH.
-      expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
-      const [logPath, logLine] = fsMocks.appendFileSync.mock.calls[0];
+      const restartsLogCalls4 = fsMocks.appendFileSync.mock.calls.filter(([p]: [unknown]) => String(p).includes('restarts.log'));
+      expect(restartsLogCalls4).toHaveLength(1);
+      const [logPath, logLine] = restartsLogCalls4[0];
       expect(String(logPath)).toContain('/logs/alice/restarts.log');
       expect(String(logLine)).toMatch(/\] PREMATURE_EXIT: exit_code=0 premature_exits=1\b/);
       expect(String(logLine)).toMatch(/backoff_s=60\b/);

@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { atomicWriteSync } from '../utils/atomic.js';
+import { withSpan } from '../utils/observe.js';
 import { join, resolve, sep } from 'path';
 import { homedir } from 'os';
 import { detectDayNightMode } from '../bus/heartbeat.js';
@@ -250,7 +251,12 @@ export class AgentProcess implements ManagedAgent {
     });
 
     try {
-      await this.pty.spawn(mode, prompt);
+      const agentName = this.name;
+      const ptyRef = this.pty;
+      await withSpan('daemon.agent_spawn', () => ptyRef!.spawn(mode, prompt), {
+        agent: agentName,
+        attributes: { mode, has_prompt: prompt ? 'true' : 'false' },
+      });
       // Codex exec-per-turn race: the new PTY's onExit can fire BEFORE this
       // line if `codex exec` completes its prompt quickly (CodexAppServerPTY's spawn
       // resolves once exec is launched, but the process may exit moments
