@@ -160,11 +160,10 @@ function hasAwaitingGregMarker(pr: GhPullRequest): boolean {
   return haystacks.some(value => /\bawaiting\s+greg\b/i.test(value));
 }
 
-// Greg directive 2026-05-31: Palette/Bolt automated PR streams on ob1-app
-// must be manual-review-only — no auto-merge, no port to ob1-parents — to
-// protect ob1-app/ob1-parents parity. Detected by title prefix or head ref.
-function isManualReviewOnlyStream(repo: string, pr: GhPullRequest): boolean {
-  if (repo !== 'RevOps-Global-GIT/ob1-app') return false;
+// Greg directive 2026-05-31: Palette/Bolt automated PR streams are
+// manual-review-only across ALL repos — no auto-merge — so the stuck-PR
+// watcher leaves them parked. Detected by title prefix or head ref.
+function isManualReviewOnlyStream(_repo: string, pr: GhPullRequest): boolean {
   const title = pr.title ?? '';
   if (/^(⚡\s*Bolt:|🎨\s*Palette:)/i.test(title)) return true;
   const head = pr.headRefName ?? '';
