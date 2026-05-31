@@ -29,6 +29,7 @@ interface GhPullRequest {
   url: string;
   createdAt: string;
   updatedAt: string;
+  headRefName?: string;
   author?: { login?: string };
   reviewDecision?: string | null;
   mergeStateStatus?: string | null;
@@ -61,6 +62,7 @@ export interface PrStuckItem {
   author: string;
   awaitingGreg: boolean;
   isDraft: boolean;
+  isManualReviewOnly: boolean;
   alertSuppressedReason: string | null;
 }
 
@@ -158,6 +160,18 @@ function hasAwaitingGregMarker(pr: GhPullRequest): boolean {
   return haystacks.some(value => /\bawaiting\s+greg\b/i.test(value));
 }
 
+// Greg directive 2026-05-31: Palette/Bolt automated PR streams on ob1-app
+// must be manual-review-only — no auto-merge, no port to ob1-parents — to
+// protect ob1-app/ob1-parents parity. Detected by title prefix or head ref.
+function isManualReviewOnlyStream(repo: string, pr: GhPullRequest): boolean {
+  if (repo !== 'RevOps-Global-GIT/ob1-app') return false;
+  const title = pr.title ?? '';
+  if (/^(⚡\s*Bolt:|🎨\s*Palette:)/i.test(title)) return true;
+  const head = pr.headRefName ?? '';
+  if (/^(bolt-|jules-)/i.test(head)) return true;
+  return false;
+}
+
 function formatHours(hours: number): string {
   if (hours >= 24) return `${(hours / 24).toFixed(1)}d`;
   return `${hours.toFixed(1)}h`;
@@ -243,7 +257,7 @@ export function runPrStuckWatcher(
         '--limit',
         '100',
         '--json',
-        'number,title,url,createdAt,updatedAt,author,reviewDecision,mergeStateStatus,statusCheckRollup,reviews,labels,isDraft',
+        'number,title,url,createdAt,updatedAt,headRefName,author,reviewDecision,mergeStateStatus,statusCheckRollup,reviews,labels,isDraft',
       ]);
       checkedRepos.push(repo);
     } catch (err) {
@@ -259,6 +273,14 @@ export function runPrStuckWatcher(
       const mergeState = pr.mergeStateStatus || 'unknown';
       const awaitingGreg = hasAwaitingGregMarker(pr);
       const isDraft = pr.isDraft ?? false;
+      const isManualReviewOnly = isManualReviewOnlyStream(repo, pr);
+      const suppressedReason = awaitingGreg
+        ? 'awaiting Greg'
+        : isManualReviewOnly
+          ? 'manual review only'
+          : isDraft
+            ? 'draft'
+            : null;
       stuckPrs.push({
         repo,
         number: pr.number,
@@ -269,19 +291,25 @@ export function runPrStuckWatcher(
         ciState: checks.summary,
         ciPassing: checks.passing,
         mergeState,
-        autoMergeEligible: checks.passing && mergeState === 'CLEAN',
+        autoMergeEligible: checks.passing && mergeState === 'CLEAN' && !isManualReviewOnly,
         reviewDecision: pr.reviewDecision || 'none',
         lastReview: lastReview(pr.reviews),
         author: pr.author?.login || 'unknown',
         awaitingGreg,
         isDraft,
-        alertSuppressedReason: awaitingGreg ? 'awaiting Greg' : (isDraft ? 'draft' : null),
+        isManualReviewOnly,
+        alertSuppressedReason: suppressedReason,
       });
     }
   }
 
   stuckPrs.sort((a, b) => b.ageHours - a.ageHours);
-  const alertPrs = stuckPrs.filter(pr => pr.updatedHoursAgo > alertThresholdHours && !pr.awaitingGreg && !pr.isDraft);
+  const alertPrs = stuckPrs.filter(pr =>
+    pr.updatedHoursAgo > alertThresholdHours
+    && !pr.awaitingGreg
+    && !pr.isDraft
+    && !pr.isManualReviewOnly,
+  );
   const result: PrStuckWatcherResult = {
     generatedAt,
     watchedRepos,
