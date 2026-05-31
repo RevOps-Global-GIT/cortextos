@@ -91,4 +91,52 @@ describe('pr-stuck-watcher', () => {
     expect(report).toContain('awaiting Greg');
     expect(report).toContain('Normal stuck PR');
   });
+
+  it('keeps draft PRs in the report but suppresses alerts', () => {
+    vi.mocked(execFileSync).mockReturnValue(JSON.stringify([
+      {
+        number: 20,
+        title: 'WIP draft PR',
+        url: 'https://github.com/acme/repo/pull/20',
+        createdAt: '2026-05-01T00:00:00Z',
+        updatedAt: '2026-05-01T00:00:00Z',
+        author: { login: 'dev' },
+        reviewDecision: null,
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        labels: [],
+        reviews: [],
+        isDraft: true,
+      },
+      {
+        number: 21,
+        title: 'Normal stuck PR',
+        url: 'https://github.com/acme/repo/pull/21',
+        createdAt: '2026-05-01T00:00:00Z',
+        updatedAt: '2026-05-01T00:00:00Z',
+        author: { login: 'dev' },
+        reviewDecision: null,
+        mergeStateStatus: 'CLEAN',
+        statusCheckRollup: [{ conclusion: 'SUCCESS' }],
+        labels: [],
+        reviews: [],
+        isDraft: false,
+      },
+    ]));
+
+    const outputDir = join(root, 'output');
+    const result = runPrStuckWatcher(makePaths(root), 'codex', 'revops-global', {
+      repos: ['acme/repo'],
+      stuckHours: 1,
+      alertHours: 1,
+      outputDir,
+    });
+
+    expect(result.stuckPrs.map(pr => pr.number)).toEqual([20, 21]);
+    expect(result.stuckPrs.find(pr => pr.number === 20)).toMatchObject({
+      isDraft: true,
+      alertSuppressedReason: 'draft',
+    });
+    expect(result.alertPrs.map(pr => pr.number)).toEqual([21]);
+  });
 });

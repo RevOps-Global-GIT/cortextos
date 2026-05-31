@@ -35,6 +35,7 @@ interface GhPullRequest {
   statusCheckRollup?: GhStatusCheck[];
   reviews?: GhReview[];
   labels?: GhLabel[];
+  isDraft?: boolean;
 }
 
 export interface PrStuckWatcherOptions {
@@ -59,6 +60,7 @@ export interface PrStuckItem {
   lastReview: string;
   author: string;
   awaitingGreg: boolean;
+  isDraft: boolean;
   alertSuppressedReason: string | null;
 }
 
@@ -241,7 +243,7 @@ export function runPrStuckWatcher(
         '--limit',
         '100',
         '--json',
-        'number,title,url,createdAt,updatedAt,author,reviewDecision,mergeStateStatus,statusCheckRollup,reviews,labels',
+        'number,title,url,createdAt,updatedAt,author,reviewDecision,mergeStateStatus,statusCheckRollup,reviews,labels,isDraft',
       ]);
       checkedRepos.push(repo);
     } catch (err) {
@@ -256,6 +258,7 @@ export function runPrStuckWatcher(
       const checks = summarizeChecks(pr.statusCheckRollup);
       const mergeState = pr.mergeStateStatus || 'unknown';
       const awaitingGreg = hasAwaitingGregMarker(pr);
+      const isDraft = pr.isDraft ?? false;
       stuckPrs.push({
         repo,
         number: pr.number,
@@ -271,13 +274,14 @@ export function runPrStuckWatcher(
         lastReview: lastReview(pr.reviews),
         author: pr.author?.login || 'unknown',
         awaitingGreg,
-        alertSuppressedReason: awaitingGreg ? 'awaiting Greg' : null,
+        isDraft,
+        alertSuppressedReason: awaitingGreg ? 'awaiting Greg' : (isDraft ? 'draft' : null),
       });
     }
   }
 
   stuckPrs.sort((a, b) => b.ageHours - a.ageHours);
-  const alertPrs = stuckPrs.filter(pr => pr.updatedHoursAgo > alertThresholdHours && !pr.awaitingGreg);
+  const alertPrs = stuckPrs.filter(pr => pr.updatedHoursAgo > alertThresholdHours && !pr.awaitingGreg && !pr.isDraft);
   const result: PrStuckWatcherResult = {
     generatedAt,
     watchedRepos,
