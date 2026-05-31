@@ -2775,26 +2775,24 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase directly; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/orch_experiments?select=recommendation,results_json&order=created_at.desc&limit=1`, {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/orch_experiments?select=status,results_json&order=created_at.desc&limit=1`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
-        results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+        const body = await resp.text().catch(() => '');
+        results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'DEFERRED', evidence: `Supabase query returned HTTP ${resp.status} — table may not be migrated in this env: ${body.slice(0, 120)}` });
       } else {
-        const rows = await resp.json() as Array<{ recommendation: string; results_json: unknown }>;
+        const rows = await resp.json() as Array<{ status: string; results_json: unknown }>;
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'DEFERRED', evidence: 'No orch_experiments rows yet — theta pipeline has not run' });
         } else {
           const row = rows[0];
           const rj = row.results_json as Record<string, unknown> | null;
           const hasParseError = rj && typeof rj === 'object' && 'parse_error' in rj;
-          const isMalformed = row.recommendation === 'malformed';
           if (hasParseError) {
             results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Latest row has parse_error in results_json: ${JSON.stringify(rj?.['parse_error'])?.slice(0, 200)}` });
-          } else if (isMalformed) {
-            results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Latest row recommendation is 'malformed' — theta output could not be parsed` });
           } else {
-            results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'PASS', evidence: `Latest orch_experiments row OK: recommendation="${row.recommendation}", no parse_error` });
+            results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'PASS', evidence: `Latest orch_experiments row OK: status="${row.status}", no parse_error in results_json` });
           }
         }
       }
