@@ -21,6 +21,7 @@ export default defineConfig({
     'hooks/hook-env-write-guard': 'src/hooks/hook-env-write-guard.ts',
     'hooks/hook-agent-task-event': 'src/hooks/hook-agent-task-event.ts',
     'hooks/hook-blocked-auto-rotate': 'src/hooks/hook-blocked-auto-rotate.ts',
+    'hooks/hook-pr-url-wire': 'src/hooks/hook-pr-url-wire.ts',
   },
   format: ['cjs'],
   target: 'node20',

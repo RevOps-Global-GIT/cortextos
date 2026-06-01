@@ -4370,6 +4370,11 @@ busCommand
   .action(() => runHook('hook-agent-task-event'));
 
 busCommand
+  .command('hook-pr-url-wire')
+  .description('PostToolUse hook (Bash): detects gh pr create, extracts PR URL, patches orch_tasks mirror metadata.pr_url for pr_cycle_minutes metric')
+  .action(() => runHook('hook-pr-url-wire'));
+
+busCommand
   .command('create-skill-pr')
   .description('Background worker: commits and draft-PRs a community skill (called by hook-skill-autopr)')
   .argument('<skill-name>', 'Skill directory name under community/skills/')

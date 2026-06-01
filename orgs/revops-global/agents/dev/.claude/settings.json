@@ -161,6 +161,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cortextos bus hook-pr-url-wire",
+            "timeout": 15
+          }
+        ]
       }
     ]
   },
