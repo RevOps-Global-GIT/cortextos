@@ -47,3 +47,7 @@ Every task completion requires one of:
 ## Git Rules (supplement to org CLAUDE.md)
 - Always base branches off `main`. Use `git merge-base --is-ancestor <sha> origin/main` to confirm a PR landed before calling it shipped.
 - `ob1-parents` and `ob1-app` are separate repos — open PRs in each; no cross-repo single PR.
+
+## Local Cron Catalog
+
+Configured cron names: `heartbeat`, `rgos-task-poll`. Keep this list aligned with `config.json`.

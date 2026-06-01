@@ -43,3 +43,7 @@
 ## Git Rules (supplement to org CLAUDE.md)
 - Assert target branch before every `git push`. Clean clones for Orca-orch DS work to avoid dirty-branch contamination.
 - Cross-repo discipline: `ob1-parents` and `ob1-app` are separate repos; open PRs in each independently.
+
+## Local Cron Catalog
+
+Configured cron names: `advisor-facing-page-canary`, `codex-tool-health-audit`, `heartbeat`, `rgos-task-poll`. Keep this list aligned with `config.json`.

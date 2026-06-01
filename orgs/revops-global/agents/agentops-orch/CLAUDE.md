@@ -48,3 +48,7 @@ cortextos bus update-task <id> in_progress
 # ... do the work ...
 cortextos bus complete-task <id> --result "<summary>"
 ```
+
+## Local Catalog Snapshot
+
+This agent has local skills `heartbeat` and `tasks`. Its configured crons are `heartbeat` and `project-task-poll`; keep those names here in sync with `config.json` so the doc-drift checker can distinguish real drift from intentionally compact operating instructions.
