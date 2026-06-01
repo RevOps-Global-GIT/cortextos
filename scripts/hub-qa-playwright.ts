@@ -774,7 +774,8 @@ async function checkDataOrEmpty(
   shotPrefix: string,
   checkName: string,
   itemSelector: string,
-  emptyPattern: RegExp = /no |empty|nothing|none/i
+  emptyPattern: RegExp = /no |empty|nothing|none/i,
+  minTextLength: number = 0
 ): Promise<CheckResult> {
   try {
     const count = await page.locator(itemSelector).count();
@@ -785,6 +786,24 @@ async function checkDataOrEmpty(
       const firstText = (await page.locator(itemSelector).first().textContent().catch(() => '')).trim();
       if (/(parse_error|undefined|null|\[object)/i.test(firstText)) {
         return { check: checkName, status: 'FAIL', evidence: `${count} item(s) found but first item text is malformed: "${firstText.slice(0, 60)}".` };
+      }
+      // 570f517f-phase2 PR1: optional content-length assertion (correctness upgrade).
+      // When minTextLength > 0, require at least one of the first 3 items to have meaningful text.
+      // Catches the "empty placeholder rows render but contain no data" failure mode.
+      if (minTextLength > 0) {
+        const sampleTexts: string[] = [];
+        const sampleN = Math.min(count, 3);
+        for (let i = 0; i < sampleN; i++) {
+          const t = ((await page.locator(itemSelector).nth(i).textContent().catch(() => '')) ?? '').trim().replace(/\s+/g, ' ');
+          sampleTexts.push(t);
+        }
+        const hasMeaningful = sampleTexts.some(t => t.length >= minTextLength);
+        if (!hasMeaningful) {
+          const maxLen = Math.max(...sampleTexts.map(t => t.length), 0);
+          return { check: checkName, status: 'FAIL', evidence: `${count} item(s) found but none in first ${sampleN} sampled have >=${minTextLength} chars (max=${maxLen}). Samples: ${sampleTexts.map(t => `"${t.slice(0, 30)}"`).join(', ')}.` };
+        }
+        const matching = sampleTexts.filter(t => t.length >= minTextLength).length;
+        return { check: checkName, status: 'PASS', evidence: `${count} item(s) visible; ${matching}/${sampleN} sampled have >=${minTextLength} chars of content.` };
       }
       return { check: checkName, status: 'PASS', evidence: `${count} item(s) visible.` };
     } else if (emptyCount > 0) {
@@ -917,11 +936,11 @@ async function runMyDayChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: "[CORRECTNESS] CHECK 2 Today's date shown", status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 3: Content sections (comms feed items, cards, etc.)
-  // Wait up to 3s for comms feed to finish rendering before checking
+  // CHECK 3: Content sections (comms feed items, cards, etc.) — 570f517f-phase2 PR1: upgrade to CORRECTNESS
+  // (require card text >=20 chars, catches the "empty placeholder card" failure mode where cards render but contain no data).
   await page.waitForSelector('[class*="card"], [class*="section"], [class*="item"], li', { timeout: 3000 }).catch(() => {});
-  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 3 Content sections visible',
-    '[class*="card"], [class*="section"], [class*="item"], li', /no tasks|nothing scheduled|empty/i));
+  results.push(await checkDataOrEmpty(page, sp, '[CORRECTNESS] CHECK 3 Content sections visible',
+    '[class*="card"], [class*="section"], [class*="item"], li', /no tasks|nothing scheduled|empty/i, 20));
 
   // CHECK 4: Per-item action button (Dismiss/Respond/Review) on comms feed items
   // Scope strictly to short-text buttons to avoid matching article headlines
@@ -965,10 +984,11 @@ async function runTasksChecks(page: Page): Promise<CheckResult[]> {
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECK 2: Task list or empty state — try broad selectors since no semantic roles present
-  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Task list visible',
+  // CHECK 2: Task list or empty state — 570f517f-phase2 PR1: upgrade to CORRECTNESS
+  // (require task-row text >=15 chars, catches empty/skeleton-row rendering before data loads).
+  results.push(await checkDataOrEmpty(page, sp, '[CORRECTNESS] CHECK 2 Task list visible',
     '[class*="task-item"], [class*="task-row"], [class*="TaskRow"], [class*="TaskItem"], [role="listitem"], [role="row"], tr, li[class], div[class*="row"]',
-    /no tasks|empty|nothing here|no items/i));
+    /no tasks|empty|nothing here|no items/i, 15));
 
   // CHECK 3: Filters / tabs visible (status, priority, assignee filters)
   try {
@@ -1287,17 +1307,34 @@ async function runFleetActivityChecks(page: Page): Promise<CheckResult[]> {
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECK 2: Activity events visible
-  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Activity events visible',
-    '[class*="event"], [class*="activity"], [class*="item"], [class*="log"], li', /no activity|no events|empty/i));
+  // CHECK 2: Activity events visible — 570f517f-phase2 PR1: upgrade to CORRECTNESS
+  // (require event text >=8 chars, catches empty/placeholder row rendering).
+  results.push(await checkDataOrEmpty(page, sp, '[CORRECTNESS] CHECK 2 Activity events visible',
+    '[class*="event"], [class*="activity"], [class*="item"], [class*="log"], li', /no activity|no events|empty/i, 8));
 
-  // CHECK 3: Timestamps on events
+  // CHECK 3: Event timestamps with freshness (570f517f-phase2 PR1 — upgrade from LIVENESS to CORRECTNESS).
+  // Previously: counted any timestamp text body-wide — would pass on a stale page with "5 days ago" labels.
+  // Now: assert at least one event has a recent timestamp (< 4h) — a live activity feed must have something fresh.
+  // Threshold 4h instead of 1h to accommodate quiet hours (overnight, weekends) without false fails.
   try {
-    // Timestamps appear as "3 minutes ago", "less than a minute ago", "2 hours ago", "just now", or HH:MM
-    const timestamps = await page.getByText(/\d+ (second|minute|hour|day)s? ago|less than a minute|just now|today|yesterday|\d{1,2}:\d{2}/i, { exact: false }).count();
-    results.push({ check: '[LIVENESS] CHECK 3 Event timestamps', status: timestamps > 0 ? 'PASS' : 'DEFERRED', evidence: timestamps > 0 ? `${timestamps} timestamp(s) visible on events.` : 'No timestamps found on events.' });
+    const allTs = await page.getByText(/\d+ (second|minute|hour|day)s? ago|less than a minute|just now|today|yesterday|\d{1,2}:\d{2}/i, { exact: false }).count();
+    const freshTs = await page.getByText(/(\d+ (second|minute)s? ago|less than a minute|just now|\d+ (minute|hour)s? ago)/i, { exact: false }).allInnerTexts().catch(() => [] as string[]);
+    // Parse fresh count: anything < 4 hours qualifies. "X seconds/minutes/just now" → fresh; "X hours ago" where X<4 → fresh.
+    const recentCount = freshTs.filter(t => {
+      if (/(second|minute)s? ago|just now|less than a minute/i.test(t)) return true;
+      const hm = t.match(/(\d+) hours? ago/i);
+      if (hm) return parseInt(hm[1], 10) < 4;
+      return false;
+    }).length;
+    if (allTs === 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'DEFERRED', evidence: 'No timestamps found on events (empty feed or rendering issue).' });
+    } else if (recentCount > 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'PASS', evidence: `${allTs} timestamp(s) visible; ${recentCount} within last 4h (live feed).` });
+    } else {
+      results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'FAIL', evidence: `${allTs} timestamp(s) visible but none within last 4h — activity feed appears stale.` });
+    }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 3 Event timestamps', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   // CHECK 4: Filter controls (event-type pill buttons: All, agent spawned, task created, etc.)
@@ -1326,9 +1363,10 @@ async function runWorkInboxChecks(page: Page): Promise<CheckResult[]> {
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECK 2: Inbox items or empty state
-  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Inbox items visible',
-    '[class*="inbox-item"], [class*="message"], [class*="item"], [role="listitem"]', /inbox is empty|no messages|nothing here/i));
+  // CHECK 2: Inbox items or empty state — 570f517f-phase2 PR1: upgrade to CORRECTNESS
+  // (require subject/preview text >=10 chars, catches empty inbox-row rendering bug).
+  results.push(await checkDataOrEmpty(page, sp, '[CORRECTNESS] CHECK 2 Inbox items visible',
+    '[class*="inbox-item"], [class*="message"], [class*="item"], [role="listitem"]', /inbox is empty|no messages|nothing here/i, 10));
 
   // CHECK 3 + CHECK 4: Click first inbox item, verify read view AND capture action buttons
   // while the item is open (action buttons typically appear in the detail view, not the list).
@@ -3487,9 +3525,10 @@ async function runFleetDreamsChecks(page: Page): Promise<CheckResult[]> {
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
   await new Promise<void>(r => setTimeout(r, 2000));
-  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Dream log entries visible (>=1 card)',
+  // 570f517f-phase2 PR1: upgrade to CORRECTNESS (require dream/prescription card text >=15 chars).
+  results.push(await checkDataOrEmpty(page, sp, '[CORRECTNESS] CHECK 2 Dream log entries visible (>=1 card)',
     '[class*="dream"],[class*="Dream"],[class*="prescription"],[class*="Prescription"],[class*="card"],[class*="grid"] > *,table tbody tr',
-    /no dreams|no entries|no results|empty/i));
+    /no dreams|no entries|no results|empty/i, 15));
   return results;
 }
 
