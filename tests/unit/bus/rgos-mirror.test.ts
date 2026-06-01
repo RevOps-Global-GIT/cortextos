@@ -331,9 +331,9 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     await mirrorTaskToRgos(task, 'create');
 
     const mockFetch = vi.mocked(fetch);
-    // 2 calls: first is resolveExistingTaskMirrorId (GET), second is the upsert (POST).
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    const [url, opts] = mockFetch.mock.calls[1]; // upsert is the second call
+    // 3 calls: primary resolveExistingTaskMirrorId (GET), proximity dedup (GET), upsert (POST).
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const [url, opts] = mockFetch.mock.calls[2]; // upsert is the third call
     expect(url).toBe('https://test.supabase.co/rest/v1/orch_tasks');
     expect((opts?.headers as Record<string, string>)['apikey']).toBe('test-service-key');
     expect((opts?.headers as Record<string, string>)['Authorization']).toBe('Bearer test-service-key');
@@ -345,7 +345,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     await mirrorTaskToRgos(task, 'create');
 
     const mockFetch = vi.mocked(fetch);
-    const [, opts] = mockFetch.mock.calls[1]; // upsert is the second call (after resolve GET)
+    const [, opts] = mockFetch.mock.calls[2]; // upsert is the third call (after resolve GET + proximity GET)
     const body = JSON.parse(opts?.body as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.id).toBe(uuidv5(task.id));
@@ -359,7 +359,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     const task = makeTask({ status: 'in_progress', updated_at: '2026-04-25T10:30:00Z' });
     await mirrorTaskToRgos(task, 'update');
 
-    const body = JSON.parse((vi.mocked(fetch).mock.calls[1][1]?.body) as string);
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[2][1]?.body) as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.status).toBe('in_progress');
     expect(body.updated_at).toBe('2026-04-25T10:30:00Z');
@@ -373,7 +373,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     });
     await mirrorTaskToRgos(task, 'complete');
 
-    const body = JSON.parse((vi.mocked(fetch).mock.calls[1][1]?.body) as string);
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[2][1]?.body) as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.status).toBe('completed');
     expect(body.result).toBe('Shipped the feature');
@@ -405,18 +405,26 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
 
   it('keeps the deterministic UUID when no metadata.bus_task_id row exists', async () => {
     vi.stubGlobal('fetch', vi.fn()
+      // Primary lookup: 200 OK, no matching rows
       .mockResolvedValueOnce({
         ok: true,
         json: async () => [],
         text: async () => '',
       })
+      // Proximity lookup: 200 OK, no matching source=null rows either
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [],
+        text: async () => '',
+      })
+      // Upsert POST
       .mockResolvedValueOnce({ ok: true, text: async () => '' }),
     );
 
     const task = makeTask({ status: 'in_progress' });
     await mirrorTaskToRgos(task, 'update');
 
-    const body = JSON.parse((vi.mocked(fetch).mock.calls[1][1]?.body) as string);
+    const body = JSON.parse((vi.mocked(fetch).mock.calls[2][1]?.body) as string);
     expect(body.id).toBe(uuidv5(task.id));
   });
 });
@@ -470,6 +478,73 @@ describe('rgos-mirror — resolveExistingTaskMirrorId()', () => {
     }));
 
     await expect(resolveExistingTaskMirrorId('task_local_001', fallbackId)).resolves.toBe(fallbackId);
+  });
+
+  it('proximity match: returns source=null row ID when primary lookup finds nothing', async () => {
+    const fallbackId = uuidv5('task_local_proximity');
+    const cortexNativeId = 'cccccccc-dddd-5eee-8fff-000000000000';
+    const fetchMock = vi.fn()
+      // Primary bus_task_id lookup — empty result
+      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' })
+      // Proximity lookup — returns the cortex_create_task row
+      .mockResolvedValueOnce({ ok: true, json: async () => [{ id: cortexNativeId, created_at: '2026-06-01T10:00:00Z' }], text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await resolveExistingTaskMirrorId(
+      'task_local_proximity',
+      fallbackId,
+      'My shared task title',
+      '2026-06-01T10:00:30Z',
+    );
+    expect(result).toBe(cortexNativeId);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Verify the proximity query includes source=is.null
+    const secondCallUrl = fetchMock.mock.calls[1][0] as string;
+    expect(secondCallUrl).toContain('source=is.null');
+    expect(secondCallUrl).toContain('title=eq.');
+  });
+
+  it('proximity match: falls back to deterministic UUID when proximity lookup also finds nothing', async () => {
+    const fallbackId = uuidv5('task_local_proximity_miss');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' })
+      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await resolveExistingTaskMirrorId(
+      'task_local_proximity_miss',
+      fallbackId,
+      'No matching title',
+      '2026-06-01T10:00:00Z',
+    );
+    expect(result).toBe(fallbackId);
+  });
+
+  it('proximity match: skips secondary lookup when title/createdAt not provided', async () => {
+    const fallbackId = uuidv5('task_local_no_hint');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await resolveExistingTaskMirrorId('task_local_no_hint', fallbackId);
+    expect(result).toBe(fallbackId);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('proximity match: skips secondary lookup when createdAt is invalid', async () => {
+    const fallbackId = uuidv5('task_local_bad_date');
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await resolveExistingTaskMirrorId(
+      'task_local_bad_date',
+      fallbackId,
+      'Some title',
+      'not-a-date',
+    );
+    expect(result).toBe(fallbackId);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -226,28 +226,40 @@ async function postgrestUpsert(
  * orch_tasks rows before the UUIDv5 id convention was universal. Reusing that
  * existing row ID prevents a later status update from creating a second
  * deterministic UUID shadow row for the same local task.
+ *
+ * Dual-write dedup: when an agent calls both cortex_create_task (source=null)
+ * AND bus create-task for the same work, two rows would otherwise appear. If the
+ * primary bus_task_id lookup finds nothing, a secondary proximity query matches
+ * source=null rows with the same title created within ±5 minutes, and reuses
+ * their ID so the bus mirror upserts onto the existing row instead of inserting
+ * a duplicate.
  */
 export async function resolveExistingTaskMirrorId(
   busTaskId: string,
   fallbackId: string,
+  title?: string,
+  createdAt?: string,
 ): Promise<string> {
   const url = process.env.SUPABASE_RGOS_URL!;
   const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
-  const endpoint = new URL(`${url}/rest/v1/orch_tasks`);
-  endpoint.searchParams.set('select', 'id,updated_at');
-  endpoint.searchParams.set('metadata->>bus_task_id', `eq.${busTaskId}`);
-  endpoint.searchParams.set('order', 'updated_at.desc');
-  endpoint.searchParams.set('limit', '5');
+  const headers = {
+    'apikey': serviceKey,
+    'Authorization': `Bearer ${serviceKey}`,
+    'Accept': 'application/json',
+  };
 
-  let res: Response;
+  // Primary lookup: find rows where metadata.bus_task_id matches the bus ID.
+  const primaryEp = new URL(`${url}/rest/v1/orch_tasks`);
+  primaryEp.searchParams.set('select', 'id,updated_at');
+  primaryEp.searchParams.set('metadata->>bus_task_id', `eq.${busTaskId}`);
+  primaryEp.searchParams.set('order', 'updated_at.desc');
+  primaryEp.searchParams.set('limit', '5');
+
+  let primaryRes: Response;
   try {
-    res = await fetch(endpoint.toString(), {
+    primaryRes = await fetch(primaryEp.toString(), {
       method: 'GET',
-      headers: {
-        'apikey': serviceKey,
-        'Authorization': `Bearer ${serviceKey}`,
-        'Accept': 'application/json',
-      },
+      headers,
       signal: AbortSignal.timeout(10_000),
     });
   } catch {
@@ -255,16 +267,62 @@ export async function resolveExistingTaskMirrorId(
     return fallbackId;
   }
 
-  if (!res.ok) return fallbackId;
+  // Primary request failed — return deterministic ID without attempting proximity lookup.
+  if (!primaryRes.ok) return fallbackId;
 
-  const rows = typeof res.json === 'function'
-    ? await res.json().catch(() => []) as Array<{ id?: unknown }>
+  const primaryRows = typeof primaryRes.json === 'function'
+    ? await primaryRes.json().catch(() => []) as Array<{ id?: unknown }>
     : [];
-  const ids = rows
+  const primaryIds = primaryRows
     .map(row => row.id)
     .filter((id): id is string => typeof id === 'string' && isUuid(id));
 
-  return ids.find(id => id === fallbackId) ?? ids[0] ?? fallbackId;
+  if (primaryIds.length > 0) {
+    return primaryIds.find(id => id === fallbackId) ?? primaryIds[0];
+  }
+
+  // Secondary lookup: catch cortex_create_task rows (source=null) for the same
+  // title within a ±5-minute window. This prevents dual-write duplicates when an
+  // agent calls both cortex_create_task and bus create-task for the same task.
+  if (title && createdAt) {
+    try {
+      const anchor = new Date(createdAt);
+      if (!isNaN(anchor.getTime())) {
+        const windowMs = 5 * 60 * 1000;
+        const lower = new Date(anchor.getTime() - windowMs).toISOString();
+        const upper = new Date(anchor.getTime() + windowMs).toISOString();
+
+        const proximityEp = new URL(`${url}/rest/v1/orch_tasks`);
+        proximityEp.searchParams.set('select', 'id,created_at');
+        proximityEp.searchParams.set('title', `eq.${title}`);
+        proximityEp.searchParams.set('source', 'is.null');
+        proximityEp.searchParams.append('created_at', `gte.${lower}`);
+        proximityEp.searchParams.append('created_at', `lte.${upper}`);
+        proximityEp.searchParams.set('order', 'created_at.desc');
+        proximityEp.searchParams.set('limit', '1');
+
+        const proximityRes = await fetch(proximityEp.toString(), {
+          method: 'GET',
+          headers,
+          signal: AbortSignal.timeout(10_000),
+        });
+
+        if (proximityRes.ok) {
+          const rows = typeof proximityRes.json === 'function'
+            ? await proximityRes.json().catch(() => []) as Array<{ id?: unknown }>
+            : [];
+          const match = rows
+            .map(row => row.id)
+            .find((id): id is string => typeof id === 'string' && isUuid(id));
+          if (match) return match;
+        }
+      }
+    } catch {
+      // Proximity lookup is best-effort; fall through to deterministic ID.
+    }
+  }
+
+  return fallbackId;
 }
 
 async function resolveTaskMirrorRow(row: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -279,7 +337,9 @@ async function resolveTaskMirrorRow(row: Record<string, unknown>): Promise<Recor
     return row;
   }
 
-  const resolvedId = await resolveExistingTaskMirrorId(busTaskId, fallbackId);
+  const title = typeof row.title === 'string' ? row.title : undefined;
+  const createdAt = typeof row.created_at === 'string' ? row.created_at : undefined;
+  const resolvedId = await resolveExistingTaskMirrorId(busTaskId, fallbackId, title, createdAt);
   return resolvedId === fallbackId ? row : { ...row, id: resolvedId };
 }
 
@@ -734,7 +794,7 @@ export async function mirrorTaskToRgos(
   // Always resolve the existing mirror row ID — not just on update/complete.
   // A retried create from the retry queue must land on the same row, not
   // insert a second shadow row that inflates the completed-task count.
-  row.id = await resolveExistingTaskMirrorId(task.id, row.id as string);
+  row.id = await resolveExistingTaskMirrorId(task.id, row.id as string, task.title, task.created_at);
   const agentId = task.assigned_to ?? process.env.CTX_AGENT_NAME ?? 'unknown';
   const action = event === 'create' ? 'task_created'
     : event === 'complete' ? 'task_completed'
