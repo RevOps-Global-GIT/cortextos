@@ -39,6 +39,12 @@
       "type": "recurring",
       "interval": "10m",
       "prompt": "Check inbox for tasks routed from orchestrator or dev. Do not dispatch browser/UI/web automation to Greg's Mac. Use Orgo/Codex-CU VM paths by default; for OB1 e2e/dogfood specifically use Compl1 VM 23e7d600 targeting https://ob1.revopsglobal.com. Only use `cortextos bus computer-use` for non-browser work or when a current explicit Orgo-failure artifact authorizes Mac fallback. Capture the response, validate completeness, reply to the requesting agent, and log a codex_dispatched event with the task summary, prompt length, runtime target, and duration."
+    },
+    {
+      "name": "supreme-mentions-triage-ingest",
+      "type": "recurring",
+      "interval": "2h",
+      "prompt": "Run the supreme-mentions-triage update via direct Slack API (no Orgo): bash /home/cortextos/cortextos/scripts/supreme-mentions-triage-run.sh. Log the exit code. If exit non-zero, send-message analyst normal 'supreme-mentions-triage-run.sh failed: <exit code / last error line>'."
     }
   ],
   "ctx_autoreset_threshold": 0,
