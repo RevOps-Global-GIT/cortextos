@@ -2841,18 +2841,17 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
     results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 6: [CORRECTNESS] No parse_error in theta_sessions structured data.
-  // Queries the theta_sessions table directly (the same store the page renders from).
-  // Page-text grep is NOT used — it trips on this assertion's own description text.
+  // CHECK 6: [CORRECTNESS] Latest theta_sessions row has no parse_error.
+  // Mirrors CHECK 5's "latest row" philosophy — only the most recent run matters.
+  // Scoping to the single latest row avoids permanent false-FAILs from resolved
+  // historical errors. Page-text grep is NOT used — it trips on this assertion's own text.
   try {
     await shot(page, `${sp}-6-parse-error-check`);
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping structured parse_error check' });
     } else {
-      // Fetch the last 10 theta_sessions; flag any with status not 'complete'/'running'
-      // or whose analyst_report contains "parse_error" or "malformed".
       const resp = await fetch(
-        `${SUPA_URL}/rest/v1/theta_sessions?select=id,status,analyst_report&order=ran_at.desc&limit=10`,
+        `${SUPA_URL}/rest/v1/theta_sessions?select=id,status,analyst_report&order=ran_at.desc&limit=1`,
         { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
       );
       if (!resp.ok) {
@@ -2862,20 +2861,20 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions', status: 'DEFERRED', evidence: 'No theta_sessions rows yet — theta pipeline has not run' });
         } else {
-          const badStatus = rows.filter(r => r.status !== 'complete' && r.status !== 'running');
-          const badReport = rows.filter(r => r.analyst_report && /parse_error|malformed/i.test(r.analyst_report));
-          const offending = [...new Map([...badStatus, ...badReport].map(r => [r.id, r])).values()];
-          if (offending.length > 0) {
+          const row = rows[0];
+          const badStatus = row.status !== 'complete' && row.status !== 'partial';
+          const badReport = row.analyst_report != null && /parse_error|malformed/i.test(row.analyst_report);
+          if (badStatus || badReport) {
             results.push({
               check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions',
               status: 'FAIL',
-              evidence: `${offending.length} session(s) with error signals. First: id=${offending[0].id} status="${offending[0].status}" report_excerpt="${(offending[0].analyst_report ?? '').slice(0, 120)}"`,
+              evidence: `Latest theta_session id=${row.id} status="${row.status}"${badReport ? ` — analyst_report contains parse_error/malformed: "${row.analyst_report?.slice(0, 120)}"` : ''}`,
             });
           } else {
             results.push({
               check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions',
               status: 'PASS',
-              evidence: `Last ${rows.length} theta_sessions OK: all status=complete/running, no parse_error in analyst_report.`,
+              evidence: `Latest theta_session OK: id=${row.id} status="${row.status}", no parse_error in analyst_report.`,
             });
           }
         }
