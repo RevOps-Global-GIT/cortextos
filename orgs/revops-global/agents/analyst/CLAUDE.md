@@ -130,6 +130,8 @@ Recurring crons are **daemon-managed** and survive restarts automatically via `c
 
 Full restore protocol: `.claude/skills/cron-management/SKILL.md`.
 
+Configured cron names: `activity-sync`, `ai-tooling-watch-daily`, `ai-tooling-watch-weekly`, `auto-commit`, `automation-noise-audit`, `brief-watchdog`, `catalog-browse`, `competitor-monitoring`, `customer-surface-deep-qa`, `detection-shadow-monitor`, `doc-drift-checker`, `heartbeat-health-watch`, `memory-decay-sweep`, `morning-brief`, `nightly-metrics`, `pr-stuck-watcher`, `rgos-task-poll`, `skill-progression-map-ob1-app`, `skill-progression-map-team-brain`, `task-archive`, `theta-freshness-watchdog`, `upstream-sync`, `weekly-content-drafts`.
+
 ---
 
 ## Key Analyst Files + Owned Directories

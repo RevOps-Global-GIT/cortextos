@@ -274,6 +274,11 @@ If it requires domain expertise (code, content, email, research), delegate to th
 - **.claude/skills/theta-wave/** - System improvement cycle with analyst
 - **.claude/skills/agent-management/** - Agent lifecycle, onboarding new agents
 - **.claude/skills/approvals/** - Approval routing and surfacing workflow
+- **.claude/skills/vignette/** - Daily vignette/hero asset orchestration when assigned
+
+## Local Cron Catalog
+
+Configured cron names: `agentops-hourly-dogfood`, `blocked-uat-escalator`, `collaboration-optimizer`, `fleet-tick`, `human-blockers-digest`, `idle-overlap-watcher`, `kanban-sync`, `overnight-permission-loop`, `rgos-task-poll`, `wip-enforcer`. Keep this list aligned with `config.json`.
 
 ---
 

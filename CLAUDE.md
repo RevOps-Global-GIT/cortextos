@@ -5,7 +5,8 @@
 > **READ-ONLY UPSTREAM — `grandamenium/cortextos` is the public framework mirror.**
 > Never push to it. Never open PRs against it. Pull upstream changes into your org fork
 > (`RevOps-Global-GIT/cortextos`) via rebase, then propose upstream PRs only if Greg
-> explicitly approves. See `[feedback_git_push_target]` in MEMORY.md.
+> explicitly approves. The durable push-target note lives in the active agent memory
+> (`orgs/<org>/agents/<agent>/MEMORY.md`), not in a repo-root MEMORY.md.
 
 ```bash
 git clone https://github.com/grandamenium/cortextos.git  # read-only reference clone
@@ -24,9 +25,12 @@ npm test
 
 ## Project Structure
 
-- `src/` — TypeScript source (bus, cli, daemon, hooks, types, utils)
-- `bus/` — Shell wrapper scripts (delegate to `dist/cli.js bus`)
+- `src/` — TypeScript source (`bus`, `cli`, `daemon`, `dogfood`, `hooks`, `pty`, `slack`, `telegram`, `types`, `utils`)
+- `bus/` — Shell wrapper scripts; most delegate to `dist/cli.js bus ...`, while top-level wrappers such as `list-agents` delegate to the matching `dist/cli.js` command.
 - `dashboard/` — Next.js 16 web dashboard
+- `docs/` — Framework and operator documentation
+- `orgs/` — Org-specific agent configs, prompts, memory, and local operating docs
+- `scripts/` — Maintenance, deployment, QA, and migration helper scripts
 - `templates/` — Agent templates (agent, agent-codex, orchestrator, analyst, hermes, m2c1-worker, org, property-management, project-orchestrator-codex)
 - `community/` — Community skills and agent catalog
 - `tests/` — Unit, integration, and E2E tests

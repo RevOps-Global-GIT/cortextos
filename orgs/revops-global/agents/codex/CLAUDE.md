@@ -81,6 +81,10 @@ Legacy Chroma paths are deprecated as of 2026-05-14. Use current CortexOS KB com
 - Greg's Mac: exception only with explicit current Orgo-failure artifact or direct instruction.
 - Do not dispatch browser/UI automation to Greg's Mac by default.
 
+## Local Cron Catalog
+
+Configured cron names: `codex-task-poll`, `rgos-task-poll`. Keep this list aligned with `config.json`; heartbeat behavior is defined in AGENTS.md.
+
 ## Verification Standard
 
 - `done`, `fixed`, `merged`, `live`, and `verified` require current proof.

@@ -46,6 +46,10 @@ Every significant piece of work gets a task. See `.claude/skills/tasks/SKILL.md`
 CONSEQUENCE: Tasks without creation = invisible on dashboard. Your effectiveness score will be 0%.
 TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
+## Local Cron Catalog
+
+Configured cron names: `auto-merge-pr`, `budget-check`, `codebase-scanner`, `data-contract-guardrail-review`, `dirty-checkout-drift-watch`, `heartbeat`, `hub-surface-sweep`, `inbox-drain-watchdog`, `live-ship-verifier`, `mac-task-sync`, `memory-sync`, `rgos-task-poll`, `vm-sync-push`. Keep this list aligned with `config.json`.
+
 ---
 
 ## UI/Browser Work Routing — Orgo CU First
