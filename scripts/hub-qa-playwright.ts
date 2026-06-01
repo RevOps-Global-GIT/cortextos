@@ -2284,7 +2284,7 @@ async function runFleetAgentsChecks(page: Page, serviceKey?: string): Promise<Ch
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 3 Agent status enum valid', status: 'DEFERRED', evidence: 'No agents in orch_agents — nothing to assert' });
         } else {
-          const VALID_STATUSES = new Set(['online', 'offline', 'running', 'idle', 'starting', 'stopped', 'error', 'degraded', 'dead', 'unknown', 'active', 'inactive']);
+          const VALID_STATUSES = new Set(['online', 'offline', 'running', 'idle', 'starting', 'stopped', 'error', 'degraded', 'dead', 'unknown', 'active', 'inactive', 'working']);
           const invalid = rows.filter(r => r.status !== null && !VALID_STATUSES.has(r.status));
           if (invalid.length > 0) {
             const sample = invalid.slice(0, 5).map(r => `${r.role_id}:${r.status}`).join(', ');
