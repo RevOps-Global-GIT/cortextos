@@ -30,7 +30,7 @@ import { spawnCodex } from '../bus/spawn-codex.js';
 import { handleCodexFallback } from '../bus/codex-fallback.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
-import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled } from '../bus/rgos-mirror.js';
+import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos } from '../bus/rgos-mirror.js';
 import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
@@ -131,6 +131,7 @@ const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
   'create-task',
   'update-task',
   'complete-task',
+  'set-pr-url',
   'validate-task',
   'claim-task',
   'save-output',
@@ -983,6 +984,16 @@ busCommand
 
     // Exit after local write completes — completeTask fires mirrorTaskToRgos
     // which schedules drainRetryQueue; exit before the drain runs.
+    process.exit(0);
+  });
+
+busCommand
+  .command('set-pr-url')
+  .argument('<task-id>', 'Bus task ID (task_EPOCH_RAND)')
+  .argument('<pr-url>', 'PR URL to record in orch_tasks mirror row metadata')
+  .description('Best-effort: patches pr_url into the orch_tasks mirror row for a bus task (enables pr_cycle_minutes metric).')
+  .action(async (taskId: string, prUrl: string) => {
+    await mirrorPrUrlToRgos(taskId, prUrl).catch(() => {});
     process.exit(0);
   });
 
