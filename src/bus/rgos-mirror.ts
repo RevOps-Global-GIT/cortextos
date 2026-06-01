@@ -779,6 +779,59 @@ export async function mirrorTaskToRgos(
 }
 
 /**
+ * Patch pr_url into an existing orch_tasks mirror row's metadata. Best-effort — never throws.
+ * Looks up the row by metadata.bus_task_id, merges pr_url, PATCHes back.
+ */
+export async function mirrorPrUrlToRgos(busTaskId: string, prUrl: string): Promise<void> {
+  if (!isEnabled()) return;
+  const url = process.env.SUPABASE_RGOS_URL!;
+  const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
+
+  // Locate the bus_mirror row for this task.
+  const findEp = new URL(`${url}/rest/v1/orch_tasks`);
+  findEp.searchParams.set('select', 'id,metadata');
+  findEp.searchParams.set('metadata->>bus_task_id', `eq.${busTaskId}`);
+  findEp.searchParams.set('source', `eq.${MIRROR_SOURCE}`);
+  findEp.searchParams.set('limit', '1');
+
+  let rowId: string | undefined;
+  let existingMeta: Record<string, unknown> = {};
+  try {
+    const findRes = await fetch(findEp.toString(), {
+      method: 'GET',
+      headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (findRes.ok) {
+      const rows = await findRes.json().catch(() => []) as Array<{ id?: string; metadata?: Record<string, unknown> }>;
+      if (rows.length > 0 && typeof rows[0].id === 'string') {
+        rowId = rows[0].id;
+        existingMeta = (rows[0].metadata && typeof rows[0].metadata === 'object') ? rows[0].metadata : {};
+      }
+    }
+  } catch { return; }
+
+  if (!rowId) return; // no mirror row found — skip silently
+
+  // PATCH metadata with pr_url merged in.
+  const patchEp = new URL(`${url}/rest/v1/orch_tasks`);
+  patchEp.searchParams.set('id', `eq.${rowId}`);
+  try {
+    await fetch(patchEp.toString(), {
+      method: 'PATCH',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({ metadata: { ...existingMeta, pr_url: prUrl } }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch { /* best-effort */ }
+}
+
+/**
  * Mirror a message write to Supabase cortex_messages. Fire-and-forget.
  */
 export async function mirrorMessageToRgos(msg: InboxMessage): Promise<void> {
