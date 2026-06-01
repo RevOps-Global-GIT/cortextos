@@ -2233,6 +2233,53 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
     results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
+  // CHECK 6: Pending column count matches API distinct-open count.
+  // Pending column = bus statuses 'pending' + 'proposed' ONLY (not approved/in_progress/review —
+  // those are separate kanban columns). This is the load-bearing correctness detector for
+  // Pending-column inflation (the exact gap that let Pending-69 reach Greg undetected).
+  try {
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches API', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping Pending counter correctness check' });
+    } else {
+      const resp = await fetch(
+        `${SUPA_URL}/rest/v1/orch_tasks?select=id&status=in.(pending,proposed)`,
+        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Prefer: 'count=exact' } },
+      );
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches API', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const contentRange = resp.headers.get('content-range') ?? '';
+        const apiCount = parseInt(contentRange.split('/')[1] ?? '-1', 10);
+        if (isNaN(apiCount) || apiCount < 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches API', status: 'DEFERRED', evidence: `Could not parse count from content-range header: "${contentRange}"` });
+        } else {
+          // Read the rendered Pending column header count from the kanban board
+          const pendingText = await page.evaluate(() => {
+            const els = Array.from(document.querySelectorAll('[class*="column-header"], [class*="columnHeader"], [class*="kanban"], th, [role="columnheader"]'));
+            const pendingEl = els.find(el => /\bpending\b/i.test(el.textContent ?? ''));
+            return pendingEl?.textContent ?? '';
+          }).catch(() => '');
+          const renderedMatch = pendingText.match(/(\d+)/);
+          const renderedCount = renderedMatch ? parseInt(renderedMatch[1], 10) : -1;
+          await shot(page, `${sp}-6-pending-counter`);
+          if (renderedCount < 0) {
+            results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches API', status: 'DEFERRED', evidence: `Could not read rendered Pending count from kanban header. API distinct-open (pending+proposed): ${apiCount}. Header text found: "${pendingText.trim().slice(0, 100)}"` });
+          } else {
+            const delta = Math.abs(renderedCount - apiCount);
+            const TOLERANCE = 2;
+            if (delta > TOLERANCE) {
+              results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches API', status: 'FAIL', evidence: `Pending count mismatch: rendered=${renderedCount}, API distinct-open (pending+proposed)=${apiCount}, delta=${delta} > tolerance=${TOLERANCE}. Likely inflation or dedup gap.` });
+            } else {
+              results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches API', status: 'PASS', evidence: `Pending count OK: rendered=${renderedCount}, API=${apiCount}, delta=${delta} ≤ tolerance=${TOLERANCE}.` });
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches API', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
   return results;
 }
 
@@ -2799,6 +2846,32 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
     }
   } catch (e) {
     results.push({ check: '[CORRECTNESS] CHECK 5 orch_experiments latest row valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 6: [CORRECTNESS] No "parse_error" or "malformed analysis" text visible on the theta page.
+  // Surface-level detector: if the renderer emits these strings, the pipeline is broken end-to-end.
+  try {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(300);
+    const pageText = await page.evaluate(() => document.body.innerText ?? '').catch(() => '');
+    const lines = pageText.split('\n');
+    const offending = lines.filter(l => /parse_error|malformed analysis/i.test(l));
+    await shot(page, `${sp}-6-parse-error-check`);
+    if (offending.length > 0) {
+      results.push({
+        check: '[CORRECTNESS] CHECK 6 No parse_error rows on theta page',
+        status: 'FAIL',
+        evidence: `${offending.length} line(s) contain "parse_error" or "malformed analysis". First offending row: "${offending[0].trim().slice(0, 200)}"`,
+      });
+    } else {
+      results.push({
+        check: '[CORRECTNESS] CHECK 6 No parse_error rows on theta page',
+        status: 'PASS',
+        evidence: 'No "parse_error" or "malformed analysis" text visible on theta page.',
+      });
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 6 No parse_error rows on theta page', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   return results;
