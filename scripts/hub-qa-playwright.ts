@@ -992,10 +992,11 @@ async function runMyDayChecks(page: Page): Promise<CheckResult[]> {
   }
 
   // CHECK 3: Content sections (comms feed items, cards, etc.) — 570f517f-phase2 PR1: upgrade to CORRECTNESS
-  // (require card text >=20 chars, catches the "empty placeholder card" failure mode where cards render but contain no data).
-  await page.waitForSelector('[class*="card"], [class*="section"], [class*="item"], li', { timeout: 3000 }).catch(() => {});
+  // Scoped to #main-content to exclude sidebar nav li items (which have no direct text and caused 929-item false-fail).
+  await page.waitForSelector('#main-content section, #main-content p', { timeout: 3000 }).catch(() => {});
   results.push(await checkDataOrEmpty(page, sp, '[CORRECTNESS] CHECK 3 Content sections visible',
-    '[class*="card"], [class*="section"], [class*="item"], li', /no tasks|nothing scheduled|empty/i, 20));
+    '#main-content section[aria-label] p, #main-content [class*="font-semibold"]',
+    /inbox zero|nothing here|no tasks|nothing scheduled|empty/i, 20));
 
   // CHECK 4: Per-item action button (Dismiss/Respond/Review) on comms feed items
   // Scope strictly to short-text buttons to avoid matching article headlines
