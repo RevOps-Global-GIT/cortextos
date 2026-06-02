@@ -254,6 +254,29 @@ function startEngageBatchScheduler(): void {
     inFlight = true; // hold the browser page for discovery navigation
     lastBatchWindow = windowKey;
 
+    // Hygiene: mark pending drafts older than 7 days as skipped — past the engagement window.
+    try {
+      const staleCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const hygieneRes = await fetch(
+        `${config.supabaseUrl}/rest/v1/linkedin_engagement_queue?status=eq.pending&session_date=lt.${staleCutoff}`,
+        {
+          method: 'PATCH',
+          headers: {
+            apikey: config.supabaseKey,
+            Authorization: `Bearer ${config.supabaseKey}`,
+            'Content-Type': 'application/json',
+            'Prefer': 'return=minimal',
+          },
+          body: JSON.stringify({ status: 'skipped', skip_reason: 'stale: >7 days past engagement window' }),
+        },
+      );
+      if (hygieneRes.ok) {
+        console.log(`[engage-batch-sched] Hygiene: marked stale pending drafts as skipped (cutoff ${staleCutoff})`);
+      }
+    } catch (err) {
+      console.warn(`[engage-batch-sched] Hygiene cleanup failed: ${(err as Error).message}`);
+    }
+
     try {
       const keywords = await pickBatchKeywords(config.supabaseUrl, config.supabaseKey, 4);
       console.log(`[engage-batch-sched] Keywords: ${keywords.join(', ')}`);

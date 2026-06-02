@@ -588,32 +588,36 @@ export async function discoverLinkedInPosts(
     console.log(`[discover] Searching: "${keyword}"`);
 
     // Intercept network responses to capture activity URNs from LinkedIn API calls.
-    const capturedUrns = new Map<string, string>(); // urn → author profile url
+    const capturedUrns = new Map<string, string>(); // urn → placeholder
     const responseHandler = async (response: import('playwright').Response) => {
-        const url = response.url();
-        if (!url.includes('linkedin.com') || !url.includes('search')) return;
-        try {
-          const text = await response.text().catch(() => '');
-          const urnMatches = text.matchAll(/"(urn:li:activity:\d+)"/g);
-          for (const m of urnMatches) {
-            const urn = m[1];
-            if (!capturedUrns.has(urn)) capturedUrns.set(urn, '');
-          }
-        } catch { /* ignore */ }
-      };
-      page.on('response', responseHandler);
+      const responseUrl = response.url();
+      if (!responseUrl.includes('linkedin.com')) return;
+      const ct = response.headers()['content-type'] ?? '';
+      if (!ct.includes('json') && !ct.includes('javascript')) return;
+      try {
+        const text = await response.text().catch(() => '');
+        const urnMatches = text.matchAll(/urn:li:activity:(\d{10,})/g);
+        for (const m of urnMatches) {
+          const urn = `urn:li:activity:${m[1]}`;
+          if (!capturedUrns.has(urn)) capturedUrns.set(urn, '');
+        }
+      } catch { /* ignore */ }
+    };
+    page.on('response', responseHandler);
     try {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       await checkSession(page);
 
-      // Give SDUI time to render post cards (headed mode renders them; headless does not)
-      await page.waitForTimeout(3000);
+      // Give SDUI time to render the initial post cards
+      await page.waitForTimeout(4000);
 
-      // Scroll to trigger additional post cards to load
-      for (let i = 0; i < 4; i++) {
-        await page.evaluate(() => window.scrollBy(0, 700));
-        await page.waitForTimeout(1000);
+      // Scroll aggressively to trigger lazy-loaded XHR calls that carry activity URNs.
+      for (let i = 0; i < 8; i++) {
+        await page.evaluate(() => window.scrollBy(0, 600));
+        await page.waitForTimeout(1500);
       }
+      // Pause to let final batch of XHR responses arrive
+      await page.waitForTimeout(2000);
 
       // Extract post cards from DOM.
       // LinkedIn renders "Feed post" heading (H2) as the first text in each post card.
@@ -713,31 +717,47 @@ export async function discoverLinkedInPosts(
 
       page.off('response', responseHandler);
 
-      // Merge network-captured URNs with DOM-extracted posts that are missing URLs.
-      // Assign captured URNs to no-url posts in order (best-effort; not always 1-to-1).
+      // Assign network-captured URNs to posts that lack real URLs.
+      // Only posts with a real /feed/update/ URL are emitted — no synthetic fallback.
       const orphanUrns = [...capturedUrns.keys()].filter(
         urn => !extracted.some(p => p.url.includes(urn))
       );
       let urnIdx = 0;
-      const today = new Date().toISOString().split('T')[0];
       const enriched = extracted.map(p => {
         if (p.url) return p;
-        // Try a network-captured URN first
         if (urnIdx < orphanUrns.length) {
           return { ...p, url: `https://www.linkedin.com/feed/update/${orphanUrns[urnIdx++]}/` };
         }
-        // Fallback: synthetic URL so the post can pass the URL-gate in engage-batch-generate.
-        // Uses author profile URL (or name) + date for per-author-per-day uniqueness.
-        const authorKey = (p.authorUrl ?? p.authorName).replace(/[^a-z0-9]/gi, '-').toLowerCase();
-        return { ...p, url: `synthetic://linkedin-post/${authorKey}/${today}` };
+        return p; // no URL — will be filtered below
       });
 
-      console.log(`[discover] "${keyword}": ${enriched.length} posts (${enriched.filter(p => !p.url.startsWith('synthetic')).length} real URLs, ${capturedUrns.size} URNs, ${enriched.filter(p => p.url.startsWith('synthetic')).length} synthetic)`);
+      const withUrls = enriched.filter(p => !!p.url);
+      console.log(`[discover] "${keyword}": ${extracted.length} DOM posts, ${capturedUrns.size} network URNs → ${withUrls.length} with real URLs (${enriched.length - withUrls.length} dropped, no URL)`);
 
-      for (const p of enriched) {
+      // Topic relevance gate: drop posts that are off-topic for RevOps/GTM/sales leadership.
+      const OFF_TOPIC_SIGNALS = [
+        /#interviewquestions/i, /#interview\b/i,
+        /\bjava\b/i, /\bpython\b/i, /\breact\.?js\b/i, /\bnode\.?js\b/i,
+        /\bangular\b/i, /\bvue\.?js\b/i, /\bdotnet\b/i, /\bc#\b/i, /\bc\+\+/i,
+        /#coding\b/i, /#developer\b/i, /#programmer\b/i, /#softwaredevelopment\b/i,
+        /#machinelearning\b/i, /#deeplearning\b/i, /#datascience\b/i, /#mlops\b/i,
+        /\bcloud engineer\b/i, /\bazure\b.*\bengineer\b/i,
+        /\bw2\s+only\b/i, /\bc2c\b/i, /\bhot(list|beds?)\b/i,
+        /immediate\s+opening/i, /\bstaffing\b/i, /\brecruiter\b/i, /\bplacement\b/i,
+        /graduation\b/i, /\bcongratulations?\b.*\bgraduate/i, /\bcolleg(e|iate)\b.*\bgrad/i,
+        /\bremote.{0,20}usd\b/i, /remote jobs?.*\/hour/i,
+        /get me on your next podcast/i,
+      ];
+
+      for (const p of withUrls) {
         if (all.length >= limit) break;
         const key = p.url;
         if (seenUrn.has(key)) continue;
+        const combined = `${p.authorName} ${p.text}`;
+        if (OFF_TOPIC_SIGNALS.some(sig => sig.test(combined))) {
+          console.log(`[discover] SKIP off-topic: ${p.authorName}: ${p.text.slice(0, 60)}`);
+          continue;
+        }
         seenUrn.add(key);
         all.push({
           url: p.url,
