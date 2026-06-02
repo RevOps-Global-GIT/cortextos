@@ -107,6 +107,7 @@ describe.skipIf(!existsSync(DIST_CLI))('session-lock: dup-spawn collision guard'
       CTX_INSTANCE_ID: INSTANCE,
     };
     delete env.CTX_SESSION_OWNER_PID;
+    delete env.CTX_ROOT; // prevent inherited CTX_ROOT from misdirecting the lock lookup
 
     const result = await runCli(['bus', 'update-heartbeat', 'online'], env);
 
@@ -128,6 +129,7 @@ describe.skipIf(!existsSync(DIST_CLI))('session-lock: dup-spawn collision guard'
       CTX_INSTANCE_ID: INSTANCE,
     };
     delete env.CTX_SESSION_OWNER_PID;
+    delete env.CTX_ROOT; // prevent inherited CTX_ROOT from misdirecting the lock lookup
 
     const probes: string[][] = [
       ['bus', 'update-heartbeat', 'online'],

@@ -18,12 +18,14 @@ describe('BUG-035 + BUG-013: enable-agent validation', () => {
   const origHome = process.env.HOME;
   const origFw = process.env.CTX_FRAMEWORK_ROOT;
   const origPr = process.env.CTX_PROJECT_ROOT;
+  const origCtxRoot = process.env.CTX_ROOT;
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'cortextos-batch-'));
     process.env.HOME = tmpHome;
     delete process.env.CTX_FRAMEWORK_ROOT;
     delete process.env.CTX_PROJECT_ROOT;
+    delete process.env.CTX_ROOT;
   });
 
   afterEach(() => {
@@ -33,6 +35,8 @@ describe('BUG-035 + BUG-013: enable-agent validation', () => {
     else process.env.CTX_FRAMEWORK_ROOT = origFw;
     if (origPr === undefined) delete process.env.CTX_PROJECT_ROOT;
     else process.env.CTX_PROJECT_ROOT = origPr;
+    if (origCtxRoot === undefined) delete process.env.CTX_ROOT;
+    else process.env.CTX_ROOT = origCtxRoot;
     rmSync(tmpHome, { recursive: true, force: true });
   });
 
