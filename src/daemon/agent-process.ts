@@ -87,6 +87,12 @@ export class AgentProcess implements ManagedAgent {
   // (each start() recreates the PTY, but the Telegram handle persists).
   private telegramApi: TelegramAPI | null = null;
   private telegramChatId: string | null = null;
+  // Issue #392: tracks whether the most recently built startup prompt consumed
+  // a restart marker. start() reads this after spawn to decide whether the
+  // daemon should fire the codex-app-server back-online Telegram directly
+  // (skipped on handoff restart or silent auto-reset).
+  private lastSpawnWasHandoff = false;
+  private lastSpawnWasSilentRestart = false;
 
   constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn, cronScheduler?: CronScheduler | null) {
     this.name = name;
@@ -295,6 +301,13 @@ export class AgentProcess implements ManagedAgent {
       } catch (err) {
         this.log(`Boot heartbeat write failed (non-fatal): ${err}`);
       }
+
+      // Issue #392: codex-app-server does not reliably execute the inline
+      // "Send a Telegram message saying you are back online" instruction the
+      // way claude-code does, so fire the back-online ping directly from the
+      // daemon for that runtime. Skipped on handoff restart and silent
+      // auto-reset, which have their own explicit UX contracts.
+      this.maybeSendCodexBootNotification();
 
       // Start session timer
       this.startSessionTimer();
@@ -1059,7 +1072,6 @@ export class AgentProcess implements ManagedAgent {
     if (existsSync(rateLimitMarker)) {
       rateLimitBlock = ' RATE-LIMIT RECOVERY: Your previous session was paused due to API rate limiting. Resume normal operations but be mindful of request volume.';
       try {
-        const { unlinkSync } = require('fs');
         unlinkSync(rateLimitMarker);
       } catch { /* ignore */ }
     }
@@ -1070,6 +1082,8 @@ export class AgentProcess implements ManagedAgent {
     const handoffBlock = this.consumeHandoffBlock();
     const isHandoffRestart = handoffBlock.length > 0;
     const isSilentRestart = this.consumeSilentRestartMarker();
+    this.lastSpawnWasHandoff = isHandoffRestart;
+    this.lastSpawnWasSilentRestart = isSilentRestart;
     // HANDOFF UX: the pickup message MUST be the first action after reading the handoff doc —
     // before cron restoration, before heartbeat, before anything else. Placing this instruction
     // immediately after the handoffBlock in the prompt ensures it is not buried.
@@ -1097,6 +1111,9 @@ export class AgentProcess implements ManagedAgent {
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
+    // Session refresh (--continue) is neither a handoff restart nor a silent auto-reset.
+    this.lastSpawnWasHandoff = false;
+    this.lastSpawnWasSilentRestart = false;
     return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Restore your crons from config.json ONLY if missing. CRITICAL DEDUP: Call CronList FIRST AND run 'cortextos bus list-crons $CTX_AGENT_NAME'. For each config.json entry, search BOTH the CronList output AND the bus list-crons output for its prompt text — if the prompt already appears in either, SKIP that cron. For entries NOT already listed: use CronCreate directly (do NOT use /loop — /loop will prompt about cloud scheduling which blocks autonomous boot). Convert interval to cron expression: 1h→"0 */1 * * *", 6h→"0 */6 * * *", 24h→"0 0 * * *", Nm→"*/N * * * *". Pass recurring:true for recurring entries, no recurring flag for once entries (only if fire_at is in the future). Rapid --continue restarts must not accumulate duplicates.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. After restoring crons and checking inbox, send a Telegram message to the user saying you are back online.`;
   }
 
@@ -1155,7 +1172,6 @@ export class AgentProcess implements ManagedAgent {
     // Primary path: explicit marker written by hard-restart or watchdog
     if (existsSync(markerPath)) {
       try {
-        const { unlinkSync } = require('fs');
         const docPath = readFileSync(markerPath, 'utf-8').trim();
         unlinkSync(markerPath);
         if (docPath && existsSync(docPath)) {
@@ -1223,10 +1239,34 @@ export class AgentProcess implements ManagedAgent {
     const markerPath = join(this.env.ctxRoot, 'state', this.name, '.silent-restart');
     if (!existsSync(markerPath)) return false;
     try {
-      const { unlinkSync } = require('fs');
       unlinkSync(markerPath);
     } catch { /* ignore — we still treat it as silent */ }
     return true;
+  }
+
+  /**
+   * Issue #392: send the back-online Telegram notification directly from the
+   * daemon when the codex-app-server runtime spawns. The boot prompt's inline
+   * "Send a Telegram message..." instruction reaches the codex thread but is
+   * not executed reliably as a tool call, leaving James without the standard
+   * post-restart notification claude-code peers send.
+   *
+   * Skipped when:
+   *  - runtime is anything other than codex-app-server (claude-code/hermes
+   *    already emit this via the prompt),
+   *  - the most recent prompt was built for a handoff restart (the agent
+   *    sends its own contextual "back — ..." reply in that case),
+   *  - the most recent prompt was built for a silent auto-reset,
+   *  - no Telegram handle has been wired (no chat_id configured).
+   */
+  private maybeSendCodexBootNotification(): void {
+    if (this.config.runtime !== 'codex-app-server') return;
+    if (this.lastSpawnWasHandoff) return;
+    if (this.lastSpawnWasSilentRestart) return;
+    if (!this.telegramApi || !this.telegramChatId) return;
+    this.telegramApi
+      .sendMessage(this.telegramChatId, `Agent ${this.name} is back online`)
+      .catch(() => { /* non-fatal: notification is observability only */ });
   }
 
   private startSessionTimer(): void {
