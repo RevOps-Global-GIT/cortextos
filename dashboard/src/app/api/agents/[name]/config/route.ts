@@ -6,6 +6,16 @@ import { spawnSync } from 'child_process';
 
 export const dynamic = 'force-dynamic';
 
+/**
+ * Map config.json `tier` field → canonical Claude model name.
+ * Used when config.json has no explicit `model` field set.
+ */
+const TIER_TO_MODEL: Record<string, string> = {
+  opus: 'claude-opus-4-5',
+  sonnet: 'claude-sonnet-4-6',
+  haiku: 'claude-haiku-4-5',
+};
+
 function resolveAgentConfigPath(frameworkRoot: string, name: string): string | null {
   // First check via getAllAgents (uses enabled-agents.json + filesystem scan)
   const allAgents = getAllAgents();
@@ -41,7 +51,17 @@ export async function GET(
   }
   try {
     const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    return Response.json({ config, name });
+
+    // Derive model from tier when not explicitly set
+    let modelSource: 'explicit' | 'tier' | 'default' = 'default';
+    if (config.model && typeof config.model === 'string' && config.model.trim()) {
+      modelSource = 'explicit';
+    } else if (config.tier && typeof config.tier === 'string' && TIER_TO_MODEL[config.tier]) {
+      config.model = TIER_TO_MODEL[config.tier];
+      modelSource = 'tier';
+    }
+
+    return Response.json({ config, name, modelSource });
   } catch {
     return Response.json({ error: 'Failed to read config' }, { status: 500 });
   }

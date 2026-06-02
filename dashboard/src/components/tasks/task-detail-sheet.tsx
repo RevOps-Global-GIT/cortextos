@@ -217,23 +217,23 @@ export function TaskDetailSheet({
     <>
     <Sheet open={open} onOpenChange={(o) => { onOpenChange(o); if (!o) { setEditing(false); setConfirmDelete(false); setError(null); setPreviewOutput(null); } }}>
       <SheetContent side="right" className="sm:max-w-lg overflow-y-auto">
-        <SheetHeader>
+        <SheetHeader className="px-4 py-3">
           {editing ? (
             <Input
               value={editTitle}
               onChange={(e) => setEditTitle(e.target.value)}
-              className="text-lg font-semibold"
+              className="text-base font-semibold"
               placeholder="Task title..."
             />
           ) : (
             <div className="flex items-start gap-2 pr-8">
-              <SheetTitle className="flex-1">{task.title}</SheetTitle>
+              <SheetTitle className="flex-1 text-base">{task.title}</SheetTitle>
               <Button variant="ghost" size="icon-sm" onClick={startEditing} title="Edit task" className="shrink-0">
                 <IconPencil size={14} />
               </Button>
             </div>
           )}
-          <SheetDescription>Task ID: {task.id}</SheetDescription>
+          <SheetDescription className="text-xs">Task ID: {task.id}</SheetDescription>
         </SheetHeader>
 
         {/* Error banner */}
@@ -272,42 +272,55 @@ export function TaskDetailSheet({
 
           <Separator />
 
-          {/* Details grid */}
-          <div className="grid grid-cols-2 gap-y-3 gap-x-4 text-sm">
-            <div>
-              <span className="text-muted-foreground">Assignee</span>
-              {editing ? (
+          {/* Details row — compact inline badges */}
+          {editing ? (
+            <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-sm">
+              <div>
+                <span className="text-muted-foreground">Assignee</span>
                 <Input
                   value={editAssignee}
                   onChange={(e) => setEditAssignee(e.target.value)}
                   placeholder="agent name or human"
                   className="mt-1 h-7 text-sm"
                 />
-              ) : (
-                <p className="font-medium">{task.assignee ?? 'Unassigned'}</p>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Project</span>
+                <p className="font-medium">{task.project ?? '-'}</p>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+              {task.assignee && (
+                <span>
+                  <span className="mr-1">Assignee:</span>
+                  <span className="font-medium text-foreground">{task.assignee}</span>
+                </span>
+              )}
+              {task.project && (
+                <span>
+                  <span className="mr-1">Project:</span>
+                  <span className="font-medium text-foreground">{task.project}</span>
+                </span>
+              )}
+              <span>
+                <span className="mr-1">Created:</span>
+                <TimeAgo date={task.created_at} />
+              </span>
+              {task.updated_at && (
+                <span>
+                  <span className="mr-1">Updated:</span>
+                  <TimeAgo date={task.updated_at} />
+                </span>
+              )}
+              {task.completed_at && (
+                <span>
+                  <span className="mr-1">Completed:</span>
+                  <TimeAgo date={task.completed_at} />
+                </span>
               )}
             </div>
-            <div>
-              <span className="text-muted-foreground">Project</span>
-              <p className="font-medium">{task.project ?? '-'}</p>
-            </div>
-            <div>
-              <span className="text-muted-foreground">Created</span>
-              <div><TimeAgo date={task.created_at} /></div>
-            </div>
-            {task.updated_at && (
-              <div>
-                <span className="text-muted-foreground">Updated</span>
-                <div><TimeAgo date={task.updated_at} /></div>
-              </div>
-            )}
-            {task.completed_at && (
-              <div>
-                <span className="text-muted-foreground">Completed</span>
-                <div><TimeAgo date={task.completed_at} /></div>
-              </div>
-            )}
-          </div>
+          )}
 
           {/* Description */}
           <Separator />

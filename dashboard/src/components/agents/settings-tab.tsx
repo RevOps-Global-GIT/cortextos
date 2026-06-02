@@ -14,6 +14,7 @@ interface AgentConfig {
     never_ask?: string[];
   };
   model?: string;
+  tier?: string;
   max_session_seconds?: number;
   max_crashes_per_day?: number;
   startup_delay?: number;
@@ -21,7 +22,7 @@ interface AgentConfig {
 }
 
 const MODEL_PLACEHOLDER: Record<NonNullable<AgentConfig['runtime']>, string> = {
-  'claude-code': 'claude-sonnet-4-5',
+  'claude-code': 'claude-sonnet-4-6',
   'codex-app-server': 'gpt-5-codex',
   hermes: 'hermes-1',
 };
@@ -38,6 +39,7 @@ const TIME_REGEX = /^\d{2}:\d{2}$/;
 
 export function SettingsTab({ agentName }: SettingsTabProps) {
   const [config, setConfig] = useState<AgentConfig>({});
+  const [modelSource, setModelSource] = useState<'explicit' | 'tier' | 'default'>('default');
   const [loading, setLoading] = useState(true);
 
   // Section 1: Operational Config
@@ -58,6 +60,7 @@ export function SettingsTab({ agentName }: SettingsTabProps) {
       .then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); })
       .then(d => {
         if (!controller.signal.aborted && d.config) setConfig(d.config);
+        if (!controller.signal.aborted && d.modelSource) setModelSource(d.modelSource as 'explicit' | 'tier' | 'default');
         if (!controller.signal.aborted) setLoading(false);
       })
       .catch(err => { if (err.name !== 'AbortError') setLoading(false); });
@@ -296,13 +299,22 @@ export function SettingsTab({ agentName }: SettingsTabProps) {
         </CardHeader>
         <CardContent className="space-y-4">
           <div>
-            <label className="text-xs text-muted-foreground">Model</label>
+            <label className="text-xs text-muted-foreground">
+              Model
+              {modelSource === 'tier' && (
+                <span className="ml-1.5 rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                  derived from tier: {config.tier}
+                </span>
+              )}
+            </label>
             <input
               type="text"
               value={config.model || ''}
               onChange={e => setConfig(p => ({ ...p, model: e.target.value }))}
               placeholder={MODEL_PLACEHOLDER[config.runtime ?? 'claude-code']}
-              className="mt-1 block w-full rounded-md border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none"
+              readOnly={modelSource === 'tier'}
+              title={modelSource === 'tier' ? `Derived from tier "${config.tier}". Set model explicitly in config.json to override.` : undefined}
+              className={`mt-1 block w-full rounded-md border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none${modelSource === 'tier' ? ' cursor-not-allowed opacity-70' : ''}`}
             />
           </div>
 

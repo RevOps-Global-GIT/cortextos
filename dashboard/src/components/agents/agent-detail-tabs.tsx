@@ -63,7 +63,7 @@ export function AgentDetailTabs({
       </TabsContent>
 
       <TabsContent value="tasks">
-        <TasksTab tasks={tasks} />
+        <TasksTab agentName={detail.systemName ?? detail.name} tasks={tasks} />
       </TabsContent>
 
       <TabsContent value="crons">
