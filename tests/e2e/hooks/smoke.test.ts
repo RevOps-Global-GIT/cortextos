@@ -398,8 +398,13 @@ describe('hook-crash-alert smoke', () => {
       expect(existsSync(crashLog)).toBe(true);
       const content = readFileSync(crashLog, 'utf-8');
       expect(content).toMatch(/type=user-stop/);
-      // Marker file should be consumed (deleted) by the hook
-      expect(existsSync(join(stateDir, '.user-stop'))).toBe(false);
+      // Marker is intentionally preserved after the first hook firing.
+      // classifyFromMarkers() does NOT unlink fresh markers because a daemon
+      // restart fires this hook twice (once per session boundary); both firings
+      // must see the marker to classify correctly. The marker is cleared by the
+      // first post-restart heartbeat, or lazy-unlinked if it becomes stale
+      // (> MARKER_TTL_MS without a successful restart heartbeat).
+      expect(existsSync(join(stateDir, '.user-stop'))).toBe(true);
     } finally {
       rmSync(tmpHome, { recursive: true, force: true });
     }
