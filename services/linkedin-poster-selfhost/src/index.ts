@@ -187,17 +187,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 // ---------------------------------------------------------------------------
 
 const DEFAULT_DISCOVERY_KEYWORDS = [
+  '#revops',
+  '#revenueoperations',
+  '#gtm',
+  '#salesops',
   'revenue operations strategy',
   'MQL definition',
   'marketing operations',
-  'HubSpot workflows',
   'RevOps',
   'RevOps and AI',
   'lead scoring model',
-  'sales marketing alignment B2B',
   'CRM data hygiene',
-  'marketing ops strategy',
-  'buying group automation',
   'revenue attribution model',
 ];
 
