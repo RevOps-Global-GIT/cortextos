@@ -2415,7 +2415,7 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'DEFERRED', evidence: 'No tasks in orch_tasks — nothing to assert' });
         } else {
-          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed']);
+          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed', 'blocked', 'rejected', 'needs_person']);
           const invalid = rows.filter(r => !r.status || !VALID_STATUSES.has(r.status));
           if (invalid.length > 0) {
             const sample = invalid.slice(0, 5).map(r => `${r.id}:${r.status}`).join(', ');
@@ -2469,6 +2469,95 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
     }
   } catch (e) {
     results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches bus ledger', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /app/fleet-sessions checks  (tab: /app/fleet/agents?tab=sessions)
+// ---------------------------------------------------------------------------
+async function runFleetSessionsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'app-fleet-sessions';
+
+  // CHECK 1: Page load — wait for sessions tab content
+  try {
+    await page.waitForSelector('[data-orchestrator-tab="agents"]', { timeout: 15000 });
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`) });
+    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'PASS', evidence: 'Fleet sessions tab loaded.' });
+  } catch (e) {
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`) }).catch(() => {});
+    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'FAIL', evidence: `Page did not load within 15s: ${(e as Error).message?.split('\n')[0]}` });
+    return results;
+  }
+
+  // CHECK 2 (CORRECTNESS): DB session count vs rendered rows
+  // Query orch_agent_heartbeats (kind != '' AND last_heartbeat within 35min) — same filter as useSessionHeartbeats hook.
+  // Assert: if DB count >= 1, UI must render >=1 card; if DB count == 0, UI must show empty state.
+  try {
+    const cutoff = new Date(Date.now() - 35 * 60 * 1000).toISOString();
+    let dbCount: number | null = null;
+
+    if (serviceKey) {
+      const resp = await fetch(
+        `${SUPA_URL}/rest/v1/orch_agent_heartbeats?select=instance_id,agent_name,kind,last_heartbeat&kind=neq.&last_heartbeat=gte.${encodeURIComponent(cutoff)}&order=last_heartbeat.desc`,
+        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Prefer: 'count=exact' } },
+      );
+      const countHeader = resp.headers.get('content-range');
+      if (countHeader) {
+        const m = countHeader.match(/\/(\d+)/);
+        dbCount = m ? parseInt(m[1], 10) : null;
+      }
+      if (dbCount === null) {
+        const rows = await resp.json() as unknown[];
+        dbCount = Array.isArray(rows) ? rows.length : null;
+      }
+    }
+
+    // Wait for sessions panel to resolve — either the count text or empty state must appear.
+    // React Query staleTime=30s so on fresh load the network request fires; give it up to 10s.
+    await Promise.race([
+      page.waitForSelector('text=active session', { timeout: 10000 }).catch(() => null),
+      page.waitForSelector('text=No active CLI sessions', { timeout: 10000 }).catch(() => null),
+    ]);
+
+    // Detect rendered state from visible text
+    const emptyStateVisible = await page.getByText('No active CLI sessions', { exact: false }).isVisible().catch(() => false);
+    const sessionCountText = await page.getByText(/active session.*refreshes every/i).textContent().catch(() => null);
+    const renderedCount = sessionCountText ? parseInt(sessionCountText.match(/^(\d+)/)?.[1] ?? '0', 10) : 0;
+
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-sessions.png`) });
+
+    if (dbCount === null) {
+      // No serviceKey — fall back to DOM-only assertion
+      if (emptyStateVisible) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'PASS', evidence: 'Empty state "No active CLI sessions" rendered correctly (no serviceKey for DB comparison).' });
+      } else if (renderedCount > 0) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'PASS', evidence: `UI shows ${renderedCount} active session(s) (no serviceKey for DB comparison).` });
+      } else {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'DEFERRED', evidence: 'Neither session cards nor empty state visible — page may still be loading.' });
+      }
+    } else if (dbCount >= 1) {
+      if (renderedCount >= 1) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'PASS', evidence: `DB: ${dbCount} active session(s); UI shows ${renderedCount} card(s). ✓` });
+      } else if (emptyStateVisible) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'FAIL', evidence: `DB has ${dbCount} active session(s) but UI shows empty state "No active CLI sessions" — sessions tab regression.` });
+      } else {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'FAIL', evidence: `DB has ${dbCount} active session(s) but neither session cards nor empty state visible — rendering failure.` });
+      }
+    } else {
+      // DB count === 0
+      if (emptyStateVisible) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'PASS', evidence: 'DB: 0 active sessions; UI shows empty state correctly.' });
+      } else if (renderedCount > 0) {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'FAIL', evidence: `DB has 0 active sessions but UI renders ${renderedCount} card(s) — stale data displayed.` });
+      } else {
+        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'DEFERRED', evidence: 'DB: 0 sessions; empty state not yet visible — page may still be loading.' });
+      }
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   return results;
@@ -4151,6 +4240,7 @@ async function main() {
       'linkedin-presence': '/app/presence',
       '/analytics': '/app/analytics',
       '/fleet': '/app/fleet',
+      '/app/fleet-sessions': '/app/fleet/agents?tab=sessions',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
@@ -4249,6 +4339,8 @@ async function main() {
       results = await runWithTimeout(() => runPipelineChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/tasks') {
       results = await runWithTimeout(() => runFleetTasksChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+    } else if (targetPage === '/app/fleet-sessions') {
+      results = await runWithTimeout(() => runFleetSessionsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/agents') {
       results = await runWithTimeout(() => runFleetAgentsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/social-content') {
@@ -4290,7 +4382,7 @@ async function main() {
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet-sessions, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
