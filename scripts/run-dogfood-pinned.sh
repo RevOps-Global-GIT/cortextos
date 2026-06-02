@@ -15,9 +15,10 @@
 
 set -euo pipefail
 
-# SCRIPT_REPO is the repo that owns this wrapper script (used for git operations
-# and locating secrets). WORKTREE is the pinned read-only execution context.
-SCRIPT_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# SCRIPT_REPO is the repo used for git operations and secrets.
+# CTX_DOGFOOD_REPO overrides the auto-detected path — needed when the wrapper is
+# run from a temp location (e.g. /tmp) rather than from inside the real checkout.
+SCRIPT_REPO="${CTX_DOGFOOD_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WORKTREE="/tmp/cortextos-dogfood-main"
 REMOTE="fork"
 BRANCH="main"
