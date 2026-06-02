@@ -201,6 +201,8 @@ async function pushHeartbeatToSupabase(agentName: string, hb: Heartbeat): Promis
     agent_name: agentName,
     org: hb.org ?? '',
     host: hostname(),
+    kind: 'agent',
+    cwd: process.cwd(),
     status: hb.status,
     current_task: hb.current_task ?? '',
     mode: hb.mode,
