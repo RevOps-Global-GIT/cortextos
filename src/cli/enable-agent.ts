@@ -5,7 +5,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI, formatValidateError } from '../telegram/api.js';
-import { getCtxRoot } from '../utils/paths.js';
+import { resolveCtxRoot } from '../utils/env.js';
 
 /**
  * BUG-035 fix: discover the cortextOS framework root without depending on
@@ -49,7 +49,7 @@ function parseEnvFile(path: string): Record<string, string> {
 }
 
 function getEnabledAgentsPath(instanceId: string): string {
-  return join(getCtxRoot(instanceId), 'config', 'enabled-agents.json');
+  return join(resolveCtxRoot(instanceId), 'config', 'enabled-agents.json');
 }
 
 /**
@@ -107,7 +107,7 @@ export function readEnabledAgents(instanceId: string): Record<string, any> {
  */
 export function writeDisableMarker(instanceId: string, agent: string, reason: string): void {
   try {
-    const ctxRoot = getCtxRoot(instanceId);
+    const ctxRoot = resolveCtxRoot(instanceId);
     const stateDir = join(ctxRoot, 'state', agent);
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, '.user-disable'), reason);
@@ -116,7 +116,7 @@ export function writeDisableMarker(instanceId: string, agent: string, reason: st
 
 function writeEnabledAgents(instanceId: string, agents: Record<string, any>): void {
   const path = getEnabledAgentsPath(instanceId);
-  const dir = join(getCtxRoot(instanceId), 'config');
+  const dir = join(resolveCtxRoot(instanceId), 'config');
   mkdirSync(dir, { recursive: true });
   atomicWriteSync(path, JSON.stringify(agents, null, 2));
 }
@@ -231,7 +231,7 @@ export const enableAgentCommand = new Command('enable')
     writeEnabledAgents(options.instance, agents);
 
     // Create per-agent state directories
-    const ctxRoot = getCtxRoot(options.instance);
+    const ctxRoot = resolveCtxRoot(options.instance);
     const agentDirs = [
       join(ctxRoot, 'inbox', agent),
       join(ctxRoot, 'inflight', agent),
@@ -247,7 +247,7 @@ export const enableAgentCommand = new Command('enable')
     console.log(`Agent "${agent}" enabled.`);
 
     // Try to start via daemon IPC
-    const ipc = new IPCClient(options.instance);
+    const ipc = new IPCClient(options.instance, resolveCtxRoot(options.instance));
     const running = await ipc.isDaemonRunning();
     if (running) {
       const response = await ipc.send({ type: 'start-agent', agent, source: 'cortextos enable' });
@@ -271,7 +271,7 @@ export const disableAgentCommand = new Command('disable')
     writeEnabledAgents(options.instance, agents);
 
     // Try to stop via daemon IPC
-    const ipc = new IPCClient(options.instance);
+    const ipc = new IPCClient(options.instance, resolveCtxRoot(options.instance));
     const running = await ipc.isDaemonRunning();
     if (running) {
       // BUG-036 fix: write .user-disable marker BEFORE the stop, so the
