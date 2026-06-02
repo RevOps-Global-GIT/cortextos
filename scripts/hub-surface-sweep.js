@@ -37,6 +37,28 @@ const SCAN_REPOS = [
   'RevOps-Global-GIT/charlie-holstine',
 ];
 
+// Dynamically parse which routes the QA harness actually supports so that
+// adding a new page to hub-qa-playwright.ts auto-marks it covered here,
+// without a manual KNOWN_QA_ROUTES edit (the #641 drift class).
+function loadHarnessRoutes() {
+  const harnessPath = path.join(REPO_ROOT, 'scripts/hub-qa-playwright.ts');
+  if (!fs.existsSync(harnessPath)) return new Set();
+  const src = fs.readFileSync(harnessPath, 'utf8');
+  const routes = new Set();
+  // All string literals in `targetPage === '/...'` conditions
+  for (const [, route] of src.matchAll(/targetPage\s*===\s*'([^']+)'/g)) {
+    if (route.startsWith('/')) routes.add(route);
+  }
+  // Canonical values in PAGE_URL_MAP (right-hand side paths)
+  const mapBlock = src.match(/PAGE_URL_MAP[^=]*=\s*\{([^}]+)\}/s);
+  if (mapBlock) {
+    for (const [, val] of mapBlock[1].matchAll(/:\s*'([^']+)'/g)) {
+      if (val.startsWith('/')) routes.add(val.split('?')[0]); // strip query params
+    }
+  }
+  return routes;
+}
+
 const KNOWN_QA_ROUTES = new Set([
   '/time', '/my-day', '/tasks', '/', '/dashboard', '/app/orchestrator',
   '/app/fleet/activity', '/app/work/inbox', '/app/work/approvals',
@@ -140,6 +162,8 @@ const KNOWN_QA_ROUTES = new Set([
   '/beehives', '/beehives/langstroth', '/beehives/warre',
   '/cottage', '/farm', '/field', '/grounds', '/mushrooms', '/music', '/orchard',
   '/talk',
+  // Dynamically derived from hub-qa-playwright.ts — new harness pages auto-covered
+  ...loadHarnessRoutes(),
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
