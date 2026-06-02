@@ -442,7 +442,6 @@ export class AgentProcess implements ManagedAgent {
     const forceFreshExists = existsSync(join(this.env.ctxRoot, 'state', this.name, '.force-fresh'));
     const rotationType = forceFreshExists ? 'context-handoff' : 'soft';
     this.writeRotationEvent(rotationType, 'session timer reached limit').catch(() => {});
-
     await this.stop();
     await this.start();
     this.updateRotationResumeSuccess().catch(() => {});
@@ -577,16 +576,58 @@ export class AgentProcess implements ManagedAgent {
 
   // --- Private methods ---
 
+  private tailStdoutLog(maxBytes: number): string {
+    const logPath = join(this.env.ctxRoot, 'logs', this.name, 'stdout.log');
+    try {
+      if (!existsSync(logPath)) return '';
+      const stats = statSync(logPath);
+      const start = Math.max(0, stats.size - maxBytes);
+      const len = stats.size - start;
+      const fd = require('fs').openSync(logPath, 'r');
+      try {
+        const buf = Buffer.alloc(len);
+        const read = require('fs').readSync(fd, buf, 0, len, start);
+        return buf.toString('utf-8', 0, read);
+      } finally {
+        require('fs').closeSync(fd);
+      }
+    } catch {
+      return '';
+    }
+  }
+
+  private detectImagePoisonCrash(recentOutput: string): boolean {
+    if (!recentOutput) return false;
+    if (recentOutput.includes('API Error: 400') && recentOutput.includes('image.source.base64')) {
+      return true;
+    }
+    if (/image format image\/[a-z]+ not supported/i.test(recentOutput)) {
+      return true;
+    }
+    return false;
+  }
+
+  private armForceFresh(reason: string): void {
+    try {
+      const stateDir = join(this.env.ctxRoot, 'state', this.name);
+      ensureDir(stateDir);
+      const markerPath = join(stateDir, '.force-fresh');
+      writeFileSync(markerPath, `${new Date().toISOString()} ${reason}\n`, 'utf-8');
+    } catch (err) {
+      this.log(`Failed to arm .force-fresh marker: ${err}`);
+    }
+  }
+
   private handleExit(exitCode: number, signal?: number): void {
+    // Capture last 16KB of stdout for image-poison detection before nulling pty.
+    const recentOutput = this.tailStdoutLog(16384);
+
     // Snapshot uptime BEFORE we null this.pty / clear the session timer below.
-    // The premature-voluntary-exit check needs to know how long the session
-    // actually ran for.
     const sessionUptimeMs = this.sessionStart
       ? Date.now() - this.sessionStart.getTime()
       : 0;
 
     // Capture rate-limit state from the output buffer BEFORE nulling the PTY.
-    // Once this.pty = null, we lose access to the buffer.
     const isRateLimited = this.pty?.getOutputBuffer()?.hasRateLimitSignature() ?? false;
     const rateLimitResetSeconds = isRateLimited
       ? (this.pty?.getOutputBuffer()?.getRateLimitResetSeconds() ?? null)
@@ -721,6 +762,23 @@ export class AgentProcess implements ManagedAgent {
     const silentRestartPath = join(this.env.ctxRoot, 'state', this.name, '.silent-restart');
     if (existsSync(silentRestartPath)) {
       this.log('ctx_autoreset (.silent-restart) — skipping crash count, sessionRefresh handles restart');
+      return;
+    }
+
+    // Image-poison auto-recovery: detect API 400 image-format crashes and
+    // respawn without counting against max_crashes_per_day. Checked BEFORE
+    // premature-exit and CrashLoopPauser so poison crashes don't trip either.
+    if (exitCode === 0 && this.detectImagePoisonCrash(recentOutput)) {
+      this.log('Image-poison crash detected (API 400, unsupported image format). Arming .force-fresh and restarting without counting against max_crashes_per_day.');
+      this.armForceFresh('image-poison auto-recovery');
+      this.appendCrashToRestartsLog(exitCode, 5000, 'IMAGE_POISON_RECOVERY');
+      this.status = 'crashed';
+      this.notifyStatusChange();
+      setTimeout(() => {
+        if (this.status === 'crashed') {
+          this.start().catch(err => this.log(`Image-poison restart failed: ${err}`));
+        }
+      }, 5000);
       return;
     }
 
@@ -885,7 +943,7 @@ export class AgentProcess implements ManagedAgent {
       return hermesDbExists(hermesHome);
     }
 
-    // Check for force-fresh marker
+    // Check for force-fresh marker (all runtimes honor it).
     const forceFreshPath = join(this.env.ctxRoot, 'state', this.name, '.force-fresh');
     if (existsSync(forceFreshPath)) {
       try {
@@ -895,7 +953,24 @@ export class AgentProcess implements ManagedAgent {
       return false;
     }
 
-    // Check for existing conversation
+    // codex-app-server: session continuity is tracked by the adapter's own
+    // codex-app-server-thread.json under ctxRoot/state/<agent>/. The Claude
+    // JSONL check below is meaningless for the codex runtime, and a stale
+    // Claude JSONL left over from a prior Claude-runtime tenure caused
+    // continue-mode → thread/resume timeout → exit_code=0 crash loop
+    // (testorg codex-agent crashed 3x with this signature on 2026-05-09,
+    // 05-14, and 05-16 before backoff drained the pending resume RPC).
+    if (this.config.runtime === 'codex-app-server') {
+      const threadStatePath = join(
+        this.env.ctxRoot,
+        'state',
+        this.name,
+        'codex-app-server-thread.json',
+      );
+      return existsSync(threadStatePath);
+    }
+
+    // Default (Claude runtime): existing conversation = JSONL files present.
     const launchDir = resolveAgentCwd(this.env.agentDir, this.config.working_directory);
     if (!launchDir) return false;
 
@@ -1359,7 +1434,7 @@ export class AgentProcess implements ManagedAgent {
   private appendCrashToRestartsLog(
     exitCode: number,
     backoffMs: number,
-    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP' | 'PREMATURE_EXIT' | 'PREMATURE_EXIT_LOOP',
+    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP' | 'PREMATURE_EXIT' | 'PREMATURE_EXIT_LOOP' | 'IMAGE_POISON_RECOVERY',
   ): void {
     try {
       const logDir = join(this.env.ctxRoot, 'logs', this.name);
@@ -1369,12 +1444,11 @@ export class AgentProcess implements ManagedAgent {
       if (kind === 'HALTED') {
         details = `exit_code=${exitCode} crash_count=${this.crashCount} max_crashes=${this.maxCrashesPerDay}`;
       } else if (kind === 'PREMATURE_EXIT' || kind === 'PREMATURE_EXIT_LOOP') {
-        // Premature exits are tracked in their own counter and do NOT touch
-        // crashCount. Log the premature-exit counter instead so the file
-        // tells a coherent story.
         details =
           `exit_code=${exitCode} premature_exits=${this.prematureExitTimestamps.length}` +
           ` window_s=${this.prematureExitWindowMs / 1000} backoff_s=${backoffMs / 1000}`;
+      } else if (kind === 'IMAGE_POISON_RECOVERY') {
+        details = `exit_code=${exitCode} backoff_s=${backoffMs / 1000} (not counted toward max_crashes)`;
       } else {
         details = `exit_code=${exitCode} crash_count=${this.crashCount} backoff_s=${backoffMs / 1000}`;
       }

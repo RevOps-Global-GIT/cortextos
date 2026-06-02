@@ -41,7 +41,7 @@ vi.mock('../../../src/bus/reminders.js', () => ({
 }));
 
 vi.mock('../../../src/utils/paths.js', () => ({
-  resolvePaths: vi.fn().mockReturnValue({}),
+  resolvePaths: vi.fn().mockReturnValue({ stateDir: '/tmp/test-ctx/state/alice' }),
   resolveAgentCwd: vi.fn((agentDir, override) => (override?.trim() || agentDir || process.cwd())),
   isAgentDirScaffolded: vi.fn().mockReturnValue(true),
 }));
@@ -258,6 +258,27 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     const stopOrder = stopSpy.mock.invocationCallOrder[0];
     const startOrder = startSpy.mock.invocationCallOrder[0];
     expect(stopOrder).toBeLessThan(startOrder);
+  });
+
+  it('sessionRefresh() writes .session-refresh marker before stop (false-crash FP fix)', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    const stopSpy = vi.spyOn(ap, 'stop').mockResolvedValue();
+    vi.spyOn(ap, 'start').mockResolvedValue();
+    fsMocks.writeFileSync.mockReset();
+
+    await ap.sessionRefresh();
+
+    const writeIdx = fsMocks.writeFileSync.mock.calls.findIndex(
+      (call) => String(call[0]).endsWith('.session-refresh'),
+    );
+    expect(writeIdx).toBeGreaterThanOrEqual(0);
+    expect(String(fsMocks.writeFileSync.mock.calls[writeIdx][0])).toBe('/tmp/test-ctx/state/alice/.session-refresh');
+    // The marker must be written BEFORE stop() — a SessionEnd hook firing as
+    // the PTY dies must already see the marker, or it classifies a false crash.
+    const markerWriteOrder = fsMocks.writeFileSync.mock.invocationCallOrder[writeIdx];
+    expect(markerWriteOrder).toBeLessThan(stopSpy.mock.invocationCallOrder[0]);
   });
 });
 

@@ -67,6 +67,8 @@ export class TelegramPoller {
   private conflictHandlers: ConflictHandler[] = [];
   private consecutiveNonConflictErrors: number = 0;
   private lastErrSignature: string = '';
+  /** Why the poll loop last exited ('stopped-externally' | 'conflict-self-die' | ''). */
+  lastExitReason: string = '';
 
   /**
    * @param api Telegram API client scoped to a single bot token.
@@ -158,6 +160,7 @@ export class TelegramPoller {
     }
 
     this.running = true;
+    this.lastExitReason = '';
     while (this.running) {
       try {
         await this.pollOnce();
@@ -225,10 +228,12 @@ export class TelegramPoller {
   /**
    * Stop the polling loop. Safe to call before start() — the subsequent
    * start() will observe stopRequested and return without entering the loop.
+   * Sets lastExitReason='stopped-externally' to mark the exit as intentional.
    */
   stop(): void {
     this.stopRequested = true;
     this.running = false;
+    this.lastExitReason = 'stopped-externally';
   }
 
   /**

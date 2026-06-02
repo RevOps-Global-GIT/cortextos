@@ -584,9 +584,12 @@ export class AgentManager {
         // ALLOWED_USER gate: if configured, ignore messages from other users.
         // Use numeric comparison to avoid string coercion issues.
         if (allowedUserId) {
-          const allowedId = parseInt(allowedUserId, 10);
-          if (msg.from?.id !== allowedId) {
-            log(`Ignoring message from unauthorized user (allowed_user gate)`);
+          const allowedIds = allowedUserId.split(',').map((s) => parseInt(s.trim(), 10));
+          const fromId = msg.from?.id;
+          if (typeof fromId !== 'number' || !allowedIds.includes(fromId)) {
+            const rejectedFrom = msg.from?.first_name || msg.from?.username || 'unknown';
+            log(`Ignoring message from unauthorized user (allowed_user gate): from=${fromId} (${rejectedFrom})`);
+            // reject-count watchdog: alert after N consecutive rejects.
             const entry = this.agents.get(name);
             if (entry) {
               entry.telegramRejectCount = (entry.telegramRejectCount ?? 0) + 1;
@@ -595,8 +598,7 @@ export class AgentManager {
                 const lastAlert = entry.telegramLastRejectAlertAt ?? 0;
                 if (now - lastAlert > REJECT_ALERT_COOLDOWN_MS) {
                   entry.telegramLastRejectAlertAt = now;
-                  const fromId = msg.from?.id ?? 'unknown';
-                  const alertText = `⚠️ WATCHDOG: ${name} rejected ${entry.telegramRejectCount} consecutive Telegram messages (ALLOWED_USER gate). Last from_id: ${fromId}. Verify ALLOWED_USER in .env matches expected users, or this may be unsolicited contact.`;
+                  const alertText = `⚠️ WATCHDOG: ${name} rejected ${entry.telegramRejectCount} consecutive Telegram messages (ALLOWED_USER gate). Last from_id: ${fromId ?? 'unknown'}. Verify ALLOWED_USER in .env matches expected users, or this may be unsolicited contact.`;
                   log(alertText);
                   if (telegramApi && chatId) {
                     telegramApi.sendMessage(chatId, alertText).catch(() => {});
@@ -721,9 +723,10 @@ export class AgentManager {
 
       poller.onReaction((reaction) => {
         if (allowedUserId) {
-          const allowedId = parseInt(allowedUserId, 10);
-          if (reaction.user?.id !== allowedId) {
-            log('Ignoring reaction from unauthorized user (allowed_user gate)');
+          const allowedIds = allowedUserId.split(',').map((s) => parseInt(s.trim(), 10));
+          const fromId = reaction.user?.id;
+          if (typeof fromId !== 'number' || !allowedIds.includes(fromId)) {
+            log(`Ignoring reaction from unauthorized user (allowed_user gate): from=${fromId}`);
             const entry = this.agents.get(name);
             if (entry) {
               entry.telegramRejectCount = (entry.telegramRejectCount ?? 0) + 1;
