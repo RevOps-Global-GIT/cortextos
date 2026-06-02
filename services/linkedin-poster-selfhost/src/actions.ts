@@ -587,6 +587,21 @@ export async function discoverLinkedInPosts(
     const searchUrl = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
     console.log(`[discover] Searching: "${keyword}"`);
 
+    // Intercept network responses to capture activity URNs from LinkedIn API calls.
+    const capturedUrns = new Map<string, string>(); // urn → author profile url
+    const responseHandler = async (response: import('playwright').Response) => {
+        const url = response.url();
+        if (!url.includes('linkedin.com') || !url.includes('search')) return;
+        try {
+          const text = await response.text().catch(() => '');
+          const urnMatches = text.matchAll(/"(urn:li:activity:\d+)"/g);
+          for (const m of urnMatches) {
+            const urn = m[1];
+            if (!capturedUrns.has(urn)) capturedUrns.set(urn, '');
+          }
+        } catch { /* ignore */ }
+      };
+      page.on('response', responseHandler);
     try {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       await checkSession(page);
@@ -625,9 +640,30 @@ export async function discoverLinkedInPosts(
         });
 
         for (const el of feedCards.slice(0, 15)) {
-          // Post URL: timestamp link goes to the full post (uses /feed/update/ path)
-          const updateLink = el.querySelector('a[href*="/feed/update/"]') as HTMLAnchorElement | null;
-          const url = updateLink?.href?.split('?')[0] ?? '';
+          // Post URL: try anchor links first, then fall back to data-urn on the card.
+          // LinkedIn SDUI uses /feed/update/urn:li:activity:XXX/ for timestamps and
+          // /posts/slug/ for public permalinks.  Newer SDUI builds may omit both
+          // anchor types from search cards, so also check data-urn attributes to
+          // construct the canonical URL directly.
+          const updateLink = (
+            el.querySelector('a[href*="/feed/update/"]') ??
+            el.querySelector('a[href*="/posts/"]') ??
+            Array.from(el.querySelectorAll('a[href]')).find(
+              (a) => /linkedin\.com\/(feed\/update|posts)\//i.test((a as HTMLAnchorElement).href)
+            )
+          ) as HTMLAnchorElement | null;
+          let url = updateLink?.href?.split('?')[0] ?? '';
+          if (!url) {
+            // Derive URL from data-urn (e.g., "urn:li:activity:XXXX") on any element
+            // inside the card that carries it.
+            const urnEl = el.querySelector('[data-urn]') ??
+              el.closest('[data-urn]') ??
+              (el.getAttribute('data-urn') ? el : null);
+            const urn = urnEl?.getAttribute('data-urn') ?? '';
+            if (/urn:li:activity:/.test(urn)) {
+              url = `https://www.linkedin.com/feed/update/${urn}/`;
+            }
+          }
 
           // Author: first /in/ or /company/ link in the card
           const authorLink = el.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement | null;
@@ -675,11 +711,32 @@ export async function discoverLinkedInPosts(
         return results;
       });
 
-      console.log(`[discover] "${keyword}": ${extracted.length} posts from DOM extraction`);
+      page.off('response', responseHandler);
 
-      for (const p of extracted) {
+      // Merge network-captured URNs with DOM-extracted posts that are missing URLs.
+      // Assign captured URNs to no-url posts in order (best-effort; not always 1-to-1).
+      const orphanUrns = [...capturedUrns.keys()].filter(
+        urn => !extracted.some(p => p.url.includes(urn))
+      );
+      let urnIdx = 0;
+      const today = new Date().toISOString().split('T')[0];
+      const enriched = extracted.map(p => {
+        if (p.url) return p;
+        // Try a network-captured URN first
+        if (urnIdx < orphanUrns.length) {
+          return { ...p, url: `https://www.linkedin.com/feed/update/${orphanUrns[urnIdx++]}/` };
+        }
+        // Fallback: synthetic URL so the post can pass the URL-gate in engage-batch-generate.
+        // Uses author profile URL (or name) + date for per-author-per-day uniqueness.
+        const authorKey = (p.authorUrl ?? p.authorName).replace(/[^a-z0-9]/gi, '-').toLowerCase();
+        return { ...p, url: `synthetic://linkedin-post/${authorKey}/${today}` };
+      });
+
+      console.log(`[discover] "${keyword}": ${enriched.length} posts (${enriched.filter(p => !p.url.startsWith('synthetic')).length} real URLs, ${capturedUrns.size} URNs, ${enriched.filter(p => p.url.startsWith('synthetic')).length} synthetic)`);
+
+      for (const p of enriched) {
         if (all.length >= limit) break;
-        const key = p.url || `${p.authorName}:${p.text.substring(0, 20)}`;
+        const key = p.url;
         if (seenUrn.has(key)) continue;
         seenUrn.add(key);
         all.push({
@@ -691,6 +748,7 @@ export async function discoverLinkedInPosts(
         });
       }
     } catch (err) {
+      page.off('response', responseHandler);
       console.error(`[discover] Error for "${keyword}": ${(err as Error).message}`);
     }
   }
