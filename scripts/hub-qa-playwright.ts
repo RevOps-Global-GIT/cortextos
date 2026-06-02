@@ -1717,7 +1717,7 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,company,domain&is_archived=eq.false&order=created_at.desc&limit=5`, {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,company,domain&is_archived=eq.false&name=not.ilike.SMOKE-TEST%25&order=created_at.desc&limit=5`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
@@ -1862,7 +1862,7 @@ async function runProjectsChecks(page: Page, serviceKey?: string): Promise<Check
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/projects?select=id,name,status&order=created_at.desc&limit=5`, {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/projects?select=id,name,status&name=not.ilike.SMOKE-TEST%25&order=created_at.desc&limit=5`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
