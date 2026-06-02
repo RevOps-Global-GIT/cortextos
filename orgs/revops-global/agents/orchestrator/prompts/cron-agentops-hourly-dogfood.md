@@ -13,19 +13,23 @@ Evaluate AgentOps like a product expert and a real operator, not just a selector
 Run it for every priority page on each pass (rotate to cover all 8 within 2–3 passes if time-constrained):
 
 ```bash
-cd /home/cortextos/cortextos
+REPO=/home/cortextos/cortextos
 
-# Priority pages — use the pinned-worktree wrapper so the harness always runs
-# from fork/main HEAD regardless of which branch the shared checkout is on.
-# This prevents stale-harness false FAILs when a feature branch is checked out.
-bash scripts/run-dogfood-pinned.sh --page /analytics --no-send
-bash scripts/run-dogfood-pinned.sh --page /fleet --no-send
-bash scripts/run-dogfood-pinned.sh --page /app/fleet/tasks --no-send
-bash scripts/run-dogfood-pinned.sh --page /app/fleet/activity --no-send
-bash scripts/run-dogfood-pinned.sh --page /app/cortex/theta --no-send
-bash scripts/run-dogfood-pinned.sh --page /app/supreme-outstanding --no-send
-bash scripts/run-dogfood-pinned.sh --page /app/work/inbox --no-send
-bash scripts/run-dogfood-pinned.sh --page /app/work/approvals --no-send
+# Bootstrap: extract the wrapper from fork/main into /tmp so it's available
+# regardless of which branch the shared checkout has checked out.
+git -C "$REPO" fetch fork main -q
+git -C "$REPO" show remotes/fork/main:scripts/run-dogfood-pinned.sh > /tmp/run-dogfood-pinned.sh
+
+# Priority pages — CTX_DOGFOOD_REPO tells the wrapper where the real repo is
+# (secrets, git remote) even though the script itself lives in /tmp.
+CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /analytics --no-send
+CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /fleet --no-send
+CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/fleet/tasks --no-send
+CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/fleet/activity --no-send
+CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/cortex/theta --no-send
+CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/supreme-outstanding --no-send
+CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/work/inbox --no-send
+CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/work/approvals --no-send
 ```
 
 Each run writes a report to `orgs/revops-global/agents/codex/output/playwright-qa/`. Collect FAIL results across all pages before proceeding.
