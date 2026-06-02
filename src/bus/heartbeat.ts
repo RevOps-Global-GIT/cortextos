@@ -367,3 +367,69 @@ export async function fetchRemoteHeartbeats(): Promise<RemoteHeartbeatRow[]> {
     return [];
   }
 }
+
+// ── External-CLI session heartbeat ───────────────────────────────────────────
+
+export interface SessionHeartbeatOptions {
+  sessionId: string;
+  label: string;
+  kind?: string;
+  cwd?: string;
+  status?: string;
+  summary?: string;
+  supabaseUrl?: string;
+  /** Service-role key OR anon key with insert-only RLS for external-cli rows. */
+  supabaseKey?: string;
+}
+
+/**
+ * Upsert a session heartbeat row into orch_agent_heartbeats.
+ * Used by `cortextos bus session-heartbeat` and Mac keepalive wrappers.
+ *
+ * Reads SUPABASE_RGOS_URL + SUPABASE_RGOS_SERVICE_KEY from env when not
+ * supplied directly — this lets the Mac wrapper supply a narrow anon key
+ * via SUPABASE_SESSION_KEY without needing the service-role secret.
+ */
+export async function pushSessionHeartbeat(opts: SessionHeartbeatOptions): Promise<void> {
+  const url = opts.supabaseUrl ?? process.env.SUPABASE_RGOS_URL;
+  const key = opts.supabaseKey
+    ?? process.env.SUPABASE_SESSION_KEY
+    ?? process.env.SUPABASE_RGOS_SERVICE_KEY;
+  if (!url || !key) {
+    throw new Error('SUPABASE_RGOS_URL and SUPABASE_RGOS_SERVICE_KEY (or SUPABASE_SESSION_KEY) are required');
+  }
+
+  const now = new Date().toISOString();
+  const row = {
+    instance_id: opts.sessionId,
+    agent_name: opts.label,
+    org: process.env.CTX_ORG ?? '',
+    host: hostname(),
+    kind: opts.kind ?? 'external-cli',
+    cwd: opts.cwd ?? '',
+    status: opts.status ?? 'active',
+    current_task: opts.summary ?? '',
+    mode: '',
+    loop_interval: 'external-cli',
+    last_heartbeat: now,
+    updated_at: now,
+  };
+
+  const endpoint = `${url}/rest/v1/orch_agent_heartbeats`;
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Prefer: 'resolution=merge-duplicates',
+    },
+    body: JSON.stringify(row),
+    signal: AbortSignal.timeout(8000),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Session heartbeat upsert failed: ${response.status} ${text}`);
+  }
+}

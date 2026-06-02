@@ -1243,6 +1243,38 @@ busCommand
   });
 
 busCommand
+  .command('session-heartbeat')
+  .description('Announce a live CLI session to the fleet board (kind=external-cli presence card)')
+  .requiredOption('--session-id <id>', 'Unique session identifier, e.g. gregs-mac-codex')
+  .requiredOption('--label <label>', 'Human-readable label shown on the card, e.g. "Greg · Codex (Mac)"')
+  .option('--kind <kind>', 'Session kind tag (default: external-cli)', 'external-cli')
+  .option('--cwd <path>', 'Current working directory of the session')
+  .option('--status <status>', 'Session status: active | idle | ended (default: active)', 'active')
+  .option('--summary <text>', 'One-line description of what the session is doing')
+  .action(async (opts: { sessionId: string; label: string; kind: string; cwd?: string; status: string; summary?: string }) => {
+    const { pushSessionHeartbeat } = await import('../bus/heartbeat.js');
+    try {
+      await pushSessionHeartbeat({
+        sessionId: opts.sessionId,
+        label: opts.label,
+        kind: opts.kind,
+        cwd: opts.cwd,
+        status: opts.status,
+        summary: opts.summary,
+      });
+      if (opts.status === 'ended') {
+        console.log(`Session ${opts.sessionId} marked ended`);
+      } else {
+        console.log(`Session heartbeat: ${opts.sessionId} (${opts.status})`);
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+
+busCommand
   .command('orgo-lease-claim')
   .description('Claim an Orgo fleet node lease in Supabase orch_fleet_nodes')
   .requiredOption('--node <node_key>', 'Orgo node_key to claim')
