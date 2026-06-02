@@ -166,6 +166,28 @@ const KNOWN_QA_ROUTES = new Set([
   ...loadHarnessRoutes(),
 ]);
 
+// ---------------------------------------------------------------------------
+// Regression guard — catches stale-branch false positives (#641/#642 class)
+//
+// When this script runs from a feature branch predating the PRs that added a
+// route to KNOWN_QA_ROUTES (or added loadHarnessRoutes()), the Set is
+// incomplete and a covered route appears as a blind spot.  Warn loudly so the
+// developer knows to run from fork/main instead of the working tree.
+//
+// Routes listed here are known-covered anchors: if any are absent from
+// KNOWN_QA_ROUTES the guard emits a warning that is visible in CI and cron
+// logs without aborting the run.
+const COVERAGE_GUARD_ROUTES = [
+  '/app/fleet-sessions',   // added #641; dynamic derivation #642
+  '/app/fleet/tasks',
+  '/app/fleet/activity',
+];
+for (const r of COVERAGE_GUARD_ROUTES) {
+  if (!KNOWN_QA_ROUTES.has(r)) {
+    console.warn(`[surface-sweep] WARN: ${r} not in KNOWN_QA_ROUTES — possible stale-branch false positive (run from fork/main to get accurate results)`);
+  }
+}
+
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
 // Uses startsWith so /guide/ covers /guide/foo, and /guide covers /guide-admin etc.
 const SKIP_PREFIXES = ['/guide', '/auth', '/login', '/callback', '/portal/', '/not-found', '/diagnostic-public', '/company-portal', '/hygiene-report-public'];
