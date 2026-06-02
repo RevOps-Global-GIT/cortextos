@@ -7,6 +7,7 @@ import { getGoals } from '@/lib/data/goals';
 import { getHealthSummary, getAllHeartbeats } from '@/lib/data/heartbeats';
 import { getRecentEvents, getMilestones } from '@/lib/data/events';
 import { discoverAgents } from '@/lib/data/agents';
+import { syncAll } from '@/lib/sync';
 
 import { ActionRequired } from '@/components/overview/action-required';
 import { CurrentFocus } from '@/components/overview/current-focus';
@@ -28,6 +29,9 @@ export default async function OverviewPage({
   const orgParam = typeof params.org === 'string' ? params.org : undefined;
   // Default to empty string (all orgs) instead of first org, so all agents show
   const org = orgParam && orgs.includes(orgParam) ? orgParam : '';
+
+  // Sync filesystem -> SQLite before reading tasks so stale data is not served.
+  syncAll();
 
   // Fetch all data in parallel
   const [

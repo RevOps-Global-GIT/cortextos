@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { getAgentDetail } from '@/lib/data/agents';
 import { getTasksByAgent } from '@/lib/data/tasks';
 import { getAllAgents } from '@/lib/config';
+import { syncAll } from '@/lib/sync';
 import { parseSoulMd } from '@/lib/markdown-parser';
 import { AgentDetailTabs } from '@/components/agents/agent-detail-tabs';
 import { AgentAvatar } from '@/components/shared/agent-avatar';
@@ -44,6 +45,9 @@ export default async function AgentDetailPage({
     const { fields } = parseSoulMd(detail.soulRaw);
     soulFields = fields;
   }
+
+  // Sync filesystem -> SQLite before reading tasks so stale data is not served.
+  syncAll();
 
   // Get tasks for this agent (use system name to match task assignee field)
   let tasks: import('@/lib/types').Task[] = [];

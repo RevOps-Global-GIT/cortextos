@@ -116,6 +116,10 @@ export function isAgentHealthy(
  * Get detailed health status (healthy / stale / down).
  */
 export function getHealthStatus(heartbeat: Heartbeat): HealthStatus {
+  // Explicit agent-reported down states take priority over timestamp.
+  const s = heartbeat.status;
+  if (s === 'down' || s === 'offline' || s === 'degraded') return 'down';
+
   if (!heartbeat.last_heartbeat) return 'down';
 
   const lastBeat = new Date(heartbeat.last_heartbeat).getTime();
