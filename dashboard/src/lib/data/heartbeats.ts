@@ -6,9 +6,24 @@ import path from 'path';
 import { CTX_ROOT, getHeartbeatPath } from '@/lib/config';
 import type { Heartbeat, HealthStatus, HealthSummary } from '@/lib/types';
 
-// Default staleness thresholds (minutes)
+// Default staleness thresholds (minutes).
+// STALE_THRESHOLD_MIN is the minimum — actual threshold is cadence-aware:
+// agents that set loop_interval get a 2× grace period over their cycle length.
 const STALE_THRESHOLD_MIN = 120; // 2 hours: day-mode running agents need actionable recovery before a 4h+ gap
 const DOWN_THRESHOLD_MIN = 1440; // 24 hours
+
+/**
+ * Parse a loop_interval string (e.g. "30m", "1h", "4h", "10m") into minutes.
+ * Returns 0 if the string is empty, missing, or unparseable.
+ */
+function parseIntervalMinutes(interval: string): number {
+  if (!interval) return 0;
+  const match = interval.trim().match(/^(\d+(?:\.\d+)?)(m|h)$/i);
+  if (!match) return 0;
+  const value = parseFloat(match[1]);
+  const unit = match[2].toLowerCase();
+  return unit === 'h' ? value * 60 : value;
+}
 
 /**
  * Get heartbeat for a single agent. Returns null if not found.
@@ -126,7 +141,13 @@ export function getHealthStatus(heartbeat: Heartbeat): HealthStatus {
   const now = Date.now();
   const diffMinutes = (now - lastBeat) / (1000 * 60);
 
-  if (diffMinutes <= STALE_THRESHOLD_MIN) return 'healthy';
+  const parsedInterval = parseIntervalMinutes(heartbeat.loop_interval ?? '');
+  const effectiveThreshold =
+    parsedInterval > 0
+      ? Math.max(parsedInterval * 2, STALE_THRESHOLD_MIN)
+      : STALE_THRESHOLD_MIN;
+
+  if (diffMinutes <= effectiveThreshold) return 'healthy';
   if (diffMinutes <= DOWN_THRESHOLD_MIN) return 'stale';
   return 'down';
 }
