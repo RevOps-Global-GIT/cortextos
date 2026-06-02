@@ -4,29 +4,50 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { buildReplyContext } from '../../../src/daemon/agent-manager.js';
 
+const mockDaemonState = vi.hoisted(() => ({
+  fastCheckerOptions: [] as Array<Record<string, unknown>>,
+  telegramMessages: [] as Array<{ chatId: string; text: string }>,
+}));
+
 // Mock the PTY layer so we don't load native bindings or spawn real processes.
 // AgentManager → AgentProcess → AgentPTY → node-pty. We mock at AgentProcess.
 vi.mock('../../../src/daemon/agent-process.js', () => ({
   AgentProcess: class {
     name: string;
-    dir: string;
-    constructor(name: string, dir: string) {
+    config: Record<string, unknown>;
+    timezone = 'UTC';
+    constructor(name: string, _env: unknown, config: Record<string, unknown> = {}) {
       this.name = name;
-      this.dir = dir;
+      this.config = config;
     }
     async start() { /* no-op */ }
     async stop() { /* no-op */ }
-    getStatus() { return { name: this.name, status: 'stopped' }; }
+    getStatus() { return { name: this.name, status: 'stopped', pid: process.pid }; }
     onExit() { /* no-op */ }
+    onStatusChanged() { /* no-op */ }
+    setTelegramHandle() { /* no-op */ }
   },
 }));
 
 // Mock FastChecker so it doesn't try to spawn anything either.
 vi.mock('../../../src/daemon/fast-checker.js', () => ({
   FastChecker: class {
-    start() { /* no-op */ }
+    constructor(_agent: unknown, _paths: unknown, _frameworkRoot: string, options: Record<string, unknown> = {}) {
+      mockDaemonState.fastCheckerOptions.push(options);
+    }
+    start() { return Promise.resolve(); }
     stop() { /* no-op */ }
     wake() { /* no-op */ }
+    isDuplicate() { return false; }
+    queueTelegramMessage() { /* no-op */ }
+    handleCallback() { return Promise.resolve(); }
+    static formatTelegramTextMessage() { return 'formatted-text'; }
+    static formatTelegramPhotoMessage() { return 'formatted-photo'; }
+    static formatTelegramDocumentMessage() { return 'formatted-document'; }
+    static formatTelegramVoiceMessage() { return 'formatted-voice'; }
+    static formatTelegramVideoMessage() { return 'formatted-video'; }
+    static formatTelegramReaction() { return 'formatted-reaction'; }
+    static readLastSent() { return null; }
   },
 }));
 
@@ -34,14 +55,27 @@ vi.mock('../../../src/daemon/fast-checker.js', () => ({
 vi.mock('../../../src/telegram/api.js', () => ({
   TelegramAPI: class {
     constructor() { /* no-op */ }
+    sendMessage(chatId: string, text: string) {
+      mockDaemonState.telegramMessages.push({ chatId, text });
+      return Promise.resolve();
+    }
   },
 }));
 
 vi.mock('../../../src/telegram/poller.js', () => ({
   TelegramPoller: class {
-    start() { /* no-op */ }
+    onMessage() { /* no-op */ }
+    onCallback() { /* no-op */ }
+    onReaction() { /* no-op */ }
+    onPersistentConflict() { /* no-op */ }
+    start() { return Promise.resolve(); }
     stop() { /* no-op */ }
   },
+}));
+
+vi.mock('../../../src/bus/metrics.js', () => ({
+  collectTelegramCommands: () => [],
+  registerTelegramCommands: () => Promise.resolve({ status: 'ok', count: 0 }),
 }));
 
 const { AgentManager } = await import('../../../src/daemon/agent-manager.js');
@@ -340,6 +374,82 @@ describe('AgentManager Telegram poller preference', () => {
       {},
       { TELEGRAM_LONG_POLLING: 'false' },
     )).toBe(false);
+  });
+});
+
+describe('AgentManager.startAgent - ALLOWED_USER validation', () => {
+  let testDir: string;
+  let ctxRoot: string;
+  let frameworkRoot: string;
+  let agentDir: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let previousEnv: Record<string, string | undefined>;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-am-allowed-user-'));
+    ctxRoot = join(testDir, 'instance');
+    frameworkRoot = join(testDir, 'framework');
+    agentDir = join(frameworkRoot, 'orgs', 'acme', 'agents', 'alice');
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(join(agentDir, 'AGENTS.md'), '# alice');
+    mockDaemonState.fastCheckerOptions = [];
+    mockDaemonState.telegramMessages = [];
+    previousEnv = {
+      BOT_TOKEN: process.env.BOT_TOKEN,
+      CHAT_ID: process.env.CHAT_ID,
+      ALLOWED_USER: process.env.ALLOWED_USER,
+      ALICE_BOT_TOKEN: process.env.ALICE_BOT_TOKEN,
+      ALICE_CHAT_ID: process.env.ALICE_CHAT_ID,
+      ALICE_ALLOWED_USER: process.env.ALICE_ALLOWED_USER,
+    };
+    for (const key of Object.keys(previousEnv)) delete process.env[key];
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    logSpy.mockRestore();
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('accepts comma-separated numeric ALLOWED_USER values and passes the first ID to FastChecker', async () => {
+    writeFileSync(
+      join(agentDir, '.env'),
+      [
+        'BOT_TOKEN=123456:ABC_def-123',
+        'CHAT_ID=987654321',
+        'ALLOWED_USER=111, 222',
+      ].join('\n'),
+    );
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+
+    await am.startAgent('alice', agentDir, { runtime: 'hermes', telegram_polling: false } as any, 'acme');
+
+    expect(mockDaemonState.fastCheckerOptions.at(-1)?.allowedUserId).toBe(111);
+    expect(mockDaemonState.telegramMessages).toEqual([]);
+  });
+
+  it('rejects malformed comma-separated ALLOWED_USER values and disables Telegram', async () => {
+    writeFileSync(
+      join(agentDir, '.env'),
+      [
+        'BOT_TOKEN=123456:ABC_def-123',
+        'CHAT_ID=987654321',
+        'ALLOWED_USER=111, greg',
+      ].join('\n'),
+    );
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+
+    await am.startAgent('alice', agentDir, { runtime: 'hermes', telegram_polling: false } as any, 'acme');
+
+    expect(mockDaemonState.fastCheckerOptions.at(-1)?.allowedUserId).toBeUndefined();
+    expect(mockDaemonState.telegramMessages.at(-1)?.text).toContain('ALLOWED_USER is missing or malformed');
   });
 });
 

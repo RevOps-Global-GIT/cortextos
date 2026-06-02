@@ -415,10 +415,18 @@ export class AgentManager {
         botToken = undefined;
       }
 
-      // ALLOWED_USER must be a numeric Telegram user ID, not a username
-      if (allowedUserId && !/^\d+$/.test(allowedUserId)) {
-        log(`SECURITY: ALLOWED_USER is not a numeric ID. Telegram user IDs are numbers (e.g. 123456789). Refusing to enable Telegram. Fix the .env file.`);
-        allowedUserId = undefined;
+      // ALLOWED_USER must be one or more numeric Telegram user IDs.
+      // Comma-separated for multi-user (e.g. group chats with Sam + a collaborator).
+      // Whitespace tolerated; any non-numeric token rejects the whole list.
+      if (allowedUserId) {
+        const ids = allowedUserId.split(',').map((s) => s.trim()).filter(Boolean);
+        if (ids.length === 0 || !ids.every((id) => /^\d+$/.test(id))) {
+          log(`SECURITY: ALLOWED_USER must be a comma-separated list of numeric Telegram user IDs (e.g. 123456789,987654321). Refusing to enable Telegram. Fix the .env file.`);
+          allowedUserId = undefined;
+        } else {
+          // Normalize to comma-joined form so downstream gate splits on it
+          allowedUserId = ids.join(',');
+        }
       }
 
       // Security: ALLOWED_USER is REQUIRED when BOT_TOKEN is set. Without it,
@@ -481,7 +489,9 @@ export class AgentManager {
       log,
       telegramApi,
       chatId,
-      allowedUserId: allowedUserId ? parseInt(allowedUserId, 10) : undefined,
+      // FastChecker only needs the first ID for its single-recipient typing
+      // indicator / quick-checks. Multi-user is enforced by the gates above.
+      allowedUserId: allowedUserId ? parseInt(allowedUserId.split(',')[0].trim(), 10) : undefined,
     });
 
     // Send Telegram notification on crashes and session refreshes
@@ -581,8 +591,9 @@ export class AgentManager {
       const REJECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 
       poller.onMessage((msg) => {
-        // ALLOWED_USER gate: if configured, ignore messages from other users.
-        // Use numeric comparison to avoid string coercion issues.
+        // ALLOWED_USER gate: comma-separated list of numeric user IDs.
+        // If configured, ignore messages from other users. Always log the
+        // rejected user_id + name so operators can discover IDs to whitelist.
         if (allowedUserId) {
           const allowedIds = allowedUserId.split(',').map((s) => parseInt(s.trim(), 10));
           const fromId = msg.from?.id;
@@ -722,6 +733,7 @@ export class AgentManager {
       });
 
       poller.onReaction((reaction) => {
+        // ALLOWED_USER gate: same multi-user rule as message handler.
         if (allowedUserId) {
           const allowedIds = allowedUserId.split(',').map((s) => parseInt(s.trim(), 10));
           const fromId = reaction.user?.id;
