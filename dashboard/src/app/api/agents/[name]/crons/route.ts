@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
-import { getAgentDir, getAllAgents, CTX_FRAMEWORK_ROOT } from '@/lib/config';
+import { getAgentDir, getAllAgents, CTX_FRAMEWORK_ROOT, CTX_ROOT } from '@/lib/config';
 import { spawnSync } from 'child_process';
 
 export const dynamic = 'force-dynamic';
@@ -14,6 +14,14 @@ interface Cron {
   /** Required for once crons — ISO 8601 datetime. */
   fire_at?: string;
   prompt: string;
+  // Live crons.json extra fields (read-only in UI)
+  schedule?: string;
+  enabled?: boolean;
+  created_at?: string;
+  last_fired_at?: string;
+  last_fire_attempted_at?: string;
+  fire_count?: number;
+  metadata?: Record<string, unknown>;
 }
 
 interface AgentConfig {
@@ -36,21 +44,38 @@ function resolveAgent(name: string): { agentDir: string; org?: string } {
   return { agentDir: getAgentDir(systemName, org), org };
 }
 
-// GET /api/agents/[name]/crons - Read crons from config.json
+// GET /api/agents/[name]/crons - Read crons from live daemon state (primary)
+// falling back to config.json if the live file doesn't exist yet.
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ name: string }> },
 ) {
   const { name } = await params;
+  const decoded = decodeURIComponent(name);
+
+  // 1. Try the daemon-managed live crons file first.
+  //    Path: $CTX_ROOT/.cortextOS/state/agents/<name>/crons.json
+  const liveCronsPath = path.join(CTX_ROOT, '.cortextOS', 'state', 'agents', decoded, 'crons.json');
+  try {
+    const raw = await fs.readFile(liveCronsPath, 'utf-8');
+    const data = JSON.parse(raw) as { crons?: Cron[]; updated_at?: string };
+    if (Array.isArray(data.crons)) {
+      return Response.json({ crons: data.crons, source: 'live' });
+    }
+  } catch {
+    // Live file not found or invalid — fall through to config.json
+  }
+
+  // 2. Fall back to config.json (startup seed).
   try {
     const { agentDir } = resolveAgent(name);
     const configPath = path.join(agentDir, 'config.json');
     const raw = await fs.readFile(configPath, 'utf-8');
     const config: AgentConfig = JSON.parse(raw);
-    return Response.json({ crons: config.crons || [] });
+    return Response.json({ crons: config.crons || [], source: 'config' });
   } catch (err) {
     console.error(`[api/agents/${name}/crons] GET error:`, err);
-    return Response.json({ crons: [] });
+    return Response.json({ crons: [], source: 'none' });
   }
 }
 

@@ -9,14 +9,24 @@ interface Cron {
   interval?: string;
   fire_at?: string;
   prompt: string;
+  // Live daemon fields (read-only)
+  schedule?: string;
+  enabled?: boolean;
+  created_at?: string;
+  last_fired_at?: string;
+  last_fire_attempted_at?: string;
+  fire_count?: number;
 }
 
 interface CronsTabProps {
   agentName: string;
 }
 
+type CronSource = 'live' | 'config' | 'none';
+
 export function CronsTab({ agentName }: CronsTabProps) {
   const [crons, setCrons] = useState<Cron[]>([]);
+  const [cronSource, setCronSource] = useState<CronSource>('none');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -27,6 +37,7 @@ export function CronsTab({ agentName }: CronsTabProps) {
       .then(r => r.json())
       .then(data => {
         setCrons(data.crons || []);
+        setCronSource((data.source as CronSource) || 'none');
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -83,9 +94,11 @@ export function CronsTab({ agentName }: CronsTabProps) {
       const d = new Date(cron.fire_at);
       return isNaN(d.getTime()) ? 'One-time (invalid time)' : `Once at ${d.toLocaleString()}`;
     }
+    // Live crons use cron expression in `schedule` field
+    if (cron.schedule) return `cron: ${cron.schedule}`;
     const interval = cron.interval ?? '';
     const match = interval.match(/^(\d+)([smhd])$/);
-    if (!match) return interval;
+    if (!match) return interval || '(no schedule)';
     const [, num, unit] = match;
     const labels: Record<string, string> = { s: 'sec', m: 'min', h: 'hr', d: 'day' };
     return `Every ${num} ${labels[unit]}${Number(num) > 1 ? 's' : ''}`;
@@ -103,6 +116,16 @@ export function CronsTab({ agentName }: CronsTabProps) {
           <h3 className="text-sm font-medium">
             Scheduled Crons ({crons.length})
           </h3>
+          {cronSource === 'live' && (
+            <span className="rounded bg-green-500/10 px-1.5 py-0.5 text-[10px] font-medium text-green-600">
+              live
+            </span>
+          )}
+          {cronSource === 'config' && (
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              seed
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -206,13 +229,28 @@ export function CronsTab({ agentName }: CronsTabProps) {
                   className="mt-1 block w-full rounded-md border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none resize-y"
                 />
               </div>
+              {/* Live metadata (read-only) */}
+              {(cron.last_fired_at || cron.fire_count !== undefined) && (
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-muted-foreground border-t pt-2">
+                  {cron.last_fired_at && (
+                    <span>Last fired: {new Date(cron.last_fired_at).toLocaleString()}</span>
+                  )}
+                  {cron.fire_count !== undefined && (
+                    <span>Fire count: {cron.fire_count}</span>
+                  )}
+                  {cron.enabled === false && (
+                    <span className="text-amber-500">disabled</span>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
       )}
 
       <p className="text-xs text-muted-foreground">
-        Crons are read from config.json on agent startup. Changes here update config.json and notify the agent to reload.
+        Live crons are read from the daemon state file (crons.json). Config.json is the startup seed.
+        Changes saved here update config.json and notify the agent to reload.
         Interval format: number + unit (e.g. 5m, 1h, 6h, 1d).
       </p>
     </div>
