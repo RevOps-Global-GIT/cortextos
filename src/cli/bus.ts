@@ -10,6 +10,7 @@ import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTa
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
+import { computeAgentRunningState } from '../bus/agent-running.js';
 import { pollWatchdog } from '../bus/watchdog.js';
 import { runPrStuckWatcher } from '../bus/pr-stuck-watcher.js';
 import { runWipEnforcer } from '../bus/wip-enforcer.js';
@@ -3898,13 +3899,14 @@ busCommand
         } catch { /* task store unavailable */ }
       }
 
-      const heartbeatFresh = heartbeatAgeMinutes !== null && heartbeatAgeMinutes <= runningHeartbeatThresholdMinutes;
-      const recoveryState = daemonRunning && !heartbeatFresh
-        ? 'stale_heartbeat_action_required'
-        : daemonRunning
-          ? 'running'
-          : 'stopped';
-      const running = daemonRunning && heartbeatFresh;
+      const runningState = computeAgentRunningState({
+        daemonRunning,
+        heartbeatAgeMinutes,
+        heartbeatFreshThresholdMinutes: runningHeartbeatThresholdMinutes,
+      });
+      // A fresh heartbeat is independent liveness evidence. The daemon IPC
+      // registry can briefly miss an agent during restarts or registry drift.
+      const running = runningState.running;
       if (opts.status === 'running' && !running) continue;
 
       results.push({
@@ -3914,7 +3916,7 @@ busCommand
         enabled: info.enabled,
         running,
         daemon_running: daemonRunning,
-        recovery_state: recoveryState,
+        recovery_state: runningState.recoveryState,
         heartbeat_age_minutes: heartbeatAgeMinutes,
         last_heartbeat: lastHeartbeat,
         current_task: currentTask,
@@ -3933,6 +3935,8 @@ busCommand
         console.log(`  ${a.name} (${a.org || 'root'}) [${status}]`);
         if (a.recovery_state === 'stale_heartbeat_action_required') {
           console.log(`    Recovery: daemon reports running but heartbeat is ${Math.round(a.heartbeat_age_minutes ?? 0)}m old; restart/action required`);
+        } else if (a.recovery_state === 'heartbeat_only_running') {
+          console.log(`    Recovery: heartbeat is fresh but daemon IPC did not report the agent; treating heartbeat as live`);
         }
         if (a.role) console.log(`    Role: ${a.role}`);
         if (a.current_task) console.log(`    Working on: ${a.current_task}`);
