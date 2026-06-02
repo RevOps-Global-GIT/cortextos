@@ -1582,7 +1582,7 @@ async function runWorkApprovalsChecks(page: Page): Promise<CheckResult[]> {
 // ---------------------------------------------------------------------------
 // /companies checks
 // ---------------------------------------------------------------------------
-async function runCompaniesChecks(page: Page): Promise<CheckResult[]> {
+async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'companies';
 
@@ -1708,13 +1708,55 @@ async function runCompaniesChecks(page: Page): Promise<CheckResult[]> {
     results.push({ check: '[LIVENESS] CHECK 5 Key columns present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
+  // CHECK 6: DB-comparison — sample 5 companies from Supabase, verify names/domains appear in UI
+  try {
+    await shot(page, `${sp}-6-db-compare`);
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
+    } else {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,domain&order=created_at.desc&limit=5`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ id: string; name: string | null; domain: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No companies in DB — UI empty state is correct' });
+        } else {
+          const pageText = (await Promise.race([
+            page.evaluate(() => document.body.textContent ?? ''),
+            new Promise<string>(r => setTimeout(() => r(''), 5000)),
+          ])).toLowerCase();
+          const missing: string[] = [];
+          for (const row of rows) {
+            const name = (row.name ?? '').toLowerCase().trim();
+            const domain = (row.domain ?? '').toLowerCase().trim();
+            const nameFound = name.length > 0 && pageText.includes(name);
+            const domainFound = domain.length > 0 && pageText.includes(domain);
+            if (!nameFound && !domainFound) {
+              missing.push(row.name ?? row.domain ?? row.id);
+            }
+          }
+          if (missing.length === 0) {
+            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'PASS', evidence: `All ${rows.length} sampled companies found in UI. Names: ${rows.map(r => r.name ?? '').filter(Boolean).slice(0, 3).join(', ')}` });
+          } else {
+            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `${missing.length}/${rows.length} DB companies not visible in UI: ${missing.slice(0, 3).join(', ')}. Page may be paginated or filter-hidden.` });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
   return results;
 }
 
 // ---------------------------------------------------------------------------
 // /projects checks
 // ---------------------------------------------------------------------------
-async function runProjectsChecks(page: Page): Promise<CheckResult[]> {
+async function runProjectsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'projects';
 
@@ -1809,6 +1851,45 @@ async function runProjectsChecks(page: Page): Promise<CheckResult[]> {
     }
   } catch (e) {
     results.push({ check: '[LIVENESS] CHECK 5 Key columns present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 6: DB-comparison — sample 5 projects from Supabase, verify names appear in UI
+  try {
+    await shot(page, `${sp}-6-db-compare`);
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
+    } else {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/projects?select=id,name,status&order=created_at.desc&limit=5`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ id: string; name: string | null; status: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'DEFERRED', evidence: 'No projects in DB — UI empty state is correct' });
+        } else {
+          const pageText = (await Promise.race([
+            page.evaluate(() => document.body.textContent ?? ''),
+            new Promise<string>(r => setTimeout(() => r(''), 5000)),
+          ])).toLowerCase();
+          const missing: string[] = [];
+          for (const row of rows) {
+            const name = (row.name ?? '').toLowerCase().trim();
+            if (name.length > 0 && !pageText.includes(name)) {
+              missing.push(row.name ?? row.id);
+            }
+          }
+          if (missing.length === 0) {
+            results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'PASS', evidence: `All ${rows.length} sampled projects found in UI. Names: ${rows.map(r => r.name ?? '').filter(Boolean).slice(0, 3).join(', ')}` });
+          } else {
+            results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'FAIL', evidence: `${missing.length}/${rows.length} DB projects not visible in UI: ${missing.slice(0, 3).join(', ')}. Page may be paginated or filter-hidden.` });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   return results;
@@ -3943,9 +4024,9 @@ async function main() {
     } else if (targetPage === '/app/work/approvals') {
       results = await runWithTimeout(() => runWorkApprovalsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/companies') {
-      results = await runWithTimeout(() => runCompaniesChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runCompaniesChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/projects') {
-      results = await runWithTimeout(() => runProjectsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runProjectsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/reports') {
       results = await runWithTimeout(() => runReportsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/pipeline') {
