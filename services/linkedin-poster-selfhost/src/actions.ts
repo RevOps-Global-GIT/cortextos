@@ -740,9 +740,13 @@ export async function discoverLinkedInPosts(
         return p; // no specific post URL available — will be filtered below
       });
 
-      // Only emit posts with a specific-post permalink (/feed/update/ with activity URN)
-      const withUrls = enriched.filter(p => isSpecificPostUrl(p.url));
-      console.log(`[discover] "${keyword}": ${extracted.length} DOM posts, ${capturedUrns.size} network URNs → ${withUrls.length} with real permalinks (${enriched.length - withUrls.length} dropped)`);
+      // Only emit person posts with a specific-post permalink (/feed/update/ with activity URN).
+      // Company posts (/company/ author) are not valid engagement targets — Greg engages with people.
+      const withUrls = enriched.filter(p =>
+        isSpecificPostUrl(p.url) && p.authorUrl?.includes('/in/')
+      );
+      const companyDropped = enriched.filter(p => isSpecificPostUrl(p.url) && !p.authorUrl?.includes('/in/')).length;
+      console.log(`[discover] "${keyword}": ${extracted.length} DOM posts, ${capturedUrns.size} network URNs → ${withUrls.length} person posts with real permalinks (${companyDropped} company posts dropped)`);
 
       // Topic relevance gate: drop posts that are off-topic for RevOps/GTM/sales leadership.
       const OFF_TOPIC_SIGNALS = [
