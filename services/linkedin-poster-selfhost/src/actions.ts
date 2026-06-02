@@ -778,7 +778,9 @@ export async function discoverLinkedInPosts(
           authorName: p.authorName,
           authorUrl: p.authorUrl,
           text: p.text,
-          keyword,
+          // Strip '#' so hashtag keywords match sender topic_keywords (e.g. '#revops' → 'revops'
+          // matches Greg's 'RevOps' after lowercasing in engage-batch-generate routing).
+          keyword: keyword.startsWith('#') ? keyword.slice(1) : keyword,
         });
       }
     } catch (err) {
