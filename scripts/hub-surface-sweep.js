@@ -143,7 +143,7 @@ const KNOWN_QA_ROUTES = new Set([
   '/app/settings',
   // rgos fleet / orchestrator / play / work / wiki / signal pages (2026-05-24 sweep)
   '/app/content-queue', '/app/data-ops-monitor',
-  '/app/fleet-activity', '/app/fleet-agents', '/app/fleet-health', '/app/fleet-orgo',
+  '/app/fleet-activity', '/app/fleet-agents', '/app/fleet-board', '/app/fleet-health', '/app/fleet-orgo',
   '/app/fleet-schedules', '/app/fleet-strategy', '/app/fleet-tasks', '/app/fleet-wip',
   '/app/insights', '/app/linked-in-presence-engine', '/app/linked-in-presence-setup',
   '/app/orchestrator-agent-detail', '/app/orchestrator-agents',
