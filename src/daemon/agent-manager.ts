@@ -580,9 +580,6 @@ export class AgentManager {
       const REJECT_ALERT_THRESHOLD = 3;
       const REJECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
 
-      const REJECT_ALERT_THRESHOLD = 3;
-      const REJECT_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
-
       poller.onMessage((msg) => {
         // ALLOWED_USER gate: if configured, ignore messages from other users.
         // Use numeric comparison to avoid string coercion issues.
