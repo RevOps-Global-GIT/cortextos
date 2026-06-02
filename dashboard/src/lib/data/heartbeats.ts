@@ -13,11 +13,13 @@ const STALE_THRESHOLD_MIN = 120; // 2 hours: day-mode running agents need action
 const DOWN_THRESHOLD_MIN = 1440; // 24 hours
 
 /**
- * Parse a loop_interval string (e.g. "30m", "1h", "4h", "10m") into minutes.
- * Returns 0 if the string is empty, missing, or unparseable.
+ * Parse a loop_interval value into minutes.
+ * Accepts a string ("30m", "1h", "4h"), a number (already minutes), or undefined.
+ * Returns 0 if missing, empty, or unparseable.
  */
-function parseIntervalMinutes(interval: string): number {
-  if (!interval) return 0;
+function parseIntervalMinutes(interval: string | number | undefined): number {
+  if (interval === undefined || interval === null || interval === '') return 0;
+  if (typeof interval === 'number') return interval;
   const match = interval.trim().match(/^(\d+(?:\.\d+)?)(m|h)$/i);
   if (!match) return 0;
   const value = parseFloat(match[1]);
@@ -131,17 +133,13 @@ export function isAgentHealthy(
  * Get detailed health status (healthy / stale / down).
  */
 export function getHealthStatus(heartbeat: Heartbeat): HealthStatus {
-  // Explicit agent-reported down states take priority over timestamp.
-  const s = heartbeat.status;
-  if (s === 'down' || s === 'offline' || s === 'degraded') return 'down';
-
   if (!heartbeat.last_heartbeat) return 'down';
 
   const lastBeat = new Date(heartbeat.last_heartbeat).getTime();
   const now = Date.now();
   const diffMinutes = (now - lastBeat) / (1000 * 60);
 
-  const parsedInterval = parseIntervalMinutes(heartbeat.loop_interval ?? '');
+  const parsedInterval = parseIntervalMinutes(heartbeat.loop_interval);
   const effectiveThreshold =
     parsedInterval > 0
       ? Math.max(parsedInterval * 2, STALE_THRESHOLD_MIN)
