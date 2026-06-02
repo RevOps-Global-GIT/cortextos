@@ -7,10 +7,10 @@ export const listAgentsCommand = new Command('list-agents')
   .option('--org <org>', 'Filter by organization')
   .option('--format <format>', 'Output format: json or text', 'text')
   .option('--instance <id>', 'Instance ID')
-  .action((options: { org?: string; format: string; instance?: string }) => {
+  .action(async (options: { org?: string; format: string; instance?: string }) => {
     const instanceId = options.instance || process.env.CTX_INSTANCE_ID || 'default';
     const ctxRoot = getCtxRoot(instanceId);
-    const agents = listAgents(ctxRoot, options.org);
+    const agents = await listAgents(ctxRoot, options.org);
 
     if (options.format === 'json') {
       console.log(JSON.stringify(agents, null, 2));
@@ -21,7 +21,7 @@ export const listAgentsCommand = new Command('list-agents')
       }
 
       // Table header
-      const header = '  Name              Display Name      Org              Role                          Status          Last Heartbeat';
+      const header = '  Name              Display Name      Org              Role                          Status          Last Heartbeat        Host';
       const separator = '  ' + '-'.repeat(header.length - 2);
       console.log('\n  Agents\n');
       console.log(header);
@@ -32,14 +32,18 @@ export const listAgentsCommand = new Command('list-agents')
         const displayName = (a.display_name || '-').padEnd(18);
         const org = (a.org || '-').padEnd(17);
         const role = (a.role || '-').substring(0, 29).padEnd(30);
-        // Show health indicator emoji
-        const healthIcon = a.running ? '● ' : '○ ';
-        const statusText = a.running ? 'running' : 'stopped';
+        // Show health indicator emoji; remote agents get a different icon
+        const healthIcon = a.running ? (a.remote ? '◉ ' : '● ') : '○ ';
+        const statusText = a.running ? (a.remote ? 'remote' : 'running') : 'stopped';
         const status = (healthIcon + statusText).padEnd(16);
         const hb = a.last_heartbeat || '-';
-        console.log(`  ${name}${displayName}${org}${role}${status}${hb}`);
+        const host = a.remote ? (a.host || '-') : '';
+        console.log(`  ${name}${displayName}${org}${role}${status}${hb.padEnd(22)}${host}`);
       }
 
-      console.log(`\n  Total: ${agents.length} agents\n`);
+      const localCount = agents.filter(a => !a.remote).length;
+      const remoteCount = agents.filter(a => a.remote).length;
+      const remoteSuffix = remoteCount > 0 ? ` (${localCount} local, ${remoteCount} remote)` : '';
+      console.log(`\n  Total: ${agents.length} agents${remoteSuffix}\n`);
     }
   });

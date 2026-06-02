@@ -126,6 +126,7 @@ export function queryKnowledgeBase(
     threshold?: number;
     frameworkRoot: string;
     instanceId: string;
+    noEmbed?: boolean;
   },
 ): KBQueryResponse {
   const { agent, scope = 'all', topK = 5, threshold = 0.5, frameworkRoot, instanceId } = options;
