@@ -235,6 +235,12 @@ async function pushHeartbeatToSupabase(agentName: string, hb: Heartbeat): Promis
  * local fleet views. This table powers AgentOps fleet status; without this
  * patch a healthy local task store can show in-progress work while
  * orch_agents.current_task_id remains null, making every active agent look idle.
+ *
+ * current_task_id is only written when the local bus has an active task.
+ * When no local task is in flight we omit the field entirely so that anchors
+ * set by cortex_claim_task (RGOS-native tasks, absent from the bus ledger)
+ * are not wiped on each heartbeat cycle.  cortex_complete_task is responsible
+ * for clearing the anchor when the RGOS task finishes.
  */
 async function pushAgentStatusToSupabase(
   agentName: string,
@@ -246,9 +252,8 @@ async function pushAgentStatusToSupabase(
   if (!url || !key) return;
 
   const roleId = `cortextos-${agentName}`;
-  const row = {
+  const row: Record<string, unknown> = {
     is_active: true,
-    current_task_id: activeTask?.mirroredId ?? null,
     last_heartbeat: hb.last_heartbeat,
     config_json: {
       mode: hb.mode,
@@ -258,6 +263,12 @@ async function pushAgentStatusToSupabase(
     },
     updated_at: new Date().toISOString(),
   };
+  // Only overwrite current_task_id when the local bus has evidence of an active
+  // task. Omitting the field on a null preserves RGOS-native anchors that live
+  // in orch_tasks (set by cortex_claim_task) and have no local task file.
+  if (activeTask !== null) {
+    row.current_task_id = activeTask.mirroredId;
+  }
 
   const endpoint = `${url}/rest/v1/orch_agents?role_id=eq.${encodeURIComponent(roleId)}`;
   const response = await fetch(endpoint, {
