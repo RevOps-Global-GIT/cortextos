@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import path from 'path';
 import { CTX_ROOT, CTX_FRAMEWORK_ROOT } from '@/lib/config';
+import { auth } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
@@ -39,20 +40,21 @@ function resolvePath(org: string): { readPath: string; writePath: string; exists
   return { readPath: ctxRootPath, writePath: ctxRootPath, exists: false };
 }
 
-function authorized(request: NextRequest): boolean {
+async function authorized(request: NextRequest): Promise<boolean> {
   const expected = process.env.CORTEXTOS_JWT;
-  if (!expected) return false; // fail closed if server isn't configured
   const header = request.headers.get('authorization') ?? '';
   const match = /^Bearer\s+(.+)$/i.exec(header);
-  if (!match) return false;
-  return match[1] === expected;
+  if (expected && match?.[1] === expected) return true;
+
+  const session = await auth();
+  return Boolean(session);
 }
 
 export async function GET(request: NextRequest) {
   if (!process.env.CORTEXTOS_JWT) {
     return Response.json({ error: 'CORTEXTOS_JWT not configured on server' }, { status: 503 });
   }
-  if (!authorized(request)) {
+  if (!(await authorized(request))) {
     return Response.json({ error: 'unauthorized' }, { status: 401 });
   }
 
@@ -77,7 +79,7 @@ export async function PUT(request: NextRequest) {
   if (!process.env.CORTEXTOS_JWT) {
     return Response.json({ error: 'CORTEXTOS_JWT not configured on server' }, { status: 503 });
   }
-  if (!authorized(request)) {
+  if (!(await authorized(request))) {
     return Response.json({ error: 'unauthorized' }, { status: 401 });
   }
 
