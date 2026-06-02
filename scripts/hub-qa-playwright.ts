@@ -3727,28 +3727,53 @@ async function runWikiGraphChecks(page: Page): Promise<CheckResult[]> {
   const loadResult = await checkLoad(page, sp);
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
-  await new Promise<void>(r => setTimeout(r, 2000));
+  // Extra wait for graph library to initialize — force-graph and cytoscape both
+  // need a render cycle before node DOM elements appear.
+  await new Promise<void>(r => setTimeout(r, 3000));
+
+  // CHECK 2: Assert canvas renders node DOM elements (pure DOM — no Supabase)
+  // Distinguishes "graph container rendered" from "graph container rendered AND has actual nodes".
+  // A canvas/SVG present but containing zero nodes means the data fetch failed silently.
   try {
     const state = await Promise.race([
       page.evaluate(() => {
-        const canvas = document.querySelectorAll('canvas,svg,[class*="graph"],[class*="Graph"],[class*="network"],[class*="node"]').length;
-        const headings = Array.from(document.querySelectorAll('h1,h2,h3')).map(h => h.textContent?.trim() ?? '').filter(Boolean);
-        return { canvas, headings };
+        // Node elements vary by library: force-graph uses <canvas>, cytoscape uses <div class*="node">,
+        // react-flow uses <div class*="react-flow__node">, d3/sigma use <circle>/<g class*="node">.
+        const canvasEls      = document.querySelectorAll('canvas').length;
+        const svgEls         = document.querySelectorAll('svg').length;
+        const nodeEls        = document.querySelectorAll('[class*="node"],[class*="Node"],[class*="vertex"],[class*="Vertex"]').length;
+        const svgNodes       = document.querySelectorAll('circle, g[class*="node"], g[id^="node"]').length;
+        const reactFlowNodes = document.querySelectorAll('[class*="react-flow__node"]').length;
+        const graphContainers = document.querySelectorAll('[class*="graph"],[class*="Graph"],[class*="network"],[class*="Network"]').length;
+        const headings       = Array.from(document.querySelectorAll('h1,h2,h3')).map(h => h.textContent?.trim() ?? '').filter(Boolean);
+        const isEmpty        = /no wiki|no pages|empty|no nodes|no documents/i.test(document.body.textContent ?? '');
+        const nodeCount      = nodeEls + svgNodes + reactFlowNodes;
+        return { canvasEls, svgEls, nodeEls, svgNodes, reactFlowNodes, nodeCount, graphContainers, headings, isEmpty };
       }),
-      new Promise<{ canvas: number; headings: string[] }>(r => setTimeout(() => r({ canvas: -1, headings: [] }), 5000)),
+      new Promise<{
+        canvasEls: number; svgEls: number; nodeEls: number; svgNodes: number;
+        reactFlowNodes: number; nodeCount: number; graphContainers: number;
+        headings: string[]; isEmpty: boolean;
+      }>(r => setTimeout(() => r({ canvasEls: -1, svgEls: -1, nodeEls: -1, svgNodes: -1, reactFlowNodes: -1, nodeCount: -1, graphContainers: -1, headings: [], isEmpty: false }), 6000)),
     ]);
     await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-graph.png`) }).catch(() => {});
-    if (state.canvas > 0) {
-      results.push({ check: '[LIVENESS] CHECK 2 Graph canvas/SVG visible', status: 'PASS', evidence: `${state.canvas} graph element(s). Headings: ${state.headings.slice(0, 3).join(', ')}` });
+
+    if (state.nodeCount < 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 Graph renders node elements', status: 'DEFERRED', evidence: 'DOM eval timed out — page JS engine busy or graph still initializing' });
+    } else if (state.isEmpty) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 Graph renders node elements', status: 'DEFERRED', evidence: 'Wiki empty state shown — no pages/nodes to render (valid state for empty knowledge base)' });
+    } else if (state.nodeCount > 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 Graph renders node elements', status: 'PASS', evidence: `Graph node DOM elements found: nodeEls=${state.nodeEls}, svgNodes=${state.svgNodes}, reactFlowNodes=${state.reactFlowNodes}. canvas=${state.canvasEls} svg=${state.svgEls}. Headings: ${state.headings.slice(0, 3).join(', ')}` });
+    } else if (state.canvasEls > 0 || state.svgEls > 0 || state.graphContainers > 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 Graph renders node elements', status: 'FAIL', evidence: `Graph container present (canvas=${state.canvasEls}, svg=${state.svgEls}, containers=${state.graphContainers}) but zero node DOM elements found — wiki data may not have loaded or graph renderer failed silently` });
     } else {
-      results.push({ check: '[LIVENESS] CHECK 2 Graph canvas/SVG visible', status: 'DEFERRED', evidence: `No canvas/SVG/graph elements found (canvas=${state.canvas}) — may still be rendering. Headings: ${state.headings.slice(0, 3).join(', ')}` });
+      results.push({ check: '[CORRECTNESS] CHECK 2 Graph renders node elements', status: 'DEFERRED', evidence: `No graph containers or node elements found — graph library may still be hydrating. Headings: ${state.headings.slice(0, 3).join(', ')}` });
     }
   } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 2 Graph canvas/SVG visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 2 Graph renders node elements', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
   return results;
 }
-
 async function main() {
   const env = loadEnv(SECRETS_ENV);
   // Use the RGOS-specific service key (project yyizocyaehmqrottmnaz)
