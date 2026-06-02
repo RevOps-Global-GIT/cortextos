@@ -3,7 +3,8 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFi
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import { OrgContext } from '../types';
-import { validateAgentName } from '../utils/validate';
+import { validateAgentName, validateOrgName } from '../utils/validate';
+import { getCtxRoot } from '../utils/paths.js';
 
 const VALID_RUNTIMES = ['claude-code', 'hermes', 'codex-app-server'] as const;
 type RuntimeKind = typeof VALID_RUNTIMES[number];
@@ -17,7 +18,7 @@ const NON_CODEX_TEMPLATES = ['orchestrator', 'analyst', 'm2c1-worker', 'hermes']
 
 export const addAgentCommand = new Command('add-agent')
   .argument('<name>', 'Agent name')
-  .option('--template <type>', 'Agent template (orchestrator, analyst, agent, agent-codex, project-orchestrator-codex)', 'agent')
+  .option('--template <type>', 'Agent template (orchestrator, analyst, agent, agent-codex)', 'agent')
   .option('--org <org>', 'Organization name')
   .option('--instance <id>', 'Instance ID', 'default')
   .option('--runtime <runtime>', `Agent runtime (${VALID_RUNTIMES.join(', ')})`, 'claude-code')
@@ -74,6 +75,20 @@ export const addAgentCommand = new Command('add-agent')
       process.exit(1);
     }
 
+    // Mirror the BUG-041 fix above for the resolved org name.
+    // Mixed-case orgs pass through add-agent today (whether supplied via --org or
+    // auto-detected from the orgs/ directory), get committed to disk, and then
+    // break every `cortextos bus *` invocation at runtime because env.ts strictly
+    // validates CTX_ORG. The dashboard API also rejects them with HTTP 400.
+    // Canonical rule: src/utils/validate.ts:validateOrgName (/^[a-z0-9_-]+$/).
+    try {
+      validateOrgName(org);
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      console.error(`Org names must match /^[a-z0-9_-]+$/ (lowercase letters, numbers, underscores, hyphens).`);
+      process.exit(1);
+    }
+
     const agentDir = join(projectRoot, 'orgs', org, 'agents', name);
     if (existsSync(agentDir)) {
       console.error(`Agent "${name}" already exists at ${agentDir}`);
@@ -85,15 +100,13 @@ export const addAgentCommand = new Command('add-agent')
     console.log(`  Organization: ${org}`);
     console.log(`  Directory: ${agentDir}\n`);
 
-    const isProjectOrchestratorCodex = options.template === 'project-orchestrator-codex';
-
     // Create agent directory
     mkdirSync(agentDir, { recursive: true });
     mkdirSync(join(agentDir, 'memory'), { recursive: true });
 
     // For codex-app-server, skills live under plugins/cortextos-agent-skills/skills
     // and are copied in by the template; .claude/skills is Claude-Code-only.
-    const isCodexAppServer = options.runtime === 'codex-app-server' || isProjectOrchestratorCodex;
+    const isCodexAppServer = options.runtime === 'codex-app-server';
     if (!isCodexAppServer) {
       mkdirSync(join(agentDir, '.claude', 'skills'), { recursive: true });
     }
@@ -101,9 +114,7 @@ export const addAgentCommand = new Command('add-agent')
     // Resolve template name. Codex agents created with the default --template agent
     // get the codex-specific bootstrap in templates/agent-codex/. Any explicit
     // --template choice is honored as-is so orchestrator/analyst/etc still work.
-    const effectiveTemplate = isProjectOrchestratorCodex
-      ? 'agent-codex'
-      : (isCodexAppServer && options.template === 'agent')
+    const effectiveTemplate = (isCodexAppServer && options.template === 'agent')
       ? 'agent-codex'
       : options.template;
 
@@ -275,10 +286,6 @@ export const addAgentCommand = new Command('add-agent')
       }
     }
 
-    if (isProjectOrchestratorCodex) {
-      applyProjectOrchestratorCodexDefaults(agentDir, name);
-    }
-
     // Update org context.json if this is the orchestrator
     if (options.template === 'orchestrator') {
       const contextPath = join(projectRoot, 'orgs', org, 'context.json');
@@ -295,7 +302,7 @@ export const addAgentCommand = new Command('add-agent')
 
     // Register in enabled-agents.json
     const instanceId = options.instance;
-    const ctxRoot = join(homedir(), '.cortextos', instanceId);
+    const ctxRoot = getCtxRoot(instanceId);
     const enabledPath = join(ctxRoot, 'config', 'enabled-agents.json');
     const configDir = join(ctxRoot, 'config');
     mkdirSync(configDir, { recursive: true });
@@ -407,58 +414,6 @@ function copyTemplateFiles(templateDir: string, agentDir: string, name: string, 
         copyTemplateFiles(srcPath, destPath, name, org);
       }
     } catch { /* skip files that can't be read */ }
-  }
-}
-
-function applyProjectOrchestratorCodexDefaults(agentDir: string, name: string): void {
-  const agentsPath = join(agentDir, 'AGENTS.md');
-  if (existsSync(agentsPath)) {
-    const current = readFileSync(agentsPath, 'utf-8');
-    if (!current.includes('## PROJECT ORCHESTRATOR OVERRIDE')) {
-      const override = [
-        '## PROJECT ORCHESTRATOR OVERRIDE',
-        '',
-        `You are \`${name}\`, a bus-only project-level orchestrator. You do not have a dedicated Telegram bot by default. On cold boot, heartbeat, cron fires, idle loops, and handoff resume, do not send idle/status messages to \`orchestrator\`. Use \`cortextos bus update-heartbeat "idle"\` silently when there is no actionable work. Send a bus message to \`orchestrator\` only when you need a dispatch decision, approval routing, escalation, or have material non-idle completion/blocker information.`,
-        '',
-        'Your operating pattern mirrors the Antigravity methodology: decompose work into explicit slices, fan out to specialist agents, define success criteria before dispatch, validate evidence before marking work complete, and keep project memory current.',
-        '',
-        'If any later bootstrap instruction says to send Telegram and `BOT_TOKEN`/`CHAT_ID` are empty, skip the outbound message and update heartbeat instead. Never send `back — idle`, `online`, `still idle`, or similar narration to `orchestrator`.',
-        '',
-      ].join('\n');
-      writeFileSync(agentsPath, current.replace('\n\n', `\n\n${override}\n`), 'utf-8');
-    }
-  }
-
-  const configPath = join(agentDir, 'config.json');
-  if (existsSync(configPath)) {
-    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-    config.runtime = 'codex-app-server';
-    config.model = config.model || 'gpt-5.5';
-    config.telegram_polling = false;
-    config.ctx_handoff_threshold = config.ctx_handoff_threshold || 88;
-    config.crons = [
-      {
-        name: 'heartbeat',
-        type: 'recurring',
-        interval: '30m',
-        prompt: 'Read HEARTBEAT.md and follow its instructions, but if there is no actionable inbox item or assigned task, only run: cortextos bus update-heartbeat "idle". Do not send-message orchestrator for idle/status updates. Message orchestrator only for a dispatch decision, blocker, approval routing, or material completion.',
-      },
-      {
-        name: 'project-task-poll',
-        type: 'recurring',
-        interval: '5m',
-        prompt: `Check for bus/RGOS tasks assigned to ${name}. Claim approved work, decompose it into project slices, dispatch specialist agents with explicit success criteria, and validate evidence before completion. If no tasks, run only: cortextos bus update-heartbeat "idle". Do not send-message orchestrator unless a dispatch decision, blocker, approval routing, or material completion needs attention.`,
-      },
-    ];
-    writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
-  }
-
-  const envPath = join(agentDir, '.env');
-  if (existsSync(envPath)) {
-    const env = readFileSync(envPath, 'utf-8');
-    if (!/^TELEGRAM_POLLING_ENABLED=/m.test(env)) {
-      writeFileSync(envPath, env.replace(/^(CHAT_ID=.*)$/m, '$1\nTELEGRAM_POLLING_ENABLED=false'), 'utf-8');
-    }
   }
 }
 

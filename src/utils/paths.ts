@@ -1,15 +1,33 @@
 import { homedir } from 'os';
 import { join } from 'path';
-import { existsSync } from 'fs';
 import type { BusPaths } from '../types/index.js';
 import { validateInstanceId } from './validate.js';
+
+/**
+ * Resolve the cortextOS data root for an instance.
+ *
+ * Resolution order (#568):
+ *   1. explicit ctxRoot argument (caller already resolved it, e.g. from resolveEnv())
+ *   2. CTX_ROOT environment variable
+ *   3. ~/.cortextos/{instance} default
+ *
+ * CTX_ROOT, when set, IS the full per-instance data root — the instance id is
+ * not appended to it. This matches resolveEnv() and bash _ctx-env.sh semantics.
+ * Deployments that relocate the data root (e.g. ~/agentic/cortextos-data) must
+ * set CTX_ROOT consistently for the daemon (ecosystem.config.js) and any shell
+ * that runs cortextos CLI commands, otherwise they will resolve different roots.
+ */
+export function getCtxRoot(instanceId: string = 'default', ctxRoot?: string): string {
+  validateInstanceId(instanceId);
+  return ctxRoot || process.env.CTX_ROOT || join(homedir(), '.cortextos', instanceId);
+}
 
 /**
  * Resolve all bus paths for an agent.
  * Mirrors the path resolution in bash _ctx-env.sh.
  *
  * The directory layout is:
- *   ~/.cortextos/{instance}/
+ *   {ctxRoot}/               - CTX_ROOT or ~/.cortextos/{instance}
  *     config/                - enabled-agents.json
  *     state/{agent}/         - flat, per-agent subdirs
  *     state/{agent}/heartbeat.json - canonical heartbeat location
@@ -30,8 +48,7 @@ export function resolvePaths(
   org?: string,
   ctxRoot?: string,
 ): BusPaths {
-  validateInstanceId(instanceId);
-  const resolvedCtxRoot = ctxRoot || join(homedir(), '.cortextos', instanceId);
+  const resolvedCtxRoot = getCtxRoot(instanceId, ctxRoot);
 
   // Org-scoped paths for tasks, approvals, analytics
   const orgBase = org ? join(resolvedCtxRoot, 'orgs', org) : resolvedCtxRoot;
@@ -51,72 +68,16 @@ export function resolvePaths(
 }
 
 /**
- * Bootstrap file that marks a directory as a fully scaffolded agent.
- * An agent without this file will silently misbehave when Claude Code launches
- * because the session-start prompt instructs the agent to read it first.
- */
-const AGENT_BOOTSTRAP_FILE = 'AGENTS.md';
-
-/**
- * Return true when `dir` looks like a scaffolded agent directory.
- * The check is intentionally narrow: presence of `AGENTS.md`. Other bootstrap
- * files (HEARTBEAT.md, IDENTITY.md) may be staged piecemeal during onboarding,
- * but AGENTS.md is what the start-up prompt reads first — without it the agent
- * cannot bootstrap.
- */
-export function isAgentDirScaffolded(dir: string | undefined): boolean {
-  if (!dir) return false;
-  return existsSync(join(dir, AGENT_BOOTSTRAP_FILE));
-}
-
-/**
- * Resolve the cwd for an agent PTY, respecting `config.working_directory` only
- * when it points at a real scaffolded agent directory.
- *
- * Order:
- *   1. `configWorkingDirectory` if set AND the path contains `AGENTS.md`
- *   2. `agentDir` if set
- *   3. `process.cwd()` as ultimate fallback
- *
- * If `configWorkingDirectory` is set but invalid (path missing, or missing
- * AGENTS.md), the optional `warn` callback is invoked and the resolver falls
- * back to `agentDir`. This prevents a typo in `config.working_directory` from
- * silently launching Claude Code into an unrelated repo whose AGENTS.md
- * belongs to a different system — the exact failure mode that broke
- * director/analyst against /Users/.../work/team-brain on 2026-05-15.
- */
-export function resolveAgentCwd(
-  agentDir: string | undefined,
-  configWorkingDirectory: string | undefined,
-  warn?: (msg: string) => void,
-): string {
-  const override = configWorkingDirectory?.trim();
-  if (override) {
-    if (isAgentDirScaffolded(override)) {
-      return override;
-    }
-    warn?.(
-      `config.working_directory=${JSON.stringify(override)} is not a scaffolded agent dir ` +
-      `(no ${AGENT_BOOTSTRAP_FILE} found); falling back to agentDir`,
-    );
-  }
-  return agentDir || process.cwd();
-}
-
-/**
  * Get the IPC socket path for daemon communication.
  * Unix domain socket on macOS/Linux, named pipe on Windows.
+ *
+ * On Unix the socket lives inside the data root, so it honours CTX_ROOT (#568).
+ * Windows named pipes are instance-keyed, not path-based — CTX_ROOT does not apply.
  */
-export function getIpcPath(instanceId: string = 'default'): string {
+export function getIpcPath(instanceId: string = 'default', ctxRoot?: string): string {
   validateInstanceId(instanceId);
   if (process.platform === 'win32') {
     return `\\\\.\\pipe\\cortextos-${instanceId}`;
   }
-  // Respect CTX_ROOT so processes spawned in a sandboxed test environment
-  // (CTX_ROOT=/tmp/XXX) connect to the sandbox socket, not the production
-  // daemon. Without this, integration tests that set CTX_ROOT but not
-  // CTX_INSTANCE_ID silently hit the live daemon (observed: race-agent
-  // IPC storm 2026-05-14T17:14Z from concurrent-cron-mutations test).
-  const ctxRoot = process.env.CTX_ROOT ?? join(homedir(), '.cortextos', instanceId);
-  return join(ctxRoot, 'daemon.sock');
+  return join(getCtxRoot(instanceId, ctxRoot), 'daemon.sock');
 }

@@ -25,13 +25,12 @@
  * New or modified crons get a freshly computed nextFireAt.
  */
 
-import { execFileSync } from 'child_process';
-import { homedir } from 'os';
 import { join } from 'path';
 import { parseDurationMs, readCronState } from '../bus/cron-state.js';
 import { readCronsWithStatus, updateCron } from '../bus/crons.js';
 import type { CronDefinition } from '../types/index.js';
 import { appendExecutionLog } from './cron-execution-log.js';
+import { getCtxRoot } from '../utils/paths.js';
 
 // ---------------------------------------------------------------------------
 // Cron expression parser — no external deps.
@@ -79,40 +78,7 @@ function expandField(field: string, min: number, max: number): number[] {
  * @param fromMs - Starting epoch time in milliseconds.
  * @returns      Epoch ms of the next matching minute, or NaN if unparseable.
  */
-/**
- * Decompose an epoch-ms timestamp into calendar parts using a specific IANA
- * timezone (e.g. "America/Los_Angeles").  Falls back to process-local time
- * when timezone is undefined or unrecognised by the runtime.
- */
-function datePartsInTz(epochMs: number, timezone: string | undefined): {
-  m: number; h: number; dy: number; mo: number; dw: number;
-} {
-  if (timezone) {
-    try {
-      const fmt = new Intl.DateTimeFormat('en-US', {
-        timeZone: timezone,
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', weekday: 'short',
-        hour12: false,
-      });
-      const parts: Record<string, string> = {};
-      for (const p of fmt.formatToParts(new Date(epochMs))) parts[p.type] = p.value;
-      return {
-        m:  parseInt(parts['minute'] ?? '0', 10),
-        h:  parseInt(parts['hour']   ?? '0', 10) % 24, // Intl may return 24 for midnight
-        dy: parseInt(parts['day']    ?? '1', 10),
-        mo: parseInt(parts['month']  ?? '1', 10),
-        dw: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].indexOf(parts['weekday'] ?? 'Sun'),
-      };
-    } catch {
-      // Unrecognised timezone — fall through to process-local below
-    }
-  }
-  const d = new Date(epochMs);
-  return { m: d.getMinutes(), h: d.getHours(), dy: d.getDate(), mo: d.getMonth() + 1, dw: d.getDay() };
-}
-
-export function nextFireFromCron(expr: string, fromMs: number, timezone?: string): number {
+export function nextFireFromCron(expr: string, fromMs: number): number {
   const parts = expr.trim().split(/\s+/);
   if (parts.length !== 5) return NaN;
 
@@ -137,7 +103,12 @@ export function nextFireFromCron(expr: string, fromMs: number, timezone?: string
   let candidate = startMs;
 
   for (let i = 0; i < MAX_MINUTES; i++) {
-    const { m, h, dy, mo, dw } = datePartsInTz(candidate, timezone);
+    const d = new Date(candidate);
+    const m  = d.getMinutes();
+    const h  = d.getHours();
+    const dy = d.getDate();
+    const mo = d.getMonth() + 1; // 1-12
+    const dw = d.getDay();       // 0-6
 
     if (
       months.includes(mo) &&
@@ -167,18 +138,6 @@ interface ScheduledCron {
   changeKey: string;
   /** True while onFire (+ retries) is executing — prevents re-entry on the next tick. */
   firing?: boolean;
-  /** Epoch ms when firing was last set to true — used to detect and recover hung fires. */
-  fireStartedAt?: number;
-  /** Epoch ms when idle-deferral began (null = not deferring). */
-  deferStart: number | null;
-  /**
-   * Number of post-dispatch-failure miss-retries already scheduled.
-   * When a cron's onFire exhausts all short retries we give it one 5-minute
-   * grace window before permanently advancing nextFireAt.  This counter tracks
-   * how many grace windows have been consumed so we don't loop forever.
-   * Reset to 0 on a successful fire.
-   */
-  missRetryCount?: number;
 }
 
 function changeKeyFor(c: CronDefinition): string {
@@ -194,13 +153,13 @@ function changeKeyFor(c: CronDefinition): string {
  * @param cron        - The cron definition.
  * @param referenceMs - Epoch ms to count forward from (usually now or lastFiredAt).
  */
-function computeNextFireAt(cron: CronDefinition, referenceMs: number, timezone?: string): number {
+function computeNextFireAt(cron: CronDefinition, referenceMs: number): number {
   const durationMs = parseDurationMs(cron.schedule);
   if (!isNaN(durationMs)) {
     return referenceMs + durationMs;
   }
   // Try as a cron expression
-  const next = nextFireFromCron(cron.schedule, referenceMs, timezone);
+  const next = nextFireFromCron(cron.schedule, referenceMs);
   return next;
 }
 
@@ -279,40 +238,12 @@ export interface CronSchedulerOptions {
   agentName: string;
   onFire: (cron: CronDefinition) => Promise<void> | void;
   logger?: (msg: string) => void;
-  /** IANA timezone for interpreting cron expressions (e.g. "America/Los_Angeles"). */
-  timezone?: string;
 }
-
-/**
- * Minimal interface that AgentProcess exposes to the CronScheduler so the
- * scheduler can query agent state (idle check, generation) without importing
- * the full AgentProcess class (avoids circular deps).
- */
-export interface ManagedAgent {
-  readonly name: string;
-  readonly generation: number;
-  readonly stateDir: string;
-  readonly configPath: string;
-  readonly timezone: string | undefined;
-  isRunning(): boolean;
-  isIdle(): boolean;
-}
-
-/** Max time (ms) to defer a cron while the agent is busy before force-injecting. */
-const MAX_DEFER_MS = 15 * 60_000; // 15 minutes
-
-/**
- * Max time (ms) a cron fire is allowed to be "in flight" before we treat it
- * as a hung PTY injection and reset the firing flag.  Set well above the
- * total retry wall-time (1s + 4s + 16s ≈ 21s) plus generous buffer.
- */
-const MAX_FIRE_DURATION_MS = 90_000; // 90 seconds
 
 export class CronScheduler {
   private readonly agentName: string;
   private readonly onFire: (cron: CronDefinition) => Promise<void> | void;
   private readonly logger: (msg: string) => void;
-  private readonly timezone: string | undefined;
 
   /** In-memory schedule, keyed by cron name. */
   private scheduled: Map<string, ScheduledCron> = new Map();
@@ -336,17 +267,10 @@ export class CronScheduler {
   /** Epoch ms of the tick interval, exposed so tests can override. */
   static readonly TICK_INTERVAL_MS = 30_000;
 
-  /**
-   * Optional agent reference used for idle-aware cron deferral.
-   * Set via attachAgent() once the AgentProcess is running.
-   */
-  private attachedAgent: ManagedAgent | null = null;
-
   constructor(opts: CronSchedulerOptions) {
     this.agentName = opts.agentName;
     this.onFire    = opts.onFire;
     this.logger    = opts.logger ?? ((msg: string) => process.stdout.write(msg + '\n'));
-    this.timezone  = opts.timezone;
   }
 
   // -------------------------------------------------------------------------
@@ -377,65 +301,6 @@ export class CronScheduler {
     }
     this.scheduled.clear();
     this.logger(`[cron-scheduler] stopped for agent "${this.agentName}"`);
-  }
-
-  /**
-   * Register an agent so the scheduler can query its idle/running state when
-   * deciding whether to defer a cron fire.  Re-attaching with a new generation
-   * (e.g. after a crash-restart) replaces the previous reference and resets
-   * any in-progress defer timers so the new session starts clean.
-   */
-  attachAgent(agent: ManagedAgent): void {
-    if (agent.name !== this.agentName) {
-      this.logger(
-        `[cron-scheduler] attachAgent: agent name mismatch ` +
-        `(expected "${this.agentName}", got "${agent.name}") — ignored`,
-      );
-      return;
-    }
-    this.attachedAgent = agent;
-    // Reset defer timers so the fresh session isn't still in a defer window
-    // from the previous generation.
-    const now = Date.now();
-    for (const sc of this.scheduled.values()) {
-      sc.deferStart = null;
-
-      // ATTACH CATCH-UP: if nextFireAt was pushed into the future by
-      // consecutive dispatch failures while the agent was down (miss-retry
-      // exhaustion advances to the next normal slot), reset it to fire on
-      // the next tick.  Detect this by checking whether the cron was due
-      // to fire at least once since it last SUCCESSFULLY fired (last_fired_at).
-      //
-      // We intentionally use only last_fired_at, not last_fire_attempted_at:
-      // attempted_at is updated on every failed dispatch and would be recent
-      // during an ongoing outage, masking the overdue status.
-      const def = sc.definition;
-      if (sc.nextFireAt > now && def.last_fired_at) {
-        const lastFiredMs = new Date(def.last_fired_at).getTime();
-        const expectedNext = computeNextFireAt(def, lastFiredMs, this.timezone);
-        if (!isNaN(expectedNext) && expectedNext <= now) {
-          this.logger(
-            `[cron-scheduler] attach-catchup: cron "${def.name}" overdue ` +
-            `(expected next=${new Date(expectedNext).toISOString()}, ` +
-            `scheduled=${new Date(sc.nextFireAt).toISOString()}) — resetting to fire now`,
-          );
-          sc.nextFireAt = now;
-          sc.missRetryCount = 0;
-        }
-      }
-    }
-    this.logger(`[cron-scheduler] agent "${agent.name}" attached (gen=${agent.generation})`);
-  }
-
-  /**
-   * Unregister a halted or restarting agent so the scheduler does not hold a
-   * stale reference.  Safe to call with an unknown name.
-   */
-  detachAgent(name: string): void {
-    if (this.attachedAgent?.name === name) {
-      this.attachedAgent = null;
-      this.logger(`[cron-scheduler] agent "${name}" detached`);
-    }
   }
 
   /**
@@ -477,8 +342,7 @@ export class CronScheduler {
     //
     // Resolve stateDir from CTX_ROOT so test sandboxes (which override CTX_ROOT
     // but not homedir) don't accidentally read production state.
-    const ctxRoot = process.env.CTX_ROOT ||
-      join(homedir(), '.cortextos', process.env.CTX_INSTANCE_ID || 'default');
+    const ctxRoot = getCtxRoot(process.env.CTX_INSTANCE_ID || 'default');
     const stateDir = join(ctxRoot, 'state', this.agentName);
     let stateLastFireByName = new Map<string, string>();
     try {
@@ -531,7 +395,7 @@ export class CronScheduler {
       if (stateFire) candidates.push(new Date(stateFire).getTime());
       const referenceMs = candidates.length > 0 ? Math.max(...candidates) : now;
 
-      let nextFireAt = computeNextFireAt(def, referenceMs, this.timezone);
+      let nextFireAt = computeNextFireAt(def, referenceMs);
 
       if (isNaN(nextFireAt)) {
         this.logger(
@@ -550,7 +414,7 @@ export class CronScheduler {
         nextFireAt = now; // fire on the very next tick
       }
 
-      nextScheduled.set(def.name, { definition: def, nextFireAt, changeKey: key, deferStart: null });
+      nextScheduled.set(def.name, { definition: def, nextFireAt, changeKey: key });
     }
 
     // LAST-GOOD-SCHEDULE FALLBACK (corruption-only)
@@ -597,46 +461,11 @@ export class CronScheduler {
 
       // Guard against re-entry: if a previous tick's async fire+retry is still
       // in flight (can happen with fake timers or very slow onFire), skip.
-      // Exception: if the fire has been in-flight longer than MAX_FIRE_DURATION_MS
-      // the onFire call has almost certainly hung (e.g. blocked PTY write).
-      // Reset the firing flag and schedule a miss-retry so the cron can recover
-      // without requiring a daemon restart.
       if (sc.firing) {
-        if (sc.fireStartedAt !== undefined && now - sc.fireStartedAt > MAX_FIRE_DURATION_MS) {
-          this.logger(
-            `[cron-scheduler] WARNING: cron "${name}" has been firing for ` +
-            `${Math.round((now - sc.fireStartedAt) / 1000)}s — assumed hung; resetting ` +
-            `firing flag and scheduling miss-retry in 5min`
-          );
-          sc.firing = false;
-          sc.fireStartedAt = undefined;
-          sc.nextFireAt = now + 5 * 60_000;
-        }
         continue;
       }
 
-      // Idle-aware deferral: if we have an attached agent reference and the
-      // agent is not idle, defer the fire rather than interrupting mid-turn.
-      // After MAX_DEFER_MS we force-inject regardless (bounds the wait).
-      const agent = this.attachedAgent;
-      if (agent && agent.isRunning() && !agent.isIdle()) {
-        if (sc.deferStart === null) {
-          sc.deferStart = now;
-          this.logger(`[cron-scheduler] cron "${name}": deferring (agent busy)`);
-          continue;
-        }
-        if (now - sc.deferStart < MAX_DEFER_MS) {
-          continue; // still within deferral window
-        }
-        this.logger(
-          `[cron-scheduler] cron "${name}": force-injecting after ` +
-          `${Math.round((now - sc.deferStart) / 60_000)}m busy defer`,
-        );
-      }
-      sc.deferStart = null;
-
       sc.firing = true;
-      sc.fireStartedAt = now;
       const cron = sc.definition;
       this.logger(`[cron-scheduler] firing cron "${name}" (was due ${new Date(sc.nextFireAt).toISOString()})`);
 
@@ -679,11 +508,8 @@ export class CronScheduler {
           );
         }
 
-        // Successful fire — reset miss-retry counter.
-        sc.missRetryCount = 0;
-
         // Advance in-memory nextFireAt
-        const next = computeNextFireAt(cron, now, this.timezone);
+        const next = computeNextFireAt(cron, now);
         if (!isNaN(next)) {
           sc.nextFireAt = next;
           sc.definition = { ...cron, last_fired_at: nowIso, fire_count: newFireCount };
@@ -694,55 +520,24 @@ export class CronScheduler {
           continue; // sc is gone, skip clearing firing flag
         }
       } else {
-        // Dispatch failed (all short retries exhausted).
-        //
-        // MISS-RETRY POLICY
-        // -----------------
-        // Before permanently skipping to the next cron slot we allow one
-        // 5-minute grace window.  This handles transient failures such as an
-        // agent cascade-restart (real incident: 2026-05-16 orchestrator restart
-        // caused morning-review to miss its slot with no alert).  After the
-        // grace window is consumed we advance nextFireAt as before — and emit
-        // a cron_missed_fire log-event so the Activity feed surfaces the miss.
-        const MAX_MISS_RETRIES = 1;
-        const MISS_RETRY_DELAY_MS = 5 * 60_000; // 5 minutes
-        const missCount = (sc.missRetryCount ?? 0) + 1;
-
-        if (missCount <= MAX_MISS_RETRIES) {
-          sc.missRetryCount = missCount;
-          sc.nextFireAt = now + MISS_RETRY_DELAY_MS;
+        // Dispatch failed (all retries exhausted). Advance nextFireAt anyway so
+        // we don't re-fire the same scheduled slot on every subsequent tick —
+        // that produced a busy-loop when an agent was unreachable. Treat the
+        // failed window as a missed slot and schedule the next normal fire.
+        const next = computeNextFireAt(cron, now);
+        if (!isNaN(next)) {
+          sc.nextFireAt = next;
           this.logger(
-            `[cron-scheduler] WARNING: "${name}" dispatch failed — scheduling miss-retry ` +
-            `in 5min (grace attempt ${missCount}/${MAX_MISS_RETRIES})`
+            `[cron-scheduler] WARNING: "${name}" dispatch failed — advancing to next slot ${new Date(next).toISOString()} ` +
+            `to avoid busy-loop (no last_fired_at update; failure recorded in execution log)`
           );
         } else {
-          // Grace window(s) consumed — advance to the next normal slot.
-          sc.missRetryCount = 0;
-          const next = computeNextFireAt(cron, now, this.timezone);
-          if (!isNaN(next)) {
-            sc.nextFireAt = next;
-            this.logger(
-              `[cron-scheduler] ERROR: "${name}" dispatch failed after all miss-retries — ` +
-              `advancing to next slot ${new Date(next).toISOString()} and emitting missed-fire event`
-            );
-            // Emit a log-event so the Activity feed records this miss.
-            try {
-              execFileSync('cortextos', [
-                'bus', 'log-event', 'cron', 'cron_missed_fire', 'warn',
-                '--meta', JSON.stringify({ cron: name, agent: this.agentName }),
-              ], { timeout: 3000, stdio: 'ignore' });
-            } catch {
-              this.logger(`[cron-scheduler] WARNING: failed to emit cron_missed_fire event for "${name}"`);
-            }
-          } else {
-            this.scheduled.delete(name);
-            this.logger(`[cron-scheduler] WARNING: removed "${name}" from schedule after failure — schedule unparseable`);
-            continue;
-          }
+          this.scheduled.delete(name);
+          this.logger(`[cron-scheduler] WARNING: removed "${name}" from schedule after failure — schedule unparseable`);
+          continue;
         }
       }
       sc.firing = false;
-      sc.fireStartedAt = undefined;
     }
   }
 }

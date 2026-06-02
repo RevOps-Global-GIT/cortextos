@@ -30,10 +30,10 @@ import {
   renameSync,
 } from 'fs';
 import { join, dirname } from 'path';
-import { homedir } from 'os';
 import { randomBytes } from 'crypto';
 import type { CronExecutionLogEntry } from '../types/index.js';
 import { cronExecutionLogPathFor } from '../bus/crons-schema.js';
+import { getCtxRoot } from '../utils/paths.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -54,7 +54,7 @@ export const ROTATION_SIZE_BYTES = 200 * 1_024;
 
 /** Resolve the absolute path to an agent's execution log. */
 function logFilePath(agentName: string): string {
-  const ctxRoot = process.env.CTX_ROOT ?? join(homedir(), '.cortextos', process.env.CTX_INSTANCE_ID ?? 'default');
+  const ctxRoot = getCtxRoot(process.env.CTX_INSTANCE_ID || 'default');
   return join(ctxRoot, cronExecutionLogPathFor(agentName));
 }
 

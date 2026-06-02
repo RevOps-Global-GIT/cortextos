@@ -1,11 +1,11 @@
 import { Command } from 'commander';
 import { existsSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, readdirSync, chmodSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 import { ensureDir } from '../utils/atomic.js';
 
 import { stripBom } from '../utils/strip-bom.js';
 import type { OrgContext } from '../types/index.js';
+import { getCtxRoot } from '../utils/paths.js';
 
 export const initCommand = new Command('init')
   .argument('<org-name>', 'Organization name')
@@ -13,7 +13,7 @@ export const initCommand = new Command('init')
   .description('Create a new cortextOS organization')
   .action(async (orgName: string, options: { instance: string }) => {
     const instanceId = options.instance;
-    const ctxRoot = join(homedir(), '.cortextos', instanceId);
+    const ctxRoot = getCtxRoot(instanceId);
     const projectRoot = process.cwd();
 
     // Check if org already exists

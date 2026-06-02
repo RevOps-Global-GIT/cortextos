@@ -19,9 +19,9 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
-import { homedir } from 'os';
 import { createHash } from 'crypto';
 import { readStdin, parseHookInput } from './index.js';
+import { getCtxRoot } from '../utils/paths.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -279,7 +279,7 @@ async function main(): Promise<void> {
   const { tool_name, tool_input } = parseHookInput(input);
 
   const agentName = process.env.CTX_AGENT_NAME || '';
-  const ctxRoot = process.env.CTX_ROOT || join(homedir(), '.cortextos', 'default');
+  const ctxRoot = getCtxRoot(process.env.CTX_INSTANCE_ID || 'default');
   const stateDir = join(ctxRoot, 'state', agentName);
 
   const state = loadState(stateDir);
