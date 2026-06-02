@@ -4135,6 +4135,39 @@ async function runWikiGraphChecks(page: Page): Promise<CheckResult[]> {
   }
   return results;
 }
+
+// /app/fleet-board checks
+// ---------------------------------------------------------------------------
+async function runFleetBoardChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'app-fleet-board';
+
+  // CHECK 1: Page load
+  try {
+    await page.waitForSelector('main, [class*="fleet"], [class*="board"], [class*="session"], h1, h2', { timeout: 15000 });
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`) });
+    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'PASS', evidence: 'Fleet board loaded.' });
+  } catch (e) {
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`) }).catch(() => {});
+    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'FAIL', evidence: `Page did not load within 15s: ${(e as Error).message?.split('\n')[0]}` });
+    return results;
+  }
+
+  // CHECK 2: No error boundary / blank body
+  try {
+    const bodyText = await page.evaluate(() => document.body?.innerText?.trim() ?? '');
+    if (bodyText.length < 20) {
+      results.push({ check: '[LIVENESS] CHECK 2 Content rendered', status: 'FAIL', evidence: `Body text too short (${bodyText.length} chars) — possible blank render` });
+    } else {
+      results.push({ check: '[LIVENESS] CHECK 2 Content rendered', status: 'PASS', evidence: `Body has ${bodyText.length} chars of content.` });
+    }
+  } catch (e) {
+    results.push({ check: '[LIVENESS] CHECK 2 Content rendered', status: 'DEFERRED', evidence: `Could not evaluate body: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
 async function main() {
   const env = loadEnv(SECRETS_ENV);
   // Use the RGOS-specific service key (project yyizocyaehmqrottmnaz)
@@ -4381,8 +4414,10 @@ async function main() {
       results = await runWithTimeout(() => runMemoryChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/app/fleet-board') {
+      results = await runWithTimeout(() => runFleetBoardChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet-sessions, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet-sessions, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph, /app/fleet-board`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
