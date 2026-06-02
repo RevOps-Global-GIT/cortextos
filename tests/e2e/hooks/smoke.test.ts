@@ -312,6 +312,8 @@ describe('hook-idle-flag smoke', () => {
           CTX_AGENT_NAME: 'test-agent',
           CTX_INSTANCE_ID: 'default',
           HOME: tmpHome,
+          // CTX_ROOT must be unset so getCtxRoot() falls back to HOME/.cortextos/instanceId
+          CTX_ROOT: '',
         },
       );
 
@@ -358,6 +360,7 @@ describe('hook-crash-alert smoke', () => {
           CTX_AGENT_NAME: 'test-agent',
           CTX_INSTANCE_ID: 'default',
           HOME: tmpHome,
+          CTX_ROOT: '', // clear inherited CTX_ROOT so hook uses HOME/.cortextos/instanceId
           // No BOT_TOKEN / CHAT_ID — Telegram skipped, log still written
         },
       );
@@ -389,6 +392,7 @@ describe('hook-crash-alert smoke', () => {
           CTX_AGENT_NAME: 'test-agent',
           CTX_INSTANCE_ID: 'default',
           HOME: tmpHome,
+          CTX_ROOT: '', // clear inherited CTX_ROOT so hook uses HOME/.cortextos/instanceId
         },
       );
 
