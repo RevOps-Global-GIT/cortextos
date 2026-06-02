@@ -35,16 +35,53 @@ const userEmail    = getArg('--user', 'greg@revopsglobal.com');
 const noSend       = argv.includes('--no-send');
 const sessionFile  = getArg('--session-file', '');
 const dogfoodMode  = argv.includes('--dogfood');
+const writePageHealth = argv.includes('--write-page-health');
+const pageHealthMode = getArg('--page-health-mode', 'report-only');
 
 // ---------------------------------------------------------------------------
 // Config — resolve paths relative to this file's location
 // ---------------------------------------------------------------------------
 const SCRIPT_DIR  = path.dirname(new URL(import.meta.url).pathname);
 const REPO_ROOT   = path.resolve(SCRIPT_DIR, '..');
-const SECRETS_ENV = path.resolve(REPO_ROOT, 'orgs/revops-global/secrets.env');
+const SECRETS_ENV = getArg(
+  '--secrets-env',
+  process.env.CTX_SECRETS_ENV || path.resolve(REPO_ROOT, 'orgs/revops-global/secrets.env'),
+);
 const OUTPUT_DIR  = path.resolve(REPO_ROOT, 'orgs/revops-global/agents/codex/output/playwright-qa');
 const HUB_URL     = 'https://hub.revopsglobal.com';
 const SUPA_URL    = 'https://yyizocyaehmqrottmnaz.supabase.co';
+const BASE_URL    = getArg('--base-url', process.env.DASHBOARD_URL || HUB_URL).replace(/\/$/, '');
+const PAGE_HEALTH_SURFACE = getArg('--page-health-surface', (() => {
+  try {
+    const host = new URL(BASE_URL).hostname;
+    if (host.includes('localhost') || host.includes('127.0.0.1')) return 'cortextos-dashboard';
+    if (host.includes('agentops.revopsglobal.com')) return 'agentops';
+    return 'hub';
+  } catch {
+    return 'hub';
+  }
+})());
+
+const EDGE_FAILURE_PATTERNS = [
+  /Failed to send a request to the Edge Function/i,
+  /Edge Function returned a non-2xx status code/i,
+  /Failed to load graph/i,
+  /Failed to load quality data/i,
+  /CORTEXTOS_JWT/i,
+  /\/api\/knowledge endpoint not exposed/i,
+];
+
+const STALENESS_PATTERNS = [
+  /\b([2-9]|\d{2,})\s+days?\s+ago\b/i,
+  /\b([2-9]|\d{2,})d\s+stale\b/i,
+  /\b(\d{4,})m\s+stale\b/i,
+  /\b([3-9]\d|[1-9]\d{2,})h\s+stale\b/i,
+];
+
+const OFF_SOURCE_PATTERNS = [
+  /\bdata sources?\b[\s\S]{0,500}\b(off|inactive|disabled)\b/i,
+  /\b(off|inactive|disabled)\b[\s\S]{0,120}\bdata sources?\b/i,
+];
 
 fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 
@@ -121,10 +158,28 @@ async function mintSession(serviceKey: string, email: string): Promise<SupabaseS
 
 function slug(str: string) { return str.replace(/\//g, '-').replace(/^-/, '') || 'root'; }
 
+function joinUrl(baseUrl: string, routePath: string): string {
+  if (/^https?:\/\//i.test(routePath)) return routePath;
+  const base = baseUrl.replace(/\/$/, '');
+  const route = routePath.startsWith('/') ? routePath : `/${routePath}`;
+  return `${base}${route}`;
+}
+
 interface CheckResult {
   check: string;
   status: 'PASS' | 'FAIL' | 'DEFERRED';
   evidence: string;
+}
+
+interface PageHealthIssue {
+  kind: 'check_failure' | 'edge_function' | 'api_failure' | 'staleness' | 'source_off' | 'deferred';
+  severity: 'warning' | 'error';
+  detail: string;
+}
+
+interface ObservedPageSignal {
+  kind: 'console' | 'requestfailed' | 'response';
+  detail: string;
 }
 
 type ButtonCounts = Record<string, number>;
@@ -3464,6 +3519,121 @@ function writeReport(results: CheckResult[], reportPath: string) {
   return { passed, failed, deferred };
 }
 
+function firstMatchingSnippet(text: string, patterns: RegExp[]): string | null {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const idx = Math.max(0, match.index ?? 0);
+      return text.slice(idx, idx + 180).replace(/\s+/g, ' ').trim();
+    }
+  }
+  return null;
+}
+
+async function collectPageHealthIssues(
+  page: Page,
+  results: CheckResult[],
+  observedSignals: ObservedPageSignal[],
+): Promise<PageHealthIssue[]> {
+  const issues: PageHealthIssue[] = [];
+
+  for (const result of results) {
+    if (result.status === 'FAIL') {
+      issues.push({
+        kind: 'check_failure',
+        severity: 'error',
+        detail: `${result.check}: ${result.evidence}`.slice(0, 500),
+      });
+    } else if (result.status === 'DEFERRED') {
+      issues.push({
+        kind: 'deferred',
+        severity: 'warning',
+        detail: `${result.check}: ${result.evidence}`.slice(0, 500),
+      });
+    }
+  }
+
+  for (const signal of observedSignals) {
+    const edgeSnippet = firstMatchingSnippet(signal.detail, EDGE_FAILURE_PATTERNS);
+    if (edgeSnippet) {
+      issues.push({ kind: 'edge_function', severity: 'error', detail: `${signal.kind}: ${edgeSnippet}` });
+    } else if (signal.kind === 'response' && /\/api\/|\/functions\/v1\//.test(signal.detail)) {
+      issues.push({ kind: 'api_failure', severity: 'warning', detail: signal.detail.slice(0, 500) });
+    }
+  }
+
+  const bodyText = await wallClock(
+    page.evaluate(() => document.body?.innerText ?? ''),
+    5000,
+    '',
+  );
+  const edgeSnippet = firstMatchingSnippet(bodyText, EDGE_FAILURE_PATTERNS);
+  if (edgeSnippet) {
+    issues.push({ kind: 'edge_function', severity: 'error', detail: edgeSnippet });
+  }
+  const staleSnippet = firstMatchingSnippet(bodyText, STALENESS_PATTERNS);
+  if (staleSnippet) {
+    issues.push({ kind: 'staleness', severity: 'warning', detail: staleSnippet });
+  }
+  const offSnippet = firstMatchingSnippet(bodyText, OFF_SOURCE_PATTERNS);
+  if (offSnippet) {
+    issues.push({ kind: 'source_off', severity: 'warning', detail: offSnippet });
+  }
+
+  return issues;
+}
+
+function pageHealthStatus(issues: PageHealthIssue[]): 'healthy' | 'warning' | 'error' {
+  if (issues.some((issue) => issue.severity === 'error')) return 'error';
+  if (issues.length > 0) return 'warning';
+  return 'healthy';
+}
+
+function pageHealthSummary(status: 'healthy' | 'warning' | 'error', issues: PageHealthIssue[]): string {
+  if (issues.length === 0) return `${pageHealthMode}: page rendered cleanly; no edge-function or staleness guard findings.`;
+  const first = issues[0].detail.replace(/\s+/g, ' ').slice(0, 220);
+  return `${pageHealthMode}: ${status}; ${issues.length} issue(s), first=${first}`;
+}
+
+async function writePageHealthVerdict(
+  serviceKey: string,
+  navPath: string,
+  results: CheckResult[],
+  observedSignals: ObservedPageSignal[],
+  page: Page,
+): Promise<void> {
+  const issues = await collectPageHealthIssues(page, results, observedSignals);
+  const status = pageHealthStatus(issues);
+  const screenshotPath = await shot(page, 'page-health');
+  const pagePath = `${PAGE_HEALTH_SURFACE}:${navPath}`;
+  const row = {
+    page_path: pagePath,
+    label: `${PAGE_HEALTH_SURFACE} ${navPath}`,
+    status,
+    summary: pageHealthSummary(status, issues),
+    issues,
+    screenshot_path: screenshotPath,
+    checked_at: new Date().toISOString(),
+  };
+
+  const res = await fetch(`${SUPA_URL}/rest/v1/agentops_page_health?on_conflict=page_path`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${serviceKey}`,
+      'apikey': serviceKey,
+      'Prefer': 'resolution=merge-duplicates',
+    },
+    body: JSON.stringify(row),
+  });
+
+  if (!res.ok) {
+    throw new Error(`agentops_page_health upsert failed ${res.status}: ${(await res.text()).slice(0, 500)}`);
+  }
+
+  console.log(`[page-health] wrote ${pagePath}: ${status} (${issues.length} issue(s), mode=${pageHealthMode})`);
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -3705,8 +3875,35 @@ async function main() {
     let pageCrashed = false;
     page.on('crash', () => { pageCrashed = true; console.error('[qa] Page crashed!'); });
 
-    console.log(`Navigating to ${HUB_URL}${navPath}...`);
-    await page.goto(`${HUB_URL}${navPath}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const observedSignals: ObservedPageSignal[] = [];
+    page.on('console', (message) => {
+      const text = message.text();
+      if (EDGE_FAILURE_PATTERNS.some((pattern) => pattern.test(text))) {
+        observedSignals.push({ kind: 'console', detail: text });
+      }
+    });
+    page.on('requestfailed', (request) => {
+      const url = request.url();
+      if (/\/api\/|\/functions\/v1\//.test(url)) {
+        observedSignals.push({
+          kind: 'requestfailed',
+          detail: `${url}: ${request.failure()?.errorText ?? 'request failed'}`,
+        });
+      }
+    });
+    page.on('response', (response) => {
+      const url = response.url();
+      if ((/\/api\/|\/functions\/v1\//.test(url)) && response.status() >= 400) {
+        observedSignals.push({
+          kind: 'response',
+          detail: `${response.status()} ${url}`,
+        });
+      }
+    });
+
+    const targetUrl = joinUrl(BASE_URL, navPath);
+    console.log(`Navigating to ${targetUrl}...`);
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
 
     if (page.url().includes('/auth') || page.url().includes('/login')) {
@@ -3801,6 +3998,9 @@ async function main() {
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
     const { passed, failed, deferred } = writeReport(results, reportPath);
+    if (writePageHealth) {
+      await writePageHealthVerdict(serviceKey, navPath, results, observedSignals, page);
+    }
 
     console.log(`\nReport: ${reportPath}`);
     console.log(`Summary: ${passed} passed, ${failed} failed, ${deferred} deferred\n`);
