@@ -15,20 +15,22 @@ Run it for every priority page on each pass (rotate to cover all 8 within 2–3 
 ```bash
 cd /home/cortextos/cortextos
 
-# Priority pages — run each individually via npx tsx:
-npx tsx scripts/hub-qa-playwright.ts --page /analytics --no-send
-npx tsx scripts/hub-qa-playwright.ts --page /fleet --no-send
-npx tsx scripts/hub-qa-playwright.ts --page /app/fleet/tasks --no-send
-npx tsx scripts/hub-qa-playwright.ts --page /app/fleet/activity --no-send
-npx tsx scripts/hub-qa-playwright.ts --page /app/cortex/theta --no-send
-npx tsx scripts/hub-qa-playwright.ts --page /app/supreme-outstanding --no-send
-npx tsx scripts/hub-qa-playwright.ts --page /app/work/inbox --no-send
-npx tsx scripts/hub-qa-playwright.ts --page /app/work/approvals --no-send
+# Priority pages — use the pinned-worktree wrapper so the harness always runs
+# from fork/main HEAD regardless of which branch the shared checkout is on.
+# This prevents stale-harness false FAILs when a feature branch is checked out.
+bash scripts/run-dogfood-pinned.sh --page /analytics --no-send
+bash scripts/run-dogfood-pinned.sh --page /fleet --no-send
+bash scripts/run-dogfood-pinned.sh --page /app/fleet/tasks --no-send
+bash scripts/run-dogfood-pinned.sh --page /app/fleet/activity --no-send
+bash scripts/run-dogfood-pinned.sh --page /app/cortex/theta --no-send
+bash scripts/run-dogfood-pinned.sh --page /app/supreme-outstanding --no-send
+bash scripts/run-dogfood-pinned.sh --page /app/work/inbox --no-send
+bash scripts/run-dogfood-pinned.sh --page /app/work/approvals --no-send
 ```
 
 Each run writes a report to `orgs/revops-global/agents/codex/output/playwright-qa/`. Collect FAIL results across all pages before proceeding.
 
-**Fallback command if `npx tsx` is not available:** `npx ts-node --esm scripts/hub-qa-playwright.ts`
+**Fallback if `npx tsx` is not available:** run `npx ts-node --esm scripts/hub-qa-playwright.ts` directly from inside `/tmp/cortextos-dogfood-main` (the pinned worktree).
 
 ## Runtime Preference (after Playwright)
 
