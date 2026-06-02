@@ -48,7 +48,7 @@ export function ActionRequired({
       icon: <IconAlertTriangle size={18} className="text-warning" />,
       label: 'blocked task',
       count: blockedTasks,
-      href: '/tasks?status=blocked',
+      href: '/tasks?agent=human',
     },
     {
       icon: <IconHeartOff size={18} className="text-destructive" />,

@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { getOrgs } from '@/lib/config';
 import { getPendingCount } from '@/lib/data/approvals';
 import { getTasks, getTasksCompletedToday } from '@/lib/data/tasks';
+import { getHumanBlockerCount } from '@/lib/data/human-blockers';
 import { getGoals } from '@/lib/data/goals';
 import { getHealthSummary, getAllHeartbeats } from '@/lib/data/heartbeats';
 import { getRecentEvents, getMilestones } from '@/lib/data/events';
@@ -31,7 +32,7 @@ export default async function OverviewPage({
   // Fetch all data in parallel
   const [
     pendingCount,
-    blockedTasks,
+    humanBlockerCount,
     allTasks,
     goalsData,
     healthSummary,
@@ -42,7 +43,7 @@ export default async function OverviewPage({
     heartbeatsList,
   ] = await Promise.all([
     Promise.resolve(getPendingCount(org || undefined)),
-    Promise.resolve(getTasks({ status: 'blocked', org: org || undefined })),
+    Promise.resolve(getHumanBlockerCount()),
     Promise.resolve(getTasks({ org: org || undefined })),
     Promise.resolve(getGoals(org || 'default')),
     getHealthSummary(org || undefined),
@@ -62,8 +63,7 @@ export default async function OverviewPage({
   const staleAgentCount = healthSummary.stale + healthSummary.down;
   const inProgressTasks = allTasks.filter(t => t.status === 'in_progress').length;
   const pendingTasks = allTasks.filter(t => t.status === 'pending').length;
-  const humanTasks = allTasks.filter(t => t.assignee === 'human' && t.status !== 'completed').length;
-  const totalActions = pendingCount + blockedTasks.length + staleAgentCount + humanTasks;
+  const totalActions = pendingCount + humanBlockerCount + staleAgentCount;
 
   return (
     <div className="space-y-6">
@@ -94,16 +94,15 @@ export default async function OverviewPage({
         tasksInProgress={inProgressTasks}
         tasksPending={pendingTasks}
         pendingApprovals={pendingCount}
-        blockedTasks={blockedTasks.length}
+        blockedTasks={humanBlockerCount}
       />
 
       {/* Action Required - only show if there are actions */}
       {totalActions > 0 && (
         <ActionRequired
           pendingApprovals={pendingCount}
-          blockedTasks={blockedTasks.length}
+          blockedTasks={humanBlockerCount}
           staleAgents={staleAgentCount}
-          humanTasks={humanTasks}
         />
       )}
 

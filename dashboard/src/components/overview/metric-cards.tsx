@@ -91,7 +91,7 @@ export function MetricCards({
         value={blockedTasks}
         sublabel={blockedTasks === 0 ? 'No blockers' : 'Needs attention'}
         icon={<IconAlertTriangle size={18} className="text-primary" />}
-        href="/tasks?status=blocked"
+        href="/tasks?agent=human"
       />
     </div>
   );
