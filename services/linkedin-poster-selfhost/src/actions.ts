@@ -583,9 +583,14 @@ export async function discoverLinkedInPosts(
   for (const keyword of keywords.slice(0, 6)) {
     if (all.length >= limit) break;
 
-    // LinkedIn content search sorted by recency — proven to return relevant posts
-    const searchUrl = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
-    console.log(`[discover] Searching: "${keyword}"`);
+    // Hashtag feed (#revops) uses a different URL that renders a live post feed
+    // and tends to carry more person posts with interceptable activity URNs.
+    const isHashtag = keyword.startsWith('#');
+    const hashtagSlug = isHashtag ? keyword.slice(1).toLowerCase().replace(/\s+/g, '') : '';
+    const searchUrl = isHashtag
+      ? `https://www.linkedin.com/feed/hashtag/${hashtagSlug}/`
+      : `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
+    console.log(`[discover] Searching: "${keyword}" → ${isHashtag ? 'hashtag feed' : 'content search'}`);
 
     // Intercept network responses to capture activity URNs from LinkedIn API calls.
     const capturedUrns = new Map<string, string>(); // urn → placeholder
@@ -717,22 +722,27 @@ export async function discoverLinkedInPosts(
 
       page.off('response', responseHandler);
 
-      // Assign network-captured URNs to posts that lack real URLs.
-      // Only posts with a real /feed/update/ URL are emitted — no synthetic fallback.
+      // Assign network-captured URNs to get real /feed/update/ permalinks.
+      // Company-feed URLs (/company/*/posts/) are not clickable to a specific post —
+      // treat them the same as no-URL posts and prefer a captured URN over them.
+      const isSpecificPostUrl = (u: string) => /\/feed\/update\//i.test(u);
       const orphanUrns = [...capturedUrns.keys()].filter(
-        urn => !extracted.some(p => p.url.includes(urn))
+        urn => !extracted.some(p => isSpecificPostUrl(p.url) && p.url.includes(urn))
       );
       let urnIdx = 0;
       const enriched = extracted.map(p => {
-        if (p.url) return p;
+        // Already a real specific-post permalink — keep it
+        if (isSpecificPostUrl(p.url)) return p;
+        // No URL or only a company/person feed page: upgrade to activity URN if available
         if (urnIdx < orphanUrns.length) {
           return { ...p, url: `https://www.linkedin.com/feed/update/${orphanUrns[urnIdx++]}/` };
         }
-        return p; // no URL — will be filtered below
+        return p; // no specific post URL available — will be filtered below
       });
 
-      const withUrls = enriched.filter(p => !!p.url);
-      console.log(`[discover] "${keyword}": ${extracted.length} DOM posts, ${capturedUrns.size} network URNs → ${withUrls.length} with real URLs (${enriched.length - withUrls.length} dropped, no URL)`);
+      // Only emit posts with a specific-post permalink (/feed/update/ with activity URN)
+      const withUrls = enriched.filter(p => isSpecificPostUrl(p.url));
+      console.log(`[discover] "${keyword}": ${extracted.length} DOM posts, ${capturedUrns.size} network URNs → ${withUrls.length} with real permalinks (${enriched.length - withUrls.length} dropped)`);
 
       // Topic relevance gate: drop posts that are off-topic for RevOps/GTM/sales leadership.
       const OFF_TOPIC_SIGNALS = [
