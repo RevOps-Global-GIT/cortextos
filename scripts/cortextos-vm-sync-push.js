@@ -868,9 +868,32 @@ async function push(payload) {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+const STALE_WATERMARK_MS = 30 * 60 * 1000; // 30 minutes
+
 async function main() {
   const watermark = loadWatermark();
   console.log(`[vm-sync-push] Syncing since ${watermark.last_synced}`);
+
+  // Stale watermark check — board data is frozen if this cron stops running
+  const staleDeltaMs = Date.now() - new Date(watermark.last_synced).getTime();
+  if (staleDeltaMs > STALE_WATERMARK_MS) {
+    const staleMin = Math.round(staleDeltaMs / 60000);
+    console.warn(`[vm-sync-push] WARN: watermark is ${staleMin}min stale — board data may be outdated`);
+    try {
+      const alertEvent = {
+        at: new Date().toISOString(),
+        type: "system_alert",
+        severity: "warning",
+        label: `vm-sync ${staleMin}min stale`,
+        message: `vm-sync watermark is ${staleMin}min stale — AgentOps board data may be outdated`,
+      };
+      fs.mkdirSync(EVENTS_DIR, { recursive: true });
+      fs.appendFileSync(
+        path.join(EVENTS_DIR, "vm-sync-stale.jsonl"),
+        JSON.stringify(alertEvent) + "\n",
+      );
+    } catch (_) {}
+  }
 
   const payload = buildPayload(watermark);
   const agentCount = payload.agents.length;
