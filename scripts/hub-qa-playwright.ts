@@ -1710,11 +1710,18 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
 
   // CHECK 6: DB-comparison — sample 5 companies from Supabase, verify names/domains appear in UI
   try {
+    // After CHECK 4 navigation, wait for the company table to re-render before reading page text.
+    await Promise.race([
+      page.waitForSelector('table tbody tr, [role="row"]:not([role="columnheader"])', { timeout: 8000 }),
+      new Promise<void>(r => setTimeout(r, 8000)),
+    ]);
     await shot(page, `${sp}-6-db-compare`);
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,domain&order=created_at.desc&limit=5`, {
+      // Mirror the UI filter (useCompanies: is_archived=false, order by name asc) so the
+      // sampled rows are guaranteed to be visible in the default rendered list.
+      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,domain&is_archived=eq.false&order=name.asc&limit=5`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
