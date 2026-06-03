@@ -165,7 +165,7 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 - For file inspection prefer `cat` / `sed -n` / `head` / `tail`; for edits prefer `sed -i` / `awk` / a redirect pipeline.
 
 ### agent-browser (Browser Automation)
-- Default runtime: Codex-CU / Orgo VM. Do not run browser automation on Greg's Mac unless a current Orgo-failure artifact authorizes Mac fallback.
+- Primary path: agent-browser for logged-in or exploratory work; `dev-browser --headless` for stateless scripted checks. Mac SSH (`cortextos bus computer-use --ssh-host gregs-mac`) is the fallback for Mac-specific state only. (Orgo was removed 2026-06.)
 - OB1 browser proof is Compl1-only: VM `23e7d600`, target `https://ob1.revopsglobal.com`.
 - `agent-browser` is the framework's Chrome/CDP browser automation tool — runtime-agnostic CLI, no MCP setup required. It is the codex equivalent of (and replacement for) the `mcp__playwright__*` tools that Claude-Code-runtime agents formerly used.
 - `agent-browser` CLI (Rust binary, npm-installed globally) drives Chrome via CDP
@@ -174,7 +174,7 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 - Quick verify: `agent-browser open https://example.com && agent-browser get title && agent-browser close`
 
 ### macOS Desktop Automation
-- Quarantined by default. Do not use Peekaboo, osascript, headed Chrome, or local Playwright on Greg's Mac unless a current explicit Orgo-failure artifact and task approval authorize that exception.
+- Quarantined by default. Do not use Peekaboo, osascript, headed Chrome, or local Playwright on Greg's Mac unless the task genuinely needs Mac-specific state and has task approval. Route such work through `cortextos bus computer-use --ssh-host gregs-mac`.
 
 ### gogcli (Google Workspace)
 - Binary: `gog` (v0.12.0 at `/opt/homebrew/bin/gog`)

@@ -9,7 +9,7 @@
 
 ## Responsibilities
 
-- **Orgo fleet execution:** drive Orgo VMs directly, inspect VM state, capture screenshot evidence, produce durable output reports.
+- **Browser / computer-use execution:** drive agent-browser for logged-in or exploratory UI work (use `dev-browser --headless` for stateless scripted checks), capture screenshot evidence, produce durable output reports. Mac SSH (`cortextos bus computer-use --ssh-host gregs-mac`) is the fallback for Mac-specific state only. (Orgo was removed 2026-06.)
 - **Hub / product QA:** focused Playwright sweeps across hub routes, voice surfaces, fleet/task screens, inbox flows.
 - **Voice MVP:** implement and verify OpenAI/LiveKit/Realtime voice paths, smoke-test speech + agent round trips.
 - **RevOps repo implementation:** scoped fixes in cortextos, RGOS, team-brain, ob1-parents, ob1-app; open PRs under current auto-merge policy.
@@ -27,7 +27,6 @@
 | ob1-app | `RevOps-Global-GIT/ob1-app` |
 | hub / RGOS | `RevOps-Global-GIT/hub` and `RevOps-Global-GIT/rgos` |
 | cortextos | `RevOps-Global-GIT/cortextos` |
-| Codex-CU VM | UUID `3ec3d7f3-a5da-4678-8b25-ce28b7aed829` |
 | Your output dir | `orgs/revops-global/agents/codex-2/output/` |
 | Org CLAUDE.md | `orgs/revops-global/CLAUDE.md` |
 
@@ -40,9 +39,9 @@ Every task completion requires one of:
 "PR opened" alone is never a completion signal.
 
 ## Escalation Pattern
-1. **Blocker** (auth, capability gap, stale Orgo VM) → `cortextos bus send-message orchestrator normal "<blocker>"`.
+1. **Blocker** (auth, capability gap) → `cortextos bus send-message orchestrator normal "<blocker>"`.
 2. **ob1-parents fix ships** → port same-day to `RevOps-Global-GIT/ob1-app` before marking complete.
-3. **Orgo CU fails** → document gap artifact, then Mac SSH as gated fallback only.
+3. **agent-browser cannot handle the task** → use Mac SSH (`--ssh-host gregs-mac`) only for genuine Mac-specific state.
 
 ## Git Rules (supplement to org CLAUDE.md)
 - Always base branches off `main`. Use `git merge-base --is-ancestor <sha> origin/main` to confirm a PR landed before calling it shipped.

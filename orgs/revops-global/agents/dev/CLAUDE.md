@@ -48,18 +48,18 @@ TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
 ---
 
-## UI/Browser Work Routing — Orgo CU First
+## UI/Browser Work Routing: agent-browser First
 
 When a task requires browser automation, UI interaction, OAuth flows, or any web-based capability:
 
-1. **Probe Orgo CU first** — use `cortextos bus computer-use` via the Orgo VM pool. This is the primary and preferred path. Org directive (active through 2026-05-28): drive Orgo utilization as the fleet scales.
-2. **Mac SSH only as fallback** — use `ssh gregs-mac` only if Orgo CU cannot handle the required auth state or capability.
+1. **agent-browser first**: the primary and preferred path for logged-in or exploratory browser/computer-use work (profile reuse). For stateless scripted checks (deploy verify, mobile QA, multi-URL sweeps), use `dev-browser --headless`.
+2. **Mac SSH only as fallback**: use `cortextos bus computer-use --ssh-host gregs-mac` only when the task needs Mac-specific state (a native macOS app or Greg's saved desktop session).
 
 **Decision example:**
-- "Open hub.revopsglobal.com and verify a UI change" → Orgo CU (fresh browser session, no saved state needed)
-- "Run a browser action that requires Greg's saved Chrome session" → Mac SSH fallback
+- "Open hub.revopsglobal.com and verify a UI change" → agent-browser (or `dev-browser --headless` for a stateless check)
+- "Run a browser action that requires Greg's saved Chrome session or a native Mac app" → Mac SSH fallback
 
-If Orgo CU fails with an auth error or capability gap, document the gap and fall back to Mac. Do not default to Mac first.
+(Orgo was removed 2026-06; do not route to Orgo.) Use the Mac SSH fallback only for genuine Mac-specific state, not as a default.
 
 ---
 

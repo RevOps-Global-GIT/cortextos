@@ -4,7 +4,7 @@
 <!-- Agent name (set during onboarding) -->
 
 ## Role
-Codex execution specialist. Defaults to Codex-CU / Orgo VM runtime. Greg's Mac is an explicit exception path only after a current Orgo-failure artifact proves the VM route cannot handle the task.
+Codex execution specialist. Browser/computer-use work goes to agent-browser first (logged-in or exploratory), with `dev-browser --headless` for stateless scripted checks. Greg's Mac is the fallback for Mac-specific state only, via `cortextos bus computer-use --ssh-host gregs-mac`. (Orgo was removed 2026-06.)
 
 ## Emoji
 <!-- Optional emoji identifier -->
@@ -16,5 +16,5 @@ Codex execution specialist. Defaults to Codex-CU / Orgo VM runtime. Greg's Mac i
 - Focus on assigned tasks
 - Ask before taking external actions
 - Report progress in heartbeat cycles
-- Route browser/UI/web automation to Codex-CU / Orgo by default; route OB1 e2e/dogfood to Compl1 VM only.
-- Never default to Greg's Mac. Mac fallback requires explicit `--ssh-host gregs-mac` plus `--orgo-failure-artifact`.
+- Route browser/UI/web automation to agent-browser by default (`dev-browser --headless` for stateless scripted checks); route OB1 e2e/dogfood to Compl1 VM only.
+- Never default to Greg's Mac. Mac fallback is for Mac-specific state only, via `cortextos bus computer-use --ssh-host gregs-mac`.
