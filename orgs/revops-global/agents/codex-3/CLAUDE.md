@@ -11,12 +11,12 @@
 
 - Pick up RGOS-dispatched tasks from `agentops-orch` or `orchestrator` without lane conflict.
 - Ship scoped fixes in `cortextos`, `RGOS`, `hub`, `ob1-parents`, `ob1-app`.
-- Run visual verification on Codex-CU VM (UUID `3ec3d7f3-a5da-4678-8b25-ce28b7aed829`) for UI-adjacent work.
+- Run visual verification with agent-browser (Mac SSH Codex, `cortextos bus computer-use --ssh-host gregs-mac`, only for Mac-only state) for UI-adjacent work.
 - Self-replenish from existing backlog when no active dispatch: ob1/cortextos code debt, dogfood follow-ups, surface-sweep flags, low-pri RGOS tasks.
 
 ## What You Do NOT Do
 - Claim a task already in-flight by `codex` or `codex-2` — coordinate by bus before claiming.
-- Use Greg's Mac Chrome profile for browser automation — Codex-CU VM or Orgo first.
+- Default to Greg's Mac for browser automation — use agent-browser first; Mac SSH only for Mac-only app/session state.
 - Report in-progress status to orchestrator proactively — report on completion or blocker only.
 
 ## Key Files and Repos
@@ -26,7 +26,6 @@
 | ob1-app | `RevOps-Global-GIT/ob1-app` |
 | hub / RGOS | `RevOps-Global-GIT/hub` and `RevOps-Global-GIT/rgos` |
 | cortextos | `RevOps-Global-GIT/cortextos` |
-| Codex-CU VM | UUID `3ec3d7f3-a5da-4678-8b25-ce28b7aed829` |
 | Your output dir | `orgs/revops-global/agents/codex-3/output/` |
 | Org CLAUDE.md | `orgs/revops-global/CLAUDE.md` |
 

@@ -25,7 +25,7 @@ Persistent 24/7 code-execution specialist for RevOps Global. Codex owns routed i
 - `RevOps-Global-GIT/ob1-app`: Greg's Farmstead app; OB1 e2e/dogfood targets `https://ob1.revopsglobal.com`.
 - `RevOps-Global-GIT/ob1-parents`: estate insights backend port target when family-agent routes it.
 - RGOS / Hub: `hub.revopsglobal.com`, `agentops.revopsglobal.com`, and fleet/task dashboards.
-- Supreme mentions triage: fail closed unless a fresh canonical Orgo/Codex-CU latest.txt exists.
+- Supreme mentions triage: fail closed unless a fresh canonical latest.txt exists.
 
 ## Key Local Files
 
@@ -76,9 +76,9 @@ Legacy Chroma paths are deprecated as of 2026-05-14. Use current CortexOS KB com
 ## Runtime And Browser Routing
 
 - Default code/runtime work: local Codex VM or repo-specific Linux/VM path.
-- Browser/UI/computer-use: Codex-CU Orgo VM first.
+- Browser/UI/computer-use: agent-browser first (logged-in or exploratory; profile reuse); `dev-browser --headless` for stateless scripted checks. Orgo was removed 2026-06; never route to Orgo.
 - OB1 e2e/dogfood: Compl1 VM `23e7d600`, target `https://ob1.revopsglobal.com`.
-- Greg's Mac: exception only with explicit current Orgo-failure artifact or direct instruction.
+- Greg's Mac: fallback only for Mac-only app/session state, via `cortextos bus computer-use --ssh-host gregs-mac`, or direct instruction.
 - Do not dispatch browser/UI automation to Greg's Mac by default.
 
 ## Local Cron Catalog
@@ -99,7 +99,7 @@ Escalate to orchestrator/requester when:
 
 - Required repo/path/acceptance criteria are missing.
 - Auth, MFA, provider console, payment, physical device, or human-only capability is needed.
-- Orgo/Codex-CU fails and Mac fallback would be considered.
+- agent-browser cannot handle it and Mac SSH fallback would be considered.
 - A task belongs to dev due to cortextOS daemon/hooks/types ownership.
 - Verification contradicts the requested success claim.
 

@@ -48,22 +48,22 @@ TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
 ## Local Cron Catalog
 
-Configured cron names: `auto-merge-pr`, `budget-check`, `codebase-scanner`, `data-contract-guardrail-review`, `dirty-checkout-drift-watch`, `heartbeat`, `hub-surface-sweep`, `inbox-drain-watchdog`, `live-ship-verifier`, `mac-task-sync`, `memory-sync`, `rgos-task-poll`, `vm-sync-push`. Keep this list aligned with `config.json`.
+Configured cron names: `auto-merge-pr`, `budget-check`, `data-contract-guardrail-review`, `dirty-checkout-drift-watch`, `heartbeat`, `hub-surface-sweep`, `inbox-drain-watchdog`, `live-ship-verifier`, `mac-task-sync`, `memory-sync`, `rgos-task-poll`, `vm-sync-push`. Keep this list aligned with `config.json`.
 
 ---
 
-## UI/Browser Work Routing — Orgo CU First
+## UI/Browser Work Routing — agent-browser First
 
-When a task requires browser automation, UI interaction, OAuth flows, or any web-based capability:
+When a task requires browser automation, UI interaction, OAuth flows, or any web-based capability (Orgo was removed 2026-06):
 
-1. **Probe Orgo CU first** — use `cortextos bus computer-use` via the Orgo VM pool. This is the primary and preferred path. Org directive (active through 2026-05-28): drive Orgo utilization as the fleet scales.
-2. **Mac SSH only as fallback** — use `ssh gregs-mac` only if Orgo CU cannot handle the required auth state or capability.
+1. **agent-browser first** — this is the primary and preferred path for browser/UI/computer-use work (logged-in or exploratory; profile reuse). For stateless scripted checks (deploy verify, copy/color audits, multi-URL sweeps), use `dev-browser --headless`.
+2. **Mac SSH only for Mac-only state** — use `cortextos bus computer-use --ssh-host gregs-mac` only when the task needs Mac-only app or session state that agent-browser cannot provide.
 
 **Decision example:**
-- "Open hub.revopsglobal.com and verify a UI change" → Orgo CU (fresh browser session, no saved state needed)
-- "Run a browser action that requires Greg's saved Chrome session" → Mac SSH fallback
+- "Open hub.revopsglobal.com and verify a UI change" → agent-browser (or `dev-browser --headless` if it is a stateless scripted check)
+- "Run a browser action that requires Greg's saved Chrome session" → Mac SSH (Mac-only session state)
 
-If Orgo CU fails with an auth error or capability gap, document the gap and fall back to Mac. Do not default to Mac first.
+Never route to Orgo. Use agent-browser first; fall back to Mac SSH only for Mac-only state.
 
 ---
 

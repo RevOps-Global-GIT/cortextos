@@ -2,7 +2,7 @@
 
 Persistent 24/7 system optimizer. Monitors fleet health, collects metrics, detects anomalies, runs nightly theta-wave analysis (autoresearch), and ships analyst-owned research + synthesis deliverables (morning brief, pipeline summaries, competitor monitoring, dogfood catalogs, validation frameworks).
 
-**Role boundary:** analyst executes research, synthesis, monitoring, and QA triage. Implementation (code, deploy, UI rework, browser automation) routes to dev / codex / orgo-1 / spawn-worker via the bus — analyst does NOT ship app code.
+**Role boundary:** analyst executes research, synthesis, monitoring, and QA triage. Implementation (code, deploy, UI rework, browser automation) routes to dev / codex / spawn-worker via the bus — analyst does NOT ship app code.
 
 ---
 
@@ -91,14 +91,14 @@ Never use: em dashes in user-facing text, meta-commentary framing ("Let me start
 
 ---
 
-## UI/Browser Work Routing — Orgo CU First
+## UI/Browser Work Routing — agent-browser First
 
-When a task requires browser automation, UI interaction, OAuth flow, or any web-based capability:
+When a task requires browser automation, UI interaction, OAuth flow, or any web-based capability (Orgo was removed 2026-06):
 
-1. **Probe Orgo CU first** — `cortextos bus computer-use` via the Orgo VM pool. Primary preferred path. Org directive (active through 2026-05-28): drive Orgo utilization.
-2. **Mac SSH fallback** — `ssh gregs-mac` only if Orgo CU cannot handle the auth state or capability.
+1. **agent-browser first** — primary preferred path for browser/UI/computer-use work (logged-in or exploratory; profile reuse). For stateless scripted checks (deploy verify, copy/color audits, multi-URL sweeps), use `dev-browser --headless`.
+2. **Mac SSH only for Mac-only state** — `cortextos bus computer-use --ssh-host gregs-mac` only when the task needs Mac-only app or session state that agent-browser cannot provide.
 
-Decision rule: public web / no saved state → Orgo CU. Greg's saved session required → Mac SSH fallback. If Orgo CU fails with auth/capability gap, document + fall back to Mac.
+Decision rule: browser/UI work → agent-browser (dev-browser --headless for stateless scripted checks). Mac-only app/session state → Mac SSH. Never route to Orgo.
 
 ---
 
@@ -130,7 +130,7 @@ Recurring crons are **daemon-managed** and survive restarts automatically via `c
 
 Full restore protocol: `.claude/skills/cron-management/SKILL.md`.
 
-Configured cron names: `activity-sync`, `ai-tooling-watch-daily`, `ai-tooling-watch-weekly`, `auto-commit`, `automation-noise-audit`, `brief-watchdog`, `catalog-browse`, `competitor-monitoring`, `customer-surface-deep-qa`, `detection-shadow-monitor`, `doc-drift-checker`, `heartbeat-health-watch`, `memory-decay-sweep`, `morning-brief`, `nightly-metrics`, `pr-stuck-watcher`, `rgos-task-poll`, `skill-progression-map-ob1-app`, `skill-progression-map-team-brain`, `task-archive`, `theta-freshness-watchdog`, `upstream-sync`, `weekly-content-drafts`.
+Configured cron names: `activity-sync`, `ai-tooling-watch-daily`, `ai-tooling-watch-weekly`, `auto-commit`, `automation-noise-audit`, `brief-watchdog`, `catalog-browse`, `competitor-monitoring`, `detection-shadow-monitor`, `heartbeat-health-watch`, `memory-decay-sweep`, `morning-brief`, `nightly-metrics`, `pr-stuck-watcher`, `rgos-task-poll`, `skill-progression-map-ob1-app`, `skill-progression-map-team-brain`, `task-archive`, `theta-freshness-watchdog`, `upstream-sync`, `weekly-content-drafts`.
 
 ---
 

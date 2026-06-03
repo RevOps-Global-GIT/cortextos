@@ -96,28 +96,6 @@
       "lastEventName": "capability_check_passed"
     },
     {
-      "id": "orgo_exec",
-      "label": "Orgo VM Exec",
-      "userCapability": "Know which VM lanes are actually usable before assigning browser, computer-use, or vendor-recovery work.",
-      "authority": "Orgo API/VM ledger for the assigned workspace/lane",
-      "sentinels": [
-        "workspace inventory",
-        "no-op exec/health endpoint",
-        "lane identity match"
-      ],
-      "currentStatus": "fail",
-      "freshnessTarget": "daily plus before VM-dependent dispatch",
-      "warnWhen": "one transient 5xx, stale lease metadata, VM listed but slow/unready, or lane mismatch",
-      "failWhen": "401/403, endpoint unreachable, VM stuck/deleted while marked active, or repeated 5xx",
-      "renewalPath": "Vendor support or VM recreation workflow; preserve lane authority in VM ledger",
-      "proofRequired": "Per-lane inventory id, exec status, and blocker class when vendor/human action is required",
-      "lastCheckedAt": "2026-05-30T04:01:25.021Z",
-      "lastAuthority": "cortextos bus orgo-lease-status",
-      "observed": "Lease/fleet status probe failed: spawnSync cortextos ETIMEDOUT",
-      "lastEventName": "capability_check_failed",
-      "proof": "healthy=[orgo-codex-computeruse: last_exec_ok=true status=running; orgo-hub-qa: last_exec_ok=standby-complete status=idle; orgo-linkedin-session: last_exec_ok=true status=running; orgo-telegram-web: last_exec_ok=true status=running; orgo-wiki-ingestion-worker: last_exec_ok=true status=running]"
-    },
-    {
       "id": "github_token",
       "label": "GitHub Token",
       "userCapability": "Keep repo automation, PR verification, and deployment-adjacent checks from failing mid-task.",

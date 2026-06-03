@@ -457,7 +457,7 @@ cortextos bus submit-community-item <item-name> <item-type> "<description>" [--d
 ### agent-browser (Browser Automation — replaces Playwright)
 - **Binary**: `agent-browser` (Rust CLI, npm-installed globally; Chrome auto-downloaded by `agent-browser install`)
 - **Use for**: Scraping websites, browser-based automation, OSINT, form filling, screenshots, login flows — anything previously done via the Playwright MCP server
-- **Runtime policy**: Default to Codex-CU / Orgo VM. Do not run agent-browser or Chrome on Greg's Mac unless a current Orgo-failure artifact explicitly authorizes Mac fallback. OB1 e2e/dogfood runs on Compl1 VM `23e7d600` against `https://ob1.revopsglobal.com`.
+- **Runtime policy**: agent-browser is the primary path for logged-in or exploratory work; use `dev-browser --headless` for stateless scripted checks. The Mac SSH fallback (`cortextos bus computer-use --ssh-host gregs-mac`) is for Mac-specific state only. (Orgo was removed 2026-06; do not route to Orgo.) OB1 e2e/dogfood runs on Compl1 VM `23e7d600` against `https://ob1.revopsglobal.com`.
 - **Skill loaded**: `.claude/skills/agent-browser/SKILL.md` — that skill instructs running `agent-browser skills get <name>` to fetch current per-version command syntax from the CLI itself
 - **Quick verify**: `agent-browser open https://example.com && agent-browser get title && agent-browser close`
 - **Snapshot-ref pattern**: prefer `agent-browser snapshot` (returns a11y tree with refs e1/e2/...) then `agent-browser click @e1` / `fill @e2 "text"` — more reliable than text-search selectors for AI-driven flows
@@ -465,7 +465,7 @@ cortextos bus submit-community-item <item-name> <item-type> "<description>" [--d
 
 
 ### macOS Desktop Automation
-- Quarantined by default. Do not use Peekaboo, osascript, headed Chrome, or local Playwright on Greg's Mac unless a current explicit Orgo-failure artifact and task approval authorize that exception.
+- Quarantined by default. Do not use Peekaboo, osascript, headed Chrome, or local Playwright on Greg's Mac unless the task genuinely needs Mac-specific state and has task approval. Route such work through `cortextos bus computer-use --ssh-host gregs-mac`.
 
 
 ### gogcli (Google Workspace CLI)

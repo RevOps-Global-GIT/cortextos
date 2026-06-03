@@ -71,27 +71,24 @@ Triggered by Greg's directive: cortextos spends too much time patching issues in
 
 ---
 
-## Orgo Usage (2026-05-20)
+## Browser / Computer-Use Routing (2026-06)
 
-Greg directive: Orgo VMs are the DEFAULT for browser/GUI/computer-use work. Greg is watching the Orgo fleet through **2026-05-28** ([[project_orgo_value_watch]]) — under-utilization counts against the eval.
+Greg directive: agent-browser is the DEFAULT for browser/GUI/computer-use work. Mac SSH is a narrow fallback for Mac-specific state only. (Orgo was removed 2026-06; do not route to Orgo.)
 
 | Trigger | Red Flag Thought | Required Action |
 |---------|-----------------|-----------------|
-| Need a browser, GUI, or computer-use surface | "I'll SSH to Greg's Mac" | **Orgo lease first.** `cortextos bus orgo-lease-claim` against one of the 5 nodes: `orgo-codex-computeruse`, `orgo-hub-qa`, `orgo-linkedin-session`, `orgo-telegram-web`, `orgo-wiki-ingestion-worker`. Mac SSH is only for Mac-specific apps/state. |
-| Task requires Codex.app, Greg's saved browser session, or Greg's open Chrome profile | "Use Orgo, it's the default" | **Use `mac-codex` instead.** Orgo VMs do not have Greg's local Mac auth state. If the task explicitly needs Greg's Mac-side credentials/apps, dispatch via `mac-codex`. |
-| Task needs a browser and Orgo has the right pre-auth state | "I'll just spin up Playwright locally" | **Claim the Orgo lease that already has the auth state baked in** (e.g. `orgo-linkedin-session` for LinkedIn). Idle Orgo nodes = wasted utilization. |
-| Multiple agents need Orgo nodes simultaneously | "Whoever gets there first wins" | **Lease before use.** `orgo-lease-claim` holds the node for your task; release with `orgo-lease-release` when done. Skipping the lease = clobbered sessions. |
-| Orgo task seems too small | "Not worth the lease overhead" | **Still lease.** Sub-100% utilization counts against the value watch. Stack quick tasks onto already-leased nodes when possible. |
+| Need a browser, GUI, or computer-use surface | "I'll SSH to Greg's Mac" | **agent-browser first.** It is the primary path for logged-in or exploratory work (profile reuse). Mac SSH is only for Mac-specific apps/state. |
+| Stateless scripted check (deploy verify, mobile QA, multi-URL sweep) | "I'll spin up a full session" | **Use `dev-browser --headless`.** Stateless scripted checks do not need a logged-in session. |
+| Task requires a native macOS app, Greg's saved browser session, or Greg's open Chrome profile | "agent-browser can do it" | **Use Mac SSH.** `cortextos bus computer-use --ssh-host gregs-mac`. agent-browser does not carry Greg's local Mac auth state. |
+| Task needs a logged-in browser session | "I'll just spin up Playwright locally" | **Use agent-browser** (profile reuse keeps the logged-in state). Do not stand up a parallel browser path. |
 
 ### Decision matrix
 
-- **Public web page, no saved-state needed** → Orgo (`orgo-codex-computeruse` is the general-purpose default)
-- **Greg's own Mac browser / Codex.app / saved Greg auth** → `mac-codex`
-- **hub.revopsglobal.com QA** → `orgo-hub-qa`
-- **LinkedIn (any account)** → `orgo-linkedin-session`
-- **Telegram web client** → `orgo-telegram-web`
-- **Wiki ingestion / scraping** → `orgo-wiki-ingestion-worker`
+- **Logged-in or exploratory browser/UI work** → agent-browser (general-purpose default)
+- **Stateless scripted check (deploy verify, mobile QA, multi-URL sweep)** → `dev-browser --headless`
+- **Greg's own Mac browser / native macOS app / saved Greg desktop session** → Mac SSH (`cortextos bus computer-use --ssh-host gregs-mac`)
+- **hub.revopsglobal.com QA** → agent-browser (or `dev-browser --headless` for a stateless check)
 
 ### Why this exists
-Two Greg memories drive this: [[feedback_orgo_vm_cu_replaces_mac_default]] (2026-05-18: "every 'take over your computer' task → Orgo VM") and [[feedback_orgo_capacity_proof_first]] (don't grow fleet beyond 5 until current pool shows 100% util with shipped artifacts). The Orgo value watch closes 2026-05-28.
+agent-browser is the primary browser/computer-use path for logged-in and exploratory work; `dev-browser --headless` covers stateless scripted checks. The Mac SSH Codex path is the fallback for genuine Mac-specific state only.
 

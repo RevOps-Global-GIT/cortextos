@@ -2,7 +2,7 @@
  * computer-use — bus command for legacy Codex dispatch.
  *
  * Usage (CLI):
- *   cortextos bus computer-use --ssh-host gregs-mac --orgo-failure-artifact /path/to/failure.json "take a screenshot and describe what you see"
+ *   cortextos bus computer-use --ssh-host gregs-mac "take a screenshot and describe what you see"
  *   cortextos bus computer-use --no-plugin "just a regular Codex task"
  *   cortextos bus computer-use --workdir /path/to/repo "refactor this file"
  *   cortextos bus computer-use --timeout 120 "slow task"
@@ -24,12 +24,6 @@
  *   plugin (screen capture, mouse, macOS GUI) fail fast with a clear error —
  *   running them locally would silently degrade without display access.
  *
- * Orgo-first gate:
- *   Mac SSH is now an explicit exception, not the default path for browser/UI work.
- *   Calls targeting Greg's Mac must include a recent (<10 minutes) failed Orgo
- *   lease attempt artifact via --orgo-failure-artifact or
- *   CORTEXTOS_ORGO_FAILURE_ARTIFACT before SSH is attempted.
- *
  * Notes on Computer Use via SSH:
  *   Screen-capture and mouse tools require a macOS display session. When invoked
  *   over SSH, those specific calls fail gracefully and Codex falls back to shell
@@ -39,7 +33,7 @@
  */
 
 import { execFileSync } from 'child_process';
-import { existsSync, statSync } from 'fs';
+import { existsSync } from 'fs';
 
 /**
  * Shell-safe single-quote escape for a string value used inside a remote
@@ -85,14 +79,12 @@ export interface ComputerUseOptions {
   workdir?: string;
   /** Timeout in seconds (default: 300) */
   timeout?: number;
-  /** SSH host. Greg's Mac requires an explicit Orgo failure artifact. */
+  /** SSH host for the guarded Mac Codex fallback (e.g. gregs-mac). */
   sshHost?: string;
   /** Path to codex-dispatch.sh on the Mac */
   dispatchScript?: string;
   /** Disable localhost codex exec fallback when Mac SSH is unreachable (default: fallback enabled) */
   noFallback?: boolean;
-  /** Path to recent failed Orgo lease attempt artifact required before Mac SSH fallback */
-  orgoFailureArtifact?: string;
 }
 
 export interface ComputerUseResult {
@@ -104,11 +96,8 @@ export interface ComputerUseResult {
   usedFallback?: boolean;
 }
 
-const GREGS_MAC_HOST = 'gregs-mac';
 const DEFAULT_DISPATCH_SCRIPT = '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh';
 const DEFAULT_MAC_CODEX_BIN = '/Applications/Codex.app/Contents/Resources/codex';
-const GREGS_MAC_TAILSCALE_IP = '100.84.86.6';
-const ORGO_FAILURE_ARTIFACT_MAX_AGE_MS = 10 * 60 * 1000;
 
 /**
  * Patterns that indicate an SSH connection-level failure (not a task failure).
@@ -129,35 +118,6 @@ const SSH_CONNECTION_ERROR_PATTERNS = [
 
 function isSshConnectionError(msg: string): boolean {
   return SSH_CONNECTION_ERROR_PATTERNS.some((re) => re.test(msg));
-}
-
-function isMacSshHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase();
-  return normalized === GREGS_MAC_HOST || normalized === GREGS_MAC_TAILSCALE_IP;
-}
-
-function validateRecentOrgoFailureArtifact(artifactPath?: string): string | null {
-  if (!artifactPath) {
-    return 'Mac SSH fallback blocked — provide --orgo-failure-artifact <path> pointing to a failed Orgo lease attempt from the last 10 minutes.';
-  }
-
-  try {
-    const stat = statSync(artifactPath);
-    if (!stat.isFile()) {
-      return `Mac SSH fallback blocked — Orgo failure artifact is not a file: ${artifactPath}`;
-    }
-
-    const ageMs = Date.now() - stat.mtimeMs;
-    if (ageMs > ORGO_FAILURE_ARTIFACT_MAX_AGE_MS) {
-      const ageMinutes = Math.round(ageMs / 60_000);
-      return `Mac SSH fallback blocked — Orgo failure artifact is ${ageMinutes} minutes old; maximum age is 10 minutes: ${artifactPath}`;
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return `Mac SSH fallback blocked — cannot read Orgo failure artifact ${artifactPath}: ${msg}`;
-  }
-
-  return null;
 }
 
 function resolveLocalCodexBin(): string {
@@ -265,7 +225,6 @@ export async function computerUse(
   const dispatchScript = opts.dispatchScript ?? DEFAULT_DISPATCH_SCRIPT;
   const timeoutSec = opts.timeout ?? 300;
   const start = Date.now();
-  const orgoFailureArtifact = opts.orgoFailureArtifact ?? process.env.CORTEXTOS_ORGO_FAILURE_ARTIFACT;
 
   if (!sshHost) {
     if (opts.noPlugin) {
@@ -282,22 +241,10 @@ export async function computerUse(
 
     return {
       ok: false,
-      error: 'computer-use no longer defaults to Greg\'s Mac. Browser/UI automation must run on Orgo/Codex-CU VM. Mac fallback requires explicit --ssh-host gregs-mac and --orgo-failure-artifact <recent-failed-Orgo-artifact>.',
+      error: 'computer-use requires an explicit --ssh-host (e.g. gregs-mac) for GUI/plugin tasks, or --no-plugin for code-only tasks that can run on the cortex VM.',
       durationMs: Date.now() - start,
       usedFallback: false,
     };
-  }
-
-  if (isMacSshHost(sshHost)) {
-    const artifactError = validateRecentOrgoFailureArtifact(orgoFailureArtifact);
-    if (artifactError) {
-      return {
-        ok: false,
-        error: artifactError,
-        durationMs: Date.now() - start,
-        usedFallback: false,
-      };
-    }
   }
 
   // Build the remote command with base64-encoded prompt (see buildRemoteCommand).

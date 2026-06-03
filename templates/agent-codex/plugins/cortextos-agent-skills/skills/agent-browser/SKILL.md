@@ -10,7 +10,7 @@ Browser automation CLI for AI agents. Uses Chrome/Chromium via CDP directly.
 
 Install: `npm i -g agent-browser && agent-browser install`
 
-Runtime policy: run on Codex-CU / Orgo VM by default. Do not run Chrome or agent-browser on Greg's Mac unless a current Orgo-failure artifact explicitly authorizes Mac fallback. OB1 e2e/dogfood uses Compl1 VM `23e7d600` against `https://ob1.revopsglobal.com`.
+Runtime policy: agent-browser is the primary path for logged-in or exploratory browser/computer-use work. For stateless scripted checks (deploy verify, mobile QA, multi-URL sweeps), use `dev-browser --headless`. The Mac SSH fallback (`cortextos bus computer-use --ssh-host gregs-mac`) is for Mac-specific state only (a native macOS app or Greg's saved desktop session). (Orgo was removed 2026-06; do not route to Orgo.) OB1 e2e/dogfood uses Compl1 VM `23e7d600` against `https://ob1.revopsglobal.com`.
 
 ## Loading Skills
 
