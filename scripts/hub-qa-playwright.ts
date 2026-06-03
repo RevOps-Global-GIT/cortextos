@@ -1708,40 +1708,51 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
     results.push({ check: '[LIVENESS] CHECK 5 Key columns present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 6: DB-comparison — sample 5 companies from Supabase, verify names/domains appear in UI
+  // CHECK 6: DB-comparison — sample 5 visible companies from Supabase, verify display labels appear in UI
   try {
     await shot(page, `${sp}-6-db-compare`);
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,domain&order=created_at.desc&limit=5`, {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,company,domain,is_archived&is_archived=eq.false&order=created_at.desc&limit=25`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
         results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
       } else {
-        const rows = await resp.json() as Array<{ id: string; name: string | null; domain: string | null }>;
+        const allRows = await resp.json() as Array<{ id: string; name: string | null; company: string | null; domain: string | null; is_archived: boolean | null }>;
+        const rows = allRows
+          .filter(row => {
+            const label = `${row.company ?? ''} ${row.name ?? ''}`.trim();
+            return !/^SMOKE-TEST/i.test(label);
+          })
+          .slice(0, 5);
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No companies in DB — UI empty state is correct' });
         } else {
+          await page.waitForFunction(() => {
+            const rowCount = document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"])').length;
+            const hasEmptyState = /no companies|no results|no clients/i.test(document.body.textContent ?? '');
+            return rowCount > 0 || hasEmptyState;
+          }, null, { timeout: 10000 }).catch(() => {});
           const pageText = (await Promise.race([
             page.evaluate(() => document.body.textContent ?? ''),
             new Promise<string>(r => setTimeout(() => r(''), 5000)),
           ])).toLowerCase();
           const missing: string[] = [];
           for (const row of rows) {
-            const name = (row.name ?? '').toLowerCase().trim();
+            const name = (row.company || row.name || '').toLowerCase().trim();
             const domain = (row.domain ?? '').toLowerCase().trim();
             const nameFound = name.length > 0 && pageText.includes(name);
             const domainFound = domain.length > 0 && pageText.includes(domain);
             if (!nameFound && !domainFound) {
-              missing.push(row.name ?? row.domain ?? row.id);
+              missing.push(row.company ?? row.name ?? row.domain ?? row.id);
             }
           }
           if (missing.length === 0) {
-            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'PASS', evidence: `All ${rows.length} sampled companies found in UI. Names: ${rows.map(r => r.name ?? '').filter(Boolean).slice(0, 3).join(', ')}` });
+            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'PASS', evidence: `All ${rows.length} sampled visible companies found in UI. Names: ${rows.map(r => r.company ?? r.name ?? '').filter(Boolean).slice(0, 3).join(', ')}` });
           } else {
-            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `${missing.length}/${rows.length} DB companies not visible in UI: ${missing.slice(0, 3).join(', ')}. Page may be paginated or filter-hidden.` });
+            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `${missing.length}/${rows.length} visible DB companies not found in UI: ${missing.slice(0, 3).join(', ')}. Page may be paginated or filter-hidden.` });
           }
         }
       }
