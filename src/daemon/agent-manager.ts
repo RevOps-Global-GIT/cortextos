@@ -16,6 +16,7 @@ import { acquireSession, releaseSession } from '../utils/session-lock.js';
 import { parseEnvFile, resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { logEvent } from '../bus/event.js';
+import { mirrorAgentStatusToRgos } from '../bus/rgos-mirror.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
@@ -1028,6 +1029,12 @@ export class AgentManager {
     const entry = this.agents.get(name);
     if (!entry) {
       console.log(`[agent-manager] Agent ${name} not found`);
+      mirrorAgentStatusToRgos(name, {
+        isActive: false,
+        reason: 'daemon_stop_agent_not_found',
+        instanceId: this.instanceId,
+        org: this.resolveAgentOrg(name),
+      }).catch(err => console.warn(`[agent-manager] RGOS inactive mirror failed for ${name}: ${err instanceof Error ? err.message : String(err)}`));
       return;
     }
 
@@ -1054,6 +1061,13 @@ export class AgentManager {
     entry.checker.stop();
     await entry.process.stop();
     this.agents.delete(name);
+
+    mirrorAgentStatusToRgos(name, {
+      isActive: false,
+      reason: 'daemon_stop_agent',
+      instanceId: this.instanceId,
+      org: this.resolveAgentOrg(name),
+    }).catch(err => console.warn(`[agent-manager] RGOS inactive mirror failed for ${name}: ${err instanceof Error ? err.message : String(err)}`));
 
     // Release the session.lock so a fresh startAgent (or external recovery
     // tool) can take ownership without tripping verifySessionOwnership().

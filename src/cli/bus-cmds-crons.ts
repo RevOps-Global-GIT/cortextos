@@ -5,6 +5,7 @@ import { resolveEnv } from '../utils/env.js';
 import { resolvePaths } from '../utils/paths.js';
 import { updateCronFire, parseDurationMs, readCronState } from '../bus/cron-state.js';
 import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByName, getExecutionLog } from '../bus/crons.js';
+import { logEvent } from '../bus/event.js';
 import { nextFireFromCron } from '../daemon/cron-scheduler.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import type { CronDefinition } from '../types/index.js';
@@ -316,6 +317,14 @@ export function registerCronCommands(busCommand: Command): void {
       }
 
       const env = resolveEnv();
+      if (patch.enabled === false) {
+        const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+        logEvent(paths, env.agentName, env.org, 'action', 'cron_disabled', 'info', {
+          target_agent: agent,
+          cron: name,
+          source: 'bus update-cron --enabled false',
+        });
+      }
       await signalCronReload(agent, env.instanceId);
       console.log(`Updated cron '${name}' for ${agent}`);
     });
