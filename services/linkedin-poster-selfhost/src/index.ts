@@ -46,6 +46,7 @@ const config: PosterConfig = {
 const browser = new BrowserManager(config);
 let inFlight = false;
 let lastActionAt = 0;
+let lastBrowserHealthy = true;
 const MIN_GAP_MS = 30_000;
 
 // ---------------------------------------------------------------------------
@@ -116,7 +117,18 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   // Health / readiness
   if (url === '/health' && method === 'GET') {
+    if (inFlight || batchRunning) {
+      send(res, 200, {
+        ok: true,
+        userId: config.userId,
+        busy: true,
+        browserHealthy: lastBrowserHealthy,
+        healthCheckSkipped: 'browser_action_in_flight',
+      });
+      return;
+    }
     const healthy = await browser.checkHealth();
+    lastBrowserHealthy = healthy;
     send(res, healthy ? 200 : 503, { ok: healthy, userId: config.userId });
     return;
   }
@@ -167,11 +179,15 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         send(res, 429, { error: 'Another action is in flight — retry in a moment' });
         break;
       }
+      inFlight = true;
       try {
         const posts = await discoverLinkedInPosts(page, keywords, limit ?? 10);
+        lastActionAt = Date.now();
         send(res, 200, { posts, count: posts.length });
       } catch (err) {
         send(res, 500, { error: (err as Error).message });
+      } finally {
+        inFlight = false;
       }
       break;
     }
@@ -342,13 +358,19 @@ async function runHeartbeatLoop(): Promise<void> {
 
   const tick = async () => {
     try {
-      const healthy = await browser.checkHealth();
+      const busy = inFlight || batchRunning;
+      const healthy = busy ? lastBrowserHealthy : await browser.checkHealth();
+      lastBrowserHealthy = healthy;
       await sendHeartbeat(config, {
         agentName: `linkedin-poster-selfhost-${config.userId}`,
         browserHealthy: healthy,
-        status: inFlight ? 'busy' : 'idle',
+        status: busy ? 'busy' : 'idle',
         profilePath: config.profileDir,
-        metadata: { senderName: config.senderName, lastActionAt },
+        metadata: {
+          senderName: config.senderName,
+          lastActionAt,
+          ...(busy ? { healthCheckSkipped: 'browser_action_in_flight' } : {}),
+        },
       });
     } catch (err) {
       console.error('[heartbeat-loop] Error:', (err as Error).message);
