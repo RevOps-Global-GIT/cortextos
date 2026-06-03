@@ -10,6 +10,7 @@ import { mirrorTaskToRgos, mirrorTaskRunToRgos, uuidv5, isUuid } from './rgos-mi
 import { logEvent } from './event.js';
 import { snapshotSessionCost } from './task-cost.js';
 import { autoEmitStatusUpdate } from './agent-task-events.js';
+import type { ProofStamp } from './proof-gate.js';
 
 function isTaskJsonFile(file: string): boolean {
   return !file.startsWith('.') && file.endsWith('.json');
@@ -751,6 +752,7 @@ export function completeTask(
   paths: BusPaths,
   taskId: string,
   result?: string,
+  proof?: ProofStamp,
 ): void {
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) {
@@ -780,6 +782,10 @@ export function completeTask(
       completedAt = task.completed_at;
       if (result) {
         task.result = result;
+      }
+      // Stamp the verified proof summary onto the task (audit + dashboard).
+      if (proof) {
+        task.meta = { ...(task.meta ?? {}), proof };
       }
       // Compute session cost delta if a start snapshot was recorded.
       const startCost = typeof task.meta?.cost_snapshot_start === 'number'

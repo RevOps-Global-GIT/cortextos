@@ -42,6 +42,7 @@ import { syncSkills } from '../bus/sync-skills.js';
 import { runWorkflow } from '../bus/run-workflow.js';
 import { computerUse } from '../bus/computer-use.js';
 import { validateTask } from '../bus/task-validate.js';
+import { resolveProofGateMode, type ProofGateMode, type ProofStamp } from '../bus/proof-gate.js';
 import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeaseStatus, releaseOrgoLease } from '../bus/orgo-lease.js';
 import { lastpassCred, LastPassCredApprovalRequiredError, LastPassCredFetchError, LastPassCredRejectedError } from '../bus/lastpass-cred.js';
 import { closeWhisperRoom, readVoiceSettings, sendWhisper, summarizeWhisperRoom, watchWhisperRoom, whisperRoomId } from '../bus/whisper-room.js';
@@ -99,6 +100,23 @@ function checkDeliverableRequirement(taskId: string, frameworkRoot: string, org:
   }
 
   return null;
+}
+
+/**
+ * Resolve the active proof-gate mode for a completion. Precedence:
+ * env CTX_PROOF_GATE > per-org context.json `proof_gate` > default 'warn'.
+ */
+function resolveOrgProofGateMode(frameworkRoot: string, org: string | undefined): ProofGateMode {
+  let orgMode: string | undefined;
+  if (org) {
+    try {
+      const ctx = JSON.parse(readFileSync(join(frameworkRoot, 'orgs', org, 'context.json'), 'utf-8')) as OrgContext;
+      orgMode = ctx.proof_gate;
+    } catch {
+      /* missing/unreadable context — fall back to env + default */
+    }
+  }
+  return resolveProofGateMode({ env: process.env.CTX_PROOF_GATE, orgMode });
 }
 
 /**
@@ -931,13 +949,23 @@ busCommand
       }
     }
 
-    // Guard: local validation gate — block vague completions without spending provider credits.
+    // Guard: artifact proof gate — block completions that lack a verifiable
+    // artifact (existing file, merged PR via gh, recording/screenshot, or
+    // pasted command output). Warn-then-block: CTX_PROOF_GATE / the org's
+    // proof_gate setting controls the level (default 'warn').
+    let proofStamp: ProofStamp | undefined;
     if (!opts.override) {
       try {
-        const validation = await validateTask(paths, id, effectiveResult);
+        const proofMode = resolveOrgProofGateMode(env.frameworkRoot, env.org);
+        const validation = await validateTask(paths, id, effectiveResult, {
+          mode: proofMode,
+          cwd: process.cwd(),
+          roots: [paths.ctxRoot],
+        });
+        proofStamp = validation.proof;
         if (validation.score < 7) {
           console.error(`Validation blocked: score ${validation.score}/10 (${validation.verdict}) — ${validation.reasoning}`);
-          console.error('Use --override to bypass the validation gate.');
+          console.error('Attach a verifiable artifact and resubmit, or use --override for emergencies.');
           process.exit(1);
         }
         console.log(`Validation passed: ${validation.score}/10 — ${validation.reasoning}`);
@@ -950,7 +978,7 @@ busCommand
       console.log('[override] Skipping validation gate.');
     }
 
-    completeTask(paths, id, effectiveResult);
+    completeTask(paths, id, effectiveResult, proofStamp);
     console.log(`Completed ${id}`);
 
     // Clear heartbeat so crash notifications show 'idle' not the just-completed task.
@@ -970,7 +998,12 @@ busCommand
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     try {
-      const result = await validateTask(paths, id);
+      const proofMode = resolveOrgProofGateMode(env.frameworkRoot, env.org);
+      const result = await validateTask(paths, id, undefined, {
+        mode: proofMode,
+        cwd: process.cwd(),
+        roots: [paths.ctxRoot],
+      });
       const icon = result.verdict === 'pass' ? 'PASS' : result.verdict === 'needs-revision' ? 'NEEDS-REVISION' : 'FAIL';
       console.log(`${icon} score=${result.score}/10 verdict=${result.verdict}`);
       console.log(result.reasoning);

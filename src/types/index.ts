@@ -732,6 +732,13 @@ export interface OrgContext {
    *  save-output. The instruction is injected into the boot prompt
    *  dynamically — no agent markdown files are modified. */
   require_deliverables?: boolean;
+  /**
+   * Completion proof-gate enforcement level, read by `complete-task`
+   * (cli/bus.ts → bus/task-validate → bus/proof-gate). `off` restores the
+   * legacy keyword heuristic; `warn` surfaces missing-artifact gaps without
+   * blocking (safe-rollout default); `block` rejects completions that lack a
+   * verifiable artifact. Overridden by the `CTX_PROOF_GATE` env var. */
+  proof_gate?: 'off' | 'warn' | 'block';
 }
 
 // Telegram Types
