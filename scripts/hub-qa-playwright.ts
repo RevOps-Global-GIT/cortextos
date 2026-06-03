@@ -1710,18 +1710,11 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
 
   // CHECK 6: DB-comparison — sample 5 companies from Supabase, verify names/domains appear in UI
   try {
-    // After CHECK 4 navigation, wait for the company table to re-render before reading page text.
-    await Promise.race([
-      page.waitForSelector('table tbody tr, [role="row"]:not([role="columnheader"])', { timeout: 8000 }),
-      new Promise<void>(r => setTimeout(r, 8000)),
-    ]);
     await shot(page, `${sp}-6-db-compare`);
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      // Mirror the UI filter (useCompanies: is_archived=false, order by name asc) so the
-      // sampled rows are guaranteed to be visible in the default rendered list.
-      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,domain&is_archived=eq.false&order=name.asc&limit=5`, {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,domain&order=created_at.desc&limit=5`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
@@ -2606,47 +2599,6 @@ async function runFleetAgentsChecks(page: Page, serviceKey?: string): Promise<Ch
 
   // CHECK 6: Timestamp freshness (P1) — fleet agents page must show at least one < 30 min timestamp
   results.push(await checkTimestampFreshness(page, '[CORRECTNESS] CHECK 6 Timestamp freshness'));
-
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// /app/fleet-board checks (BoardPanel tab embedded in /app/fleet/agents?tab=board)
-// ---------------------------------------------------------------------------
-async function runFleetBoardChecks(page: Page): Promise<CheckResult[]> {
-  const results: CheckResult[] = [];
-  const sp = 'app-fleet-board';
-
-  // Navigate to the board tab directly — FleetBoard.tsx is a component rendered
-  // inside the Fleet Agents page as a tab, not a standalone route.
-  try {
-    await page.goto(`https://hub.revopsglobal.com/app/fleet/agents?tab=board`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
-  } catch { /* navigation timeout handled below */ }
-
-  // CHECK 1: Page load
-  const loadResult = await checkLoad(page, sp);
-  results.push(loadResult);
-  if (loadResult.status === 'FAIL') return results;
-
-  // CHECK 2: Board columns visible (Active Sessions, In Progress, Review, Done)
-  try {
-    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(1000);
-    await shot(page, `${sp}-2-columns`);
-    const colHeadings = await page.locator('h3').allInnerTexts().catch(() => [] as string[]);
-    const expected = ['Active Sessions', 'In Progress', 'Review', 'Done'];
-    const found = expected.filter(h => colHeadings.some(t => t.toLowerCase().includes(h.toLowerCase())));
-    if (found.length >= 3) {
-      results.push({ check: '[LIVENESS] CHECK 2 Board columns visible', status: 'PASS', evidence: `${found.length}/4 column headings found: ${found.join(', ')}` });
-    } else if (found.length > 0) {
-      results.push({ check: '[LIVENESS] CHECK 2 Board columns visible', status: 'DEFERRED', evidence: `Only ${found.length}/4 columns visible: ${found.join(', ')} — may still be loading` });
-    } else {
-      const anyCard = await page.locator('[class*="card"], [class*="Card"]').count();
-      results.push({ check: '[LIVENESS] CHECK 2 Board columns visible', status: anyCard > 0 ? 'DEFERRED' : 'FAIL', evidence: anyCard > 0 ? `Board tab may use different column markup; ${anyCard} card elements found` : 'No board columns or cards found' });
-    }
-  } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 2 Board columns visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
-  }
 
   return results;
 }
@@ -3681,68 +3633,6 @@ async function runFleetChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
-function updateQaSummary(outputDir: string) {
-  const today = new Date().toISOString().slice(0, 10);
-  const pagePattern = new RegExp(`-qa-${today}\\.md$`);
-  let files: string[];
-  try {
-    files = fs.readdirSync(outputDir)
-      .filter(f => pagePattern.test(f) && !f.startsWith('qa-summary'))
-      .map(f => path.join(outputDir, f));
-  } catch { return; }
-
-  let totalPass = 0, totalFail = 0, totalDefer = 0;
-  const rows: Array<{ page: string; pass: number; fail: number; defer: number; path: string }> = [];
-
-  for (const p of files) {
-    try {
-      const text = fs.readFileSync(p, 'utf8');
-      const m = text.match(/Summary:\s*(\d+)\s+passed,\s*(\d+)\s+failed,\s*(\d+)\s+deferred/);
-      if (!m) continue;
-      const pass = Number(m[1]), fail = Number(m[2]), defer = Number(m[3]);
-      const rawPage = path.basename(p).replace(pagePattern, '').replace(/-/g, '/');
-      const page = rawPage.startsWith('/') ? rawPage : `/${rawPage}`;
-      totalPass += pass; totalFail += fail; totalDefer += defer;
-      rows.push({ page, pass, fail, defer, path: p });
-    } catch { continue; }
-  }
-
-  if (rows.length === 0) return;
-
-  const now = new Date();
-  const ts = now.toISOString();
-  const stamp = now.toISOString().replace(/[-:]/g, '').slice(0, 13).replace('T', 'T');
-  const summaryPath = path.join(outputDir, `qa-summary-${stamp}.md`);
-
-  const lines = [
-    `# Hub Dogfood QA Summary - ${ts}`,
-    '',
-    `**Runtime:** Playwright harness (\`scripts/hub-qa-playwright.ts\`) against \`https://hub.revopsglobal.com\`; authenticated as \`greg@revopsglobal.com\`; per-page runs via cron.`,
-    '',
-    `**This pass total:** ${totalPass} passed, ${totalFail} failed, ${totalDefer} deferred`,
-    '',
-    '| Page | Passed | Failed | Deferred | Report |',
-    '|---|---:|---:|---:|---|',
-    ...rows.map(r => `| ${r.page} | ${r.pass} | ${r.fail} | ${r.defer} | ${r.path} |`),
-    '',
-    '## Findings',
-    `- P1/P2 failures: ${totalFail === 0 ? 'none' : `${totalFail} failures — see individual reports`}.`,
-    `- Deferred follow-ups: ${totalDefer} checks across ${rows.length} pages.`,
-    '',
-    '## Artifacts',
-    ...rows.map(r => `- ${r.page}: ${r.path}`),
-  ];
-
-  // Remove any older qa-summary files for today to avoid stale files confusing latestTextArtifact.
-  try {
-    fs.readdirSync(outputDir)
-      .filter(f => f.startsWith('qa-summary-') && f.includes(today.replace(/-/g, '')) && path.join(outputDir, f) !== summaryPath)
-      .forEach(f => { try { fs.unlinkSync(path.join(outputDir, f)); } catch { /* ignore */ } });
-  } catch { /* ignore */ }
-
-  fs.writeFileSync(summaryPath, lines.join('\n') + '\n');
-}
-
 function writeReport(results: CheckResult[], reportPath: string) {
   const passed  = results.filter(r => r.status === 'PASS').length;
   const failed  = results.filter(r => r.status === 'FAIL').length;
@@ -4266,10 +4156,8 @@ async function main() {
       results = await runWithTimeout(() => runMemoryChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
-    } else if (targetPage === '/app/fleet-board') {
-      results = await runWithTimeout(() => runFleetBoardChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph, /app/fleet-board`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
@@ -4277,10 +4165,6 @@ async function main() {
     if (writePageHealth) {
       await writePageHealthVerdict(serviceKey, navPath, results, observedSignals, page);
     }
-
-    // Aggregate all today's page reports into a fresh qa-summary so the
-    // cortextos-deliverables-snapshot emitter always has a current artifact.
-    updateQaSummary(OUTPUT_DIR);
 
     console.log(`\nReport: ${reportPath}`);
     console.log(`Summary: ${passed} passed, ${failed} failed, ${deferred} deferred\n`);

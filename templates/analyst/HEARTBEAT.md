@@ -3,6 +3,8 @@
 This runs on your heartbeat cron (every 4 hours). Execute EVERY step in order.
 Skipping steps = broken system. The dashboard monitors your compliance.
 
+> **Interval rule:** Configure your heartbeat cron to fire at an interval shorter than the Warden's staleness threshold. The canonical Warden threshold is **30 minutes** — agents whose `last_heartbeat` is older than that are flagged stale on the fleet board. Rule: `heartbeat_interval < 30m`. Agents with 4h heartbeat intervals will appear stale between heartbeats.
+
 ## Step 1: Update heartbeat (DO THIS FIRST)
 
 ```bash
