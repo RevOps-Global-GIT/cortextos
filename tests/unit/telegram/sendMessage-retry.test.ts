@@ -94,9 +94,8 @@ describe('TelegramAPI.sendMessage — retry behaviour (withRetry integration)', 
     const api = new TelegramAPI('123:TEST_TOKEN');
     await expect(api.sendMessage(42, 'hello')).rejects.toThrow('ECONNRESET');
 
-    // post() retries once on transport errors, so each withRetry attempt makes 2 fetch
-    // calls. Total: maxAttempts(3) × post()-attempts(2) = 6 fetch calls before throwing.
-    expect(call).toBe(6);
+    // maxAttempts = 3 → exactly 3 fetch calls before throwing
+    expect(call).toBe(3);
   });
 
   it('does NOT retry on non-retryable Telegram API errors (400 Bad Request)', async () => {

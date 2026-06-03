@@ -1,10 +1,9 @@
 import { Command } from 'commander';
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
-import { platform, arch } from 'os';
+import { homedir, platform, arch } from 'os';
 import { execSync, spawnSync } from 'child_process';
 import { randomBytes } from 'crypto';
-import { getCtxRoot } from '../utils/paths.js';
 
 const IS_WINDOWS = platform() === 'win32';
 const IS_MAC = platform() === 'darwin';
@@ -85,7 +84,7 @@ export const installCommand = new Command('install')
   .description('Install cortextOS — create state directories, check and install dependencies')
   .action(async (options: { instance: string }) => {
     const instanceId = options.instance;
-    const ctxRoot = getCtxRoot(instanceId);
+    const ctxRoot = join(homedir(), '.cortextos', instanceId);
 
     console.log('\ncortextOS Installation\n');
 

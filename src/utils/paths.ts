@@ -5,30 +5,11 @@ import type { BusPaths } from '../types/index.js';
 import { validateInstanceId } from './validate.js';
 
 /**
- * Resolve the cortextOS data root for an instance.
- *
- * Resolution order (#568):
- *   1. explicit ctxRoot argument (caller already resolved it, e.g. from resolveEnv())
- *   2. CTX_ROOT environment variable
- *   3. ~/.cortextos/{instance} default
- *
- * CTX_ROOT, when set, IS the full per-instance data root — the instance id is
- * not appended to it. This matches resolveEnv() and bash _ctx-env.sh semantics.
- * Deployments that relocate the data root (e.g. ~/agentic/cortextos-data) must
- * set CTX_ROOT consistently for the daemon (ecosystem.config.js) and any shell
- * that runs cortextos CLI commands, otherwise they will resolve different roots.
- */
-export function getCtxRoot(instanceId: string = 'default', ctxRoot?: string): string {
-  validateInstanceId(instanceId);
-  return ctxRoot || process.env.CTX_ROOT || join(homedir(), '.cortextos', instanceId);
-}
-
-/**
  * Resolve all bus paths for an agent.
  * Mirrors the path resolution in bash _ctx-env.sh.
  *
  * The directory layout is:
- *   {ctxRoot}/               - CTX_ROOT or ~/.cortextos/{instance}
+ *   ~/.cortextos/{instance}/
  *     config/                - enabled-agents.json
  *     state/{agent}/         - flat, per-agent subdirs
  *     state/{agent}/heartbeat.json - canonical heartbeat location
@@ -47,20 +28,20 @@ export function resolvePaths(
   agentName: string,
   instanceId: string = 'default',
   org?: string,
-  ctxRoot?: string,
 ): BusPaths {
-  const resolvedCtxRoot = getCtxRoot(instanceId, ctxRoot);
+  validateInstanceId(instanceId);
+  const ctxRoot = join(homedir(), '.cortextos', instanceId);
 
   // Org-scoped paths for tasks, approvals, analytics
-  const orgBase = org ? join(resolvedCtxRoot, 'orgs', org) : resolvedCtxRoot;
+  const orgBase = org ? join(ctxRoot, 'orgs', org) : ctxRoot;
 
   return {
-    ctxRoot: resolvedCtxRoot,
-    inbox: join(resolvedCtxRoot, 'inbox', agentName),
-    inflight: join(resolvedCtxRoot, 'inflight', agentName),
-    processed: join(resolvedCtxRoot, 'processed', agentName),
-    logDir: join(resolvedCtxRoot, 'logs', agentName),
-    stateDir: join(resolvedCtxRoot, 'state', agentName),
+    ctxRoot,
+    inbox: join(ctxRoot, 'inbox', agentName),
+    inflight: join(ctxRoot, 'inflight', agentName),
+    processed: join(ctxRoot, 'processed', agentName),
+    logDir: join(ctxRoot, 'logs', agentName),
+    stateDir: join(ctxRoot, 'state', agentName),
     taskDir: join(orgBase, 'tasks'),
     approvalDir: join(orgBase, 'approvals'),
     analyticsDir: join(orgBase, 'analytics'),
@@ -79,7 +60,7 @@ const AGENT_BOOTSTRAP_FILE = 'AGENTS.md';
  * Return true when `dir` looks like a scaffolded agent directory.
  * The check is intentionally narrow: presence of `AGENTS.md`. Other bootstrap
  * files (HEARTBEAT.md, IDENTITY.md) may be staged piecemeal during onboarding,
- * but AGENTS.md is what the start-up prompt reads first - without it the agent
+ * but AGENTS.md is what the start-up prompt reads first — without it the agent
  * cannot bootstrap.
  */
 export function isAgentDirScaffolded(dir: string | undefined): boolean {
@@ -100,7 +81,7 @@ export function isAgentDirScaffolded(dir: string | undefined): boolean {
  * AGENTS.md), the optional `warn` callback is invoked and the resolver falls
  * back to `agentDir`. This prevents a typo in `config.working_directory` from
  * silently launching Claude Code into an unrelated repo whose AGENTS.md
- * belongs to a different system - the exact failure mode that broke
+ * belongs to a different system — the exact failure mode that broke
  * director/analyst against /Users/.../work/team-brain on 2026-05-15.
  */
 export function resolveAgentCwd(
@@ -124,14 +105,17 @@ export function resolveAgentCwd(
 /**
  * Get the IPC socket path for daemon communication.
  * Unix domain socket on macOS/Linux, named pipe on Windows.
- *
- * On Unix the socket lives inside the data root, so it honours CTX_ROOT (#568).
- * Windows named pipes are instance-keyed, not path-based — CTX_ROOT does not apply.
  */
-export function getIpcPath(instanceId: string = 'default', ctxRoot?: string): string {
+export function getIpcPath(instanceId: string = 'default'): string {
   validateInstanceId(instanceId);
   if (process.platform === 'win32') {
     return `\\\\.\\pipe\\cortextos-${instanceId}`;
   }
-  return join(getCtxRoot(instanceId, ctxRoot), 'daemon.sock');
+  // Respect CTX_ROOT so processes spawned in a sandboxed test environment
+  // (CTX_ROOT=/tmp/XXX) connect to the sandbox socket, not the production
+  // daemon. Without this, integration tests that set CTX_ROOT but not
+  // CTX_INSTANCE_ID silently hit the live daemon (observed: race-agent
+  // IPC storm 2026-05-14T17:14Z from concurrent-cron-mutations test).
+  const ctxRoot = process.env.CTX_ROOT ?? join(homedir(), '.cortextos', instanceId);
+  return join(ctxRoot, 'daemon.sock');
 }

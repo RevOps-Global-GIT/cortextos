@@ -23,7 +23,6 @@ type Capability = {
   failWhen: string;
   renewalPath: string;
   proofRequired: string;
-  maxAgeHours?: number;
   lastCheckedAt?: string;
   lastAuthority?: string;
   observed?: string;
@@ -45,12 +44,6 @@ const statusClasses: Record<CapabilityStatus, string> = {
   blocked: 'border-slate-300 bg-slate-100 text-slate-700',
   pending_wiring: 'border-blue-200 bg-blue-50 text-blue-700',
 };
-
-function isFreshnessStalePast(lastCheckedAt: string | undefined, maxAgeHours: number | undefined): boolean {
-  if (!lastCheckedAt || !maxAgeHours) return false;
-  const ageHours = (Date.now() - new Date(lastCheckedAt).getTime()) / (1000 * 60 * 60);
-  return ageHours > maxAgeHours;
-}
 
 export default function CortexCapabilitiesPage() {
   const monitor = loadMonitor();
@@ -117,14 +110,9 @@ export default function CortexCapabilitiesPage() {
                   <p className="text-xs font-medium uppercase text-muted-foreground">Freshness</p>
                   <p className="mt-1 text-sm">{capability.freshnessTarget}</p>
                   {capability.lastCheckedAt && (
-                    <p className="mt-0.5 font-mono text-xs text-muted-foreground">
+                    <p className="mt-1 font-mono text-xs text-muted-foreground">
                       checked {new Date(capability.lastCheckedAt).toLocaleString()}
                     </p>
-                  )}
-                  {isFreshnessStalePast(capability.lastCheckedAt, capability.maxAgeHours) && (
-                    <span className="mt-1 inline-block rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700">
-                      stale
-                    </span>
                   )}
                 </div>
                 <div>

@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { formatDistanceToNow } from 'date-fns';
 import {
   Sheet,
   SheetContent,
@@ -120,8 +119,6 @@ export function TaskDetailSheet({
   const [editAssignee, setEditAssignee] = useState<string>('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activityEvents, setActivityEvents] = useState<Array<{id: string; timestamp: string; type: string; message: string; agent: string}>>([]);
-  const [activityLoading, setActivityLoading] = useState(false);
 
   // Deliverables state
   const [outputs, setOutputs] = useState<TaskOutput[]>([]);
@@ -155,20 +152,6 @@ export function TaskDetailSheet({
       setPreviewOutput(null);
     }
   }, [open, task?.id, task?.org, fetchTaskOutputs, task]);
-
-  useEffect(() => {
-    if (!open || !task || !task.assignee) return;
-    setActivityLoading(true);
-    const from = task.created_at ? `&from=${encodeURIComponent(task.created_at)}` : '';
-    fetch(`/api/events?agent=${encodeURIComponent(task.assignee)}&limit=20${from}`)
-      .then(r => r.ok ? r.json() : { events: [] })
-      .then(data => {
-        const events = Array.isArray(data.events) ? data.events : Array.isArray(data) ? data : [];
-        setActivityEvents(events);
-      })
-      .catch(() => setActivityEvents([]))
-      .finally(() => setActivityLoading(false));
-  }, [open, task?.id, task?.assignee, task?.created_at, task]);
 
   if (!task) return null;
 
@@ -528,32 +511,6 @@ export function TaskDetailSheet({
                         </button>
                       );
                     })}
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-
-          {!editing && task.assignee && (
-            <>
-              <Separator />
-              <div>
-                <p className="text-sm font-medium mb-2">Activity</p>
-                {activityLoading ? (
-                  <p className="text-xs text-muted-foreground">Loading…</p>
-                ) : activityEvents.length === 0 ? (
-                  <p className="text-xs text-muted-foreground italic">No events recorded yet for this agent.</p>
-                ) : (
-                  <div className="space-y-1 max-h-48 overflow-y-auto">
-                    {activityEvents.map((ev, i) => (
-                      <div key={ev.id ?? i} className="flex items-start gap-2 text-xs py-1">
-                        <span className="text-muted-foreground shrink-0 tabular-nums w-20">
-                          {(() => { try { return formatDistanceToNow(new Date(ev.timestamp), { addSuffix: true }); } catch { return ''; } })()}
-                        </span>
-                        <span className="rounded bg-muted px-1 py-0.5 uppercase text-[9px] font-medium text-muted-foreground shrink-0">{ev.type}</span>
-                        <span className="flex-1 break-words">{(ev as {message?: string}).message ?? ev.type}</span>
-                      </div>
-                    ))}
                   </div>
                 )}
               </div>

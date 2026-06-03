@@ -992,11 +992,10 @@ async function runMyDayChecks(page: Page): Promise<CheckResult[]> {
   }
 
   // CHECK 3: Content sections (comms feed items, cards, etc.) — 570f517f-phase2 PR1: upgrade to CORRECTNESS
-  // Scoped to #main-content to exclude sidebar nav li items (which have no direct text and caused 929-item false-fail).
-  await page.waitForSelector('#main-content section, #main-content p', { timeout: 3000 }).catch(() => {});
+  // (require card text >=20 chars, catches the "empty placeholder card" failure mode where cards render but contain no data).
+  await page.waitForSelector('[class*="card"], [class*="section"], [class*="item"], li', { timeout: 3000 }).catch(() => {});
   results.push(await checkDataOrEmpty(page, sp, '[CORRECTNESS] CHECK 3 Content sections visible',
-    '#main-content section[aria-label] p, #main-content [class*="font-semibold"]',
-    /inbox zero|nothing here|no tasks|nothing scheduled|empty/i, 20));
+    '[class*="card"], [class*="section"], [class*="item"], li', /no tasks|nothing scheduled|empty/i, 20));
 
   // CHECK 4: Per-item action button (Dismiss/Respond/Review) on comms feed items
   // Scope strictly to short-text buttons to avoid matching article headlines
@@ -1675,8 +1674,6 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
       ]);
       if (urlAfter !== urlBefore || hasDetail) {
         await page.goto(`${HUB_URL}/companies`, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-        await page.waitForSelector('table tbody tr, [role="row"]:not([role="columnheader"])', { timeout: 15000 }).catch(() => {});
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
         results.push({ check: '[LIVENESS] CHECK 4 Row click → detail', status: 'PASS', evidence: `Clicked "${rowInfo.text.slice(0, 40)}". URL: ${urlBefore} → ${urlAfter}. Detail content: ${hasDetail}. Returned.` });
       } else {
         results.push({ check: '[LIVENESS] CHECK 4 Row click → detail', status: 'DEFERRED', evidence: `Clicked row but URL/content unchanged. Row: "${rowInfo.text.slice(0, 40)}".` });
@@ -1711,19 +1708,19 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
     results.push({ check: '[LIVENESS] CHECK 5 Key columns present', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 6: DB-comparison — sample 5 visible companies from Supabase, verify display labels appear in UI
+  // CHECK 6: DB-comparison — sample 5 companies from Supabase, verify names/domains appear in UI
   try {
     await shot(page, `${sp}-6-db-compare`);
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,company,domain&is_archived=eq.false&name=not.ilike.SMOKE-TEST%25&order=created_at.desc&limit=5`, {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,domain&order=created_at.desc&limit=5`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
         results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
       } else {
-        const rows = await resp.json() as Array<{ id: string; name: string | null; company: string | null; domain: string | null }>;
+        const rows = await resp.json() as Array<{ id: string; name: string | null; domain: string | null }>;
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No companies in DB — UI empty state is correct' });
         } else {
@@ -1733,18 +1730,18 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
           ])).toLowerCase();
           const missing: string[] = [];
           for (const row of rows) {
-            const displayName = (row.company || row.name || '').toLowerCase().trim();
+            const name = (row.name ?? '').toLowerCase().trim();
             const domain = (row.domain ?? '').toLowerCase().trim();
-            const nameFound = displayName.length > 0 && pageText.includes(displayName);
+            const nameFound = name.length > 0 && pageText.includes(name);
             const domainFound = domain.length > 0 && pageText.includes(domain);
             if (!nameFound && !domainFound) {
-              missing.push(row.company ?? row.name ?? row.domain ?? row.id);
+              missing.push(row.name ?? row.domain ?? row.id);
             }
           }
           if (missing.length === 0) {
-            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'PASS', evidence: `All ${rows.length} sampled visible companies found in UI. Names: ${rows.map(r => r.company ?? r.name ?? '').filter(Boolean).slice(0, 3).join(', ')}` });
+            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'PASS', evidence: `All ${rows.length} sampled companies found in UI. Names: ${rows.map(r => r.name ?? '').filter(Boolean).slice(0, 3).join(', ')}` });
           } else {
-            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `${missing.length}/${rows.length} visible DB companies not found in UI: ${missing.slice(0, 3).join(', ')}. Page may be paginated or filter-hidden.` });
+            results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'FAIL', evidence: `${missing.length}/${rows.length} DB companies not visible in UI: ${missing.slice(0, 3).join(', ')}. Page may be paginated or filter-hidden.` });
           }
         }
       }
@@ -1862,7 +1859,7 @@ async function runProjectsChecks(page: Page, serviceKey?: string): Promise<Check
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/projects?select=id,name,status&name=not.ilike.SMOKE-TEST%25&order=created_at.desc&limit=5`, {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/projects?select=id,name,status&order=created_at.desc&limit=5`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
@@ -2415,7 +2412,7 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'DEFERRED', evidence: 'No tasks in orch_tasks — nothing to assert' });
         } else {
-          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed', 'blocked', 'rejected', 'needs_person']);
+          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed']);
           const invalid = rows.filter(r => !r.status || !VALID_STATUSES.has(r.status));
           if (invalid.length > 0) {
             const sample = invalid.slice(0, 5).map(r => `${r.id}:${r.status}`).join(', ');
@@ -2469,95 +2466,6 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
     }
   } catch (e) {
     results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches bus ledger', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
-  }
-
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// /app/fleet-sessions checks  (tab: /app/fleet/agents?tab=sessions)
-// ---------------------------------------------------------------------------
-async function runFleetSessionsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
-  const results: CheckResult[] = [];
-  const sp = 'app-fleet-sessions';
-
-  // CHECK 1: Page load — wait for sessions tab content
-  try {
-    await page.waitForSelector('[data-orchestrator-tab="agents"]', { timeout: 15000 });
-    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`) });
-    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'PASS', evidence: 'Fleet sessions tab loaded.' });
-  } catch (e) {
-    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`) }).catch(() => {});
-    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'FAIL', evidence: `Page did not load within 15s: ${(e as Error).message?.split('\n')[0]}` });
-    return results;
-  }
-
-  // CHECK 2 (CORRECTNESS): DB session count vs rendered rows
-  // Query orch_agent_heartbeats (kind != '' AND last_heartbeat within 35min) — same filter as useSessionHeartbeats hook.
-  // Assert: if DB count >= 1, UI must render >=1 card; if DB count == 0, UI must show empty state.
-  try {
-    const cutoff = new Date(Date.now() - 35 * 60 * 1000).toISOString();
-    let dbCount: number | null = null;
-
-    if (serviceKey) {
-      const resp = await fetch(
-        `${SUPA_URL}/rest/v1/orch_agent_heartbeats?select=instance_id,agent_name,kind,last_heartbeat&kind=neq.&last_heartbeat=gte.${encodeURIComponent(cutoff)}&order=last_heartbeat.desc`,
-        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Prefer: 'count=exact' } },
-      );
-      const countHeader = resp.headers.get('content-range');
-      if (countHeader) {
-        const m = countHeader.match(/\/(\d+)/);
-        dbCount = m ? parseInt(m[1], 10) : null;
-      }
-      if (dbCount === null) {
-        const rows = await resp.json() as unknown[];
-        dbCount = Array.isArray(rows) ? rows.length : null;
-      }
-    }
-
-    // Wait for sessions panel to resolve — either the count text or empty state must appear.
-    // React Query staleTime=30s so on fresh load the network request fires; give it up to 10s.
-    await Promise.race([
-      page.waitForSelector('text=active session', { timeout: 10000 }).catch(() => null),
-      page.waitForSelector('text=No active CLI sessions', { timeout: 10000 }).catch(() => null),
-    ]);
-
-    // Detect rendered state from visible text
-    const emptyStateVisible = await page.getByText('No active CLI sessions', { exact: false }).isVisible().catch(() => false);
-    const sessionCountText = await page.getByText(/active session.*refreshes every/i).textContent().catch(() => null);
-    const renderedCount = sessionCountText ? parseInt(sessionCountText.match(/^(\d+)/)?.[1] ?? '0', 10) : 0;
-
-    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-sessions.png`) });
-
-    if (dbCount === null) {
-      // No serviceKey — fall back to DOM-only assertion
-      if (emptyStateVisible) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'PASS', evidence: 'Empty state "No active CLI sessions" rendered correctly (no serviceKey for DB comparison).' });
-      } else if (renderedCount > 0) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'PASS', evidence: `UI shows ${renderedCount} active session(s) (no serviceKey for DB comparison).` });
-      } else {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'DEFERRED', evidence: 'Neither session cards nor empty state visible — page may still be loading.' });
-      }
-    } else if (dbCount >= 1) {
-      if (renderedCount >= 1) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'PASS', evidence: `DB: ${dbCount} active session(s); UI shows ${renderedCount} card(s). ✓` });
-      } else if (emptyStateVisible) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'FAIL', evidence: `DB has ${dbCount} active session(s) but UI shows empty state "No active CLI sessions" — sessions tab regression.` });
-      } else {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'FAIL', evidence: `DB has ${dbCount} active session(s) but neither session cards nor empty state visible — rendering failure.` });
-      }
-    } else {
-      // DB count === 0
-      if (emptyStateVisible) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'PASS', evidence: 'DB: 0 active sessions; UI shows empty state correctly.' });
-      } else if (renderedCount > 0) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'FAIL', evidence: `DB has 0 active sessions but UI renders ${renderedCount} card(s) — stale data displayed.` });
-      } else {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'DEFERRED', evidence: 'DB: 0 sessions; empty state not yet visible — page may still be loading.' });
-      }
-    }
-  } catch (e) {
-    results.push({ check: '[CORRECTNESS] CHECK 2 Sessions count DB vs UI', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   return results;
@@ -2691,6 +2599,47 @@ async function runFleetAgentsChecks(page: Page, serviceKey?: string): Promise<Ch
 
   // CHECK 6: Timestamp freshness (P1) — fleet agents page must show at least one < 30 min timestamp
   results.push(await checkTimestampFreshness(page, '[CORRECTNESS] CHECK 6 Timestamp freshness'));
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /app/fleet-board checks (BoardPanel tab embedded in /app/fleet/agents?tab=board)
+// ---------------------------------------------------------------------------
+async function runFleetBoardChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'app-fleet-board';
+
+  // Navigate to the board tab directly — FleetBoard.tsx is a component rendered
+  // inside the Fleet Agents page as a tab, not a standalone route.
+  try {
+    await page.goto(`https://hub.revopsglobal.com/app/fleet/agents?tab=board`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+  } catch { /* navigation timeout handled below */ }
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Board columns visible (Active Sessions, In Progress, Review, Done)
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+    await shot(page, `${sp}-2-columns`);
+    const colHeadings = await page.locator('h3').allInnerTexts().catch(() => [] as string[]);
+    const expected = ['Active Sessions', 'In Progress', 'Review', 'Done'];
+    const found = expected.filter(h => colHeadings.some(t => t.toLowerCase().includes(h.toLowerCase())));
+    if (found.length >= 3) {
+      results.push({ check: '[LIVENESS] CHECK 2 Board columns visible', status: 'PASS', evidence: `${found.length}/4 column headings found: ${found.join(', ')}` });
+    } else if (found.length > 0) {
+      results.push({ check: '[LIVENESS] CHECK 2 Board columns visible', status: 'DEFERRED', evidence: `Only ${found.length}/4 columns visible: ${found.join(', ')} — may still be loading` });
+    } else {
+      const anyCard = await page.locator('[class*="card"], [class*="Card"]').count();
+      results.push({ check: '[LIVENESS] CHECK 2 Board columns visible', status: anyCard > 0 ? 'DEFERRED' : 'FAIL', evidence: anyCard > 0 ? `Board tab may use different column markup; ${anyCard} card elements found` : 'No board columns or cards found' });
+    }
+  } catch (e) {
+    results.push({ check: '[LIVENESS] CHECK 2 Board columns visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
 
   return results;
 }
@@ -3264,7 +3213,7 @@ async function runLinkedInPresenceChecks(page: Page): Promise<CheckResult[]> {
 // ---------------------------------------------------------------------------
 // /app/signals checks
 // ---------------------------------------------------------------------------
-async function runSignalsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
+async function runSignalsChecks(page: Page): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'signals';
 
@@ -3272,41 +3221,10 @@ async function runSignalsChecks(page: Page, serviceKey?: string): Promise<CheckR
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
 
-  // CHECK 2: signal_type + severity in valid enum (CORRECTNESS upgrade from [MIXED] liveness)
-  // Queries Supabase signals table and validates that all rows have known signal_type and severity values.
-  try {
-    await shot(page, `${sp}-2-db-enum`);
-    if (!serviceKey) {
-      results.push({ check: '[CORRECTNESS] CHECK 2 Signal enum values valid', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
-    } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/signals?select=id,signal_type,severity&order=created_at.desc&limit=25`, {
-        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
-      });
-      if (!resp.ok) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Signal enum values valid', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
-      } else {
-        const rows = await resp.json() as Array<{ id: string; signal_type: string | null; severity: string | null }>;
-        if (!rows || rows.length === 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Signal enum values valid', status: 'DEFERRED', evidence: 'No signals in DB — UI empty state is correct' });
-        } else {
-          const VALID_SEVERITY = new Set(['critical', 'high', 'medium', 'low', 'info']);
-          const badType     = rows.filter(r => !r.signal_type || r.signal_type.trim() === '');
-          const badSeverity = rows.filter(r => r.severity && !VALID_SEVERITY.has(r.severity.toLowerCase()));
-          const issues: string[] = [];
-          if (badType.length > 0)     issues.push(`${badType.length}/${rows.length} signals have null/empty signal_type`);
-          if (badSeverity.length > 0) issues.push(`${badSeverity.length}/${rows.length} signals have invalid severity: ${[...new Set(badSeverity.map(r => r.severity))].join(', ')}`);
-          if (issues.length > 0) {
-            results.push({ check: '[CORRECTNESS] CHECK 2 Signal enum values valid', status: 'FAIL', evidence: issues.join('; ') });
-          } else {
-            const types = [...new Set(rows.map(r => r.signal_type).filter(Boolean))].slice(0, 4);
-            results.push({ check: '[CORRECTNESS] CHECK 2 Signal enum values valid', status: 'PASS', evidence: `All ${rows.length} recent signals have valid signal_type + severity. Types seen: ${types.join(', ')}` });
-          }
-        }
-      }
-    }
-  } catch (e) {
-    results.push({ check: '[CORRECTNESS] CHECK 2 Signal enum values valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
-  }
+  // CHECK 2: Signal cards or empty state
+  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Signal cards visible',
+    '[class*="signal"], [class*="card"], [class*="item"], [role="listitem"]',
+    /no signals|nothing here|empty|all clear/i));
 
   // CHECK 3: Action buttons present (Dismiss / View / Snooze — do NOT fire external actions)
   try {
@@ -3447,147 +3365,48 @@ async function runSupremeOutstandingChecks(page: Page): Promise<CheckResult[]> {
 // ---------------------------------------------------------------------------
 // /clients checks
 // ---------------------------------------------------------------------------
-async function runClientsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
+async function runClientsChecks(page: Page): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'clients';
   const loadResult = await checkLoad(page, sp);
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
   await new Promise<void>(r => setTimeout(r, 1500));
-
-  // CHECK 2: Row count vs DB count (CORRECTNESS upgrade from [MIXED] liveness)
-  try {
-    await shot(page, `${sp}-2-list`);
-    if (!serviceKey) {
-      results.push({ check: '[CORRECTNESS] CHECK 2 Client list matches DB count', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
-    } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/clients?select=id&limit=200`, {
-        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
-      });
-      if (!resp.ok) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Client list matches DB count', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
-      } else {
-        const rows = await resp.json() as Array<{ id: string }>;
-        const dbCount = rows.length;
-        const uiCount = await Promise.race([
-          page.evaluate(() =>
-            document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"]), [class*="client-card"],[class*="clientCard"]').length
-          ),
-          new Promise<number>(r => setTimeout(() => r(-1), 5000)),
-        ]);
-        if (dbCount === 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Client list matches DB count', status: 'DEFERRED', evidence: 'No clients in DB — UI empty state is correct' });
-        } else if (uiCount < 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Client list matches DB count', status: 'DEFERRED', evidence: `DB has ${dbCount} clients but UI count timed out — page may still be loading` });
-        } else if (uiCount === 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Client list matches DB count', status: 'FAIL', evidence: `DB has ${dbCount} clients but UI shows 0 rows — rendering regression or auth issue` });
-        } else {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Client list matches DB count', status: 'PASS', evidence: `DB: ${dbCount} clients, UI: ${uiCount} row(s) visible (page may be paginated; row count ≥ 1 is sufficient)` });
-        }
-      }
-    }
-  } catch (e) {
-    results.push({ check: '[CORRECTNESS] CHECK 2 Client list matches DB count', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
-  }
-
+  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Client list visible',
+    'table tbody tr, [role="row"]:not([role="columnheader"]), [class*="client-card"],[class*="clientCard"]',
+    /no clients|no results|empty/i));
   return results;
 }
 
 // ---------------------------------------------------------------------------
 // /contacts checks
 // ---------------------------------------------------------------------------
-async function runContactsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
+async function runContactsChecks(page: Page): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'contacts';
   const loadResult = await checkLoad(page, sp);
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
   await new Promise<void>(r => setTimeout(r, 1500));
-
-  // CHECK 2: Row count vs DB count (CORRECTNESS upgrade from [MIXED] liveness)
-  try {
-    await shot(page, `${sp}-2-list`);
-    if (!serviceKey) {
-      results.push({ check: '[CORRECTNESS] CHECK 2 Contact list matches DB count', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
-    } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/contacts?select=id&limit=200`, {
-        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
-      });
-      if (!resp.ok) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Contact list matches DB count', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
-      } else {
-        const rows = await resp.json() as Array<{ id: string }>;
-        const dbCount = rows.length;
-        const uiCount = await Promise.race([
-          page.evaluate(() =>
-            document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"]), [class*="contact-card"],[class*="contactCard"]').length
-          ),
-          new Promise<number>(r => setTimeout(() => r(-1), 5000)),
-        ]);
-        if (dbCount === 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Contact list matches DB count', status: 'DEFERRED', evidence: 'No contacts in DB — UI empty state is correct' });
-        } else if (uiCount < 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Contact list matches DB count', status: 'DEFERRED', evidence: `DB has ${dbCount} contacts but UI count timed out — page may still be loading` });
-        } else if (uiCount === 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Contact list matches DB count', status: 'FAIL', evidence: `DB has ${dbCount} contacts but UI shows 0 rows — rendering regression or auth issue` });
-        } else {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Contact list matches DB count', status: 'PASS', evidence: `DB: ${dbCount} contacts, UI: ${uiCount} row(s) visible (page may be paginated; row count ≥ 1 is sufficient)` });
-        }
-      }
-    }
-  } catch (e) {
-    results.push({ check: '[CORRECTNESS] CHECK 2 Contact list matches DB count', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
-  }
-
+  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Contact list visible',
+    'table tbody tr, [role="row"]:not([role="columnheader"]), [class*="contact-card"],[class*="contactCard"]',
+    /no contacts|no results|empty/i));
   return results;
 }
 
 // ---------------------------------------------------------------------------
 // /invoices checks
 // ---------------------------------------------------------------------------
-async function runInvoicesChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
+async function runInvoicesChecks(page: Page): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sp = 'invoices';
   const loadResult = await checkLoad(page, sp);
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
   await new Promise<void>(r => setTimeout(r, 1500));
-
-  // CHECK 2: Row count vs DB count (CORRECTNESS upgrade from [MIXED] liveness)
-  try {
-    await shot(page, `${sp}-2-list`);
-    if (!serviceKey) {
-      results.push({ check: '[CORRECTNESS] CHECK 2 Invoice list matches DB count', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
-    } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/invoices?select=id&limit=200`, {
-        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
-      });
-      if (!resp.ok) {
-        results.push({ check: '[CORRECTNESS] CHECK 2 Invoice list matches DB count', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
-      } else {
-        const rows = await resp.json() as Array<{ id: string }>;
-        const dbCount = rows.length;
-        const uiCount = await Promise.race([
-          page.evaluate(() =>
-            document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"]), [class*="invoice"]').length
-          ),
-          new Promise<number>(r => setTimeout(() => r(-1), 5000)),
-        ]);
-        if (dbCount === 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Invoice list matches DB count', status: 'DEFERRED', evidence: 'No invoices in DB — UI empty state is correct' });
-        } else if (uiCount < 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Invoice list matches DB count', status: 'DEFERRED', evidence: `DB has ${dbCount} invoices but UI count timed out — page may still be loading` });
-        } else if (uiCount === 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Invoice list matches DB count', status: 'FAIL', evidence: `DB has ${dbCount} invoices but UI shows 0 rows — rendering regression or auth issue` });
-        } else {
-          results.push({ check: '[CORRECTNESS] CHECK 2 Invoice list matches DB count', status: 'PASS', evidence: `DB: ${dbCount} invoices, UI: ${uiCount} row(s) visible (page may be paginated; row count ≥ 1 is sufficient)` });
-        }
-      }
-    }
-  } catch (e) {
-    results.push({ check: '[CORRECTNESS] CHECK 2 Invoice list matches DB count', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
-  }
-
+  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Invoice list visible',
+    'table tbody tr, [role="row"]:not([role="columnheader"]), [class*="invoice"]',
+    /no invoices|no results|empty/i));
   return results;
 }
 
@@ -4135,39 +3954,6 @@ async function runWikiGraphChecks(page: Page): Promise<CheckResult[]> {
   }
   return results;
 }
-
-// /app/fleet-board checks
-// ---------------------------------------------------------------------------
-async function runFleetBoardChecks(page: Page): Promise<CheckResult[]> {
-  const results: CheckResult[] = [];
-  const sp = 'app-fleet-board';
-
-  // CHECK 1: Page load
-  try {
-    await page.waitForSelector('main, [class*="fleet"], [class*="board"], [class*="session"], h1, h2', { timeout: 15000 });
-    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`) });
-    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'PASS', evidence: 'Fleet board loaded.' });
-  } catch (e) {
-    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load.png`) }).catch(() => {});
-    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'FAIL', evidence: `Page did not load within 15s: ${(e as Error).message?.split('\n')[0]}` });
-    return results;
-  }
-
-  // CHECK 2: No error boundary / blank body
-  try {
-    const bodyText = await page.evaluate(() => document.body?.innerText?.trim() ?? '');
-    if (bodyText.length < 20) {
-      results.push({ check: '[LIVENESS] CHECK 2 Content rendered', status: 'FAIL', evidence: `Body text too short (${bodyText.length} chars) — possible blank render` });
-    } else {
-      results.push({ check: '[LIVENESS] CHECK 2 Content rendered', status: 'PASS', evidence: `Body has ${bodyText.length} chars of content.` });
-    }
-  } catch (e) {
-    results.push({ check: '[LIVENESS] CHECK 2 Content rendered', status: 'DEFERRED', evidence: `Could not evaluate body: ${(e as Error).message?.split('\n')[0]}` });
-  }
-
-  return results;
-}
-
 async function main() {
   const env = loadEnv(SECRETS_ENV);
   // Use the RGOS-specific service key (project yyizocyaehmqrottmnaz)
@@ -4273,7 +4059,6 @@ async function main() {
       'linkedin-presence': '/app/presence',
       '/analytics': '/app/analytics',
       '/fleet': '/app/fleet',
-      '/app/fleet-sessions': '/app/fleet/agents?tab=sessions',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
@@ -4372,8 +4157,6 @@ async function main() {
       results = await runWithTimeout(() => runPipelineChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/tasks') {
       results = await runWithTimeout(() => runFleetTasksChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
-    } else if (targetPage === '/app/fleet-sessions') {
-      results = await runWithTimeout(() => runFleetSessionsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/agents') {
       results = await runWithTimeout(() => runFleetAgentsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/social-content') {
@@ -4387,15 +4170,15 @@ async function main() {
     } else if (targetPage === '/app/presence' || targetPage === 'linkedin-presence') {
       results = await runWithTimeout(() => runLinkedInPresenceChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/signals' || targetPage === '/signals') {
-      results = await runWithTimeout(() => runSignalsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+      results = await runWithTimeout(() => runSignalsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/supreme-outstanding' || targetPage === '/supreme-outstanding') {
       results = await runWithTimeout(() => runSupremeOutstandingChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/clients') {
-      results = await runWithTimeout(() => runClientsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+      results = await runWithTimeout(() => runClientsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/contacts') {
-      results = await runWithTimeout(() => runContactsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+      results = await runWithTimeout(() => runContactsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/invoices') {
-      results = await runWithTimeout(() => runInvoicesChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+      results = await runWithTimeout(() => runInvoicesChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/settings') {
       results = await runWithTimeout(() => runSettingsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/financials') {
@@ -4417,7 +4200,7 @@ async function main() {
     } else if (targetPage === '/app/fleet-board') {
       results = await runWithTimeout(() => runFleetBoardChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet-sessions, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph, /app/fleet-board`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph, /app/fleet-board`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);

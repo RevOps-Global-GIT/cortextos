@@ -2,10 +2,9 @@ import { Command } from 'commander';
 import { existsSync, readFileSync, mkdirSync } from 'fs';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { join } from 'path';
-import { platform } from 'os';
+import { homedir, platform } from 'os';
 import { execSync, spawn, spawnSync } from 'child_process';
 import { IPCClient } from '../daemon/ipc-server.js';
-import { resolveCtxRoot } from '../utils/env.js';
 
 const IS_WINDOWS = platform() === 'win32';
 const SAFE_CMD = /^[@a-z0-9._/-]+$/i;
@@ -23,8 +22,7 @@ export const startCommand = new Command('start')
   .option('--foreground', 'Run daemon in foreground (no PM2, for debugging)')
   .description('Start the cortextOS daemon and agents')
   .action(async (agent: string | undefined, options: { instance: string; foreground?: boolean }) => {
-    const ctxRoot = resolveCtxRoot(options.instance);
-    const ipc = new IPCClient(options.instance, ctxRoot);
+    const ipc = new IPCClient(options.instance);
     const daemonRunning = await ipc.isDaemonRunning();
 
     if (!daemonRunning) {
@@ -35,6 +33,8 @@ export const startCommand = new Command('start')
         console.error('Daemon not built. Run: npm run build');
         process.exit(1);
       }
+
+      const ctxRoot = join(homedir(), '.cortextos', options.instance);
 
       // Try reading org from enabled-agents.json
       let org = '';
@@ -125,7 +125,7 @@ export const startCommand = new Command('start')
         // exit non-zero so the operator gets an actionable error.
         const MAX_SPAWN_ATTEMPTS = 3;
         const SPAWN_RETRY_BACKOFF_MS = 2000;
-        const ipc2 = new IPCClient(options.instance, ctxRoot);
+        const ipc2 = new IPCClient(options.instance);
         let running = false;
 
         for (let attempt = 1; attempt <= MAX_SPAWN_ATTEMPTS && !running; attempt++) {
@@ -165,6 +165,7 @@ export const startCommand = new Command('start')
     // Daemon already running
     if (agent) {
       // Auto-register in enabled-agents.json if not already present
+      const ctxRoot = join(homedir(), '.cortextos', options.instance);
       const enabledPath = join(ctxRoot, 'config', 'enabled-agents.json');
       let enabledAgents: Record<string, any> = {};
       try {

@@ -13,28 +13,22 @@ Evaluate AgentOps like a product expert and a real operator, not just a selector
 Run it for every priority page on each pass (rotate to cover all 8 within 2–3 passes if time-constrained):
 
 ```bash
-REPO=/home/cortextos/cortextos
+cd /home/cortextos/cortextos
 
-# Bootstrap: extract the wrapper from fork/main into /tmp so it's available
-# regardless of which branch the shared checkout has checked out.
-git -C "$REPO" fetch fork main -q
-git -C "$REPO" show remotes/fork/main:scripts/run-dogfood-pinned.sh > /tmp/run-dogfood-pinned.sh
-
-# Priority pages — CTX_DOGFOOD_REPO tells the wrapper where the real repo is
-# (secrets, git remote) even though the script itself lives in /tmp.
-CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /analytics --no-send
-CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /fleet --no-send
-CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/fleet/tasks --no-send
-CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/fleet/activity --no-send
-CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/cortex/theta --no-send
-CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/supreme-outstanding --no-send
-CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/work/inbox --no-send
-CTX_DOGFOOD_REPO="$REPO" bash /tmp/run-dogfood-pinned.sh --page /app/work/approvals --no-send
+# Priority pages — run each individually via npx tsx:
+npx tsx scripts/hub-qa-playwright.ts --page /analytics --no-send
+npx tsx scripts/hub-qa-playwright.ts --page /fleet --no-send
+npx tsx scripts/hub-qa-playwright.ts --page /app/fleet/tasks --no-send
+npx tsx scripts/hub-qa-playwright.ts --page /app/fleet/activity --no-send
+npx tsx scripts/hub-qa-playwright.ts --page /app/cortex/theta --no-send
+npx tsx scripts/hub-qa-playwright.ts --page /app/supreme-outstanding --no-send
+npx tsx scripts/hub-qa-playwright.ts --page /app/work/inbox --no-send
+npx tsx scripts/hub-qa-playwright.ts --page /app/work/approvals --no-send
 ```
 
 Each run writes a report to `orgs/revops-global/agents/codex/output/playwright-qa/`. Collect FAIL results across all pages before proceeding.
 
-**Fallback if `npx tsx` is not available:** run `npx ts-node --esm scripts/hub-qa-playwright.ts` directly from inside `/tmp/cortextos-dogfood-main` (the pinned worktree).
+**Fallback command if `npx tsx` is not available:** `npx ts-node --esm scripts/hub-qa-playwright.ts`
 
 ## Runtime Preference (after Playwright)
 

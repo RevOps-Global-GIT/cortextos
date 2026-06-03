@@ -1,16 +1,22 @@
 import { createServer, Server, Socket } from 'net';
 import { existsSync, unlinkSync, chmodSync, readFileSync } from 'fs';
 import { join, resolve as pathResolve } from 'path';
+import { homedir } from 'os';
 import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
-import { getIpcPath, getCtxRoot } from '../utils/paths.js';
+import { getIpcPath } from '../utils/paths.js';
 import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron, getCronByName } from '../bus/crons.js';
 import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
 import { parseDurationMs } from '../bus/cron-state.js';
 import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
+import { atomicWriteSync } from '../utils/atomic.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
+
+function resolveCtxRoot(): string {
+  return process.env.CTX_ROOT ?? join(homedir(), '.cortextos', process.env.CTX_INSTANCE_ID ?? 'default');
+}
 
 // ---------------------------------------------------------------------------
 // Manual fire cooldown — Subtask 4.5
@@ -151,7 +157,7 @@ export function computeNextFire(
  * and cron execution log, and return a combined summary array.
  */
 function listAllCrons(): CronSummaryRow[] {
-  const ctxRoot = getCtxRoot(process.env.CTX_INSTANCE_ID || 'default');
+  const ctxRoot = resolveCtxRoot();
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
 
   let enabledAgents: Record<string, { enabled?: boolean; org?: string }> = {};
@@ -221,7 +227,7 @@ export function computeFleetHealth(
     return _fleetHealthCache.result;
   }
 
-  const ctxRoot = getCtxRoot(process.env.CTX_INSTANCE_ID || 'default');
+  const ctxRoot = resolveCtxRoot();
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
 
   let enabledAgents: Record<string, { enabled?: boolean; org?: string }> = {};
@@ -304,7 +310,7 @@ export function isValidSchedule(schedule: string): boolean {
  * Read the list of enabled agent names from enabled-agents.json.
  */
 function getEnabledAgents(): string[] {
-  const ctxRoot = getCtxRoot(process.env.CTX_INSTANCE_ID || 'default');
+  const ctxRoot = resolveCtxRoot();
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
   if (!existsSync(enabledFile)) return [];
   try {
@@ -479,9 +485,9 @@ export class IPCServer {
   private socketPath: string;
   private agentManager: AgentManager;
 
-  constructor(agentManager: AgentManager, instanceId: string = 'default', ctxRoot?: string) {
+  constructor(agentManager: AgentManager, instanceId: string = 'default') {
     this.agentManager = agentManager;
-    this.socketPath = getIpcPath(instanceId, ctxRoot);
+    this.socketPath = getIpcPath(instanceId);
   }
 
   /**
@@ -663,23 +669,37 @@ export class IPCServer {
           break;
 
         case 'spawn-worker': {
-          const d = request.data as { name?: string; dir?: string; prompt?: string; parent?: string; model?: string } | undefined;
+          const d = request.data as { name?: string; dir?: string; prompt?: string; parent?: string; model?: string; home?: string } | undefined;
           if (!d?.name || !d?.dir || !d?.prompt) {
             response = { success: false, error: 'spawn-worker requires: name, dir, prompt' };
           } else if (!WORKER_NAME_REGEX.test(d.name) || d.name.length > 64) {
             response = { success: false, error: 'Invalid worker name' };
           } else {
             const resolvedDir = pathResolve(d.dir);
-            const ctxRoot = pathResolve(getCtxRoot(process.env.CTX_INSTANCE_ID || 'default'));
+            const ctxRoot = process.env.CTX_ROOT ? pathResolve(process.env.CTX_ROOT) : '';
             const cwd = pathResolve(process.cwd());
             const underCtxRoot = ctxRoot && (resolvedDir === ctxRoot || resolvedDir.startsWith(ctxRoot + '/'));
             const underCwd = resolvedDir === cwd || resolvedDir.startsWith(cwd + '/');
             if (!underCtxRoot && !underCwd) {
               response = { success: false, error: 'Invalid worker dir' };
             } else {
-              this.agentManager.spawnWorker(d.name, resolvedDir, d.prompt, d.parent, d.model)
-                .catch(err => console.error(`[ipc] spawn-worker failed:`, err));
-              response = { success: true, data: `Spawning worker ${d.name}` };
+              const workerName = d.name;
+              const ctxRootForWorker = resolveCtxRoot();
+              this.agentManager.spawnWorker(workerName, resolvedDir, d.prompt, d.parent, d.model, d.home)
+                .catch(err => {
+                  console.error(`[ipc] spawn-worker failed:`, err);
+                  try {
+                    const statusPath = join(ctxRootForWorker, 'workers', `${workerName}-status.json`);
+                    atomicWriteSync(statusPath, JSON.stringify({
+                      status: 'failed',
+                      error: err instanceof Error ? err.message : String(err),
+                      timestamp: new Date().toISOString(),
+                    }, null, 2));
+                  } catch (writeErr) {
+                    console.error(`[ipc] failed to write worker failure artifact:`, writeErr);
+                  }
+                });
+              response = { success: true, data: `Spawning worker ${workerName}` };
             }
           }
           break;
@@ -874,8 +894,8 @@ export class IPCServer {
 export class IPCClient {
   private socketPath: string;
 
-  constructor(instanceId: string = 'default', ctxRoot?: string) {
-    this.socketPath = getIpcPath(instanceId, ctxRoot);
+  constructor(instanceId: string = 'default') {
+    this.socketPath = getIpcPath(instanceId);
   }
 
   /**
@@ -895,6 +915,13 @@ export class IPCClient {
       });
 
       socket.on('end', () => {
+        // Destroy immediately so the socket's ref does not keep the calling
+        // process's event loop alive after the response is fully received.
+        // Without this, short-lived CLI child processes that use IPCClient
+        // (e.g. `bus update-cron`) never exit because the half-open socket
+        // continues holding a ref, causing execFile / execFileAsync callers
+        // to wait indefinitely.
+        socket.destroy();
         try {
           resolve(JSON.parse(data));
         } catch {
@@ -903,6 +930,8 @@ export class IPCClient {
       });
 
       socket.on('error', (err: Error) => {
+        // Destroy so the socket ref is released regardless of error type.
+        socket.destroy();
         if ((err as any).code === 'ECONNREFUSED' || (err as any).code === 'ENOENT') {
           resolve({
             success: false,

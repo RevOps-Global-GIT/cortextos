@@ -1,58 +1,23 @@
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync } from 'fs';
 import { join } from 'path';
+import { homedir } from 'os';
 import type { BusPaths } from '../types/index.js';
 import { normalizeOrgName } from '../utils/org.js';
-import { getCtxRoot } from '../utils/paths.js';
 
 /**
  * Knowledge base integration.
  *
- * Chroma/MMRAG ingestion was retired. Query now uses the local wiki checkout
- * directly via git-grep so heartbeat and operator queries do not touch the
- * removed embedding path or require KB secrets/config.
+ * Chroma/MMRAG/Gemini embeddings are dormant by default as of 2026-05-14.
+ * Runtime retrieval uses deterministic text search over the version-controlled
+ * team-brain wiki, including the Open Brain thought mirror under
+ * `wiki/sources/thoughts`. KB_VECTOR_ENABLED is reserved for a future revival
+ * path, but there are no active Chroma calls in this runtime module while the
+ * flag is false.
  */
 
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function findWikiRoot(frameworkRoot: string, org: string): string | null {
-  const candidates = [
-    join(frameworkRoot, 'wiki'),
-    join(frameworkRoot, 'orgs', org, 'wiki'),
-    join(frameworkRoot, 'knowledge'),
-  ];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
-}
-
-function classifyWikiDoc(sourceFile: string): string {
-  return sourceFile.includes('/sources/thoughts/')
-    ? 'open-brain-thought'
-    : 'wiki-grep';
-}
-
-function parseGitGrepOutput(output: string, org: string, agent: string | undefined, topK: number): KBQueryResult[] {
-  return output
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line): KBQueryResult | null => {
-      const match = line.match(/^([^:]+):(\d+):(.*)$/);
-      if (!match) return null;
-      const [, sourceFile, lineNo, content] = match;
-      const result: KBQueryResult = {
-        content: content.trim(),
-        source_file: `${sourceFile}:${lineNo}`,
-        org,
-        score: 0,
-        doc_type: classifyWikiDoc(sourceFile),
-      };
-      if (agent) result.agent_name = agent;
-      return result;
-    })
-    .filter((result): result is KBQueryResult => result !== null)
-    .slice(0, topK);
+function vectorSearchEnabled(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.KB_VECTOR_ENABLED || '');
 }
 
 export interface KBQueryResult {
@@ -72,8 +37,75 @@ export interface KBQueryResponse {
 }
 
 /**
+ * Resolve the wiki directory path.
+ * Uses WIKI_PATH env var, then ~/work/team-brain default.
+ */
+function resolveWikiPath(): string {
+  if (process.env.WIKI_PATH) return process.env.WIKI_PATH;
+  return join(homedir(), 'work', 'team-brain');
+}
+
+/**
+ * Search across the team-brain wiki and Open Brain thought mirror.
+ * Returns results formatted as KBQueryResult so callers get a consistent shape.
+ */
+function wikiGrepFallback(
+  query: string,
+  org: string,
+  topK: number,
+): KBQueryResult[] {
+  const wikiDir = resolveWikiPath();
+  if (!existsSync(wikiDir)) return [];
+
+  try {
+    // -i: case-insensitive, -r: recursive, -n: line numbers, -C 2: 2 lines context
+    // Escape query for shell safety — use only the first "word" portion for grep
+    const safeQuery = query.replace(/[^a-zA-Z0-9 _-]/g, '').trim().split(/\s+/).slice(0, 4).join(' ');
+    if (!safeQuery) return [];
+
+    let output = execSync(
+      `git grep -i -r -n -C 2 --max-count=10 -- ${JSON.stringify(safeQuery)} docs wiki .claude 2>/dev/null | head -n 400 || true`,
+      { cwd: wikiDir, encoding: 'utf-8', timeout: 10000, maxBuffer: 512 * 1024 },
+    );
+    if (!output.trim()) {
+      const terms = safeQuery.split(/\s+/).filter((term) => term.length > 2).slice(0, 4);
+      if (terms.length > 0) {
+        const termArgs = terms.map((term) => `-e ${JSON.stringify(term)}`).join(' ');
+        output = execSync(
+          `git grep -i -r -n -C 2 --max-count=10 ${termArgs} -- docs wiki .claude 2>/dev/null | head -n 400 || true`,
+          { cwd: wikiDir, encoding: 'utf-8', timeout: 10000, maxBuffer: 512 * 1024 },
+        );
+      }
+    }
+
+    // Each match block is separated by '--'; within a block lines are: file:linenum-context or file:linenum:match
+    const blocks = output.split(/^--$/m).slice(0, topK);
+    return blocks.map((block) => {
+      const lines = block.trim().split('\n').filter(Boolean);
+      if (lines.length === 0) return null;
+      // Extract file path from first line (format: filepath:linenum:text or filepath:linenum-text)
+      const firstLine = lines[0];
+      const sourceMatch = firstLine.match(/^(.+?)(?::\d+:|-\d+-)/);
+      const sourceFile = sourceMatch ? sourceMatch[1] : firstLine;
+      const content = lines.join('\n').substring(0, 500);
+      return {
+        content,
+        source_file: join(wikiDir, sourceFile),
+        org,
+        score: 1.0,
+        doc_type: sourceFile.includes('wiki/sources/thoughts/')
+          ? 'open-brain-thought'
+          : 'wiki-grep',
+      } as KBQueryResult;
+    }).filter((r): r is KBQueryResult => r !== null);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Query the knowledge base.
- * Returns parsed JSON results when --json is used internally.
+ * ChromaDB is intentionally bypassed; all queries use wiki-grep directly.
  */
 export function queryKnowledgeBase(
   paths: BusPaths,
@@ -89,20 +121,19 @@ export function queryKnowledgeBase(
     noEmbed?: boolean;
   },
 ): KBQueryResponse {
-  const { agent, topK = 5, frameworkRoot } = options;
+  const { topK = 5, frameworkRoot } = options;
+  void paths;
+  // Normalize once at the top so result metadata uses canonical org casing.
   const org = normalizeOrgName(frameworkRoot, options.org);
-  const wikiRoot = findWikiRoot(frameworkRoot, org);
-  if (!wikiRoot) return { results: [], total: 0, query: question, collection: 'wiki-grep' };
-  try {
-    const output = execSync(
-      `cd ${shellQuote(wikiRoot)} && git grep -n -i -- ${shellQuote(question)} -- .`,
-      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
+
+  if (vectorSearchEnabled()) {
+    console.warn(
+      '[kb] KB_VECTOR_ENABLED is set, but the Chroma vector path is dormant in this build; using wiki-grep.',
     );
-    const results = parseGitGrepOutput(String(output), org, agent, topK);
-    return { results, total: results.length, query: question, collection: 'wiki-grep' };
-  } catch {
-    return { results: [], total: 0, query: question, collection: 'wiki-grep' };
   }
+
+  const wikiResults = wikiGrepFallback(question, org, topK);
+  return { results: wikiResults, total: wikiResults.length, query: question, collection: 'wiki-grep' };
 }
 
 /**
@@ -119,25 +150,23 @@ export function ingestKnowledgeBase(
     instanceId: string;
   },
 ): void {
-  console.warn('[kb] Chroma/MMRAG ingestion is deprecated; skipping kb-ingest.');
+  const { frameworkRoot } = options;
+  // Normalize once (see queryKnowledgeBase for rationale).
+  const org = normalizeOrgName(frameworkRoot, options.org);
+
+  console.warn(
+    `[kb] Chroma/MMRAG ingestion is deprecated for org ${org}. ` +
+    'No vector index was written; commit source docs to team-brain/wiki instead.',
+  );
   for (const p of paths) {
-    console.log(`  Source: ${p}`);
+    console.log(`  Skipped deprecated ingest source: ${p}`);
   }
 }
 
 /**
- * Ensure the knowledge base directories exist for an org.
- *
- * `frameworkRoot` is required so the org name can be normalized to its
- * canonical filesystem casing — without that, a caller passing a drifted
- * name (e.g. "acmecorp") would create a ghost state dir identical
- * to the one this module was written to prevent.
+ * Retained for CLI compatibility. Chroma directories are no longer created.
  */
 export function ensureKBDirs(instanceId: string, frameworkRoot: string, org: string): void {
-  const canonicalOrg = normalizeOrgName(frameworkRoot, org);
-  const kbRoot = join(getCtxRoot(instanceId), 'orgs', canonicalOrg, 'knowledge-base');
-  const chromaDir = join(kbRoot, 'chromadb');
-  if (!existsSync(chromaDir)) {
-    mkdirSync(chromaDir, { recursive: true });
-  }
+  normalizeOrgName(frameworkRoot, org);
+  void instanceId;
 }

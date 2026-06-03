@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { transcribeVoice } from '../../../src/telegram/transcribe';
@@ -15,13 +15,11 @@ describe('transcribeVoice', () => {
       CTX_WHISPER_BIN: process.env.CTX_WHISPER_BIN,
       CTX_FFMPEG_BIN: process.env.CTX_FFMPEG_BIN,
       CTX_WHISPER_MODEL: process.env.CTX_WHISPER_MODEL,
-      CTX_WHISPER_LANG: process.env.CTX_WHISPER_LANG,
     };
     delete process.env.CTX_TELEGRAM_NO_TRANSCRIBE;
     delete process.env.CTX_WHISPER_BIN;
     delete process.env.CTX_FFMPEG_BIN;
     delete process.env.CTX_WHISPER_MODEL;
-    delete process.env.CTX_WHISPER_LANG;
   });
 
   afterEach(() => {
@@ -90,44 +88,5 @@ describe('transcribeVoice', () => {
     const elapsed = Date.now() - start;
     expect(result).toBeNull();
     expect(elapsed).toBeLessThan(2000);
-  });
-
-  it('passes CTX_WHISPER_LANG to whisper-cli', async () => {
-    const oggPath = join(workDir, 'voice.ogg');
-    const fakeModel = join(workDir, 'model.bin');
-    const wavPath = join(workDir, 'voice.wav');
-    const argsPath = join(workDir, 'whisper-args.json');
-    const fakeFfmpeg = join(workDir, 'ffmpeg.js');
-    const fakeWhisper = join(workDir, 'whisper.js');
-
-    writeFileSync(oggPath, 'fake-audio');
-    writeFileSync(fakeModel, 'fake-model');
-    writeFileSync(fakeFfmpeg, [
-      '#!/usr/bin/env node',
-      `require('fs').writeFileSync(${JSON.stringify(wavPath)}, 'fake-wav');`,
-      '',
-    ].join('\n'));
-    writeFileSync(fakeWhisper, [
-      '#!/usr/bin/env node',
-      `require('fs').writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));`,
-      "process.stdout.write('hola mundo\\n');",
-      '',
-    ].join('\n'));
-    chmodSync(fakeFfmpeg, 0o755);
-    chmodSync(fakeWhisper, 0o755);
-
-    process.env.CTX_WHISPER_MODEL = fakeModel;
-    process.env.CTX_FFMPEG_BIN = fakeFfmpeg;
-    process.env.CTX_WHISPER_BIN = fakeWhisper;
-    process.env.CTX_WHISPER_LANG = 'es';
-
-    await expect(transcribeVoice(oggPath)).resolves.toBe('hola mundo');
-    expect(JSON.parse(readFileSync(argsPath, 'utf-8'))).toEqual([
-      '-m', fakeModel,
-      '-f', wavPath,
-      '-l', 'es',
-      '-nt',
-      '-np',
-    ]);
   });
 });

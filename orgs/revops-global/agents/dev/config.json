@@ -85,7 +85,7 @@
       "name": "hub-surface-sweep",
       "type": "recurring",
       "interval": "6h",
-      "prompt": "REPO=/home/cortextos/cortextos; git -C \"$REPO\" fetch fork main -q; PINNED_SHA=$(git -C \"$REPO\" rev-parse remotes/fork/main); if [ ! -f /tmp/cortextos-dogfood-main/scripts/hub-surface-sweep.js ]; then git -C \"$REPO\" worktree prune; git -C \"$REPO\" worktree add --detach /tmp/cortextos-dogfood-main remotes/fork/main 2>/dev/null || true; fi; git -C /tmp/cortextos-dogfood-main reset --hard \"$PINNED_SHA\" --quiet; node /tmp/cortextos-dogfood-main/scripts/hub-surface-sweep.js"
+      "prompt": "node /home/cortextos/cortextos/scripts/hub-surface-sweep.js"
     }
   ],
   "ctx_autoreset_threshold": 85,

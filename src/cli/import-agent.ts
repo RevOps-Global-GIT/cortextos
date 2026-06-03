@@ -6,14 +6,12 @@ import { spawnSync } from 'child_process';
 import { validateAgentName } from '../utils/validate.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveCtxRoot } from '../utils/env.js';
 
 interface ExportManifest {
   version: string;
   agent_name: string;
   exported_at: string;
   model?: string;
-  runtime?: string;
   crons?: unknown[];
   memory_files?: string[];
   task_count?: number;
@@ -119,7 +117,6 @@ export const importAgentCommand = new Command('import-agent')
       working_directory: '',
       timezone: importedConfig?.timezone || 'America/New_York',
       model: importedConfig?.model || manifest?.model || 'claude-sonnet-4-6',
-      runtime: importedConfig?.runtime || manifest?.runtime || 'claude-code',
       crons: importedConfig?.crons || manifest?.crons || [],
       ecosystem: { local_version_control: { enabled: true } },
       day_mode_start: '08:00',
@@ -135,7 +132,8 @@ export const importAgentCommand = new Command('import-agent')
     // Copy state (tasks, memory) from export if present
     const exportedStateDir = join(tmpDir, 'state');
     if (existsSync(exportedStateDir)) {
-      const paths = resolvePaths(agentName, options.instance, org, resolveCtxRoot(options.instance));
+      const ctxRoot = join(homedir(), '.cortextos', options.instance);
+      const paths = resolvePaths(agentName, options.instance, org);
 
       // Tasks
       const exportedTasks = join(exportedStateDir, 'tasks');
@@ -155,8 +153,7 @@ export const importAgentCommand = new Command('import-agent')
     }
 
     // Register in enabled-agents.json
-    const paths = resolvePaths(agentName, options.instance, undefined, resolveCtxRoot(options.instance));
-    const ctxRoot = paths.ctxRoot;
+    const ctxRoot = join(homedir(), '.cortextos', options.instance);
     const enabledPath = join(ctxRoot, 'config', 'enabled-agents.json');
     let enabledAgents: Record<string, any> = {};
     try {
@@ -183,7 +180,7 @@ export const importAgentCommand = new Command('import-agent')
 
     // Start the agent
     if (options.start) {
-      const ipc = new IPCClient(options.instance, resolveCtxRoot(options.instance));
+      const ipc = new IPCClient(options.instance);
       const daemonRunning = await ipc.isDaemonRunning();
       if (daemonRunning) {
         console.log(`\n  Starting agent...`);

@@ -12,10 +12,9 @@ import { Command } from 'commander';
 import { createInterface, type Interface } from 'readline';
 import { existsSync, writeFileSync, chmodSync } from 'fs';
 import { join } from 'path';
+import { homedir } from 'os';
 import { spawnSync } from 'child_process';
 import { TelegramAPI, formatValidateError } from '../telegram/api.js';
-import { validateAgentName, validateOrgName } from '../utils/validate.js';
-import { getCtxRoot } from '../utils/paths.js';
 
 function rl(): Interface {
   return createInterface({ input: process.stdin, output: process.stdout });
@@ -25,17 +24,12 @@ function ask(iface: Interface, question: string): Promise<string> {
   return new Promise(resolve => iface.question(question, answer => resolve(answer.trim())));
 }
 
-function askRequired(iface: Interface, question: string, errorMsg: string): Promise<string> {
-  return new Promise(async resolve => {
-    while (true) {
-      const answer = await ask(iface, question);
-      if (answer) {
-        resolve(answer);
-        return;
-      }
-      console.log(`  ${errorMsg}`);
-    }
-  });
+async function askRequired(iface: Interface, question: string, errorMsg: string): Promise<string> {
+  while (true) {
+    const answer = await ask(iface, question);
+    if (answer) return answer;
+    console.log(`  ${errorMsg}`);
+  }
 }
 
 function askDefault(iface: Interface, question: string, defaultVal: string): Promise<string> {
@@ -166,6 +160,14 @@ async function validateTelegramCredsInteractive(
   return null;
 }
 
+function validateAgentName(name: string): boolean {
+  return /^[a-z0-9_-]+$/.test(name);
+}
+
+function validateOrgName(name: string): boolean {
+  return /^[a-z0-9_-]+$/.test(name);
+}
+
 function findProjectRoot(): string {
   // Prefer CTX_FRAMEWORK_ROOT if set (running inside cortextOS session)
   if (process.env.CTX_FRAMEWORK_ROOT && existsSync(join(process.env.CTX_FRAMEWORK_ROOT, 'dist', 'cli.js'))) {
@@ -196,7 +198,7 @@ export const setupCommand = new Command('setup')
   .action(async (options: { instance: string }) => {
     const instanceId = options.instance;
     const projectRoot = findProjectRoot();
-    const ctxRoot = getCtxRoot(instanceId);
+    const ctxRoot = join(homedir(), '.cortextos', instanceId);
 
     const iface = rl();
 
@@ -230,9 +232,7 @@ export const setupCommand = new Command('setup')
     let orgName = '';
     while (true) {
       orgName = await askRequired(iface, '  Organization name: ', 'Organization name cannot be empty.');
-      try {
-        validateOrgName(orgName);
-      } catch {
+      if (!validateOrgName(orgName)) {
         console.log('  Invalid name. Use lowercase letters, numbers, hyphens, and underscores only.');
         continue;
       }
@@ -260,9 +260,7 @@ export const setupCommand = new Command('setup')
     let orchName = '';
     while (true) {
       orchName = await askDefault(iface, '  Orchestrator agent name', 'boss');
-      try {
-        validateAgentName(orchName);
-      } catch {
+      if (!validateAgentName(orchName)) {
         console.log('  Invalid name. Use lowercase letters, numbers, hyphens, and underscores only.');
         continue;
       }
@@ -347,9 +345,7 @@ export const setupCommand = new Command('setup')
       let agentName = '';
       while (true) {
         agentName = await askRequired(iface, '  Agent name: ', 'Agent name is required.');
-        try {
-          validateAgentName(agentName);
-        } catch {
+        if (!validateAgentName(agentName)) {
           console.log('  Invalid name. Use lowercase letters, numbers, hyphens, and underscores only.');
           continue;
         }

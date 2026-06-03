@@ -3,7 +3,6 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 import { fileURLToPath } from 'url';
-import { getCtxRoot } from '../utils/paths.js';
 
 export const ecosystemCommand = new Command('ecosystem')
   .option('--instance <id>', 'Instance ID', 'default')
@@ -11,7 +10,7 @@ export const ecosystemCommand = new Command('ecosystem')
   .option('--output <path>', 'Output file', 'ecosystem.config.js')
   .description('Generate PM2 ecosystem.config.js from agent configs')
   .action(async (options: { instance: string; org?: string; output: string }) => {
-    const ctxRoot = getCtxRoot(options.instance);
+    const ctxRoot = join(homedir(), '.cortextos', options.instance);
     // BUG-035 (companion fix): same project-root discovery as enable-agent.ts
     // so `cortextos ecosystem` works from outside ~/cortextos.
     let projectRoot: string;

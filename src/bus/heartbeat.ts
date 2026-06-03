@@ -1,64 +1,9 @@
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from 'fs';
+import { existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { hostname } from 'os';
 import type { Heartbeat, BusPaths, Task } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { broadcastPresence, isUuid, uuidv5 } from './rgos-mirror.js';
-
-/**
- * SessionEnd-hook end-type markers (see src/hooks/hook-crash-alert.ts). A
- * restart writes one of these; the crash-alert hook reads it WITHOUT consuming
- * it, because one restart fires the hook twice and both firings must classify
- * from the same marker. clearEndMarkers is the marker's primary cleanup: an
- * agent updating its heartbeat is genuinely alive in its post-restart session,
- * so a pending end-marker is stale and is removed here — but only once it is
- * past the grace window below. The hook's TTL is the backstop for a start that
- * fails before ever heartbeating.
- */
-const END_TYPE_MARKERS = [
-  '.restart-planned',
-  '.session-refresh',
-  '.user-restart',
-  '.user-disable',
-  '.user-stop',
-  '.daemon-crashed',
-  '.daemon-stop',
-];
-
-/**
- * A marker younger than this is left alone by clearEndMarkers — it may belong
- * to a restart still in flight. The hazard: the post-restart session can reach
- * its first heartbeat before the dying restart's SECOND SessionEnd firing
- * lands (firing#2 is typically 13-22s after firing#1, but not hard-bounded).
- * Without a grace window, that heartbeat would wipe the marker and firing#2
- * would classify `crash` — the exact false positive this whole change exists
- * to kill, reintroduced under a narrower window.
- *
- * The grace makes that race negligible, not mathematically zero: a firing#2
- * delayed past 120s under heavy load could still miss the marker. That is the
- * same bounded residual as the hook's TTL and is accepted. The window is sized
- * generously on the TTL's cost asymmetry — too tight reopens the FP; too loose
- * only delays cleanup harmlessly (the heartbeat clears it on a later pass, and
- * the 300s hook TTL backstops). 120s clears any plausible firing#2 delay while
- * staying well under the TTL.
- */
-const MARKER_CLEAR_GRACE_MS = 120_000; // 2 minutes
-
-/**
- * Remove SessionEnd-hook end-type markers from an agent's state dir, skipping
- * any marker younger than MARKER_CLEAR_GRACE_MS (an in-flight restart whose
- * second hook firing may not have landed yet). `nowMs` is injectable for tests.
- */
-export function clearEndMarkers(stateDir: string, nowMs: number = Date.now()): void {
-  for (const file of END_TYPE_MARKERS) {
-    const p = join(stateDir, file);
-    if (!existsSync(p)) continue;
-    try {
-      if (nowMs - statSync(p).mtimeMs < MARKER_CLEAR_GRACE_MS) continue; // in-flight — leave it
-      unlinkSync(p);
-    } catch { /* ignore — best-effort cleanup */ }
-  }
-}
 
 /**
  * Update heartbeat for the current agent.
@@ -103,14 +48,6 @@ export async function updateHeartbeat(
     join(paths.stateDir, 'heartbeat.json'),
     JSON.stringify(heartbeat),
   );
-
-  // The agent is alive in its (post-restart) session — clear stale SessionEnd
-  // markers so the crash-alert hook cannot misclassify a later genuine crash
-  // as a planned restart. Markers inside the grace window are left in place
-  // (an in-flight restart's second hook firing may not have landed); they are
-  // cleared on a later heartbeat. This is the primary marker cleanup; the
-  // hook's TTL is the failed-start backstop.
-  clearEndMarkers(paths.stateDir);
 
   // Fire-and-forget Supabase upsert — no-ops gracefully if env vars are absent.
   // Errors are non-fatal (local heartbeat must always succeed) but ARE logged so
@@ -264,8 +201,6 @@ async function pushHeartbeatToSupabase(agentName: string, hb: Heartbeat): Promis
     agent_name: agentName,
     org: hb.org ?? '',
     host: hostname(),
-    kind: 'agent',
-    cwd: process.cwd(),
     status: hb.status,
     current_task: hb.current_task ?? '',
     mode: hb.mode,
@@ -300,12 +235,6 @@ async function pushHeartbeatToSupabase(agentName: string, hb: Heartbeat): Promis
  * local fleet views. This table powers AgentOps fleet status; without this
  * patch a healthy local task store can show in-progress work while
  * orch_agents.current_task_id remains null, making every active agent look idle.
- *
- * current_task_id is only written when the local bus has an active task.
- * When no local task is in flight we omit the field entirely so that anchors
- * set by cortex_claim_task (RGOS-native tasks, absent from the bus ledger)
- * are not wiped on each heartbeat cycle.  cortex_complete_task is responsible
- * for clearing the anchor when the RGOS task finishes.
  */
 async function pushAgentStatusToSupabase(
   agentName: string,
@@ -317,8 +246,9 @@ async function pushAgentStatusToSupabase(
   if (!url || !key) return;
 
   const roleId = `cortextos-${agentName}`;
-  const row: Record<string, unknown> = {
+  const row = {
     is_active: true,
+    current_task_id: activeTask?.mirroredId ?? null,
     last_heartbeat: hb.last_heartbeat,
     config_json: {
       mode: hb.mode,
@@ -328,12 +258,6 @@ async function pushAgentStatusToSupabase(
     },
     updated_at: new Date().toISOString(),
   };
-  // Only overwrite current_task_id when the local bus has evidence of an active
-  // task. Omitting the field on a null preserves RGOS-native anchors that live
-  // in orch_tasks (set by cortex_claim_task) and have no local task file.
-  if (activeTask !== null) {
-    row.current_task_id = activeTask.mirroredId;
-  }
 
   const endpoint = `${url}/rest/v1/orch_agents?role_id=eq.${encodeURIComponent(roleId)}`;
   const response = await fetch(endpoint, {

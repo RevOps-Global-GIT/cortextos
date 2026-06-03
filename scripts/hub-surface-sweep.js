@@ -37,33 +37,11 @@ const SCAN_REPOS = [
   'RevOps-Global-GIT/charlie-holstine',
 ];
 
-// Dynamically parse which routes the QA harness actually supports so that
-// adding a new page to hub-qa-playwright.ts auto-marks it covered here,
-// without a manual KNOWN_QA_ROUTES edit (the #641 drift class).
-function loadHarnessRoutes() {
-  const harnessPath = path.join(REPO_ROOT, 'scripts/hub-qa-playwright.ts');
-  if (!fs.existsSync(harnessPath)) return new Set();
-  const src = fs.readFileSync(harnessPath, 'utf8');
-  const routes = new Set();
-  // All string literals in `targetPage === '/...'` conditions
-  for (const [, route] of src.matchAll(/targetPage\s*===\s*'([^']+)'/g)) {
-    if (route.startsWith('/')) routes.add(route);
-  }
-  // Canonical values in PAGE_URL_MAP (right-hand side paths)
-  const mapBlock = src.match(/PAGE_URL_MAP[^=]*=\s*\{([^}]+)\}/s);
-  if (mapBlock) {
-    for (const [, val] of mapBlock[1].matchAll(/:\s*'([^']+)'/g)) {
-      if (val.startsWith('/')) routes.add(val.split('?')[0]); // strip query params
-    }
-  }
-  return routes;
-}
-
 const KNOWN_QA_ROUTES = new Set([
   '/time', '/my-day', '/tasks', '/', '/dashboard', '/app/orchestrator',
   '/app/fleet/activity', '/app/work/inbox', '/app/work/approvals',
   '/companies', '/projects', '/reports', '/pipeline',
-  '/app/fleet/tasks', '/app/fleet/agents', '/app/fleet-sessions', '/social-content',
+  '/app/fleet/tasks', '/app/fleet/agents', '/social-content',
   '/attribution-deployer', '/content-attribution', '/content-review', '/app/wiki', '/app/cortex/theta', '/app/presence',
   '/app/signals', '/app/supreme-outstanding',
   '/assessment-detail', '/assessment-rubric', '/assessments',
@@ -162,31 +140,7 @@ const KNOWN_QA_ROUTES = new Set([
   '/beehives', '/beehives/langstroth', '/beehives/warre',
   '/cottage', '/farm', '/field', '/grounds', '/mushrooms', '/music', '/orchard',
   '/talk',
-  // Dynamically derived from hub-qa-playwright.ts — new harness pages auto-covered
-  ...loadHarnessRoutes(),
 ]);
-
-// ---------------------------------------------------------------------------
-// Regression guard — catches stale-branch false positives (#641/#642 class)
-//
-// When this script runs from a feature branch predating the PRs that added a
-// route to KNOWN_QA_ROUTES (or added loadHarnessRoutes()), the Set is
-// incomplete and a covered route appears as a blind spot.  Warn loudly so the
-// developer knows to run from fork/main instead of the working tree.
-//
-// Routes listed here are known-covered anchors: if any are absent from
-// KNOWN_QA_ROUTES the guard emits a warning that is visible in CI and cron
-// logs without aborting the run.
-const COVERAGE_GUARD_ROUTES = [
-  '/app/fleet-sessions',   // added #641; dynamic derivation #642
-  '/app/fleet/tasks',
-  '/app/fleet/activity',
-];
-for (const r of COVERAGE_GUARD_ROUTES) {
-  if (!KNOWN_QA_ROUTES.has(r)) {
-    console.warn(`[surface-sweep] WARN: ${r} not in KNOWN_QA_ROUTES — possible stale-branch false positive (run from fork/main to get accurate results)`);
-  }
-}
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
 // Uses startsWith so /guide/ covers /guide/foo, and /guide covers /guide-admin etc.
