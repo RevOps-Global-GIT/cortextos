@@ -1,7 +1,8 @@
 import type { BusPaths } from '../types/index.js';
 import { listAgents } from './agents.js';
+import { readCrons } from './crons.js';
 import { listTasks } from './task.js';
-import { isEnabled, mapStatus, uuidv5 } from './rgos-mirror.js';
+import { isEnabled, mapStatus, mirrorAgentStatusToRgos, mirrorTaskToRgos, uuidv5 } from './rgos-mirror.js';
 
 type DriftKind = 'task_missing' | 'task_status' | 'agent_missing' | 'agent_active';
 
@@ -23,6 +24,34 @@ export interface AgentOpsMirrorReconcileResult {
   mirror_agents: number;
   drift_count: number;
   drifts: AgentOpsMirrorDrift[];
+}
+
+export interface AgentOpsMirrorRepairFailure {
+  kind: 'task' | 'agent';
+  id: string;
+  error: string;
+}
+
+export interface AgentOpsCronAudit {
+  live_crons: number;
+  enabled_crons: number;
+  disabled_crons: number;
+  note: string;
+}
+
+export interface AgentOpsMirrorRepairResult {
+  ok: boolean;
+  skipped?: boolean;
+  reason?: string;
+  dry_run: boolean;
+  before: AgentOpsMirrorReconcileResult;
+  after?: AgentOpsMirrorReconcileResult;
+  planned_tasks: number;
+  planned_agents: number;
+  repaired_tasks: number;
+  repaired_agents: number;
+  failures: AgentOpsMirrorRepairFailure[];
+  crons: AgentOpsCronAudit;
 }
 
 async function fetchMirrorRows<T>(table: string, params: URLSearchParams): Promise<T[]> {
@@ -180,5 +209,121 @@ export async function reconcileAgentOpsMirror(
     mirror_agents: mirrorAgents.length,
     drift_count: driftCount,
     drifts,
+  };
+}
+
+function taskMirrorEvent(taskStatus: string): 'update' | 'complete' {
+  return taskStatus === 'completed' ? 'complete' : 'update';
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function auditCrons(agentNames: string[]): AgentOpsCronAudit {
+  let liveCrons = 0;
+  let enabledCrons = 0;
+  let disabledCrons = 0;
+
+  for (const agentName of agentNames) {
+    const crons = readCrons(agentName);
+    liveCrons += crons.length;
+    for (const cron of crons) {
+      if (cron.enabled === false) disabledCrons++;
+      else enabledCrons++;
+    }
+  }
+
+  return {
+    live_crons: liveCrons,
+    enabled_crons: enabledCrons,
+    disabled_crons: disabledCrons,
+    note: 'crons enumerated only; AgentOps currently mirrors cron disablement as Activity events, not persistent cron rows',
+  };
+}
+
+export async function repairAgentOpsMirror(
+  paths: BusPaths,
+  options?: { org?: string; maxDrifts?: number; dryRun?: boolean },
+): Promise<AgentOpsMirrorRepairResult> {
+  const before = await reconcileAgentOpsMirror(paths, options);
+  const liveTasks = listTasks(paths);
+  const liveAgents = await listAgents(paths.ctxRoot, options?.org);
+  const crons = auditCrons(liveAgents.map(agent => agent.name));
+  const dryRun = options?.dryRun === true;
+
+  if (before.skipped || !isEnabled()) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: before.reason ?? 'RGOS mirror disabled or Supabase env missing',
+      dry_run: dryRun,
+      before,
+      planned_tasks: liveTasks.length,
+      planned_agents: liveAgents.length,
+      repaired_tasks: 0,
+      repaired_agents: 0,
+      failures: [],
+      crons,
+    };
+  }
+
+  if (dryRun) {
+    return {
+      ok: true,
+      dry_run: true,
+      before,
+      planned_tasks: liveTasks.length,
+      planned_agents: liveAgents.length,
+      repaired_tasks: 0,
+      repaired_agents: 0,
+      failures: [],
+      crons,
+    };
+  }
+
+  const failures: AgentOpsMirrorRepairFailure[] = [];
+  let repairedTasks = 0;
+  let repairedAgents = 0;
+
+  for (const task of liveTasks) {
+    try {
+      await mirrorTaskToRgos(task, taskMirrorEvent(task.status));
+      repairedTasks++;
+    } catch (err) {
+      failures.push({ kind: 'task', id: task.id, error: errorMessage(err) });
+    }
+  }
+
+  for (const agent of liveAgents) {
+    try {
+      await mirrorAgentStatusToRgos(agent.name, {
+        isActive: agent.enabled !== false && agent.running === true,
+        currentTask: agent.current_task ?? null,
+        lastHeartbeat: agent.last_heartbeat ?? null,
+        mode: agent.mode ?? null,
+        reason: 'agentops_mirror_repair',
+        instanceId: agent.instance_id ?? process.env.CTX_INSTANCE_ID,
+        org: agent.org || options?.org,
+      });
+      repairedAgents++;
+    } catch (err) {
+      failures.push({ kind: 'agent', id: agent.name, error: errorMessage(err) });
+    }
+  }
+
+  const after = await reconcileAgentOpsMirror(paths, options);
+
+  return {
+    ok: failures.length === 0 && after.drift_count === 0,
+    dry_run: false,
+    before,
+    after,
+    planned_tasks: liveTasks.length,
+    planned_agents: liveAgents.length,
+    repaired_tasks: repairedTasks,
+    repaired_agents: repairedAgents,
+    failures,
+    crons,
   };
 }
