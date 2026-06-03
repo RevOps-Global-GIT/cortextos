@@ -35,10 +35,9 @@ Each run writes a report to `orgs/revops-global/agents/codex/output/playwright-q
 Use routes in this priority order — never report "blocked" due to Codex credits, as alternatives are always available:
 
 1. **Playwright harness** (`scripts/hub-qa-playwright.ts`) — mandatory authenticated page check route; always runs first regardless of Codex state.
-2. **Orgo CU lease** (`cortextos bus orgo-lease-claim`) — visual/interactive checks needing a real browser; use for screenshot proof and click interactions.
-3. **Agent Browser (Vercel)** — additional browser route for page-load and UI validation.
-4. **Claude in-context** — API/SQL/data verification; always available.
-5. **Codex Chrome** — optional supplement when other routes are active.
+2. **agent-browser** — primary browser route for visual/interactive checks needing a real browser; use for screenshot proof and click interactions.
+3. **Claude in-context** — API/SQL/data verification; always available.
+4. **Codex Chrome** — optional supplement when other routes are active.
 
 ## Pages To Sample
 
@@ -73,7 +72,7 @@ Selector-only PASS is not sufficient. Stale data, misleading labels, fake data p
 
 ## Severity Classification
 
-After collecting Playwright FAIL/DEFERRED results and any Orgo CU evidence, classify each finding:
+After collecting Playwright FAIL/DEFERRED results and any agent-browser evidence, classify each finding:
 
 - **P1**: Auth broken, page not loading, data completely missing, critical workflow blocked.
 - **P2**: Misleading data, stale content older than 1h, broken filter/action, missing key metric.

@@ -65,21 +65,22 @@ TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
 ---
 
-## UI/Browser Work Routing — Orgo CU First
+## UI/Browser Work Routing — agent-browser First
 
 When decomposing directives, run this pre-dispatch check before assigning work:
 
-If a task involves any of `{browser, screenshot, click, OAuth, web form, login, scrape, IDE GUI}`, route it to the Orgo lease pool first. This includes dashboard QA, visual proof, session checks, browser setup, and any web interaction that can run in a cloud desktop.
+If a task involves any of `{browser, screenshot, click, OAuth, web form, login, scrape, IDE GUI}`, route it to a browser runtime. This includes dashboard QA, visual proof, session checks, browser setup, and any web interaction.
 
-1. **Attempt Orgo lease first** — claim an Orgo node with `cortextos bus orgo-lease-claim` and run the browser/UI work there. This is the primary and preferred path. Org directive (active through 2026-05-28): drive Orgo utilization as the fleet scales.
-2. **Capture failure artifact before Mac fallback** — if Orgo cannot handle the required auth state or capability, write an artifact showing the failed Orgo attempt. It must be recent (<10 minutes) before Mac SSH fallback is allowed.
-3. **Mac SSH only as gated fallback** — use `ssh gregs-mac` or `cortextos bus computer-use --ssh-host gregs-mac` only after the Orgo failure artifact exists. The bus command enforces this with `--orgo-failure-artifact <path>`.
+1. **agent-browser first** — the primary and preferred path for browser/UI work (logged-in or exploratory sessions, with profile reuse). For stateless scripted checks (deploy verify, mobile QA, multi-URL sweeps) use `dev-browser --headless`.
+2. **Mac SSH Codex fallback** — use `ssh gregs-mac` or `cortextos bus computer-use --ssh-host gregs-mac` only for Mac-specific app/session state that agent-browser cannot reach (a native macOS app, or Greg's saved desktop session).
 
 **Decision example:**
-- "Check status of a web dashboard" → Orgo CU (stateless browser session)
-- "Operate BotFather or Telegram on Greg's Mac" → Mac SSH fallback (Mac-specific app state)
+- "Check status of a web dashboard" → agent-browser
+- "Operate BotFather or a native Mac app" → Mac SSH fallback (Mac-specific app state)
 
-When dispatching browser tasks to codex: explicitly state "(1) claim Orgo lease, (2) attach failed Orgo artifact if fallback is needed, (3) Mac SSH only with `--orgo-failure-artifact`" in the task description.
+When dispatching browser tasks to codex: state "(1) agent-browser first, (2) Mac SSH (`--ssh-host gregs-mac`) only for Mac-specific state" in the task description.
+
+(Orgo/Codex-CU was removed 2026-06 — do not route to Orgo lease pools.)
 
 ---
 
