@@ -23,23 +23,19 @@ import { writeDisableMarker } from '../../../src/cli/enable-agent';
 import { writeStopMarker } from '../../../src/cli/stop';
 
 describe('BUG-036: lifecycle marker writes', () => {
-  // The helpers resolve the state dir via resolveCtxRoot() which honours CTX_ROOT first.
-  // Clear CTX_ROOT so the fallback path (homedir() + instanceId) uses our tmpHome.
+  // The helpers write under homedir() — point HOME at a temp dir for the test
+  // so we don't pollute the user's real ~/.cortextos.
   let tmpHome: string;
   const origHome = process.env.HOME;
-  const origCtxRoot = process.env.CTX_ROOT;
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'cortextos-bug036-'));
     process.env.HOME = tmpHome;
-    delete process.env.CTX_ROOT;
   });
 
   afterEach(() => {
     if (origHome === undefined) delete process.env.HOME;
     else process.env.HOME = origHome;
-    if (origCtxRoot === undefined) delete process.env.CTX_ROOT;
-    else process.env.CTX_ROOT = origCtxRoot;
     rmSync(tmpHome, { recursive: true, force: true });
   });
 

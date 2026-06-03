@@ -40,8 +40,7 @@ const TEST_ORG = 'acme';
 const createdTaskIds: string[] = [];
 
 function taskDir(): string {
-  const root = tmpRoot || process.env.CTX_ROOT || join(homedir(), '.cortextos', 'default');
-  return join(root, 'orgs', TEST_ORG, 'tasks');
+  return join(homedir(), '.cortextos', 'default', 'orgs', TEST_ORG, 'tasks');
 }
 
 beforeEach(() => {

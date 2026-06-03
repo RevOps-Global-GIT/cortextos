@@ -87,12 +87,6 @@ export class AgentProcess implements ManagedAgent {
   // (each start() recreates the PTY, but the Telegram handle persists).
   private telegramApi: TelegramAPI | null = null;
   private telegramChatId: string | null = null;
-  // Issue #392: tracks whether the most recently built startup prompt consumed
-  // a restart marker. start() reads this after spawn to decide whether the
-  // daemon should fire the codex-app-server back-online Telegram directly
-  // (skipped on handoff restart or silent auto-reset).
-  private lastSpawnWasHandoff = false;
-  private lastSpawnWasSilentRestart = false;
 
   constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn, cronScheduler?: CronScheduler | null) {
     this.name = name;
@@ -302,13 +296,6 @@ export class AgentProcess implements ManagedAgent {
         this.log(`Boot heartbeat write failed (non-fatal): ${err}`);
       }
 
-      // Issue #392: codex-app-server does not reliably execute the inline
-      // "Send a Telegram message saying you are back online" instruction the
-      // way claude-code does, so fire the back-online ping directly from the
-      // daemon for that runtime. Skipped on handoff restart and silent
-      // auto-reset, which have their own explicit UX contracts.
-      this.maybeSendCodexBootNotification();
-
       // Start session timer
       this.startSessionTimer();
 
@@ -455,6 +442,7 @@ export class AgentProcess implements ManagedAgent {
     const forceFreshExists = existsSync(join(this.env.ctxRoot, 'state', this.name, '.force-fresh'));
     const rotationType = forceFreshExists ? 'context-handoff' : 'soft';
     this.writeRotationEvent(rotationType, 'session timer reached limit').catch(() => {});
+
     await this.stop();
     await this.start();
     this.updateRotationResumeSuccess().catch(() => {});
@@ -589,58 +577,16 @@ export class AgentProcess implements ManagedAgent {
 
   // --- Private methods ---
 
-  private tailStdoutLog(maxBytes: number): string {
-    const logPath = join(this.env.ctxRoot, 'logs', this.name, 'stdout.log');
-    try {
-      if (!existsSync(logPath)) return '';
-      const stats = statSync(logPath);
-      const start = Math.max(0, stats.size - maxBytes);
-      const len = stats.size - start;
-      const fd = require('fs').openSync(logPath, 'r');
-      try {
-        const buf = Buffer.alloc(len);
-        const read = require('fs').readSync(fd, buf, 0, len, start);
-        return buf.toString('utf-8', 0, read);
-      } finally {
-        require('fs').closeSync(fd);
-      }
-    } catch {
-      return '';
-    }
-  }
-
-  private detectImagePoisonCrash(recentOutput: string): boolean {
-    if (!recentOutput) return false;
-    if (recentOutput.includes('API Error: 400') && recentOutput.includes('image.source.base64')) {
-      return true;
-    }
-    if (/image format image\/[a-z]+ not supported/i.test(recentOutput)) {
-      return true;
-    }
-    return false;
-  }
-
-  private armForceFresh(reason: string): void {
-    try {
-      const stateDir = join(this.env.ctxRoot, 'state', this.name);
-      ensureDir(stateDir);
-      const markerPath = join(stateDir, '.force-fresh');
-      writeFileSync(markerPath, `${new Date().toISOString()} ${reason}\n`, 'utf-8');
-    } catch (err) {
-      this.log(`Failed to arm .force-fresh marker: ${err}`);
-    }
-  }
-
   private handleExit(exitCode: number, signal?: number): void {
-    // Capture last 16KB of stdout for image-poison detection before nulling pty.
-    const recentOutput = this.tailStdoutLog(16384);
-
     // Snapshot uptime BEFORE we null this.pty / clear the session timer below.
+    // The premature-voluntary-exit check needs to know how long the session
+    // actually ran for.
     const sessionUptimeMs = this.sessionStart
       ? Date.now() - this.sessionStart.getTime()
       : 0;
 
     // Capture rate-limit state from the output buffer BEFORE nulling the PTY.
+    // Once this.pty = null, we lose access to the buffer.
     const isRateLimited = this.pty?.getOutputBuffer()?.hasRateLimitSignature() ?? false;
     const rateLimitResetSeconds = isRateLimited
       ? (this.pty?.getOutputBuffer()?.getRateLimitResetSeconds() ?? null)
@@ -775,23 +721,6 @@ export class AgentProcess implements ManagedAgent {
     const silentRestartPath = join(this.env.ctxRoot, 'state', this.name, '.silent-restart');
     if (existsSync(silentRestartPath)) {
       this.log('ctx_autoreset (.silent-restart) — skipping crash count, sessionRefresh handles restart');
-      return;
-    }
-
-    // Image-poison auto-recovery: detect API 400 image-format crashes and
-    // respawn without counting against max_crashes_per_day. Checked BEFORE
-    // premature-exit and CrashLoopPauser so poison crashes don't trip either.
-    if (exitCode === 0 && this.detectImagePoisonCrash(recentOutput)) {
-      this.log('Image-poison crash detected (API 400, unsupported image format). Arming .force-fresh and restarting without counting against max_crashes_per_day.');
-      this.armForceFresh('image-poison auto-recovery');
-      this.appendCrashToRestartsLog(exitCode, 5000, 'IMAGE_POISON_RECOVERY');
-      this.status = 'crashed';
-      this.notifyStatusChange();
-      setTimeout(() => {
-        if (this.status === 'crashed') {
-          this.start().catch(err => this.log(`Image-poison restart failed: ${err}`));
-        }
-      }, 5000);
       return;
     }
 
@@ -956,7 +885,7 @@ export class AgentProcess implements ManagedAgent {
       return hermesDbExists(hermesHome);
     }
 
-    // Check for force-fresh marker (all runtimes honor it).
+    // Check for force-fresh marker
     const forceFreshPath = join(this.env.ctxRoot, 'state', this.name, '.force-fresh');
     if (existsSync(forceFreshPath)) {
       try {
@@ -966,24 +895,7 @@ export class AgentProcess implements ManagedAgent {
       return false;
     }
 
-    // codex-app-server: session continuity is tracked by the adapter's own
-    // codex-app-server-thread.json under ctxRoot/state/<agent>/. The Claude
-    // JSONL check below is meaningless for the codex runtime, and a stale
-    // Claude JSONL left over from a prior Claude-runtime tenure caused
-    // continue-mode → thread/resume timeout → exit_code=0 crash loop
-    // (testorg codex-agent crashed 3x with this signature on 2026-05-09,
-    // 05-14, and 05-16 before backoff drained the pending resume RPC).
-    if (this.config.runtime === 'codex-app-server') {
-      const threadStatePath = join(
-        this.env.ctxRoot,
-        'state',
-        this.name,
-        'codex-app-server-thread.json',
-      );
-      return existsSync(threadStatePath);
-    }
-
-    // Default (Claude runtime): existing conversation = JSONL files present.
+    // Check for existing conversation
     const launchDir = resolveAgentCwd(this.env.agentDir, this.config.working_directory);
     if (!launchDir) return false;
 
@@ -1072,6 +984,7 @@ export class AgentProcess implements ManagedAgent {
     if (existsSync(rateLimitMarker)) {
       rateLimitBlock = ' RATE-LIMIT RECOVERY: Your previous session was paused due to API rate limiting. Resume normal operations but be mindful of request volume.';
       try {
+        const { unlinkSync } = require('fs');
         unlinkSync(rateLimitMarker);
       } catch { /* ignore */ }
     }
@@ -1082,8 +995,6 @@ export class AgentProcess implements ManagedAgent {
     const handoffBlock = this.consumeHandoffBlock();
     const isHandoffRestart = handoffBlock.length > 0;
     const isSilentRestart = this.consumeSilentRestartMarker();
-    this.lastSpawnWasHandoff = isHandoffRestart;
-    this.lastSpawnWasSilentRestart = isSilentRestart;
     // HANDOFF UX: the pickup message MUST be the first action after reading the handoff doc —
     // before cron restoration, before heartbeat, before anything else. Placing this instruction
     // immediately after the handoffBlock in the prompt ensures it is not buried.
@@ -1111,9 +1022,6 @@ export class AgentProcess implements ManagedAgent {
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
-    // Session refresh (--continue) is neither a handoff restart nor a silent auto-reset.
-    this.lastSpawnWasHandoff = false;
-    this.lastSpawnWasSilentRestart = false;
     return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Restore your crons from config.json ONLY if missing. CRITICAL DEDUP: Call CronList FIRST AND run 'cortextos bus list-crons $CTX_AGENT_NAME'. For each config.json entry, search BOTH the CronList output AND the bus list-crons output for its prompt text — if the prompt already appears in either, SKIP that cron. For entries NOT already listed: use CronCreate directly (do NOT use /loop — /loop will prompt about cloud scheduling which blocks autonomous boot). Convert interval to cron expression: 1h→"0 */1 * * *", 6h→"0 */6 * * *", 24h→"0 0 * * *", Nm→"*/N * * * *". Pass recurring:true for recurring entries, no recurring flag for once entries (only if fire_at is in the future). Rapid --continue restarts must not accumulate duplicates.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. After restoring crons and checking inbox, send a Telegram message to the user saying you are back online.`;
   }
 
@@ -1172,6 +1080,7 @@ export class AgentProcess implements ManagedAgent {
     // Primary path: explicit marker written by hard-restart or watchdog
     if (existsSync(markerPath)) {
       try {
+        const { unlinkSync } = require('fs');
         const docPath = readFileSync(markerPath, 'utf-8').trim();
         unlinkSync(markerPath);
         if (docPath && existsSync(docPath)) {
@@ -1239,34 +1148,10 @@ export class AgentProcess implements ManagedAgent {
     const markerPath = join(this.env.ctxRoot, 'state', this.name, '.silent-restart');
     if (!existsSync(markerPath)) return false;
     try {
+      const { unlinkSync } = require('fs');
       unlinkSync(markerPath);
     } catch { /* ignore — we still treat it as silent */ }
     return true;
-  }
-
-  /**
-   * Issue #392: send the back-online Telegram notification directly from the
-   * daemon when the codex-app-server runtime spawns. The boot prompt's inline
-   * "Send a Telegram message..." instruction reaches the codex thread but is
-   * not executed reliably as a tool call, leaving James without the standard
-   * post-restart notification claude-code peers send.
-   *
-   * Skipped when:
-   *  - runtime is anything other than codex-app-server (claude-code/hermes
-   *    already emit this via the prompt),
-   *  - the most recent prompt was built for a handoff restart (the agent
-   *    sends its own contextual "back — ..." reply in that case),
-   *  - the most recent prompt was built for a silent auto-reset,
-   *  - no Telegram handle has been wired (no chat_id configured).
-   */
-  private maybeSendCodexBootNotification(): void {
-    if (this.config.runtime !== 'codex-app-server') return;
-    if (this.lastSpawnWasHandoff) return;
-    if (this.lastSpawnWasSilentRestart) return;
-    if (!this.telegramApi || !this.telegramChatId) return;
-    this.telegramApi
-      .sendMessage(this.telegramChatId, `Agent ${this.name} is back online`)
-      .catch(() => { /* non-fatal: notification is observability only */ });
   }
 
   private startSessionTimer(): void {
@@ -1474,7 +1359,7 @@ export class AgentProcess implements ManagedAgent {
   private appendCrashToRestartsLog(
     exitCode: number,
     backoffMs: number,
-    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP' | 'PREMATURE_EXIT' | 'PREMATURE_EXIT_LOOP' | 'IMAGE_POISON_RECOVERY',
+    kind: 'CRASH' | 'HALTED' | 'CRASH_LOOP' | 'PREMATURE_EXIT' | 'PREMATURE_EXIT_LOOP',
   ): void {
     try {
       const logDir = join(this.env.ctxRoot, 'logs', this.name);
@@ -1484,11 +1369,12 @@ export class AgentProcess implements ManagedAgent {
       if (kind === 'HALTED') {
         details = `exit_code=${exitCode} crash_count=${this.crashCount} max_crashes=${this.maxCrashesPerDay}`;
       } else if (kind === 'PREMATURE_EXIT' || kind === 'PREMATURE_EXIT_LOOP') {
+        // Premature exits are tracked in their own counter and do NOT touch
+        // crashCount. Log the premature-exit counter instead so the file
+        // tells a coherent story.
         details =
           `exit_code=${exitCode} premature_exits=${this.prematureExitTimestamps.length}` +
           ` window_s=${this.prematureExitWindowMs / 1000} backoff_s=${backoffMs / 1000}`;
-      } else if (kind === 'IMAGE_POISON_RECOVERY') {
-        details = `exit_code=${exitCode} backoff_s=${backoffMs / 1000} (not counted toward max_crashes)`;
       } else {
         details = `exit_code=${exitCode} crash_count=${this.crashCount} backoff_s=${backoffMs / 1000}`;
       }

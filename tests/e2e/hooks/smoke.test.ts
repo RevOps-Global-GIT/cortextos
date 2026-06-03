@@ -312,8 +312,6 @@ describe('hook-idle-flag smoke', () => {
           CTX_AGENT_NAME: 'test-agent',
           CTX_INSTANCE_ID: 'default',
           HOME: tmpHome,
-          // CTX_ROOT must be unset so getCtxRoot() falls back to HOME/.cortextos/instanceId
-          CTX_ROOT: '',
         },
       );
 
@@ -360,7 +358,6 @@ describe('hook-crash-alert smoke', () => {
           CTX_AGENT_NAME: 'test-agent',
           CTX_INSTANCE_ID: 'default',
           HOME: tmpHome,
-          CTX_ROOT: '', // clear inherited CTX_ROOT so hook uses HOME/.cortextos/instanceId
           // No BOT_TOKEN / CHAT_ID — Telegram skipped, log still written
         },
       );
@@ -392,7 +389,6 @@ describe('hook-crash-alert smoke', () => {
           CTX_AGENT_NAME: 'test-agent',
           CTX_INSTANCE_ID: 'default',
           HOME: tmpHome,
-          CTX_ROOT: '', // clear inherited CTX_ROOT so hook uses HOME/.cortextos/instanceId
         },
       );
 
@@ -402,13 +398,8 @@ describe('hook-crash-alert smoke', () => {
       expect(existsSync(crashLog)).toBe(true);
       const content = readFileSync(crashLog, 'utf-8');
       expect(content).toMatch(/type=user-stop/);
-      // Marker is intentionally preserved after the first hook firing.
-      // classifyFromMarkers() does NOT unlink fresh markers because a daemon
-      // restart fires this hook twice (once per session boundary); both firings
-      // must see the marker to classify correctly. The marker is cleared by the
-      // first post-restart heartbeat, or lazy-unlinked if it becomes stale
-      // (> MARKER_TTL_MS without a successful restart heartbeat).
-      expect(existsSync(join(stateDir, '.user-stop'))).toBe(true);
+      // Marker file should be consumed (deleted) by the hook
+      expect(existsSync(join(stateDir, '.user-stop'))).toBe(false);
     } finally {
       rmSync(tmpHome, { recursive: true, force: true });
     }

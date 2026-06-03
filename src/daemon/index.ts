@@ -1,10 +1,16 @@
+import { killOrphanedClaude } from "./orphan-cleanup.js";
 import { AgentManager } from './agent-manager.js';
 import { IPCServer } from './ipc-server.js';
 import { readdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { join } from 'path';
-import { ensureDir } from '../utils/atomic.js';
-import { getCtxRoot } from '../utils/paths.js';
+import { homedir } from 'os';
+import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
+
+// Each fast-checker registers a process-level SIGUSR1 handler (see
+// fast-checker.ts:102). With >10 active agents the default Node listener cap
+// trips MaxListenersExceededWarning. Bump for the full fleet.
+process.setMaxListeners(20);
 
 // Each fast-checker registers a process-level SIGUSR1 handler (see
 // fast-checker.ts:102). With >10 active agents the default Node listener cap
@@ -31,7 +37,7 @@ export interface CrashEvent { ts: string; err: string; }
 export interface CrashHistory { crashes: CrashEvent[]; lastAlertAt?: string; }
 
 export const CRASH_HISTORY_MAX = 20;
-export const CRASH_LOOP_WINDOW_MS = 15 * 60 * 1000;    // 15 min detection window
+const CRASH_LOOP_WINDOW_MS = 15 * 60 * 1000;    // 15 min detection window
 export const CRASH_LOOP_THRESHOLD = 3;                  // 3 crashes trips the alert
 export const CRASH_LOOP_COOLDOWN_MS = 30 * 60 * 1000;   // 30 min between alerts
 const TELEGRAM_SEND_TIMEOUT_MS = 3000;           // bounded — we're crashing
@@ -54,7 +60,7 @@ export function readCrashHistory(ctxRoot: string): CrashHistory {
 export function writeCrashHistory(ctxRoot: string, history: CrashHistory): void {
   try {
     ensureDir(join(ctxRoot, 'state'));
-    writeFileSync(crashHistoryPath(ctxRoot), JSON.stringify(history, null, 2), 'utf-8');
+    atomicWriteSync(crashHistoryPath(ctxRoot), JSON.stringify(history, null, 2));
   } catch {
     // disk full / permission issue — don't block exit
     console.error('[daemon] Failed to persist crash history (non-fatal)');
@@ -104,6 +110,10 @@ export function writeDaemonCrashedMarkers(ctxRoot: string): void {
   } catch { return; }
   const ts = new Date().toISOString();
   for (const name of names) {
+    // Synthetic / test agents (^test-) are ephemeral and may share a real bot
+    // token. Writing .daemon-crashed for them routes daemon-crash alerts to the
+    // operator chat via hook-crash-alert.ts — suppress to avoid false alarms.
+    if (/^test-/i.test(name)) continue;
     try {
       writeFileSync(join(stateDir, name, '.daemon-crashed'), ts, 'utf-8');
     } catch { /* swallow per-agent */ }
@@ -225,12 +235,8 @@ class Daemon {
 
   constructor() {
     this.instanceId = process.env.CTX_INSTANCE_ID || 'default';
-    // #568: honour CTX_ROOT (set by ecosystem.config.js) so the data root is
-    // relocatable; falls back to ~/.cortextos/{instance}. Agent PTYs receive the
-    // same CTX_ROOT (agent-pty.ts), so daemon and bus commands agree on one root.
-    // Nested cortextOS instances must set their own CTX_ROOT (or unset it) to
-    // avoid inheriting this daemon's root.
-    this.ctxRoot = getCtxRoot(this.instanceId);
+    // Always derive ctxRoot from instanceId to avoid inheriting a parent cortextOS's CTX_ROOT
+    this.ctxRoot = join(homedir(), '.cortextos', this.instanceId);
   }
 
   async start(): Promise<void> {
@@ -264,8 +270,14 @@ class Daemon {
     this.agentManager = new AgentManager(this.instanceId, this.ctxRoot, frameworkRoot, org);
 
     // Start IPC server
-    this.ipcServer = new IPCServer(this.agentManager, this.instanceId, this.ctxRoot);
+    this.ipcServer = new IPCServer(this.agentManager, this.instanceId);
     await this.ipcServer.start();
+
+    // Kill orphaned Claude processes from prior daemon run (BUG: typing forever)
+    const orphansKilled = killOrphanedClaude();
+    if (orphansKilled > 0) {
+      console.log(`[daemon] Cleaned up ${orphansKilled} orphaned Claude process(es)`);
+    }
 
     // Discover and start agents
     await this.agentManager.discoverAndStart();
@@ -303,6 +315,17 @@ class Daemon {
         return;
       }
       shuttingDown = true;
+      // Write .daemon-stop markers synchronously BEFORE yielding to async work.
+      // PM2 sends SIGINT/SIGTERM to the daemon's entire process group, so PTY
+      // children (Claude Code CLI) receive the signal at the same instant.
+      // agent-process.ts:handleExit() checks for .daemon-stop to distinguish a
+      // clean shutdown from a crash. Without markers on disk right now, all
+      // PTY exits are mis-classified as crashes → SESSION CONTINUATION flood.
+      // stopAll() also writes these markers, but only after the event loop
+      // yields into the async shutdown() call — too late for racing PTY exits.
+      if (this.agentManager) {
+        this.agentManager.writeAllDaemonStopMarkersSync();
+      }
       shutdown().catch((err) => {
         console.error('[daemon] Fatal shutdown error:', err);
         process.exit(1);

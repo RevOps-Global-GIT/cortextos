@@ -227,23 +227,18 @@ async function postgrestUpsert(
  * existing row ID prevents a later status update from creating a second
  * deterministic UUID shadow row for the same local task.
  *
- * Dual-write dedup: when an agent calls both cortex_create_task (source=null,
- * created_by=cortex) AND bus create-task for the same work, two rows would
- * otherwise appear. Three-stage dedup:
- *   1. Primary: find rows where metadata.bus_task_id matches the bus ID.
- *   2. Secondary: proximity query — same title + source=null within ±5 minutes.
- *   3. Tertiary (CREATE only): exact-twin query — same title + assigned_to +
- *      created_by=cortex + source=null + no bus_task_id yet. Catches twins
- *      created >5 minutes before the bus create-task call (session start vs.
- *      mid-session create). Gated on event=create to avoid false merges across
- *      sessions during update/complete events.
+ * Dual-write dedup: when an agent calls both cortex_create_task (source=null)
+ * AND bus create-task for the same work, two rows would otherwise appear. If the
+ * primary bus_task_id lookup finds nothing, a secondary proximity query matches
+ * source=null rows with the same title created within ±5 minutes, and reuses
+ * their ID so the bus mirror upserts onto the existing row instead of inserting
+ * a duplicate.
  */
 export async function resolveExistingTaskMirrorId(
   busTaskId: string,
   fallbackId: string,
   title?: string,
   createdAt?: string,
-  opts?: { event?: 'create' | 'update' | 'complete'; assignedTo?: string },
 ): Promise<string> {
   const url = process.env.SUPABASE_RGOS_URL!;
   const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
@@ -324,45 +319,6 @@ export async function resolveExistingTaskMirrorId(
       }
     } catch {
       // Proximity lookup is best-effort; fall through to deterministic ID.
-    }
-  }
-
-  // Tertiary lookup (CREATE event only): match the exact cortex_create_task twin
-  // by signature — same title + assigned_to + created_by=cortex + source=null +
-  // no bus_task_id linked. This catches twins created >5 minutes before the bus
-  // create-task call (e.g. cortex_create_task at session start, bus create-task
-  // fired mid-session), which the ±5-minute proximity window would miss.
-  // Gated strictly on event=create to prevent false merges during update/complete.
-  if (opts?.event === 'create' && title && opts?.assignedTo) {
-    try {
-      const twinEp = new URL(`${url}/rest/v1/orch_tasks`);
-      twinEp.searchParams.set('select', 'id');
-      twinEp.searchParams.set('title', `eq.${title}`);
-      twinEp.searchParams.set('assigned_to', `eq.${opts.assignedTo}`);
-      twinEp.searchParams.set('created_by', 'eq.cortex');
-      twinEp.searchParams.set('source', 'is.null');
-      twinEp.searchParams.set('metadata->>bus_task_id', 'is.null');
-      twinEp.searchParams.set('status', 'not.in.(completed,cancelled)');
-      twinEp.searchParams.set('order', 'created_at.desc');
-      twinEp.searchParams.set('limit', '1');
-
-      const twinRes = await fetch(twinEp.toString(), {
-        method: 'GET',
-        headers,
-        signal: AbortSignal.timeout(10_000),
-      });
-
-      if (twinRes.ok) {
-        const rows = typeof twinRes.json === 'function'
-          ? await twinRes.json().catch(() => []) as Array<{ id?: unknown }>
-          : [];
-        const match = rows
-          .map(row => row.id)
-          .find((id): id is string => typeof id === 'string' && isUuid(id));
-        if (match) return match;
-      }
-    } catch {
-      // Tertiary lookup is best-effort; fall through to deterministic ID.
     }
   }
 
@@ -838,13 +794,7 @@ export async function mirrorTaskToRgos(
   // Always resolve the existing mirror row ID — not just on update/complete.
   // A retried create from the retry queue must land on the same row, not
   // insert a second shadow row that inflates the completed-task count.
-  row.id = await resolveExistingTaskMirrorId(
-    task.id,
-    row.id as string,
-    task.title,
-    task.created_at,
-    { event, assignedTo: task.assigned_to },
-  );
+  row.id = await resolveExistingTaskMirrorId(task.id, row.id as string, task.title, task.created_at);
   const agentId = task.assigned_to ?? process.env.CTX_AGENT_NAME ?? 'unknown';
   const action = event === 'create' ? 'task_created'
     : event === 'complete' ? 'task_completed'

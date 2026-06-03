@@ -76,9 +76,9 @@ function fmtTs(iso: string | undefined): string {
  * Send a reload-crons IPC signal to the daemon (non-blocking, best-effort).
  * Silently swallows errors — the daemon will pick up changes on its next tick.
  */
-async function signalCronReload(agentName: string, instanceId: string, ctxRoot?: string): Promise<void> {
+async function signalCronReload(agentName: string, instanceId: string): Promise<void> {
   try {
-    const ipc = new IPCClient(instanceId, ctxRoot);
+    const ipc = new IPCClient(instanceId);
     await ipc.send({ type: 'reload-crons', agent: agentName, source: 'cortextos bus cron-cmd' });
   } catch { /* non-fatal — scheduler picks up file change on next 30s tick */ }
 }
@@ -96,7 +96,7 @@ export function registerCronCommands(busCommand: Command): void {
     .description('Record that a named cron just fired (enables daemon gap detection for dead zones)')
     .action((cronName: string, opts: { interval?: string }) => {
       const env = resolveEnv();
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       updateCronFire(paths.stateDir, cronName, opts.interval);
       console.log(`Recorded fire for cron "${cronName}"`);
     });
@@ -146,7 +146,7 @@ export function registerCronCommands(busCommand: Command): void {
         process.exit(1);
       }
 
-      await signalCronReload(agent, env.instanceId, env.ctxRoot);
+      await signalCronReload(agent, env.instanceId);
       console.log(`Added cron '${name}' for ${agent}`);
     });
 
@@ -165,7 +165,7 @@ export function registerCronCommands(busCommand: Command): void {
       }
 
       const env = resolveEnv();
-      await signalCronReload(agent, env.instanceId, env.ctxRoot);
+      await signalCronReload(agent, env.instanceId);
       console.log(`Removed cron '${name}' from ${agent}`);
     });
 
@@ -185,7 +185,7 @@ export function registerCronCommands(busCommand: Command): void {
       //   - cron-state.json `last_fire` (via bus update-cron-fire from agent skills)
       // For a single source of truth in the CLI, take the most recent of the two.
       const env = resolveEnv();
-      const paths = resolvePaths(agent, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(agent, env.instanceId, env.org);
       const stateRecords = readCronState(paths.stateDir).crons;
       const fireByName = new Map<string, string>();
       for (const rec of stateRecords) fireByName.set(rec.name, rec.last_fire);
@@ -316,7 +316,7 @@ export function registerCronCommands(busCommand: Command): void {
       }
 
       const env = resolveEnv();
-      await signalCronReload(agent, env.instanceId, env.ctxRoot);
+      await signalCronReload(agent, env.instanceId);
       console.log(`Updated cron '${name}' for ${agent}`);
     });
 
@@ -335,7 +335,7 @@ export function registerCronCommands(busCommand: Command): void {
       }
 
       const env = resolveEnv();
-      const ipc = new IPCClient(env.instanceId, env.ctxRoot);
+      const ipc = new IPCClient(env.instanceId);
 
       const daemonRunning = await ipc.isDaemonRunning();
       if (!daemonRunning) {

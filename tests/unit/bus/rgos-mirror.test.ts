@@ -331,9 +331,9 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     await mirrorTaskToRgos(task, 'create');
 
     const mockFetch = vi.mocked(fetch);
-    // 4 calls on create: primary GET, proximity GET, tertiary twin GET, upsert POST.
-    expect(mockFetch).toHaveBeenCalledTimes(4);
-    const [url, opts] = mockFetch.mock.calls[3]; // upsert is the fourth call on create
+    // 3 calls: primary resolveExistingTaskMirrorId (GET), proximity dedup (GET), upsert (POST).
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+    const [url, opts] = mockFetch.mock.calls[2]; // upsert is the third call
     expect(url).toBe('https://test.supabase.co/rest/v1/orch_tasks');
     expect((opts?.headers as Record<string, string>)['apikey']).toBe('test-service-key');
     expect((opts?.headers as Record<string, string>)['Authorization']).toBe('Bearer test-service-key');
@@ -345,7 +345,7 @@ describe('rgos-mirror — mirrorTaskToRgos (scenario 1-3)', () => {
     await mirrorTaskToRgos(task, 'create');
 
     const mockFetch = vi.mocked(fetch);
-    const [, opts] = mockFetch.mock.calls[3]; // upsert is the fourth call on create (primary GET + proximity GET + tertiary twin GET + POST)
+    const [, opts] = mockFetch.mock.calls[2]; // upsert is the third call (after resolve GET + proximity GET)
     const body = JSON.parse(opts?.body as string);
     expect(body.id).toMatch(UUID_V5_RE);
     expect(body.id).toBe(uuidv5(task.id));
@@ -545,73 +545,6 @@ describe('rgos-mirror — resolveExistingTaskMirrorId()', () => {
     );
     expect(result).toBe(fallbackId);
     expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it('tertiary twin lookup: returns cortex-twin ID when primary+secondary miss on event=create', async () => {
-    const fallbackId = uuidv5('task_local_twin_miss');
-    const twinId = 'aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee';
-    const fetchMock = vi.fn()
-      // Primary bus_task_id lookup — empty
-      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' })
-      // Secondary proximity lookup — empty (no match within ±5 min)
-      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' })
-      // Tertiary twin lookup — returns the cortex_create_task row
-      .mockResolvedValueOnce({ ok: true, json: async () => [{ id: twinId }], text: async () => '' });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await resolveExistingTaskMirrorId(
-      'task_local_twin_miss',
-      fallbackId,
-      'My twin task title',
-      '2026-06-01T08:00:00Z', // valid createdAt for secondary to run
-      { event: 'create', assignedTo: 'dev' },
-    );
-    expect(result).toBe(twinId);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    // Tertiary query must include the twin-signature constraints
-    const twinCallUrl = fetchMock.mock.calls[2][0] as string;
-    expect(twinCallUrl).toContain('source=is.null');
-    expect(twinCallUrl).toContain('created_by=eq.cortex');
-    expect(twinCallUrl).toContain('assigned_to=eq.dev');
-    expect(twinCallUrl).toContain('bus_task_id=is.null');
-  });
-
-  it('tertiary twin lookup: skipped on event=update (prevents false cross-session merges)', async () => {
-    const fallbackId = uuidv5('task_local_twin_update');
-    const fetchMock = vi.fn()
-      // Primary — empty
-      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' })
-      // Secondary proximity — empty
-      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await resolveExistingTaskMirrorId(
-      'task_local_twin_update',
-      fallbackId,
-      'My twin task title',
-      '2026-06-01T08:00:00Z',
-      { event: 'update', assignedTo: 'dev' },
-    );
-    expect(result).toBe(fallbackId);
-    expect(fetchMock).toHaveBeenCalledTimes(2); // only primary + secondary, no tertiary
-  });
-
-  it('tertiary twin lookup: skipped when assignedTo not provided', async () => {
-    const fallbackId = uuidv5('task_local_twin_no_agent');
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' })
-      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' });
-    vi.stubGlobal('fetch', fetchMock);
-
-    const result = await resolveExistingTaskMirrorId(
-      'task_local_twin_no_agent',
-      fallbackId,
-      'My twin task title',
-      '2026-06-01T08:00:00Z',
-      { event: 'create' }, // no assignedTo
-    );
-    expect(result).toBe(fallbackId);
-    expect(fetchMock).toHaveBeenCalledTimes(2); // only primary + secondary
   });
 });
 

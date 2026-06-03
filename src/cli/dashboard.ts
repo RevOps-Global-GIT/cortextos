@@ -1,9 +1,8 @@
 import { Command } from 'commander';
 import { existsSync, readFileSync, writeFileSync, chmodSync, mkdirSync, openSync } from 'fs';
 import { join } from 'path';
-import { platform } from 'os';
+import { homedir, platform } from 'os';
 import { randomBytes } from 'crypto';
-import { getCtxRoot } from '../utils/paths.js';
 
 const IS_WINDOWS = platform() === 'win32';
 
@@ -44,7 +43,7 @@ export const dashboardCommand = new Command('dashboard')
 
     // ─── Load / generate dashboard credentials ────────────────────────────────
 
-    const ctxRoot = getCtxRoot(options.instance);
+    const ctxRoot = join(homedir(), '.cortextos', options.instance);
     const dashEnvPath = join(ctxRoot, 'dashboard.env');
 
     let dashCreds: Record<string, string> = {};

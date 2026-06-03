@@ -583,46 +583,22 @@ export async function discoverLinkedInPosts(
   for (const keyword of keywords.slice(0, 6)) {
     if (all.length >= limit) break;
 
-    // Hashtag feed (#revops) uses a different URL that renders a live post feed
-    // and tends to carry more person posts with interceptable activity URNs.
-    const isHashtag = keyword.startsWith('#');
-    const hashtagSlug = isHashtag ? keyword.slice(1).toLowerCase().replace(/\s+/g, '') : '';
-    const searchUrl = isHashtag
-      ? `https://www.linkedin.com/feed/hashtag/${hashtagSlug}/`
-      : `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
-    console.log(`[discover] Searching: "${keyword}" → ${isHashtag ? 'hashtag feed' : 'content search'}`);
+    // LinkedIn content search sorted by recency — proven to return relevant posts
+    const searchUrl = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
+    console.log(`[discover] Searching: "${keyword}"`);
 
-    // Intercept network responses to capture activity URNs from LinkedIn API calls.
-    const capturedUrns = new Map<string, string>(); // urn → placeholder
-    const responseHandler = async (response: import('playwright').Response) => {
-      const responseUrl = response.url();
-      if (!responseUrl.includes('linkedin.com')) return;
-      const ct = response.headers()['content-type'] ?? '';
-      if (!ct.includes('json') && !ct.includes('javascript')) return;
-      try {
-        const text = await response.text().catch(() => '');
-        const urnMatches = text.matchAll(/urn:li:activity:(\d{10,})/g);
-        for (const m of urnMatches) {
-          const urn = `urn:li:activity:${m[1]}`;
-          if (!capturedUrns.has(urn)) capturedUrns.set(urn, '');
-        }
-      } catch { /* ignore */ }
-    };
-    page.on('response', responseHandler);
     try {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       await checkSession(page);
 
-      // Give SDUI time to render the initial post cards
-      await page.waitForTimeout(4000);
+      // Give SDUI time to render post cards (headed mode renders them; headless does not)
+      await page.waitForTimeout(3000);
 
-      // Scroll aggressively to trigger lazy-loaded XHR calls that carry activity URNs.
-      for (let i = 0; i < 8; i++) {
-        await page.evaluate(() => window.scrollBy(0, 600));
-        await page.waitForTimeout(1500);
+      // Scroll to trigger additional post cards to load
+      for (let i = 0; i < 4; i++) {
+        await page.evaluate(() => window.scrollBy(0, 700));
+        await page.waitForTimeout(1000);
       }
-      // Pause to let final batch of XHR responses arrive
-      await page.waitForTimeout(2000);
 
       // Extract post cards from DOM.
       // LinkedIn renders "Feed post" heading (H2) as the first text in each post card.
@@ -649,30 +625,9 @@ export async function discoverLinkedInPosts(
         });
 
         for (const el of feedCards.slice(0, 15)) {
-          // Post URL: try anchor links first, then fall back to data-urn on the card.
-          // LinkedIn SDUI uses /feed/update/urn:li:activity:XXX/ for timestamps and
-          // /posts/slug/ for public permalinks.  Newer SDUI builds may omit both
-          // anchor types from search cards, so also check data-urn attributes to
-          // construct the canonical URL directly.
-          const updateLink = (
-            el.querySelector('a[href*="/feed/update/"]') ??
-            el.querySelector('a[href*="/posts/"]') ??
-            Array.from(el.querySelectorAll('a[href]')).find(
-              (a) => /linkedin\.com\/(feed\/update|posts)\//i.test((a as HTMLAnchorElement).href)
-            )
-          ) as HTMLAnchorElement | null;
-          let url = updateLink?.href?.split('?')[0] ?? '';
-          if (!url) {
-            // Derive URL from data-urn (e.g., "urn:li:activity:XXXX") on any element
-            // inside the card that carries it.
-            const urnEl = el.querySelector('[data-urn]') ??
-              el.closest('[data-urn]') ??
-              (el.getAttribute('data-urn') ? el : null);
-            const urn = urnEl?.getAttribute('data-urn') ?? '';
-            if (/urn:li:activity:/.test(urn)) {
-              url = `https://www.linkedin.com/feed/update/${urn}/`;
-            }
-          }
+          // Post URL: timestamp link goes to the full post (uses /feed/update/ path)
+          const updateLink = el.querySelector('a[href*="/feed/update/"]') as HTMLAnchorElement | null;
+          const url = updateLink?.href?.split('?')[0] ?? '';
 
           // Author: first /in/ or /company/ link in the card
           const authorLink = el.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement | null;
@@ -720,71 +675,22 @@ export async function discoverLinkedInPosts(
         return results;
       });
 
-      page.off('response', responseHandler);
+      console.log(`[discover] "${keyword}": ${extracted.length} posts from DOM extraction`);
 
-      // Assign network-captured URNs to get real /feed/update/ permalinks.
-      // Company-feed URLs (/company/*/posts/) are not clickable to a specific post —
-      // treat them the same as no-URL posts and prefer a captured URN over them.
-      const isSpecificPostUrl = (u: string) => /\/feed\/update\//i.test(u);
-      const orphanUrns = [...capturedUrns.keys()].filter(
-        urn => !extracted.some(p => isSpecificPostUrl(p.url) && p.url.includes(urn))
-      );
-      let urnIdx = 0;
-      const enriched = extracted.map(p => {
-        // Already a real specific-post permalink — keep it
-        if (isSpecificPostUrl(p.url)) return p;
-        // No URL or only a company/person feed page: upgrade to activity URN if available
-        if (urnIdx < orphanUrns.length) {
-          return { ...p, url: `https://www.linkedin.com/feed/update/${orphanUrns[urnIdx++]}/` };
-        }
-        return p; // no specific post URL available — will be filtered below
-      });
-
-      // Only emit person posts with a specific-post permalink (/feed/update/ with activity URN).
-      // Company posts (/company/ author) are not valid engagement targets — Greg engages with people.
-      const withUrls = enriched.filter(p =>
-        isSpecificPostUrl(p.url) && p.authorUrl?.includes('/in/')
-      );
-      const companyDropped = enriched.filter(p => isSpecificPostUrl(p.url) && !p.authorUrl?.includes('/in/')).length;
-      console.log(`[discover] "${keyword}": ${extracted.length} DOM posts, ${capturedUrns.size} network URNs → ${withUrls.length} person posts with real permalinks (${companyDropped} company posts dropped)`);
-
-      // Topic relevance gate: drop posts that are off-topic for RevOps/GTM/sales leadership.
-      const OFF_TOPIC_SIGNALS = [
-        /#interviewquestions/i, /#interview\b/i,
-        /\bjava\b/i, /\bpython\b/i, /\breact\.?js\b/i, /\bnode\.?js\b/i,
-        /\bangular\b/i, /\bvue\.?js\b/i, /\bdotnet\b/i, /\bc#\b/i, /\bc\+\+/i,
-        /#coding\b/i, /#developer\b/i, /#programmer\b/i, /#softwaredevelopment\b/i,
-        /#machinelearning\b/i, /#deeplearning\b/i, /#datascience\b/i, /#mlops\b/i,
-        /\bcloud engineer\b/i, /\bazure\b.*\bengineer\b/i,
-        /\bw2\s+only\b/i, /\bc2c\b/i, /\bhot(list|beds?)\b/i,
-        /immediate\s+opening/i, /\bstaffing\b/i, /\brecruiter\b/i, /\bplacement\b/i,
-        /graduation\b/i, /\bcongratulations?\b.*\bgraduate/i, /\bcolleg(e|iate)\b.*\bgrad/i,
-        /\bremote.{0,20}usd\b/i, /remote jobs?.*\/hour/i,
-        /get me on your next podcast/i,
-      ];
-
-      for (const p of withUrls) {
+      for (const p of extracted) {
         if (all.length >= limit) break;
-        const key = p.url;
+        const key = p.url || `${p.authorName}:${p.text.substring(0, 20)}`;
         if (seenUrn.has(key)) continue;
-        const combined = `${p.authorName} ${p.text}`;
-        if (OFF_TOPIC_SIGNALS.some(sig => sig.test(combined))) {
-          console.log(`[discover] SKIP off-topic: ${p.authorName}: ${p.text.slice(0, 60)}`);
-          continue;
-        }
         seenUrn.add(key);
         all.push({
           url: p.url,
           authorName: p.authorName,
           authorUrl: p.authorUrl,
           text: p.text,
-          // Strip '#' so hashtag keywords match sender topic_keywords (e.g. '#revops' → 'revops'
-          // matches Greg's 'RevOps' after lowercasing in engage-batch-generate routing).
-          keyword: keyword.startsWith('#') ? keyword.slice(1) : keyword,
+          keyword,
         });
       }
     } catch (err) {
-      page.off('response', responseHandler);
       console.error(`[discover] Error for "${keyword}": ${(err as Error).message}`);
     }
   }

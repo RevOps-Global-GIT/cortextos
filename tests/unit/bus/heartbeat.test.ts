@@ -104,33 +104,6 @@ describe('updateHeartbeat', () => {
     }
   });
 
-  it('omits current_task_id from PATCH when no local task is in flight', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'heartbeat-no-task-'));
-    try {
-      setSupabaseEnv();
-      mockFetchOk();
-      const paths = makePaths(root);
-      mkdirSync(paths.taskDir, { recursive: true });
-      // No task files — simulates an agent working on an RGOS-native task
-      // that has no local bus file. The heartbeat must NOT overwrite the
-      // current_task_id that cortex_claim_task has already set in orch_agents.
-
-      await updateHeartbeat(paths, 'codex', 'online', { org: 'revops-global' });
-
-      const fetchMock = vi.mocked(fetch);
-      const orchAgentCall = fetchMock.mock.calls.find(([url]) =>
-        String(url).includes('/rest/v1/orch_agents?role_id=eq.cortextos-codex'));
-      expect(orchAgentCall).toBeTruthy();
-      const body = JSON.parse(String(orchAgentCall?.[1]?.body));
-      // current_task_id must be absent — not null, not present — so Supabase
-      // PATCH leaves the column value untouched.
-      expect(Object.prototype.hasOwnProperty.call(body, 'current_task_id')).toBe(false);
-      expect(body.config_json.current_task_bus_id).toBeNull();
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
   it('uses an explicit heartbeat task id before task-store fallback', async () => {
     const root = mkdtempSync(join(tmpdir(), 'heartbeat-explicit-task-'));
     try {

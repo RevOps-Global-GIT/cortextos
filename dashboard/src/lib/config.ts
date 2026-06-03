@@ -178,12 +178,6 @@ export function getOrgs(): string[] {
   return Array.from(byLower.values());
 }
 
-const SYSTEM_DIR_BLOCKLIST = new Set([
-  '_archive',
-  'cortextos',
-  'monitor-cortexos-fleet-tasks',
-]);
-
 export function getAgentsForOrg(org: string): string[] {
   const agents = new Set<string>();
 
@@ -191,7 +185,7 @@ export function getAgentsForOrg(org: string): string[] {
   const stateAgentsDir = path.join(CTX_ROOT, 'orgs', org, 'agents');
   if (fs.existsSync(stateAgentsDir)) {
     for (const d of fs.readdirSync(stateAgentsDir, { withFileTypes: true })) {
-      if (d.isDirectory() && !SYSTEM_DIR_BLOCKLIST.has(d.name)) agents.add(d.name);
+      if (d.isDirectory()) agents.add(d.name);
     }
   }
 
@@ -199,7 +193,7 @@ export function getAgentsForOrg(org: string): string[] {
   const frameworkAgentsDir = path.join(CTX_FRAMEWORK_ROOT, 'orgs', org, 'agents');
   if (fs.existsSync(frameworkAgentsDir)) {
     for (const d of fs.readdirSync(frameworkAgentsDir, { withFileTypes: true })) {
-      if (d.isDirectory() && !SYSTEM_DIR_BLOCKLIST.has(d.name)) agents.add(d.name);
+      if (d.isDirectory()) agents.add(d.name);
     }
   }
 

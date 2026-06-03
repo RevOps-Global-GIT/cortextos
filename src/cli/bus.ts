@@ -10,7 +10,6 @@ import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTa
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
-import { computeAgentRunningState } from '../bus/agent-running.js';
 import { pollWatchdog } from '../bus/watchdog.js';
 import { runPrStuckWatcher } from '../bus/pr-stuck-watcher.js';
 import { runWipEnforcer } from '../bus/wip-enforcer.js';
@@ -441,7 +440,7 @@ busCommand
     }
 
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
     const agentExists = isRegisteredAgent(projectRoot, to) || isLocalVoiceEndpoint(to);
@@ -549,7 +548,7 @@ busCommand
   .command('check-inbox')
   .action(() => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const messages = checkInbox(paths);
     console.log(JSON.stringify(messages));
   });
@@ -559,7 +558,7 @@ busCommand
   .argument('<id>', 'Message ID to acknowledge')
   .action((id: string) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     ackInbox(paths, id);
     try {
       logEvent(paths, env.agentName, env.org, 'message', 'inbox_ack', 'info', JSON.stringify({ msg_id: id }));
@@ -654,7 +653,7 @@ busCommand
     skipDedup?: boolean;
   }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
     let meta: Record<string, unknown> | undefined;
     if (opts.meta) {
@@ -766,7 +765,7 @@ busCommand
     const notifyTargets = assigneeList && assigneeList.length > 1 ? assigneeList : (primaryAssignee ? [primaryAssignee] : []);
     for (const target of notifyTargets) {
       if (target !== env.agentName) {
-        const targetPaths = resolvePaths(target, env.instanceId, env.org, env.ctxRoot);
+        const targetPaths = resolvePaths(target, env.instanceId, env.org);
         sendMessage(targetPaths, env.agentName, target, 'normal',
           `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
       }
@@ -789,7 +788,7 @@ busCommand
       process.exit(1);
     }
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     // Guard: block review/completion when deliverables are required but missing.
     // Checks both ready_for_review (approval workflow) and completed (vanilla upstream)
@@ -816,7 +815,7 @@ busCommand
   .option('--dry-run', 'Report what would be compacted without modifying anything')
   .action((opts: { olderThan: string; dryRun?: boolean }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const olderThanDays = parseInt(opts.olderThan, 10);
     if (isNaN(olderThanDays) || olderThanDays < 0) {
       console.error('--older-than must be a non-negative integer');
@@ -838,7 +837,7 @@ busCommand
   .argument('<id>', 'Task ID')
   .action((id: string) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const open = checkTaskDependencies(paths, id);
     if (open.length === 0) {
       console.log(`${id}: no open dependencies — ready to work`);
@@ -856,7 +855,7 @@ busCommand
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .action((opts: { on: string; format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const tasks = listBlockedBy(paths, opts.on);
 
     if (opts.format === 'json') {
@@ -891,7 +890,7 @@ busCommand
   .option('--json', 'Emit raw JSONL instead of formatted text')
   .action((id: string, opts: { json?: boolean }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const entries = readTaskAudit(paths, id);
     if (entries.length === 0) {
       console.log(`No audit log for task ${id}`);
@@ -917,7 +916,7 @@ busCommand
   .option('--agent <name>', 'Agent claiming the task (defaults to CTX_AGENT_NAME)')
   .action(async (id: string, opts: { agent?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const agent = opts.agent || env.agentName;
     if (!agent) {
       console.error('ERROR: --agent or CTX_AGENT_NAME required');
@@ -946,7 +945,7 @@ busCommand
     // Accept result as either positional arg or --result flag (P1 fix #8)
     const effectiveResult = opts.result ?? resultArg;
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     // Guard: block completion when deliverables are required but missing
     if (env.org) {
@@ -1004,7 +1003,7 @@ busCommand
   .description('Locally validate a task against its success_criteria. Exits 0 if score >= 7, exits 1 if score < 7.')
   .action(async (id: string) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     try {
       const result = await validateTask(paths, id);
       const icon = result.verdict === 'pass' ? 'PASS' : result.verdict === 'needs-revision' ? 'NEEDS-REVISION' : 'FAIL';
@@ -1028,7 +1027,7 @@ busCommand
   .action((taskId: string, source: string, opts: { label?: string; move?: boolean; link?: boolean }) => {
     const noLink = opts.link === false;
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     try {
       const result = saveOutput(paths, {
         taskId,
@@ -1055,7 +1054,7 @@ busCommand
   .option('--respect-deps', 'Sort DAG-aware: unblocked tasks first, blocked tasks last')
   .action(async (opts: { agent?: string; status?: string; format?: string; respectDeps?: boolean }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const requestedStatus = opts.status === 'approved' ? 'pending' : opts.status;
     if (opts.status === 'approved') {
       try {
@@ -1125,7 +1124,7 @@ busCommand
       process.exit(1);
     }
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     logEvent(paths, env.agentName, env.org, category as EventCategory, event, severity as EventSeverity, opts.meta);
     console.log(`Logged ${category}/${event} (${severity})`);
     await logImplicitInvocation('event-logging', env.agentDir ?? '', env.agentName);
@@ -1182,7 +1181,7 @@ busCommand
   .option('--interval <i>', 'Loop interval from cron config')
   .action(async (status: string, opts: { task?: string; timezone?: string; interval?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     // Read display name from IDENTITY.md so agents self-report their user-facing name
     let displayName: string | undefined;
@@ -1616,7 +1615,7 @@ busCommand
   .action((to: string, text: string, opts: { from?: string; room?: string; timeoutMs?: string }) => {
     try {
       const env = resolveEnv();
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       const from = opts.from || env.agentName;
       const timeoutMs = parsePositiveIntOpt(opts.timeoutMs, '--timeout-ms');
       const message = sendWhisper(paths, from, to, text, { roomId: opts.room, timeoutMs, agentDir: env.agentDir });
@@ -1638,7 +1637,7 @@ busCommand
   .action(async (room: string, opts: { timeoutMs?: string; pollMs: string; summarize?: boolean }) => {
     try {
       const env = resolveEnv();
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       const timeoutMs = parsePositiveIntOpt(opts.timeoutMs, '--timeout-ms');
       const pollMs = parsePositiveIntOpt(opts.pollMs, '--poll-ms');
       const result = await watchWhisperRoom(paths, room, { timeoutMs, pollMs, summarize: opts.summarize });
@@ -1658,7 +1657,7 @@ busCommand
   .action((room: string, opts: { max?: string }) => {
     try {
       const env = resolveEnv();
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       const maxMessages = parsePositiveIntOpt(opts.max, '--max');
       console.log(summarizeWhisperRoom(paths, room, maxMessages));
     } catch (err) {
@@ -1675,7 +1674,7 @@ busCommand
   .action((room: string, opts: { reason: string }) => {
     try {
       const env = resolveEnv();
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       const session = closeWhisperRoom(paths, room, opts.reason);
       logEvent(paths, env.agentName, env.org, 'message', 'whisper_closed', 'info', JSON.stringify({ room_id: room, reason: opts.reason }));
       console.log(JSON.stringify(session, null, 2));
@@ -1693,7 +1692,7 @@ busCommand
   .action((command: string, args: string[]) => {
     try {
       const env = resolveEnv();
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       if (command === 'settings') {
         console.log(JSON.stringify(readVoiceSettings(paths, env.agentDir), null, 2));
         return;
@@ -1739,7 +1738,7 @@ busCommand
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .action((opts: { format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const heartbeats = readAllHeartbeats(paths);
 
     if (opts.format === 'json') {
@@ -1774,7 +1773,7 @@ busCommand
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .action((opts: { repos?: string; stuckHours?: string; alertHours?: string; notifyAgent?: string; autoMerge?: boolean; createTasks?: boolean; dryRun?: boolean; format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
     const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
     const result = runPrStuckWatcher(paths, env.agentName, env.org, {
@@ -1818,7 +1817,7 @@ busCommand
     }
 
     if (!opts.dryRun && result.alertPrs.length > 0 && opts.notifyAgent) {
-      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org, env.ctxRoot);
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
       const sample = result.alertPrs.slice(0, 8).map(pr => `${pr.repo}#${pr.number} (${pr.ageHours.toFixed(1)}h)`).join(', ');
       sendMessage(
         targetPaths,
@@ -1855,7 +1854,7 @@ busCommand
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .action(async (opts: { telegramChatId?: string; dryRun?: boolean; format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     // Resolve BOT_TOKEN: agent .env first (most specific), then process env.
     // Same precedence as the send-telegram command — keeps a single source of
@@ -1901,7 +1900,7 @@ busCommand
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .action((opts: { thresholdLines?: string; createTasks?: boolean; format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
     const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
     const threshold = Number(opts.thresholdLines ?? 5);
@@ -1930,13 +1929,13 @@ busCommand
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .action((opts: { notifyAgent?: string; dryRun?: boolean; format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
     const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
     const result = runGoalProgressProbe(paths, env.agentName, env.org, projectRoot, { outputDir });
 
     if (!opts.dryRun && result.stalledAgents.length > 2 && opts.notifyAgent) {
-      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org, env.ctxRoot);
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
       sendMessage(
         targetPaths,
         env.agentName,
@@ -1968,7 +1967,7 @@ busCommand
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .action(async (opts: { thresholdMinutes?: string; restart?: boolean; notifyAgent?: string; skipAgent?: string[]; dryRun?: boolean; format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
     const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
     const ipc = new IPCClient(env.instanceId);
@@ -2010,7 +2009,7 @@ busCommand
     }
 
     if (!opts.dryRun && report.staleRunningAgents.length > 0 && opts.notifyAgent) {
-      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org, env.ctxRoot);
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
       sendMessage(
         targetPaths,
         env.agentName,
@@ -2040,7 +2039,7 @@ busCommand
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .action((opts: { pages?: string; user?: string; createTasks?: boolean; format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
     const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
     const report = runCustomerSurfaceQa(paths, env.agentName, env.org, projectRoot, {
@@ -2069,7 +2068,7 @@ busCommand
   .option('--restart', 'Auto soft-restart expired agents via daemon IPC')
   .action(async (opts: { format?: string; lease?: string; restart?: boolean }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const defaultLeaseSeconds = Math.max(60, parseInt(opts.lease ?? '14400', 10) || 14400);
 
     const results = pollWatchdog(paths, env.agentName, env.org, {
@@ -2134,7 +2133,7 @@ busCommand
     console.log(`[codebase-scan] Hits: ${result.hits.length} markers, ${result.largeFiles.length} large files`);
 
     if (!opts.dryRun && result.topActionable.length > 0) {
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       for (const item of result.topActionable) {
         const taskId = createTask(paths, env.agentName, env.org, `[codebase-scan] ${item}`, {
           description: `Auto-generated by codebase-scan loop on ${today}. See ${outputPath} for full report.`,
@@ -2147,7 +2146,7 @@ busCommand
     }
 
     logEvent(
-      resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot),
+      resolvePaths(env.agentName, env.instanceId, env.org),
       env.agentName, env.org, 'action', 'codebase_scan_complete', 'info',
       { hits: result.hits.length, large_files: result.largeFiles.length, output: outputPath },
     );
@@ -2159,7 +2158,7 @@ busCommand
   .option('--days <n>', 'Rolling window in days (default: 7)', '7')
   .action((opts: { days: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const days = parseInt(opts.days, 10) || 7;
     const result = computeUvd(paths.taskDir, { days });
     const metricsDir = join(paths.analyticsDir, '..', 'metrics');
@@ -2194,7 +2193,7 @@ busCommand
     console.log(`[security-audit] Critical: ${result.criticalCount}, High: ${result.highCount}, Actionable: ${result.actionable.length}`);
 
     if (!opts.dryRun && result.actionable.length > 0) {
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       for (const vuln of result.actionable) {
         const fix = typeof vuln.fixAvailable === 'object'
           ? `upgrade to ${vuln.fixAvailable.name}@${vuln.fixAvailable.version}`
@@ -2212,7 +2211,7 @@ busCommand
     }
 
     logEvent(
-      resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot),
+      resolvePaths(env.agentName, env.instanceId, env.org),
       env.agentName, env.org, 'action', 'security_audit_complete', 'info',
       { critical: result.criticalCount, high: result.highCount, actionable: result.actionable.length, output: outputPath },
     );
@@ -2276,7 +2275,7 @@ busCommand
   .description('Find stale tasks (in_progress >2h, pending >24h, overdue)')
   .action(() => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const report = checkStaleTasks(paths);
     console.log(JSON.stringify(report));
   });
@@ -2287,7 +2286,7 @@ busCommand
   .option('--dry-run', 'Show what would be archived without modifying files')
   .action((opts: { dryRun?: boolean }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const report = archiveTasks(paths, opts.dryRun ?? false);
     console.log(JSON.stringify(report));
   });
@@ -2297,7 +2296,7 @@ busCommand
   .description('Find stale human-assigned tasks (>24h)')
   .action(() => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const tasks = checkHumanTasks(paths);
     console.log(JSON.stringify(tasks));
   });
@@ -2310,11 +2309,11 @@ busCommand
     const { mkdirSync, writeFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const reason = opts.reason || 'self-restart requested';
 
     // Write .user-restart marker (same as soft-restart)
-    const ctxRoot = env.ctxRoot;
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
     const stateDir = join(ctxRoot, 'state', env.agentName);
     mkdirSync(stateDir, { recursive: true });
     writeFileSync(join(stateDir, '.user-restart'), reason);
@@ -2323,7 +2322,7 @@ busCommand
     selfRestart(paths, env.agentName, reason);
 
     // Send IPC restart-agent signal for self — makes restart immediate
-    const ipc = new IPCClient(env.instanceId, env.ctxRoot);
+    const ipc = new IPCClient(env.instanceId);
     const daemonRunning = await ipc.isDaemonRunning();
     if (daemonRunning) {
       const resp = await ipc.send({ type: 'restart-agent', agent: env.agentName, source: 'cortextos bus self-restart' });
@@ -2347,7 +2346,7 @@ busCommand
   .action(async (opts: { reason?: string; handoffDoc?: string }) => {
     const { writeFileSync: fsWrite, existsSync: fsExists, mkdirSync: fsMkdir } = require('fs');
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     hardRestart(paths, env.agentName, opts.reason);
     if (opts.handoffDoc && fsExists(opts.handoffDoc)) {
       fsMkdir(paths.stateDir, { recursive: true });
@@ -2356,7 +2355,7 @@ busCommand
     // Send IPC restart-agent so the daemon terminates and restarts this session
     // immediately. Without this the session keeps running — .force-fresh is only
     // consumed on the NEXT restart, which never comes unless the daemon is notified.
-    const ipc = new IPCClient(env.instanceId, env.ctxRoot);
+    const ipc = new IPCClient(env.instanceId);
     const daemonRunning = await ipc.isDaemonRunning();
     if (daemonRunning) {
       const resp = await ipc.send({ type: 'restart-agent', agent: env.agentName, source: 'cortextos bus hard-restart' });
@@ -2386,7 +2385,7 @@ busCommand
       process.exit(1);
     }
     validateAgentName(target);
-    const paths = resolvePaths(target, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(target, env.instanceId, env.org);
     const frameworkRoot = env.frameworkRoot || process.cwd();
     const report = autoCompactAgent(paths, target, frameworkRoot, {
       reason: opts.reason,
@@ -2519,7 +2518,7 @@ busCommand
     // If approval_required is configured, auto-create an approval
     const config = loadExperimentConfig(agentDir);
     if (config.approval_required) {
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       const approvalId = await createApproval(
         paths,
         env.agentName,
@@ -2877,7 +2876,7 @@ busCommand
         // Auto-emit activity event so dashboard sees every Telegram send,
         // even from agents that never call log-event directly.
         try {
-          const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+          const paths = resolvePaths(env.agentName, env.instanceId, env.org);
           const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
           logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
           recordOutboundDogfoodTelegramAudit(paths, env.ctxRoot, env.agentName, env.org, chatId, sentMessageId, dashText);
@@ -3105,7 +3104,7 @@ busCommand
         logOutboundMessage(env.ctxRoot, env.agentName, chatId, dashboardText, 0, {});
         cacheLastSent(env.ctxRoot, env.agentName, chatId, dashboardText);
         try {
-          const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+          const paths = resolvePaths(env.agentName, env.instanceId, env.org);
           logEvent(paths, env.agentName, env.org, 'message', 'voice_sent', 'info',
             JSON.stringify({ chat_id: chatId, engine: usedEngine, chars: text.length, audio_url: audioUrl || null }));
         } catch { /* non-fatal */ }
@@ -3391,7 +3390,7 @@ busCommand
       }
     }
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir, emailMeta, opts?.linkedOrchApprovalId);
     console.log(id);
     await logImplicitInvocation('approvals', env.agentDir ?? '', env.agentName);
@@ -3404,7 +3403,7 @@ busCommand
   .option('--dry-run', 'Validate and print the email without sending', false)
   .action((approvalId: string, opts: { dryRun?: boolean }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     try {
       const result = sendApprovedEmail(paths, approvalId, { dryRun: opts.dryRun });
       if (opts.dryRun) {
@@ -3431,7 +3430,7 @@ busCommand
       process.exit(1);
     }
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     updateApproval(paths, id, status as ApprovalStatus, note);
     console.log(`Approval ${id} -> ${status}`);
   });
@@ -3444,7 +3443,7 @@ busCommand
   .option('--remote-script <path>', 'Remote fetcher path on Mac', '/Users/gregharned/.cortextos/bin/lastpass-cred-fetch.sh')
   .action(async (service: string, opts: { sshHost?: string; remoteScript?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     try {
       const result = await lastpassCred(paths, service, {
         agentName: env.agentName,
@@ -3497,7 +3496,7 @@ busCommand
     }
 
     const result = queryKnowledgeBase(
-      resolvePaths(env.agentName, env.instanceId, org, env.ctxRoot),
+      resolvePaths(env.agentName, env.instanceId, org),
       question,
       {
         org,
@@ -3813,7 +3812,7 @@ busCommand
     const { existsSync, readdirSync, readFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
-    const ctxRoot = env.ctxRoot;
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
     const frameworkRoot = env.frameworkRoot || process.cwd();
 
     // Collect agents from enabled-agents.json + filesystem scan
@@ -3843,7 +3842,7 @@ busCommand
 
     // Determine running agents via IPC daemon.
     const runningAgents = new Set<string>();
-    const ipc = new IPCClient(env.instanceId, env.ctxRoot);
+    const ipc = new IPCClient(env.instanceId);
     try {
       const resp = await ipc.send({ type: 'status', source: 'cortextos bus' });
       if (resp.success && Array.isArray(resp.data)) {
@@ -3892,21 +3891,20 @@ busCommand
       }
       if (!currentTask) {
         try {
-          const taskPaths = resolvePaths(name, env.instanceId, info.org || env.org, env.ctxRoot);
+          const taskPaths = resolvePaths(name, env.instanceId, info.org || env.org);
           const activeTasks = listTasks(taskPaths, { agent: name, status: 'in_progress' });
           const activeTask = activeTasks[0];
           if (activeTask) currentTask = `${activeTask.id}: ${activeTask.title}`;
         } catch { /* task store unavailable */ }
       }
 
-      const runningState = computeAgentRunningState({
-        daemonRunning,
-        heartbeatAgeMinutes,
-        heartbeatFreshThresholdMinutes: runningHeartbeatThresholdMinutes,
-      });
-      // A fresh heartbeat is independent liveness evidence. The daemon IPC
-      // registry can briefly miss an agent during restarts or registry drift.
-      const running = runningState.running;
+      const heartbeatFresh = heartbeatAgeMinutes !== null && heartbeatAgeMinutes <= runningHeartbeatThresholdMinutes;
+      const recoveryState = daemonRunning && !heartbeatFresh
+        ? 'stale_heartbeat_action_required'
+        : daemonRunning
+          ? 'running'
+          : 'stopped';
+      const running = daemonRunning && heartbeatFresh;
       if (opts.status === 'running' && !running) continue;
 
       results.push({
@@ -3916,7 +3914,7 @@ busCommand
         enabled: info.enabled,
         running,
         daemon_running: daemonRunning,
-        recovery_state: runningState.recoveryState,
+        recovery_state: recoveryState,
         heartbeat_age_minutes: heartbeatAgeMinutes,
         last_heartbeat: lastHeartbeat,
         current_task: currentTask,
@@ -3935,8 +3933,6 @@ busCommand
         console.log(`  ${a.name} (${a.org || 'root'}) [${status}]`);
         if (a.recovery_state === 'stale_heartbeat_action_required') {
           console.log(`    Recovery: daemon reports running but heartbeat is ${Math.round(a.heartbeat_age_minutes ?? 0)}m old; restart/action required`);
-        } else if (a.recovery_state === 'heartbeat_only_running') {
-          console.log(`    Recovery: heartbeat is fresh but daemon IPC did not report the agent; treating heartbeat as live`);
         }
         if (a.role) console.log(`    Role: ${a.role}`);
         if (a.current_task) console.log(`    Working on: ${a.current_task}`);
@@ -4040,8 +4036,8 @@ busCommand
     const { mkdirSync, writeFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
-    const ctxRoot = env.ctxRoot;
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
 
     // Write urgent signal file that fast-checker checks on every poll
     const signalDir = join(ctxRoot, 'state', targetAgent);
@@ -4070,7 +4066,7 @@ busCommand
     const { mkdirSync, writeFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
-    const ctxRoot = env.ctxRoot;
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
 
     // Step 1: Write .user-restart marker BEFORE triggering exit
     const stateDir = join(ctxRoot, 'state', targetAgent);
@@ -4079,7 +4075,7 @@ busCommand
     console.log(`Wrote .user-restart marker for ${targetAgent}: ${reason}`);
 
     // Step 2: Send restart via IPC daemon (cross-platform — named pipe on Windows, socket on Unix).
-    const ipc = new IPCClient(env.instanceId, env.ctxRoot);
+    const ipc = new IPCClient(env.instanceId);
     const daemonRunning = await ipc.isDaemonRunning();
 
     if (daemonRunning) {
@@ -4105,7 +4101,7 @@ busCommand
     const { mkdirSync, writeFileSync, readFileSync, existsSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
-    const ctxRoot = env.ctxRoot;
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
     const staggerMs = parseInt(opts.stagger, 10) * 1000;
 
     // Read enabled agents from config
@@ -4128,7 +4124,7 @@ busCommand
       process.exit(0);
     }
 
-    const ipc = new IPCClient(env.instanceId, env.ctxRoot);
+    const ipc = new IPCClient(env.instanceId);
     const daemonRunning = await ipc.isDaemonRunning();
     if (!daemonRunning) {
       console.error('ERROR: Node daemon is not running. Start it with: cortextos start');
@@ -4171,7 +4167,7 @@ busCommand
     const { mkdirSync, appendFileSync } = require('fs');
     const { join } = require('path');
     const env = resolveEnv();
-    const ctxRoot = env.ctxRoot;
+    const ctxRoot = require('path').join(require('os').homedir(), '.cortextos', env.instanceId);
 
     // Write to outbound-messages.jsonl so iOS app chat history picks it up
     const logDir = join(ctxRoot, 'logs', agent);
@@ -4187,7 +4183,7 @@ busCommand
 
     // ACK the original inbox message
     if (msgId) {
-      const paths = resolvePaths(agent, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(agent, env.instanceId, env.org);
       try { ackInbox(paths, msgId); } catch { /* best effort */ }
     }
 
@@ -4214,7 +4210,7 @@ busCommand
 
     if (opts.allOrgs) {
       // Scan every org directory under CTX_ROOT — mirrors dashboard syncAll() behaviour
-      const ctxRoot = env.ctxRoot;
+      const ctxRoot = join(homedir(), '.cortextos', env.instanceId);
       const orgsDir = join(ctxRoot, 'orgs');
       const orgs: string[] = existsSync(orgsDir)
         ? readdirSync(orgsDir, { withFileTypes: true })
@@ -4222,13 +4218,13 @@ busCommand
             .map((d: { name: string }) => d.name)
         : [];
       for (const org of orgs) {
-        const orgPaths = resolvePaths(env.agentName, env.instanceId, org, env.ctxRoot);
+        const orgPaths = resolvePaths(env.agentName, env.instanceId, org);
         // Reconcile dashboard-resolved approvals against orch_approvals before listing
         await reconcileOrchApprovals(orgPaths).catch(() => {});
         approvals = approvals.concat(listPendingApprovals(orgPaths));
       }
     } else {
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       // Reconcile dashboard-resolved approvals against orch_approvals before listing
       await reconcileOrchApprovals(paths).catch(() => {});
       approvals = listPendingApprovals(paths);
@@ -4259,7 +4255,7 @@ busCommand
   .description('Create a persistent reminder that survives hard-restarts')
   .action((fireAt: string, prompt: string) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const reminder = createReminder(paths, fireAt, prompt);
     console.log(reminder.id);
   });
@@ -4271,7 +4267,7 @@ busCommand
   .description('List pending (or all) reminders')
   .action((opts: { all?: boolean; format?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const reminders = listReminders(paths, { all: opts.all });
 
     if (opts.format === 'json') {
@@ -4301,7 +4297,7 @@ busCommand
   .description('Mark a reminder as handled')
   .action((id: string) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     ackReminder(paths, id);
     console.log(`ACK'd reminder ${id}`);
   });
@@ -4312,7 +4308,7 @@ busCommand
   .description('Delete acked reminders older than N days')
   .action((opts: { days?: string }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const pruned = pruneReminders(paths, parseInt(opts.days ?? '7', 10));
     console.log(`Pruned ${pruned} acked reminder(s)`);
   });
@@ -4566,7 +4562,7 @@ busCommand
   .option('--dry-run', 'Print events to stdout instead of logging', false)
   .action(async (opts: { session?: string; interval: string; telegram: boolean; dryRun: boolean }) => {
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const sessionName = opts.session || env.agentName;
     const pollMs = Math.max(500, parseInt(opts.interval, 10) || 2000);
 
@@ -4751,7 +4747,7 @@ busCommand
   .option('--dry-run', 'Print the generated skill without writing to disk')
   .action(async (opts: { fromTask: string; agent?: string; dryRun?: boolean }) => {
     const env = resolveEnv();
-    const busPaths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const busPaths = resolvePaths(env.agentName, env.instanceId, env.org);
     try {
       const result = await generateSkill(
         { taskId: opts.fromTask, agentDir: opts.agent, dryRun: opts.dryRun },
@@ -4972,7 +4968,7 @@ busCommand
     });
 
     const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     if (!result.ok) {
       if (opts.autoFallback) {
@@ -5087,7 +5083,7 @@ busCommand
       }
     }
 
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org, env.ctxRoot);
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const startedTaskUpdate = bestEffortTaskStatus(paths, opts.taskId, 'in_progress');
     const result = spawnCodex(promptFile, {
       workdir: opts.workdir,
