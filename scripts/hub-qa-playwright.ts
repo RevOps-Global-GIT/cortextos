@@ -3674,6 +3674,68 @@ async function runFleetChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+function updateQaSummary(outputDir: string) {
+  const today = new Date().toISOString().slice(0, 10);
+  const pagePattern = new RegExp(`-qa-${today}\\.md$`);
+  let files: string[];
+  try {
+    files = fs.readdirSync(outputDir)
+      .filter(f => pagePattern.test(f) && !f.startsWith('qa-summary'))
+      .map(f => path.join(outputDir, f));
+  } catch { return; }
+
+  let totalPass = 0, totalFail = 0, totalDefer = 0;
+  const rows: Array<{ page: string; pass: number; fail: number; defer: number; path: string }> = [];
+
+  for (const p of files) {
+    try {
+      const text = fs.readFileSync(p, 'utf8');
+      const m = text.match(/Summary:\s*(\d+)\s+passed,\s*(\d+)\s+failed,\s*(\d+)\s+deferred/);
+      if (!m) continue;
+      const pass = Number(m[1]), fail = Number(m[2]), defer = Number(m[3]);
+      const rawPage = path.basename(p).replace(pagePattern, '').replace(/-/g, '/');
+      const page = rawPage.startsWith('/') ? rawPage : `/${rawPage}`;
+      totalPass += pass; totalFail += fail; totalDefer += defer;
+      rows.push({ page, pass, fail, defer, path: p });
+    } catch { continue; }
+  }
+
+  if (rows.length === 0) return;
+
+  const now = new Date();
+  const ts = now.toISOString();
+  const stamp = now.toISOString().replace(/[-:]/g, '').slice(0, 13).replace('T', 'T');
+  const summaryPath = path.join(outputDir, `qa-summary-${stamp}.md`);
+
+  const lines = [
+    `# Hub Dogfood QA Summary - ${ts}`,
+    '',
+    `**Runtime:** Playwright harness (\`scripts/hub-qa-playwright.ts\`) against \`https://hub.revopsglobal.com\`; authenticated as \`greg@revopsglobal.com\`; per-page runs via cron.`,
+    '',
+    `**This pass total:** ${totalPass} passed, ${totalFail} failed, ${totalDefer} deferred`,
+    '',
+    '| Page | Passed | Failed | Deferred | Report |',
+    '|---|---:|---:|---:|---|',
+    ...rows.map(r => `| ${r.page} | ${r.pass} | ${r.fail} | ${r.defer} | ${r.path} |`),
+    '',
+    '## Findings',
+    `- P1/P2 failures: ${totalFail === 0 ? 'none' : `${totalFail} failures — see individual reports`}.`,
+    `- Deferred follow-ups: ${totalDefer} checks across ${rows.length} pages.`,
+    '',
+    '## Artifacts',
+    ...rows.map(r => `- ${r.page}: ${r.path}`),
+  ];
+
+  // Remove any older qa-summary files for today to avoid stale files confusing latestTextArtifact.
+  try {
+    fs.readdirSync(outputDir)
+      .filter(f => f.startsWith('qa-summary-') && f.includes(today.replace(/-/g, '')) && path.join(outputDir, f) !== summaryPath)
+      .forEach(f => { try { fs.unlinkSync(path.join(outputDir, f)); } catch { /* ignore */ } });
+  } catch { /* ignore */ }
+
+  fs.writeFileSync(summaryPath, lines.join('\n') + '\n');
+}
+
 function writeReport(results: CheckResult[], reportPath: string) {
   const passed  = results.filter(r => r.status === 'PASS').length;
   const failed  = results.filter(r => r.status === 'FAIL').length;
@@ -4208,6 +4270,10 @@ async function main() {
     if (writePageHealth) {
       await writePageHealthVerdict(serviceKey, navPath, results, observedSignals, page);
     }
+
+    // Aggregate all today's page reports into a fresh qa-summary so the
+    // cortextos-deliverables-snapshot emitter always has a current artifact.
+    updateQaSummary(OUTPUT_DIR);
 
     console.log(`\nReport: ${reportPath}`);
     console.log(`Summary: ${passed} passed, ${failed} failed, ${deferred} deferred\n`);
