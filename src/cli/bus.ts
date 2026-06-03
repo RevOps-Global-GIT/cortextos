@@ -28,7 +28,7 @@ import { handleCodexFallback } from '../bus/codex-fallback.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos, mirrorAgentStatusToRgos, mirrorTaskToRgos } from '../bus/rgos-mirror.js';
-import { reconcileAgentOpsMirror } from '../bus/agentops-mirror-reconcile.js';
+import { reconcileAgentOpsMirror, repairAgentOpsMirror } from '../bus/agentops-mirror-reconcile.js';
 import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { enforceControlPolicy } from '../bus/orch-control-policy.js';
@@ -4497,14 +4497,70 @@ busCommand
   .option('--json', 'Output result as JSON', false)
   .option('--no-log', 'Do not emit mirror_drift_detected Activity events', false)
   .option('--max-drifts <n>', 'Maximum drift samples to include in output/event', '50')
-  .action(async (opts: { json?: boolean; noLog?: boolean; maxDrifts?: string }) => {
+  .option('--repair', 'Backfill live tasks and agents into the RGOS AgentOps mirror using existing mirror writers', false)
+  .option('--dry-run', 'With --repair, report the backfill plan without writing mirror rows', false)
+  .action(async (opts: { json?: boolean; noLog?: boolean; maxDrifts?: string; repair?: boolean; dryRun?: boolean }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const maxDrifts = Number.parseInt(opts.maxDrifts ?? '50', 10);
-    const result = await reconcileAgentOpsMirror(paths, {
+    const reconcileOptions = {
       org: env.org,
       maxDrifts: Number.isFinite(maxDrifts) && maxDrifts > 0 ? maxDrifts : 50,
-    });
+    };
+
+    if (opts.repair) {
+      const result = await repairAgentOpsMirror(paths, {
+        ...reconcileOptions,
+        dryRun: opts.dryRun === true,
+      });
+
+      if (!opts.noLog) {
+        logEvent(paths, env.agentName, env.org, 'action', result.dry_run ? 'mirror_repair_planned' : 'mirror_repair_completed', result.ok ? 'info' : 'warning', {
+          dry_run: result.dry_run,
+          before_drift_count: result.before.drift_count,
+          after_drift_count: result.after?.drift_count ?? null,
+          planned_tasks: result.planned_tasks,
+          planned_agents: result.planned_agents,
+          repaired_tasks: result.repaired_tasks,
+          repaired_agents: result.repaired_agents,
+          failures: result.failures,
+          crons: result.crons,
+        });
+      }
+
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+
+      if (result.skipped) {
+        console.log(`agentops-mirror-reconcile --repair: skipped — ${result.reason}`);
+        return;
+      }
+
+      const afterCount = result.after?.drift_count;
+      const mode = result.dry_run ? 'dry-run plan' : 'repair';
+      console.log(`agentops-mirror-reconcile --repair: ${mode}`);
+      console.log(`  before drift: ${result.before.drift_count}`);
+      console.log(`  planned: ${result.planned_tasks} task(s), ${result.planned_agents} agent(s), ${result.crons.live_crons} cron(s) enumerated`);
+      if (result.dry_run) {
+        console.log(`  writes: 0 (dry run)`);
+        console.log(`  cron note: ${result.crons.note}`);
+        return;
+      }
+      console.log(`  repaired: ${result.repaired_tasks} task(s), ${result.repaired_agents} agent(s)`);
+      console.log(`  after drift: ${afterCount ?? 'not checked'}`);
+      console.log(`  cron note: ${result.crons.note}`);
+      if (result.failures.length > 0) {
+        for (const failure of result.failures.slice(0, 10)) {
+          console.log(`  failure ${failure.kind} ${failure.id}: ${failure.error}`);
+        }
+      }
+      if (!result.ok) process.exit(1);
+      return;
+    }
+
+    const result = await reconcileAgentOpsMirror(paths, reconcileOptions);
 
     if (!opts.noLog && result.drift_count > 0) {
       logEvent(paths, env.agentName, env.org, 'action', 'mirror_drift_detected', 'warning', {
