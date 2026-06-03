@@ -5270,3 +5270,60 @@ busCommand
       console.log(JSON.stringify(result, null, 2));
     }
   });
+
+busCommand
+  .command('decommission-agent <agent>')
+  .description('Mark an agent as decommissioned: write suppress markers, disable in registry, stop if running')
+  .option('--instance <id>', 'Instance ID', 'default')
+  .option('--reason <text>', 'Reason for decommission', 'decommissioned via cortextos bus decommission-agent')
+  .action(async (agent: string, opts: { instance: string; reason: string }) => {
+    const env = resolveEnv();
+    const instanceId = opts.instance || env.instanceId;
+    const ctxRoot = join(homedir(), '.cortextos', instanceId);
+    const stateDir = join(ctxRoot, 'state', agent);
+
+    mkdirSync(stateDir, { recursive: true });
+
+    // .decommissioned: read by monitoring scripts (heartbeat-health-watch,
+    // stale-claimed-task-monitor) to suppress alerts for this agent.
+    writeFileSync(
+      join(stateDir, '.decommissioned'),
+      JSON.stringify({
+        agent,
+        decommissioned_at: new Date().toISOString(),
+        reason: opts.reason,
+      }) + '\n',
+    );
+
+    // .user-disable: prevents the crash-alert hook from firing a false alarm
+    // when the PTY is killed as part of decommission.
+    writeFileSync(join(stateDir, '.user-disable'), opts.reason);
+
+    // Disable in enabled-agents.json
+    const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
+    let agents: Record<string, any> = {};
+    if (existsSync(enabledFile)) {
+      try { agents = JSON.parse(readFileSync(enabledFile, 'utf-8')); } catch { /* corrupt — start fresh */ }
+    }
+    agents[agent] = { ...(agents[agent] ?? {}), enabled: false, decommissioned: true };
+    mkdirSync(join(ctxRoot, 'config'), { recursive: true });
+    atomicWriteSync(enabledFile, JSON.stringify(agents, null, 2));
+
+    // Stop via daemon IPC if running
+    let stoppedViaDaemon = false;
+    const ipc = new IPCClient(instanceId);
+    if (await ipc.isDaemonRunning()) {
+      const resp = await ipc.send({ type: 'stop-agent', agent, source: 'cortextos bus decommission-agent' });
+      stoppedViaDaemon = resp.success;
+    }
+
+    console.log(JSON.stringify({
+      ok: true,
+      agent,
+      decommissioned: true,
+      markers_written: ['.decommissioned', '.user-disable'],
+      disabled_in_registry: true,
+      stopped_via_daemon: stoppedViaDaemon,
+      state_dir: stateDir,
+    }));
+  });
