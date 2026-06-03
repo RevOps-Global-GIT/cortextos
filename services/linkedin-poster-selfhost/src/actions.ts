@@ -567,38 +567,73 @@ export async function publishLinkedInPost(
  * SDUI does not render feed content in headless Chrome, so DOM extraction only
  * works when the browser is visible to an X11 display.
  *
- * Flow: navigate LinkedIn content search → wait for SDUI render → scroll to
- * load more → extract post cards from DOM (data-urn + author link + text).
+ * Flow:
+ *  1. For hashtag keywords (#revops), navigate the hashtag feed — it carries
+ *     more person posts with interceptable activity URNs than content search.
+ *  2. For plain keywords, use LinkedIn content search sorted by recency.
+ *  3. Intercept XHR/fetch responses to capture activity URNs before DOM scrape.
+ *  4. Scroll aggressively (10 passes) to trigger lazy-loaded XHR calls.
+ *  5. Enrich DOM-extracted posts with orphan URNs that have no matching card.
+ *  6. Accept both person (/in/) and company (/company/) authors — target is
+ *     8-12 combined posts per batch; downstream engagement engine decides who
+ *     to engage with.
  */
 export async function discoverLinkedInPosts(
   page: Page,
   keywords: string[],
-  limit: number = 10,
+  limit: number = 15,
 ): Promise<DiscoveredPost[]> {
   const all: DiscoveredPost[] = [];
   const seenUrn = new Set<string>();
   const headed = !!process.env['DISPLAY'];
   console.log(`[discover] Mode: ${headed ? 'headed (Xvfb)' : 'headless'}`);
 
-  for (const keyword of keywords.slice(0, 6)) {
+  for (const keyword of keywords.slice(0, 8)) {
     if (all.length >= limit) break;
 
-    // LinkedIn content search sorted by recency — proven to return relevant posts
-    const searchUrl = `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
-    console.log(`[discover] Searching: "${keyword}"`);
+    // Hashtag feed (#revops) renders a live post feed with more person posts
+    // and better activity URN coverage than keyword content search.
+    const isHashtag = keyword.startsWith('#');
+    const hashtagSlug = isHashtag ? keyword.slice(1).toLowerCase().replace(/\s+/g, '') : '';
+    const searchUrl = isHashtag
+      ? `https://www.linkedin.com/feed/hashtag/${hashtagSlug}/`
+      : `https://www.linkedin.com/search/results/content/?keywords=${encodeURIComponent(keyword)}&sortBy=date_posted`;
+    console.log(`[discover] Searching: "${keyword}" → ${isHashtag ? 'hashtag feed' : 'content search'}`);
+
+    // Intercept XHR/fetch responses to capture activity URNs before DOM scrape.
+    // LinkedIn's voyager API returns these in JSON; capturing them gives us real
+    // /feed/update/ permalinks even when the DOM card omits an anchor link.
+    const capturedUrns = new Map<string, string>(); // urn → placeholder
+    const responseHandler = async (response: import('playwright').Response) => {
+      const responseUrl = response.url();
+      if (!responseUrl.includes('linkedin.com')) return;
+      const ct = response.headers()['content-type'] ?? '';
+      if (!ct.includes('json') && !ct.includes('javascript')) return;
+      try {
+        const text = await response.text().catch(() => '');
+        const urnMatches = text.matchAll(/urn:li:activity:(\d{10,})/g);
+        for (const m of urnMatches) {
+          const urn = `urn:li:activity:${m[1]}`;
+          if (!capturedUrns.has(urn)) capturedUrns.set(urn, '');
+        }
+      } catch { /* ignore */ }
+    };
+    page.on('response', responseHandler);
 
     try {
       await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
       await checkSession(page);
 
-      // Give SDUI time to render post cards (headed mode renders them; headless does not)
-      await page.waitForTimeout(3000);
+      // Give SDUI time to render the initial post cards
+      await page.waitForTimeout(4000);
 
-      // Scroll to trigger additional post cards to load
-      for (let i = 0; i < 4; i++) {
-        await page.evaluate(() => window.scrollBy(0, 700));
-        await page.waitForTimeout(1000);
+      // Scroll aggressively to trigger lazy-loaded XHR calls that carry activity URNs.
+      for (let i = 0; i < 10; i++) {
+        await page.evaluate(() => window.scrollBy(0, 600));
+        await page.waitForTimeout(1200);
       }
+      // Pause to let final batch of XHR responses arrive
+      await page.waitForTimeout(2000);
 
       // Extract post cards from DOM.
       // LinkedIn renders "Feed post" heading (H2) as the first text in each post card.
@@ -624,10 +659,28 @@ export async function discoverLinkedInPosts(
           return !parentText.startsWith('Feed post');
         });
 
-        for (const el of feedCards.slice(0, 15)) {
-          // Post URL: timestamp link goes to the full post (uses /feed/update/ path)
-          const updateLink = el.querySelector('a[href*="/feed/update/"]') as HTMLAnchorElement | null;
-          const url = updateLink?.href?.split('?')[0] ?? '';
+        for (const el of feedCards.slice(0, 20)) {
+          // Post URL: try anchor links first, then data-urn on card elements.
+          // LinkedIn SDUI uses /feed/update/urn:li:activity:XXX/ for timestamps and
+          // /posts/slug/ for public permalinks. Newer SDUI builds may omit anchor links
+          // from search cards, so check data-urn attributes as a fallback.
+          const updateLink = (
+            el.querySelector('a[href*="/feed/update/"]') ??
+            el.querySelector('a[href*="/posts/"]') ??
+            Array.from(el.querySelectorAll('a[href]')).find(
+              (a) => /linkedin\.com\/(feed\/update|posts)\//i.test((a as HTMLAnchorElement).href)
+            )
+          ) as HTMLAnchorElement | null;
+          let url = updateLink?.href?.split('?')[0] ?? '';
+          if (!url) {
+            const urnEl = el.querySelector('[data-urn]') ??
+              el.closest('[data-urn]') ??
+              (el.getAttribute('data-urn') ? el : null);
+            const urn = urnEl?.getAttribute('data-urn') ?? '';
+            if (/urn:li:activity:/.test(urn)) {
+              url = `https://www.linkedin.com/feed/update/${urn}/`;
+            }
+          }
 
           // Author: first /in/ or /company/ link in the card
           const authorLink = el.querySelector('a[href*="/in/"], a[href*="/company/"]') as HTMLAnchorElement | null;
@@ -657,7 +710,6 @@ export async function discoverLinkedInPosts(
               .sort((a, b) => b.length - a.length)[0] ?? '';
           }
           if (!postText) {
-            // Fallback: longest paragraph in the whole card
             postText = allPs
               .map(p => p.textContent?.trim() ?? '')
               .filter(t => t.length > 80 && t !== authorName && !/^\d+[mhdw]/.test(t) && !t.startsWith('•'))
@@ -675,22 +727,68 @@ export async function discoverLinkedInPosts(
         return results;
       });
 
-      console.log(`[discover] "${keyword}": ${extracted.length} posts from DOM extraction`);
+      page.off('response', responseHandler);
 
-      for (const p of extracted) {
+      // Assign network-captured URNs to posts that lack real /feed/update/ permalinks.
+      // Company feed pages (/company/*/posts/) are not specific-post links —
+      // treat them the same as missing URLs and prefer a captured URN.
+      const isSpecificPostUrl = (u: string) => /\/feed\/update\//i.test(u);
+      const orphanUrns = [...capturedUrns.keys()].filter(
+        urn => !extracted.some(p => isSpecificPostUrl(p.url) && p.url.includes(urn))
+      );
+      let urnIdx = 0;
+      const enriched = extracted.map(p => {
+        if (isSpecificPostUrl(p.url)) return p;
+        if (urnIdx < orphanUrns.length) {
+          return { ...p, url: `https://www.linkedin.com/feed/update/${orphanUrns[urnIdx++]}/` };
+        }
+        return p;
+      });
+
+      // Accept both person (/in/) and company (/company/) authors — target is 8-12
+      // combined posts per batch. The engagement engine handles author-level filtering.
+      const withUrls = enriched.filter(p => isSpecificPostUrl(p.url));
+      console.log(
+        `[discover] "${keyword}": ${extracted.length} DOM posts, ${capturedUrns.size} network URNs → ` +
+        `${withUrls.length} with real permalinks (${enriched.length - withUrls.length} dropped, no URL)`
+      );
+
+      // Topic relevance gate: drop posts that are off-topic for RevOps/GTM/sales leadership.
+      const OFF_TOPIC_SIGNALS = [
+        /#interviewquestions/i, /#interview\b/i,
+        /\bjava\b/i, /\bpython\b/i, /\breact\.?js\b/i, /\bnode\.?js\b/i,
+        /\bangular\b/i, /\bvue\.?js\b/i, /\bdotnet\b/i, /\bc#\b/i, /\bc\+\+/i,
+        /#coding\b/i, /#developer\b/i, /#programmer\b/i, /#softwaredevelopment\b/i,
+        /#machinelearning\b/i, /#deeplearning\b/i, /#datascience\b/i, /#mlops\b/i,
+        /\bcloud engineer\b/i, /\bazure\b.*\bengineer\b/i,
+        /\bw2\s+only\b/i, /\bc2c\b/i, /\bhot(list|beds?)\b/i,
+        /immediate\s+opening/i, /\bstaffing\b/i, /\brecruiter\b/i, /\bplacement\b/i,
+        /graduation\b/i, /\bcongratulations?\b.*\bgraduate/i, /\bcolleg(e|iate)\b.*\bgrad/i,
+        /\bremote.{0,20}usd\b/i, /remote jobs?.*\/hour/i,
+        /get me on your next podcast/i,
+      ];
+
+      for (const p of withUrls) {
         if (all.length >= limit) break;
-        const key = p.url || `${p.authorName}:${p.text.substring(0, 20)}`;
+        const key = p.url;
         if (seenUrn.has(key)) continue;
+        const combined = `${p.authorName} ${p.text}`;
+        if (OFF_TOPIC_SIGNALS.some(sig => sig.test(combined))) {
+          console.log(`[discover] SKIP off-topic: ${p.authorName}: ${p.text.slice(0, 60)}`);
+          continue;
+        }
         seenUrn.add(key);
         all.push({
           url: p.url,
           authorName: p.authorName,
           authorUrl: p.authorUrl,
           text: p.text,
-          keyword,
+          // Strip '#' so hashtag keywords match sender topic_keywords
+          keyword: keyword.startsWith('#') ? keyword.slice(1) : keyword,
         });
       }
     } catch (err) {
+      page.off('response', responseHandler);
       console.error(`[discover] Error for "${keyword}": ${(err as Error).message}`);
     }
   }
