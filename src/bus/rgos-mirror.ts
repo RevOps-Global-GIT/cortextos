@@ -838,6 +838,73 @@ export async function mirrorTaskToRgos(
   }
 }
 
+export interface AgentMirrorStatus {
+  isActive: boolean;
+  currentTaskId?: string | null;
+  currentTaskBusId?: string | null;
+  currentTask?: string | null;
+  lastHeartbeat?: string | null;
+  mode?: string | null;
+  reason?: string;
+  instanceId?: string;
+  org?: string;
+}
+
+/**
+ * Patch an agent lifecycle state into RGOS orch_agents.
+ *
+ * Heartbeats already mark agents active, but lifecycle stops/decommissions can
+ * happen between heartbeat writes. This direct patch keeps AgentOps' mirror
+ * honest when an operator intentionally stops or disables an agent.
+ */
+export async function mirrorAgentStatusToRgos(
+  agentName: string,
+  status: AgentMirrorStatus,
+): Promise<void> {
+  if (!isEnabled()) return;
+  const url = process.env.SUPABASE_RGOS_URL!;
+  const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
+  const roleId = `cortextos-${agentName}`;
+  const now = new Date().toISOString();
+
+  const row: Record<string, unknown> = {
+    is_active: status.isActive,
+    current_task_id: status.isActive ? (status.currentTaskId ?? null) : null,
+    config_json: {
+      source: 'cortextos',
+      mirror_source: MIRROR_SOURCE,
+      lifecycle_reason: status.reason ?? (status.isActive ? 'heartbeat' : 'stopped'),
+      current_task: status.currentTask ?? null,
+      current_task_bus_id: status.currentTaskBusId ?? null,
+      instance_id: status.instanceId ?? process.env.CTX_INSTANCE_ID ?? null,
+      org: status.org ?? process.env.CTX_ORG ?? null,
+    },
+    updated_at: now,
+  };
+  if (status.lastHeartbeat !== undefined) row.last_heartbeat = status.lastHeartbeat;
+  if (status.mode !== undefined) {
+    (row.config_json as Record<string, unknown>).mode = status.mode;
+  }
+
+  const endpoint = `${url}/rest/v1/orch_agents?role_id=eq.${encodeURIComponent(roleId)}`;
+  const response = await fetch(endpoint, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      Prefer: 'return=minimal',
+    },
+    body: JSON.stringify(row),
+    signal: AbortSignal.timeout(8_000),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Supabase orch_agents update failed: ${response.status} ${body.slice(0, 160)}`);
+  }
+}
+
 /**
  * Patch pr_url into an existing orch_tasks mirror row's metadata. Best-effort — never throws.
  * Looks up the row by metadata.bus_task_id, merges pr_url, PATCHes back.

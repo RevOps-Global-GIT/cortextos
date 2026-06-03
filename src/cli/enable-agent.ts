@@ -5,6 +5,7 @@ import { join } from 'path';
 import { homedir } from 'os';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI, formatValidateError } from '../telegram/api.js';
+import { mirrorAgentStatusToRgos } from '../bus/rgos-mirror.js';
 
 /**
  * BUG-035 fix: discover the cortextOS framework root without depending on
@@ -287,6 +288,11 @@ export const disableAgentCommand = new Command('disable')
         console.log(`Agent "${agent}" disabled. Stop failed: ${response.error}`);
       }
     } else {
+      await mirrorAgentStatusToRgos(agent, {
+        isActive: false,
+        reason: 'cli_disable_daemon_not_running',
+        instanceId: options.instance,
+      }).catch(err => console.warn(`RGOS inactive mirror failed for ${agent}: ${err instanceof Error ? err.message : String(err)}`));
       console.log(`Agent "${agent}" disabled.`);
     }
   });

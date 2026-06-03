@@ -30,7 +30,8 @@ import { spawnCodex } from '../bus/spawn-codex.js';
 import { handleCodexFallback } from '../bus/codex-fallback.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
-import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos } from '../bus/rgos-mirror.js';
+import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos, mirrorAgentStatusToRgos, mirrorTaskToRgos } from '../bus/rgos-mirror.js';
+import { reconcileAgentOpsMirror } from '../bus/agentops-mirror-reconcile.js';
 import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
@@ -795,11 +796,23 @@ busCommand
     process.exit(0);
   });
 
+async function flushTaskMirrorForCli(
+  paths: ReturnType<typeof resolvePaths>,
+  taskId: string,
+  event: 'update' | 'complete',
+): Promise<void> {
+  if (process.env.VITEST || process.env.NODE_ENV === 'test') return;
+  const taskPath = findTaskFile(paths, taskId);
+  if (!taskPath) return;
+  const task = JSON.parse(readFileSync(taskPath, 'utf-8')) as Task;
+  await mirrorTaskToRgos(task, event);
+}
+
 busCommand
   .command('update-task')
   .argument('<id>', 'Task ID')
   .argument('<status>', 'New status (pending, in_progress, completed, blocked, cancelled)')
-  .action((id: string, status: string) => {
+  .action(async (id: string, status: string) => {
     const validStatuses: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'];
     if (!validStatuses.includes(status as TaskStatus)) {
       console.error(`Invalid status '${status}'. Must be one of: ${validStatuses.join(', ')}`);
@@ -820,9 +833,8 @@ busCommand
     }
 
     updateTask(paths, id, status as TaskStatus);
+    await flushTaskMirrorForCli(paths, id, 'update');
     console.log(`Updated ${id} -> ${status}`);
-    // Exit after local write completes — updateTask fires mirrorTaskToRgos
-    // which schedules drainRetryQueue; exit before the drain runs.
     process.exit(0);
   });
 
@@ -945,6 +957,9 @@ busCommand
         await importRgosTaskById(paths, id, agent);
       }
       const task = claimTask(paths, id, agent);
+      if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+        await mirrorTaskToRgos(task, 'update');
+      }
       console.log(`Claimed ${id} -> in_progress (assigned to ${agent})`);
       console.log(`  Title: ${task.title}`);
     } catch (err) {
@@ -1004,14 +1019,13 @@ busCommand
     }
 
     completeTask(paths, id, effectiveResult, proofStamp);
+    await flushTaskMirrorForCli(paths, id, 'complete');
     console.log(`Completed ${id}`);
 
     // Clear heartbeat so crash notifications show 'idle' not the just-completed task.
     // Swallowed — heartbeat update must never block or fail task completion.
     await updateHeartbeat(paths, env.agentName, 'idle', { org: env.org, currentTask: '' }).catch(() => {});
 
-    // Exit after local write completes — completeTask fires mirrorTaskToRgos
-    // which schedules drainRetryQueue; exit before the drain runs.
     process.exit(0);
   });
 
@@ -4966,6 +4980,54 @@ busCommand
   });
 
 busCommand
+  .command('agentops-mirror-reconcile')
+  .description('Compare live cortextOS state with RGOS AgentOps mirror rows and log drift')
+  .option('--json', 'Output result as JSON', false)
+  .option('--no-log', 'Do not emit mirror_drift_detected Activity events', false)
+  .option('--max-drifts <n>', 'Maximum drift samples to include in output/event', '50')
+  .action(async (opts: { json?: boolean; noLog?: boolean; maxDrifts?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const maxDrifts = Number.parseInt(opts.maxDrifts ?? '50', 10);
+    const result = await reconcileAgentOpsMirror(paths, {
+      org: env.org,
+      maxDrifts: Number.isFinite(maxDrifts) && maxDrifts > 0 ? maxDrifts : 50,
+    });
+
+    if (!opts.noLog && result.drift_count > 0) {
+      logEvent(paths, env.agentName, env.org, 'action', 'mirror_drift_detected', 'warning', {
+        drift_count: result.drift_count,
+        live_tasks: result.live_tasks,
+        mirror_tasks: result.mirror_tasks,
+        live_agents: result.live_agents,
+        mirror_agents: result.mirror_agents,
+        drifts: result.drifts,
+      });
+    }
+
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    if (result.skipped) {
+      console.log(`agentops-mirror-reconcile: skipped — ${result.reason}`);
+      return;
+    }
+
+    if (result.drift_count === 0) {
+      console.log(`agentops-mirror-reconcile: no drift (${result.live_tasks} live tasks, ${result.live_agents} live agents)`);
+      return;
+    }
+
+    console.log(`agentops-mirror-reconcile: ${result.drift_count} drift(s) detected`);
+    for (const drift of result.drifts) {
+      console.log(`  ${drift.kind} ${drift.id}: live=${JSON.stringify(drift.live)} mirror=${JSON.stringify(drift.mirror)}`);
+    }
+    process.exit(1);
+  });
+
+busCommand
   .command('computer-use <prompt>')
   .description('Run a legacy Codex dispatch prompt. Defaults to local code-only Codex; Greg Mac requires explicit guarded fallback.')
   .option('--no-plugin', 'Send a plain Codex prompt without the Computer Use plugin')
@@ -5348,6 +5410,14 @@ busCommand
     if (await ipc.isDaemonRunning()) {
       const resp = await ipc.send({ type: 'stop-agent', agent, source: 'cortextos bus decommission-agent' });
       stoppedViaDaemon = resp.success;
+    }
+    if (!stoppedViaDaemon) {
+      await mirrorAgentStatusToRgos(agent, {
+        isActive: false,
+        reason: 'bus_decommission_agent',
+        instanceId,
+        org: env.org,
+      }).catch(err => console.warn(`RGOS inactive mirror failed for ${agent}: ${err instanceof Error ? err.message : String(err)}`));
     }
 
     console.log(JSON.stringify({

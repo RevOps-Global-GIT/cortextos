@@ -48,6 +48,7 @@ import {
   migrateRetryQueueConstraints,
   migrateRetryQueueReplyToId,
   resolveExistingTaskMirrorId,
+  mirrorAgentStatusToRgos,
   PostgRESTError,
   _resetDrainLock,
 } from '../../../src/bus/rgos-mirror.js';
@@ -160,6 +161,43 @@ describe('rgos-mirror — isEnabled()', () => {
   it('returns false when SUPABASE_RGOS_SERVICE_KEY missing', () => {
     process.env.SUPABASE_RGOS_URL = 'https://test.supabase.co';
     expect(isEnabled()).toBe(false);
+  });
+});
+
+describe('rgos-mirror — mirrorAgentStatusToRgos()', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-agent-status-'));
+    setMirrorEnv(tmpDir);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('patches orch_agents inactive for stopped agents', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorAgentStatusToRgos('codex', {
+      isActive: false,
+      reason: 'daemon_stop_agent',
+      instanceId: 'cortextos1',
+      org: 'revops-global',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain('/rest/v1/orch_agents?role_id=eq.cortextos-codex');
+    expect(init?.method).toBe('PATCH');
+    const body = JSON.parse(String(init?.body));
+    expect(body.is_active).toBe(false);
+    expect(body.current_task_id).toBeNull();
+    expect(body.config_json.lifecycle_reason).toBe('daemon_stop_agent');
+    expect(body.config_json.instance_id).toBe('cortextos1');
   });
 });
 

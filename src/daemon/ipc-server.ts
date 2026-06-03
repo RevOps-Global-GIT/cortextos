@@ -4,13 +4,14 @@ import { join, resolve as pathResolve } from 'path';
 import { homedir } from 'os';
 import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
-import { getIpcPath } from '../utils/paths.js';
+import { getIpcPath, resolvePaths } from '../utils/paths.js';
 import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron, getCronByName } from '../bus/crons.js';
 import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
 import { parseDurationMs } from '../bus/cron-state.js';
 import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
 import { atomicWriteSync } from '../utils/atomic.js';
+import { logEvent } from '../bus/event.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
 
@@ -450,6 +451,21 @@ export function handleUpdateCron(
     return { ok: false, error: `Cron '${name}' not found for agent '${agent}'.` };
   }
 
+  if (patch.enabled === false && !process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    try {
+      const instanceId = process.env.CTX_INSTANCE_ID ?? 'default';
+      const org = process.env.CTX_ORG ?? '';
+      const paths = resolvePaths(agent, instanceId, org);
+      logEvent(paths, agent, org, 'action', 'cron_disabled', 'info', {
+        target_agent: agent,
+        cron: name,
+        source: 'daemon update-cron',
+      });
+    } catch {
+      // Cron mutation is authoritative; visibility event is best-effort.
+    }
+  }
+
   return { ok: true };
 }
 
@@ -626,9 +642,9 @@ export class IPCServer {
             response = { success: false, error: 'Agent name required', code: 'INVALID_INPUT' };
           } else {
             const insp = this.agentManager.inspectAgentOp('stop', request.agent);
-            this.agentManager.stopAgent(request.agent)
-              .catch(err => console.error(`Failed to stop ${request.agent}:`, err));
             if (insp.ok) {
+              this.agentManager.stopAgent(request.agent)
+                .catch(err => console.error(`Failed to stop ${request.agent}:`, err));
               response = { success: true, data: `Stopping ${request.agent}` };
             } else {
               console.log(`[ipc] stop-agent ${request.agent}: ${insp.code} — ${insp.message}`);
