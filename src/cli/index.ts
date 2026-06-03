@@ -22,7 +22,6 @@ import { getConfigCommand } from './get-config.js';
 import { goalsCommand } from './goals.js';
 import { setupCommand } from './setup.js';
 import { spawnWorkerCommand, terminateWorkerCommand, listWorkersCommand, injectWorkerCommand } from './workers.js';
-import { provisionOrgoCommand } from './provision-orgo.js';
 import { importAgentCommand } from './import-agent.js';
 import { updateCommand } from './update.js';
 
@@ -57,7 +56,6 @@ program.addCommand(spawnWorkerCommand);
 program.addCommand(terminateWorkerCommand);
 program.addCommand(listWorkersCommand);
 program.addCommand(injectWorkerCommand);
-program.addCommand(provisionOrgoCommand);
 program.addCommand(importAgentCommand);
 program.addCommand(updateCommand);
 

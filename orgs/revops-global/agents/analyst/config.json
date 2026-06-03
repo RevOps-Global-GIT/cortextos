@@ -133,28 +133,10 @@
       "prompt": "Memory-decay sweep. Read all entries in MEMORY.md (auto-memory index). For each entry >30 days old: verify the referenced file/function/config still exists by grepping/globbing. Flag entries where the claim is no longer true. Update or remove stale entries. Write a one-line summary to daily memory noting how many entries checked, how many updated, how many removed."
     },
     {
-      "name": "doc-drift-checker",
-      "type": "recurring",
-      "cron": "0 6 * * 6",
-      "prompt": "Doc drift checker. Compare key documentation files against actual codebase state. Check: (1) CLAUDE.md references to file paths \u2014 verify each path exists. (2) AGENTS.md role descriptions \u2014 verify against current enabled-agents.json. (3) knowledge.md tool/command references \u2014 verify commands exist in bus/. (4) README or SYSTEM.md references to architecture \u2014 verify against actual directory structure. Write results to analyst/output/YYYY-MM-DD-doc-drift.md. For each drift found: file, line, claim, actual state. If >3 drifts found, create one RGOS task to fix them. If 0 drifts, write one-line 'no drift detected' and skip task creation."
-    },
-    {
       "name": "heartbeat-health-watch",
       "type": "recurring",
       "interval": "30m",
       "prompt": "Run bus inbox/heartbeat health watch: cd /home/cortextos/cortextos && cortextos bus heartbeat-health-watch --threshold-minutes 120 --notify-agent orchestrator. Alert orchestrator if any enabled+running agent has been silent for more than 2h; do not message Greg directly."
-    },
-    {
-      "name": "pr-stuck-watcher",
-      "type": "recurring",
-      "interval": "1h",
-      "prompt": "Run PR stuck watcher: cd /home/cortextos/cortextos && cortextos bus pr-stuck-watcher --stuck-hours 2 --alert-hours 2 --auto-merge --create-tasks --notify-agent orchestrator. It watches the 5 RevOps repos, auto-merges eligible green PRs under blanket policy, and creates RGOS tasks for stuck PRs that cannot auto-merge."
-    },
-    {
-      "name": "customer-surface-deep-qa",
-      "type": "recurring",
-      "interval": "6h",
-      "prompt": "Run customer-surface deep QA: cd /home/cortextos/cortextos && cortextos bus customer-surface-qa --user greg@revopsglobal.com. This runs the Playwright harness against core customer surfaces, writes a report, and creates a task for each failing page. If tasks are created or the command errors, notify orchestrator with the report path; otherwise stay silent."
     },
     {
       "name": "automation-noise-audit",
