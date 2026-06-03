@@ -11,15 +11,22 @@ vi.mock('../../../src/daemon/agent-process.js', () => ({
   AgentProcess: class {
     name: string;
     dir: string;
+    config = {};
     constructor(name: string, dir: string) { this.name = name; this.dir = dir; }
     async start() { /* no-op */ }
     async stop() { /* no-op */ }
     getStatus() { return { name: this.name, status: 'stopped' }; }
+    isDeadButRegistered() { return false; }
+    markProcessDead() { /* no-op */ }
+    resetCrashCount() { /* no-op */ }
+    onStatusChanged() { /* no-op */ }
+    setTelegramHandle() { /* no-op */ }
+    get timezone() { return undefined; }
     onExit() { /* no-op */ }
   },
 }));
 vi.mock('../../../src/daemon/fast-checker.js', () => ({
-  FastChecker: class { start() {} stop() {} wake() {} },
+  FastChecker: class { async start() {} stop() {} wake() {} },
 }));
 vi.mock('../../../src/telegram/api.js', () => ({ TelegramAPI: class { constructor() {} } }));
 vi.mock('../../../src/telegram/poller.js', () => ({ TelegramPoller: class { start() {} stop() {} } }));
@@ -99,6 +106,36 @@ describe('AgentManager.inspectAgentOp — issue #346 (DEDUPED vs NOT_FOUND)', ()
     am.inspectAgentOp('restart', 'phantom');
     const after = (am as unknown as { agents: Map<string, unknown> }).agents.size;
     expect(after).toBe(before);
+  });
+
+  it('startAgent respawns an agent that is registered but has no live process', async () => {
+    const agentDir = join(testDir, 'framework', 'orgs', 'acme', 'agents', 'alice');
+    mkdirSync(agentDir, { recursive: true });
+    const staleProcess = {
+      isDeadButRegistered: vi.fn()
+        .mockReturnValueOnce(true)
+        .mockReturnValueOnce(true)
+        .mockReturnValue(false),
+      markProcessDead: vi.fn(),
+      resetCrashCount: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn().mockReturnValue({ name: 'alice', status: 'running', pid: 12345 }),
+    };
+    const staleChecker = { stop: vi.fn() };
+    (am as unknown as { agents: Map<string, unknown> }).agents.set('alice', {
+      process: staleProcess,
+      checker: staleChecker,
+    });
+
+    await am.startAgent('alice', agentDir, {}, 'acme');
+
+    expect(staleProcess.markProcessDead).toHaveBeenCalledWith(expect.stringContaining('startAgent'));
+    expect(staleProcess.stop).toHaveBeenCalled();
+    expect(staleChecker.stop).toHaveBeenCalled();
+    expect(staleProcess.resetCrashCount).not.toHaveBeenCalled();
+    expect((am as unknown as { agents: Map<string, unknown> }).agents.has('alice')).toBe(true);
+    const replacement = (am as unknown as { agents: Map<string, { process: unknown } > }).agents.get('alice')?.process;
+    expect(replacement).not.toBe(staleProcess);
   });
 });
 
