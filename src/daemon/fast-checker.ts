@@ -77,6 +77,9 @@ export class FastChecker {
   // triggering an immediate restart.
   private consecutiveStalls: number = 0;
   private readonly POLL_CYCLE_TIMEOUT_MS = 30_000;
+  // Per-step timeout for outbound HTTP subprocess calls (gws, check-usage-api).
+  // Tighter than POLL_CYCLE_TIMEOUT_MS so a single hung step can't monopolise the full 30s budget.
+  private readonly STEP_HTTP_TIMEOUT_MS = 15_000;
   private readonly WATCHDOG_MAX_RESTARTS = 3;
   private readonly WATCHDOG_WINDOW_MS = 15 * 60 * 1000;   // 15 min
   private readonly WATCHDOG_CIRCUIT_RESET_MS = 30 * 60 * 1000; // 30 min
@@ -588,7 +591,7 @@ export class FastChecker {
         execFile('gws', ['gmail', 'users', 'messages', 'list',
           '--params', JSON.stringify({ userId: 'me', q: this.gmailWatch!.query }),
           '--format', 'json',
-        ], { timeout: this.POLL_CYCLE_TIMEOUT_MS }, (err, stdout) => {
+        ], { timeout: this.STEP_HTTP_TIMEOUT_MS }, (err, stdout) => {
           if (err) { reject(err); return; }
           resolve(stdout);
         });
@@ -617,7 +620,7 @@ export class FastChecker {
           execFile('gws', ['gmail', 'users', 'messages', 'get',
             '--params', JSON.stringify({ userId: 'me', id, format: 'metadata', metadataHeaders: ['Subject', 'From'] }),
             '--format', 'json',
-          ], { timeout: this.POLL_CYCLE_TIMEOUT_MS }, (err, stdout) => {
+          ], { timeout: this.STEP_HTTP_TIMEOUT_MS }, (err, stdout) => {
             if (err) { reject(err); return; }
             resolve(stdout);
           });
@@ -671,7 +674,7 @@ export class FastChecker {
       rawJson = await new Promise<string>((resolve, reject) => {
         // Pass high warn thresholds to suppress the script's own Telegram alerts —
         // we handle alerting ourselves on tier transitions only.
-        execFile('cortextos', ['bus', 'check-usage-api', '--json'], { timeout: this.POLL_CYCLE_TIMEOUT_MS }, (err, stdout) => {
+        execFile('cortextos', ['bus', 'check-usage-api', '--json'], { timeout: this.STEP_HTTP_TIMEOUT_MS }, (err, stdout) => {
           if (err) { reject(err); return; }
           resolve(stdout);
         });
