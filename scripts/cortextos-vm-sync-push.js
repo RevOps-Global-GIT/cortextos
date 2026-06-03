@@ -364,6 +364,10 @@ function readDailyTokensForAgent(agentName) {
 // ── Data collection ───────────────────────────────────────────────────────────
 
 /** List all agent names from state dir (skip non-agent entries) */
+function isDecommissioned(agentName) {
+  return fs.existsSync(path.join(STATE_DIR, agentName, ".decommissioned"));
+}
+
 function listAgentNames() {
   if (!fs.existsSync(STATE_DIR)) return [];
   return fs
@@ -374,7 +378,9 @@ function listAgentNames() {
       // Skip known non-agent dirs
       if (["vm-sync-watermark.json", "audit"].includes(name)) return false;
       // Must have heartbeat.json to be a real agent
-      return fs.existsSync(path.join(p, "heartbeat.json"));
+      if (!fs.existsSync(path.join(p, "heartbeat.json"))) return false;
+      // Exclude decommissioned agents from the board
+      return !isDecommissioned(name);
     });
 }
 
@@ -587,14 +593,16 @@ function buildPayload(watermark) {
   const activityEvents = readEventsSince(sinceTs);
   const crashEvents = readCrashEventsSince(sinceTs);
 
-  // Collect all unique agent names that have any data
-  const allAgents = new Set([
-    ...agentNames,
-    ...daemonStatuses.keys(),
-    ...Object.keys(taskTransitions),
-    ...Object.keys(activityEvents),
-    ...Object.keys(crashEvents),
-  ]);
+  // Collect all unique agent names that have any data, excluding decommissioned
+  const allAgents = new Set(
+    [
+      ...agentNames,
+      ...daemonStatuses.keys(),
+      ...Object.keys(taskTransitions),
+      ...Object.keys(activityEvents),
+      ...Object.keys(crashEvents),
+    ].filter((name) => !isDecommissioned(name)),
+  );
 
   const agents = [];
 
