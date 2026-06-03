@@ -320,8 +320,11 @@ export function evaluateExperiment(
 ): Experiment {
   const experiment = loadExperiment(agentDir, experimentId);
 
-  if (experiment.status !== 'running') {
-    throw new Error(`Experiment ${experimentId} is '${experiment.status}', expected 'running'`);
+  if (experiment.status === 'proposed') {
+    throw new Error(
+      `Experiment ${experimentId} has not been started yet (status='proposed'). ` +
+      `Run 'bus run-experiment ${experimentId}' first.`,
+    );
   }
 
   const score = options?.score;
