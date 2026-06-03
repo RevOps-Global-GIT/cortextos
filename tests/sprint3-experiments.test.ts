@@ -251,9 +251,29 @@ describe('Sprint 3: Experiment Framework', () => {
       expect(result.decision).toBe('keep');
     });
 
-    it('throws if experiment is not running', () => {
+    it('throws if experiment is proposed (not yet started)', () => {
       const id = createExperiment(testDir, 'testbot', 'ctr', 'test');
-      expect(() => evaluateExperiment(testDir, id, 10)).toThrow("expected 'running'");
+      expect(() => evaluateExperiment(testDir, id, 10)).toThrow("has not been started yet");
+    });
+
+    it('accepts re-evaluation of a completed experiment (autoresearch sync drift fix)', () => {
+      const id = createExperiment(testDir, 'testbot', 'engagement', 'hypothesis', {
+        direction: 'higher',
+      });
+      runExperiment(testDir, id);
+      // First eval: 8 > 0 baseline → keep; baseline advances to 8.
+      const first = evaluateExperiment(testDir, id, 8, { justification: 'initial eval' });
+      expect(first.status).toBe('completed');
+      expect(first.decision).toBe('keep');
+      expect(first.baseline_value).toBe(8);
+
+      // Re-evaluate the already-completed experiment — must not throw.
+      // 3 < 8 (updated baseline) → discard.
+      const second = evaluateExperiment(testDir, id, 3, { justification: 're-eval with corrected data' });
+      expect(second.status).toBe('completed');
+      expect(second.result_value).toBe(3);
+      expect(second.decision).toBe('discard');
+      expect(second.learning).toContain('re-eval with corrected data');
     });
 
     it('stores --score in score field without overwriting measured value', () => {
