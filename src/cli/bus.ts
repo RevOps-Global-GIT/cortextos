@@ -4499,7 +4499,8 @@ busCommand
   .option('--max-drifts <n>', 'Maximum drift samples to include in output/event', '50')
   .option('--repair', 'Backfill live tasks and agents into the RGOS AgentOps mirror using existing mirror writers', false)
   .option('--dry-run', 'With --repair, report the backfill plan without writing mirror rows', false)
-  .action(async (opts: { json?: boolean; noLog?: boolean; maxDrifts?: string; repair?: boolean; dryRun?: boolean }) => {
+  .option('--verify-delay-ms <n>', 'With --repair, wait before after-reconcile to catch external mirror reassertion', '25000')
+  .action(async (opts: { json?: boolean; noLog?: boolean; maxDrifts?: string; repair?: boolean; dryRun?: boolean; verifyDelayMs?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const maxDrifts = Number.parseInt(opts.maxDrifts ?? '50', 10);
@@ -4509,9 +4510,11 @@ busCommand
     };
 
     if (opts.repair) {
+      const verifyDelayMs = Number.parseInt(opts.verifyDelayMs ?? '25000', 10);
       const result = await repairAgentOpsMirror(paths, {
         ...reconcileOptions,
         dryRun: opts.dryRun === true,
+        verifyDelayMs: Number.isFinite(verifyDelayMs) && verifyDelayMs >= 0 ? verifyDelayMs : 25000,
       });
 
       if (!opts.noLog) {
@@ -4519,6 +4522,7 @@ busCommand
           dry_run: result.dry_run,
           before_drift_count: result.before.drift_count,
           after_drift_count: result.after?.drift_count ?? null,
+          verify_delay_ms: result.verify_delay_ms,
           planned_tasks: result.planned_tasks,
           planned_agents: result.planned_agents,
           repaired_tasks: result.repaired_tasks,
@@ -4549,6 +4553,7 @@ busCommand
         return;
       }
       console.log(`  repaired: ${result.repaired_tasks} task(s), ${result.repaired_agents} agent(s)`);
+      console.log(`  verify delay: ${result.verify_delay_ms}ms`);
       console.log(`  after drift: ${afterCount ?? 'not checked'}`);
       console.log(`  cron note: ${result.crons.note}`);
       if (result.failures.length > 0) {

@@ -117,7 +117,12 @@ describe('reconcileAgentOpsMirror', () => {
     expect(result.drift_count).toBe(2);
     expect(result.drifts).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: 'task_status', id: task.id, live: 'cancelled', mirror: 'blocked' }),
-      expect.objectContaining({ kind: 'agent_active', id: 'cortextos-codex', live: true, mirror: false }),
+      expect.objectContaining({
+        kind: 'agent_active',
+        id: 'cortextos-codex',
+        live: true,
+        mirror: expect.objectContaining({ is_active: false }),
+      }),
     ]));
   });
 

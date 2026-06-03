@@ -44,6 +44,7 @@ export interface AgentOpsMirrorRepairResult {
   skipped?: boolean;
   reason?: string;
   dry_run: boolean;
+  verify_delay_ms: number;
   before: AgentOpsMirrorReconcileResult;
   after?: AgentOpsMirrorReconcileResult;
   planned_tasks: number;
@@ -101,6 +102,12 @@ interface MirrorTaskRow {
 interface MirrorAgentRow {
   role_id?: string;
   is_active?: boolean;
+  last_heartbeat?: string | null;
+  updated_at?: string | null;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 export async function reconcileAgentOpsMirror(
@@ -168,7 +175,7 @@ export async function reconcileAgentOpsMirror(
   }
 
   const agentParams = new URLSearchParams({
-    select: 'role_id,is_active',
+    select: 'role_id,is_active,last_heartbeat,updated_at',
   });
   const mirrorAgents = await fetchAllMirrorRows<MirrorAgentRow>('orch_agents', agentParams);
   const mirrorAgentsByRoleId = new Map(
@@ -196,7 +203,11 @@ export async function reconcileAgentOpsMirror(
         kind: 'agent_active',
         id: roleId,
         live: liveActive,
-        mirror: mirror.is_active ?? null,
+        mirror: {
+          is_active: mirror.is_active ?? null,
+          last_heartbeat: mirror.last_heartbeat ?? null,
+          updated_at: mirror.updated_at ?? null,
+        },
       });
     }
   }
@@ -244,13 +255,14 @@ function auditCrons(agentNames: string[]): AgentOpsCronAudit {
 
 export async function repairAgentOpsMirror(
   paths: BusPaths,
-  options?: { org?: string; maxDrifts?: number; dryRun?: boolean },
+  options?: { org?: string; maxDrifts?: number; dryRun?: boolean; verifyDelayMs?: number },
 ): Promise<AgentOpsMirrorRepairResult> {
   const before = await reconcileAgentOpsMirror(paths, options);
   const liveTasks = listTasks(paths);
   const liveAgents = await listAgents(paths.ctxRoot, options?.org);
   const crons = auditCrons(liveAgents.map(agent => agent.name));
   const dryRun = options?.dryRun === true;
+  const verifyDelayMs = dryRun ? 0 : Math.max(0, options?.verifyDelayMs ?? 0);
 
   if (before.skipped || !isEnabled()) {
     return {
@@ -258,6 +270,7 @@ export async function repairAgentOpsMirror(
       skipped: true,
       reason: before.reason ?? 'RGOS mirror disabled or Supabase env missing',
       dry_run: dryRun,
+      verify_delay_ms: verifyDelayMs,
       before,
       planned_tasks: liveTasks.length,
       planned_agents: liveAgents.length,
@@ -272,6 +285,7 @@ export async function repairAgentOpsMirror(
     return {
       ok: true,
       dry_run: true,
+      verify_delay_ms: verifyDelayMs,
       before,
       planned_tasks: liveTasks.length,
       planned_agents: liveAgents.length,
@@ -312,11 +326,16 @@ export async function repairAgentOpsMirror(
     }
   }
 
+  if (verifyDelayMs > 0) {
+    await wait(verifyDelayMs);
+  }
+
   const after = await reconcileAgentOpsMirror(paths, options);
 
   return {
     ok: failures.length === 0 && after.drift_count === 0,
     dry_run: false,
+    verify_delay_ms: verifyDelayMs,
     before,
     after,
     planned_tasks: liveTasks.length,
