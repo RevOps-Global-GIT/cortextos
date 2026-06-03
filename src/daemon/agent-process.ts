@@ -139,7 +139,30 @@ export class AgentProcess implements ManagedAgent {
   }
 
   isRunning(): boolean {
-    return this.status === 'running' && this.pty !== null;
+    return this.status === 'running' && this.hasLivePtyProcess();
+  }
+
+  /**
+   * True when the in-memory lifecycle says "running" but the backing PTY
+   * process is no longer live. AgentManager uses this to recover the registry
+   * wedge where startAgent() would otherwise dedupe against a dead entry.
+   */
+  isDeadButRegistered(): boolean {
+    return this.status === 'running' && !this.hasLivePtyProcess();
+  }
+
+  /**
+   * Mark a missing backing process as crashed so a manager-driven restart can
+   * tear down stale per-agent resources before starting a fresh PTY.
+   */
+  markProcessDead(reason: string): void {
+    if (this.status !== 'running') return;
+    this.log(`Process liveness lost while registered as running: ${reason}`);
+    this.stopRequested = true;
+    this.pty = null;
+    this.clearSessionTimer();
+    this.status = 'crashed';
+    this.notifyStatusChange();
   }
 
   /**
@@ -165,6 +188,21 @@ export class AgentProcess implements ManagedAgent {
     const ok = this.injectMessage(message);
     if (ok) this.lastInjectedAt = Date.now();
     return ok;
+  }
+
+  private hasLivePtyProcess(): boolean {
+    if (!this.pty || !this.pty.isAlive()) return false;
+
+    const pid = this.pty.getPid();
+    if (pid && process.platform !== 'win32') {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   /**

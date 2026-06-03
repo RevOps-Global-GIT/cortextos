@@ -27,6 +27,7 @@ type LogFn = (msg: string) => void;
  * Manages all agents in a cortextOS instance.
  */
 export class AgentManager {
+  private static readonly HEALTH_RESTART_COOLDOWN_MS = 5 * 60 * 1000;
   private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; pollerToken?: string; activityPollerToken?: string; telegramRejectCount?: number; telegramLastRejectAlertAt?: number }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
   /** Daemon-level cron scheduler registry: one CronScheduler per enabled agent. */
@@ -343,6 +344,12 @@ export class AgentManager {
     }
 
     if (this.agents.has(name)) {
+      const entry = this.agents.get(name);
+      if (entry?.process.isDeadButRegistered?.()) {
+        await this.restartDeadRegisteredAgent(name, 'startAgent found a running registry entry with no live PTY process');
+        return;
+      }
+
       // Safety net: a startAgent arrived while the name is still in the
       // registry AND we have no in-flight stopAgent promise for it. With
       // the inFlightStops await above, the common stop+start IPC race no
@@ -1097,6 +1104,48 @@ export class AgentManager {
     console.log(`[agent-manager] Restart complete for ${name}`);
   }
 
+  private async restartDeadRegisteredAgent(agentName: string, reason: string): Promise<boolean> {
+    const entry = this.agents.get(agentName);
+    if (!entry?.process.isDeadButRegistered()) return false;
+
+    const lastRestart = this.lastRestartAt.get(agentName) ?? 0;
+    if (Date.now() - lastRestart < AgentManager.HEALTH_RESTART_COOLDOWN_MS) {
+      console.warn(`[agent-manager] ${agentName}: registered as running but process is dead (${reason}); restart cooldown active`);
+      return true;
+    }
+
+    console.warn(`[agent-manager] ${agentName}: registered as running but process is dead (${reason}) — respawning`);
+    entry.process.markProcessDead(reason);
+    this.lastRestartAt.set(agentName, Date.now());
+    this.healthRestartInProgress.add(agentName);
+    try {
+      await logEvent(
+        resolvePaths(agentName, this.instanceId, this.resolveAgentOrg(agentName)),
+        agentName,
+        this.resolveAgentOrg(agentName),
+        'action',
+        'agent_respawn_dead_registered_process',
+        'warning',
+        { reason },
+      );
+    } catch {
+      // Logging must not block recovery.
+    }
+
+    try {
+      await this.restartAgent(agentName);
+      const newEntry = this.agents.get(agentName);
+      newEntry?.process.resetCrashCount();
+      console.log(`[agent-manager] ${agentName}: respawn complete after dead registered process`);
+    } catch (err) {
+      console.error(`[agent-manager] ${agentName}: respawn failed after dead registered process: ${err}`);
+    } finally {
+      this.healthRestartInProgress.delete(agentName);
+    }
+
+    return true;
+  }
+
   /**
    * Write .daemon-stop markers for all currently-managed agents synchronously.
    *
@@ -1406,7 +1455,6 @@ export class AgentManager {
     const staleMinutes: number =
       (config as AgentConfig & { health?: { stale_heartbeat_minutes?: number } }).health?.stale_heartbeat_minutes ?? 45;
     const staleMs = staleMinutes * 60 * 1000;
-    const COOLDOWN_MS = 5 * 60 * 1000;
     const INTERVAL_MS = 60 * 1000;
 
     const timer = setInterval(async () => {
@@ -1417,6 +1465,9 @@ export class AgentManager {
       }
 
       const agentStatus = entry.process.getStatus();
+      if (agentStatus.status === 'running' && await this.restartDeadRegisteredAgent(agentName, 'stale-heartbeat watcher liveness check')) {
+        return;
+      }
       if (agentStatus.status !== 'running') return;
 
       const heartbeatPath = join(this.ctxRoot, 'state', agentName, 'heartbeat.json');
@@ -1437,7 +1488,7 @@ export class AgentManager {
 
       // Enforce cooldown
       const lastRestart = this.lastRestartAt.get(agentName) ?? 0;
-      if (Date.now() - lastRestart < COOLDOWN_MS) {
+      if (Date.now() - lastRestart < AgentManager.HEALTH_RESTART_COOLDOWN_MS) {
         console.log(`[stale-watcher] ${agentName}: heartbeat stale (${Math.round(ageMs / 60000)}min) but cooldown active — skipping restart`);
         return;
       }
@@ -1487,7 +1538,11 @@ export class AgentManager {
    */
   private async runHealthProbe(agentName: string): Promise<void> {
     // Skip if the agent is no longer running.
-    if (!this.agents.has(agentName)) return;
+    const entry = this.agents.get(agentName);
+    if (!entry) return;
+    if (entry.process.getStatus().status === 'running' && await this.restartDeadRegisteredAgent(agentName, 'health-probe liveness check')) {
+      return;
+    }
 
     const probeId = `health-probe-${agentName}-${Date.now()}`;
     const sentAt = new Date().toISOString();
