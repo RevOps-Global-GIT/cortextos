@@ -2,12 +2,12 @@
 # Smoke-test the Cortex -> Codex dispatch lane without exposing secrets.
 #
 # Default mode runs the VM-local, code-only bus dispatch check.
-# Greg's Mac is an explicit exception path and requires both:
-#   ALLOW_MAC_DIRECT=1 SSH_HOST=gregs-mac ORGO_FAILURE_ARTIFACT=/path/to/recent-failed-orgo.json
+# Greg's Mac is an explicit exception path and requires:
+#   ALLOW_MAC_DIRECT=1 SSH_HOST=gregs-mac
 #
 # Useful overrides:
 #   scripts/smoke-codex-dispatch.sh
-#   ALLOW_MAC_DIRECT=1 BUS_ONLY=1 SSH_HOST=gregs-mac ORGO_FAILURE_ARTIFACT=/tmp/orgo-fail.json scripts/smoke-codex-dispatch.sh
+#   ALLOW_MAC_DIRECT=1 BUS_ONLY=1 SSH_HOST=gregs-mac scripts/smoke-codex-dispatch.sh
 #   ALLOW_FALLBACK=1 scripts/smoke-codex-dispatch.sh
 
 set -euo pipefail
@@ -22,7 +22,6 @@ DIRECT_ONLY="${DIRECT_ONLY:-0}"
 BUS_ONLY="${BUS_ONLY:-0}"
 ALLOW_FALLBACK="${ALLOW_FALLBACK:-0}"
 ALLOW_MAC_DIRECT="${ALLOW_MAC_DIRECT:-0}"
-ORGO_FAILURE_ARTIFACT="${ORGO_FAILURE_ARTIFACT:-}"
 
 DIRECT_SENTINEL="CORTEXTOS_CODEX_DIRECT_OK"
 BUS_SENTINEL="CORTEXTOS_CODEX_BUS_OK"
@@ -60,11 +59,7 @@ assert_contains() {
 
 run_direct() {
   if [[ "$ALLOW_MAC_DIRECT" != "1" ]]; then
-    echo "direct Mac Codex dispatcher smoke is quarantined; set ALLOW_MAC_DIRECT=1 with a recent ORGO_FAILURE_ARTIFACT to run it" >&2
-    exit 69
-  fi
-  if [[ -z "$ORGO_FAILURE_ARTIFACT" || ! -f "$ORGO_FAILURE_ARTIFACT" ]]; then
-    echo "direct Mac Codex dispatcher smoke requires ORGO_FAILURE_ARTIFACT pointing to a recent failed Orgo attempt" >&2
+    echo "direct Mac Codex dispatcher smoke is quarantined; set ALLOW_MAC_DIRECT=1 to run it" >&2
     exit 69
   fi
   require_executable "$DISPATCH_SCRIPT" "Codex dispatcher"
@@ -91,9 +86,6 @@ run_bus() {
 
   if [[ -n "$SSH_HOST" ]]; then
     args+=(--ssh-host "$SSH_HOST" --dispatch-script "$DISPATCH_SCRIPT")
-  fi
-  if [[ -n "$ORGO_FAILURE_ARTIFACT" ]]; then
-    args+=(--orgo-failure-artifact "$ORGO_FAILURE_ARTIFACT")
   fi
 
   if [[ "$ALLOW_FALLBACK" != "1" ]]; then

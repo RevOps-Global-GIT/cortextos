@@ -18,7 +18,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -31,19 +31,14 @@ import { computerUse } from '../../../src/bus/computer-use';
 
 const mockExecFileSync = execFileSync as unknown as Mock;
 let tempDir = '';
-let recentOrgoFailureArtifact = '';
 
 beforeEach(() => {
   process.env.CODEX_BIN = 'codex';
   tempDir = mkdtempSync(join(tmpdir(), 'computer-use-test-'));
-  recentOrgoFailureArtifact = join(tempDir, 'orgo-failed-lease.json');
-  writeFileSync(recentOrgoFailureArtifact, JSON.stringify({ ok: false, reason: 'orgo lease failed' }));
-  process.env.CORTEXTOS_ORGO_FAILURE_ARTIFACT = recentOrgoFailureArtifact;
 });
 
 afterEach(() => {
   delete process.env.CODEX_BIN;
-  delete process.env.CORTEXTOS_ORGO_FAILURE_ARTIFACT;
   if (tempDir) rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -157,44 +152,6 @@ describe('computerUse — SSH success path', () => {
   });
 });
 
-describe('computerUse — Orgo-first Mac SSH gate', () => {
-  beforeEach(() => vi.resetAllMocks());
-
-  it('blocks gregs-mac SSH when no recent Orgo failure artifact is provided', async () => {
-    delete process.env.CORTEXTOS_ORGO_FAILURE_ARTIFACT;
-
-    const result = await computerUse('take a screenshot', { sshHost: 'gregs-mac' });
-
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/Mac SSH fallback blocked.*orgo-failure-artifact/i);
-    expect(result.usedFallback).toBe(false);
-    expect(mockExecFileSync).not.toHaveBeenCalled();
-  });
-
-  it('blocks gregs-mac SSH when the Orgo failure artifact is older than 10 minutes', async () => {
-    const stale = Date.now() / 1000 - (11 * 60);
-    utimesSync(recentOrgoFailureArtifact, stale, stale);
-
-    const result = await computerUse('take a screenshot', { sshHost: 'gregs-mac' });
-
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/artifact is 11 minutes old|maximum age is 10 minutes/i);
-    expect(mockExecFileSync).not.toHaveBeenCalled();
-  });
-
-  it('does not require an Orgo failure artifact for non-Mac SSH hosts', async () => {
-    delete process.env.CORTEXTOS_ORGO_FAILURE_ARTIFACT;
-    mockExecFileSync.mockReturnValueOnce('done\n');
-
-    const result = await computerUse('do something', { noPlugin: true, sshHost: 'custom-mac' });
-
-    expect(result.ok).toBe(true);
-    expect(result.output).toBe('done');
-    const [cmd] = mockExecFileSync.mock.calls[0];
-    expect(cmd).toBe('ssh');
-  });
-});
-
 describe('computerUse — no SSH host default', () => {
   beforeEach(() => vi.resetAllMocks());
 
@@ -217,7 +174,7 @@ describe('computerUse — no SSH host default', () => {
     const result = await computerUse('open Chrome and inspect the page');
 
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/no longer defaults to Greg's Mac/i);
+    expect(result.error).toMatch(/requires an explicit --ssh-host/i);
     expect(mockExecFileSync).not.toHaveBeenCalled();
   });
 });

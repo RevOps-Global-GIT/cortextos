@@ -13,11 +13,8 @@ import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
 import { pollWatchdog } from '../bus/watchdog.js';
 import { runPrStuckWatcher } from '../bus/pr-stuck-watcher.js';
 import { runWipEnforcer } from '../bus/wip-enforcer.js';
-import { runDocDriftChecker } from '../bus/doc-drift-checker.js';
 import { runGoalProgressProbe } from '../bus/goal-progress-probe.js';
 import { runHeartbeatHealthWatch, inferRunningFromHeartbeats } from '../bus/heartbeat-health-watch.js';
-import { runCustomerSurfaceQa } from '../bus/customer-surface-qa.js';
-import { runCodebaseScan } from '../bus/codebase-scan.js';
 import { computeUvd, writeUvdResult } from '../bus/compute-uvd.js';
 import { runSecurityAudit } from '../bus/security-audit.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
@@ -32,7 +29,6 @@ import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/kn
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos } from '../bus/rgos-mirror.js';
 import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
-import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { enforceControlPolicy } from '../bus/orch-control-policy.js';
 import { sendTelegramVoice } from '../bus/send-telegram-voice.js';
@@ -43,8 +39,6 @@ import { runWorkflow } from '../bus/run-workflow.js';
 import { computerUse } from '../bus/computer-use.js';
 import { validateTask } from '../bus/task-validate.js';
 import { resolveProofGateMode, type ProofGateMode, type ProofStamp } from '../bus/proof-gate.js';
-import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeaseStatus, releaseOrgoLease } from '../bus/orgo-lease.js';
-import { lastpassCred, LastPassCredApprovalRequiredError, LastPassCredFetchError, LastPassCredRejectedError } from '../bus/lastpass-cred.js';
 import { closeWhisperRoom, readVoiceSettings, sendWhisper, summarizeWhisperRoom, watchWhisperRoom, whisperRoomId } from '../bus/whisper-room.js';
 import {
   AGENT_TASK_EVENT_TYPES,
@@ -184,15 +178,11 @@ const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
   // Knowledge base writes
   'kb-ingest',
   // Lease writes
-  'orgo-lease-claim',
-  'orgo-lease-release',
-  'farm-dispatch',
   'whisper-send',
   'whisper-watch',
   'whisper-close',
   'orch-talk',
   // Skill / catalog writes
-  'create-skill-pr',
   'install-community-item',
   'submit-community-item',
   'prepare-submission',
@@ -205,7 +195,6 @@ const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
   'manage-cycle',
   'sync-experiments',
   // Credential access writes audit lines and can create approvals.
-  'lastpass-cred',
 ]);
 
 /**
@@ -1307,327 +1296,6 @@ busCommand
     process.exit(0);
   });
 
-busCommand
-  .command('orgo-lease-claim')
-  .description('Claim an Orgo fleet node lease in Supabase orch_fleet_nodes')
-  .requiredOption('--node <node_key>', 'Orgo node_key to claim')
-  .requiredOption('--focus <text>', 'Current focus/workload for the lease')
-  .option('--holder <agent>', 'Lease holder (defaults to CTX_AGENT_NAME)')
-  .option('--preconditions <json>', 'Required app/session/tool preconditions as JSON object', '{}')
-  .option('--artifact <text>', 'Expected artifact/deliverable')
-  .option('--release <text>', 'Release condition')
-  .option('--escalation <text>', 'Escalation rule')
-  .option('--ttl <minutes>', 'Artifact TTL / lease expiry in minutes', '60')
-  .option('--value <text>', 'Throughput/cost/value signal')
-  .option('--task <id>', 'Linked task id')
-  .option('--force', 'Claim even when node is already busy or leased')
-  .option('--json', 'Emit JSON')
-  .action(async (opts: { node: string; focus: string; holder?: string; preconditions?: string; artifact?: string; release?: string; escalation?: string; ttl?: string; value?: string; task?: string; force?: boolean; json?: boolean }) => {
-    try {
-      const result = await claimOrgoLease({
-        node: opts.node,
-        focus: opts.focus,
-        holder: opts.holder,
-        preconditions: opts.preconditions,
-        artifact: opts.artifact,
-        release: opts.release,
-        escalation: opts.escalation,
-        ttl: parseInt(opts.ttl ?? '60', 10),
-        value: opts.value,
-        task: opts.task,
-        force: opts.force ?? false,
-      });
-      if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(`Claimed ${result.node.node_key} lease ${result.lease.lease_id}`);
-        console.log(`  holder: ${result.lease.holder}`);
-        console.log(`  focus: ${result.lease.focus}`);
-        console.log(`  expires_at: ${result.lease.expires_at}`);
-      }
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-busCommand
-  .command('orgo-lease-release')
-  .description('Release an active Orgo fleet node lease')
-  .option('--lease <uuid>', 'Lease id to release')
-  .option('--node <node_key>', 'Node key whose active lease should be released')
-  .option('--result <text>', 'Result or produced artifact summary')
-  .option('--json', 'Emit JSON')
-  .action(async (opts: { lease?: string; node?: string; result?: string; json?: boolean }) => {
-    if (!opts.lease && !opts.node) {
-      console.error('Either --lease or --node is required');
-      process.exit(1);
-    }
-    try {
-      const result = await releaseOrgoLease({ lease: opts.lease, node: opts.node, result: opts.result });
-      if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
-      } else {
-        console.log(`Released ${result.node.node_key} lease ${result.released.lease_id}`);
-        if (result.released.result) console.log(`  result: ${result.released.result}`);
-      }
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-busCommand
-  .command('orgo-lease-status')
-  .description('Show Orgo fleet lease status from Supabase orch_fleet_nodes')
-  .option('--node <node_key>', 'Filter to a node')
-  .option('--status <status>', 'busy, idle, or all', 'all')
-  .option('--json', 'Emit JSON')
-  .action(async (opts: { node?: string; status?: string; json?: boolean }) => {
-    if (opts.status && !['busy', 'idle', 'all'].includes(opts.status)) {
-      console.error('--status must be one of: busy, idle, all');
-      process.exit(1);
-    }
-    try {
-      const nodes = await listOrgoLeaseStatus({ node: opts.node, status: opts.status as 'busy' | 'idle' | 'all' });
-      console.log(opts.json ? JSON.stringify(nodes, null, 2) : formatLeaseStatus(nodes));
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-busCommand
-  .command('orgo-lease-watchdog')
-  .description('List expired Orgo leases that need escalation')
-  .option('--json', 'Emit JSON')
-  .action(async (opts: { json?: boolean }) => {
-    try {
-      const expired = await checkOrgoLeaseWatchdog();
-      if (opts.json) {
-        console.log(JSON.stringify(expired, null, 2));
-      } else if (expired.length === 0) {
-        console.log('No expired Orgo leases.');
-      } else {
-        for (const item of expired) {
-          console.log(`${item.node_key} expired at ${item.expired_at}: ${item.lease.escalation_rule}`);
-        }
-      }
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-const FARM_ORGO_COMPUTER_ID = '3ec3d7f3-a5da-4678-8b25-ce28b7aed829';
-const FARM_INBOX_DIR = '/opt/claude-farm/inbox';
-const FARM_RESULTS_DIR = '/opt/claude-farm/results';
-const ORGO_API_BASE = 'https://www.orgo.ai/api';
-
-type FarmDispatchTask = {
-  id: string;
-  prompt: string;
-};
-
-type FarmDispatchJob = {
-  run_id: string;
-  tasks: FarmDispatchTask[];
-  timeout: number;
-  reply_to: string;
-};
-
-type OrgoExecResponse = {
-  success: boolean;
-  output: string;
-};
-
-function parseFarmTasks(raw: string): FarmDispatchTask[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`--tasks-json must be valid JSON: ${(err as Error).message}`);
-  }
-
-  const candidate = Array.isArray(parsed)
-    ? parsed
-    : parsed && typeof parsed === 'object' && Array.isArray((parsed as { tasks?: unknown }).tasks)
-      ? (parsed as { tasks: unknown[] }).tasks
-      : null;
-
-  if (!candidate) {
-    throw new Error('--tasks-json must be an array of {id,prompt} objects, or an object with a tasks array');
-  }
-
-  if (candidate.length === 0) {
-    throw new Error('--tasks-json must include at least one task');
-  }
-
-  return candidate.map((item, idx) => {
-    if (!item || typeof item !== 'object') {
-      throw new Error(`task ${idx + 1} must be an object`);
-    }
-    const record = item as Record<string, unknown>;
-    const id = typeof record.id === 'string' ? record.id.trim() : '';
-    const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : '';
-    if (!id) throw new Error(`task ${idx + 1} is missing a non-empty string id`);
-    if (!prompt) throw new Error(`task ${idx + 1} is missing a non-empty string prompt`);
-    return { id, prompt };
-  });
-}
-
-function parseFarmTaskSpec(raw: string): FarmDispatchTask {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    throw new Error('--task must not be empty');
-  }
-
-  try {
-    const parsed = JSON.parse(trimmed) as unknown;
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      const record = parsed as Record<string, unknown>;
-      const id = typeof record.id === 'string' ? record.id.trim() : '';
-      const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : '';
-      if (!id || !prompt) {
-        throw new Error('--task JSON must include non-empty string id and prompt fields');
-      }
-      return { id, prompt };
-    }
-    if (typeof parsed === 'string' && parsed.trim()) {
-      return { id: `task-${randomString(8)}`, prompt: parsed.trim() };
-    }
-    throw new Error('--task JSON must be an object with id and prompt, or a prompt string');
-  } catch (err) {
-    if (err instanceof SyntaxError) {
-      const separator = trimmed.match(/^([^:\s|]+)(?:::|\|)\s*(.+)$/s);
-      if (separator) {
-        return { id: separator[1].trim(), prompt: separator[2].trim() };
-      }
-      return { id: `task-${randomString(8)}`, prompt: trimmed };
-    }
-    throw err;
-  }
-}
-
-async function orgoExec(computerId: string, apiKey: string, code: string): Promise<OrgoExecResponse> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30_000);
-  try {
-    const res = await fetch(`${ORGO_API_BASE}/computers/${computerId}/exec`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ code, timeout: 20 }),
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`Orgo exec failed: HTTP ${res.status} ${body}`.trim());
-    }
-    return res.json() as Promise<OrgoExecResponse>;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function buildFarmDropCode(job: FarmDispatchJob, jobFileName: string): string {
-  const encoded = Buffer.from(JSON.stringify(job, null, 2) + '\n', 'utf-8').toString('base64');
-  return `
-import base64, json, os, tempfile
-
-inbox_dir = ${JSON.stringify(FARM_INBOX_DIR)}
-results_dir = ${JSON.stringify(FARM_RESULTS_DIR)}
-job_file = ${JSON.stringify(jobFileName)}
-payload = base64.b64decode(${JSON.stringify(encoded)})
-
-os.makedirs(inbox_dir, exist_ok=True)
-os.makedirs(results_dir, exist_ok=True)
-target = os.path.join(inbox_dir, job_file)
-
-fd, tmp = tempfile.mkstemp(prefix=".farm-", suffix=".json", dir=inbox_dir)
-try:
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, target)
-finally:
-    if os.path.exists(tmp):
-        os.unlink(tmp)
-
-print(json.dumps({"ok": True, "job_path": target, "bytes": len(payload)}))
-`.trim();
-}
-
-busCommand
-  .command('farm-dispatch')
-  .description('Dispatch a job to the Codex-CU Claude farm inbox')
-  .option('--task <taskspec>', 'Single task as JSON {id,prompt}, id::prompt, or a prompt string')
-  .option('--tasks-json <json>', 'Batch JSON array of {id,prompt} tasks, or {"tasks":[...]}')
-  .option('--timeout <seconds>', 'Per-job timeout passed to the farm daemon', '60')
-  .option('--computer <id>', 'Codex-CU Orgo computer ID', FARM_ORGO_COMPUTER_ID)
-  .option('--api-key <key>', 'Orgo API key (defaults to ORGO_API_KEY)')
-  .action(async (opts: { task?: string; tasksJson?: string; timeout: string; computer: string; apiKey?: string }) => {
-    try {
-      if (!opts.task && !opts.tasksJson) {
-        throw new Error('Provide either --task TASKSPEC or --tasks-json JSON');
-      }
-      if (opts.task && opts.tasksJson) {
-        throw new Error('Use either --task or --tasks-json, not both');
-      }
-
-      const timeout = parseInt(opts.timeout, 10);
-      if (!Number.isFinite(timeout) || timeout <= 0) {
-        throw new Error('--timeout must be a positive integer number of seconds');
-      }
-
-      const apiKey = opts.apiKey || process.env['ORGO_API_KEY'] || '';
-      if (!apiKey) {
-        throw new Error('ORGO_API_KEY is required; set it in secrets.env or pass --api-key');
-      }
-
-      const env = resolveEnv();
-      const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, '');
-      const runId = `farm-${timestamp}-${randomString(6).toLowerCase()}`;
-      const jobFileName = `${runId}.json`;
-      const job: FarmDispatchJob = {
-        run_id: runId,
-        tasks: opts.task ? [parseFarmTaskSpec(opts.task)] : parseFarmTasks(opts.tasksJson!),
-        timeout,
-        reply_to: env.agentName,
-      };
-
-      const response = await orgoExec(opts.computer, apiKey, buildFarmDropCode(job, jobFileName));
-      if (!response.success) {
-        throw new Error(`Orgo exec returned success=false: ${response.output}`);
-      }
-
-      let remote: unknown = null;
-      try {
-        remote = JSON.parse((response.output || '').trim());
-      } catch {
-        remote = { raw_output: response.output };
-      }
-
-      const result = {
-        run_id: runId,
-        task_count: job.tasks.length,
-        timeout,
-        reply_to: job.reply_to,
-        computer_id: opts.computer,
-        job_path: `${FARM_INBOX_DIR}/${jobFileName}`,
-        result_path: `${FARM_RESULTS_DIR}/result-${runId}.json`,
-        remote,
-      };
-      console.log(JSON.stringify(result, null, 2));
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
 function parsePositiveIntOpt(value: string | undefined, flagName: string): number | undefined {
   if (value === undefined) return undefined;
   const parsed = parseInt(value, 10);
@@ -1926,35 +1594,6 @@ busCommand
   });
 
 busCommand
-  .command('doc-drift-checker')
-  .description('Compare cortextOS docs against actual project, skill, and cron structure')
-  .option('--threshold-lines <n>', 'Create a task when drift findings exceed this count', '5')
-  .option('--no-create-tasks', 'Write the report without creating a follow-up task')
-  .option('--format <fmt>', 'Output format: json or text', 'text')
-  .action((opts: { thresholdLines?: string; createTasks?: boolean; format?: string }) => {
-    const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
-    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
-    const threshold = Number(opts.thresholdLines ?? 5);
-    const report = runDocDriftChecker(paths, env.agentName, env.org, projectRoot, {
-      thresholdLines: Number.isFinite(threshold) && threshold >= 0 ? threshold : 5,
-      outputDir,
-      createTasks: opts.createTasks,
-    });
-
-    if (opts.format === 'json') {
-      console.log(JSON.stringify(report, null, 2));
-      return;
-    }
-
-    console.log(`Doc drift findings: ${report.findings.length}`);
-    console.log(`Threshold: ${report.thresholdLines}`);
-    console.log(`Task created: ${report.taskCreated ? report.taskId : 'no'}`);
-    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
-  });
-
-busCommand
   .command('goal-progress-probe')
   .description('Check whether each agent memory mentions its active goals in the last 24h')
   .option('--notify-agent <agent>', 'Agent to notify when more than two agents appear stalled', 'orchestrator')
@@ -2064,36 +1703,6 @@ busCommand
   });
 
 busCommand
-  .command('customer-surface-qa')
-  .description('Run customer-surface Playwright QA and create tasks for failures')
-  .option('--pages <pages>', 'Comma-separated hub pages to check. Defaults to core customer surfaces')
-  .option('--user <email>', 'Hub user email for QA session setup', 'greg@revopsglobal.com')
-  .option('--no-create-tasks', 'Write report without creating tasks for failing pages')
-  .option('--format <fmt>', 'Output format: json or text', 'text')
-  .action((opts: { pages?: string; user?: string; createTasks?: boolean; format?: string }) => {
-    const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
-    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
-    const report = runCustomerSurfaceQa(paths, env.agentName, env.org, projectRoot, {
-      pages: opts.pages ? opts.pages.split(',').map(page => page.trim()).filter(Boolean) : undefined,
-      user: opts.user,
-      outputDir,
-      createTasks: opts.createTasks,
-    });
-
-    if (opts.format === 'json') {
-      console.log(JSON.stringify(report, null, 2));
-      return;
-    }
-
-    console.log(`Pages checked: ${report.pages.length}`);
-    console.log(`Pages with failures: ${report.failures.length}`);
-    console.log(`Tasks created: ${report.taskIds.length}`);
-    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
-  });
-
-busCommand
   .command('poll-watchdog')
   .description('Check all agent heartbeats against their lease thresholds and emit alerts for expired agents')
   .option('--format <fmt>', 'Output format: json or text', 'text')
@@ -2146,43 +1755,6 @@ busCommand
     } else {
       console.log('\nAll agents within lease.');
     }
-  });
-
-busCommand
-  .command('codebase-scan')
-  .description('Scan src/ for TODO/FIXME/HACK/XXX markers and large files; write daily report and create RGOS tasks')
-  .option('--output <path>', 'Override output file path (default: agent output dir)')
-  .option('--dry-run', 'Print report path but do not create RGOS tasks')
-  .action(async (opts: { output?: string; dryRun?: boolean }) => {
-    const env = resolveEnv();
-    const today = new Date().toISOString().slice(0, 10);
-    const outputPath = opts.output ??
-      join(env.agentDir ?? join(env.projectRoot ?? env.frameworkRoot, 'orgs', env.org, 'agents', env.agentName),
-        'output', `${today}-codebase-scan.md`);
-
-    console.log(`[codebase-scan] Scanning ${env.frameworkRoot}/src ...`);
-    const result = runCodebaseScan(env.frameworkRoot, outputPath);
-    console.log(`[codebase-scan] Report written → ${outputPath}`);
-    console.log(`[codebase-scan] Hits: ${result.hits.length} markers, ${result.largeFiles.length} large files`);
-
-    if (!opts.dryRun && result.topActionable.length > 0) {
-      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-      for (const item of result.topActionable) {
-        const taskId = createTask(paths, env.agentName, env.org, `[codebase-scan] ${item}`, {
-          description: `Auto-generated by codebase-scan loop on ${today}. See ${outputPath} for full report.`,
-          priority: 'low',
-          skipBriefValidation: true,
-        });
-        console.log(`[codebase-scan] Created task ${taskId}: ${item}`);
-        logEvent(paths, env.agentName, env.org, 'action', 'codebase_scan_task_created', 'info', { task_id: taskId });
-      }
-    }
-
-    logEvent(
-      resolvePaths(env.agentName, env.instanceId, env.org),
-      env.agentName, env.org, 'action', 'codebase_scan_complete', 'info',
-      { hits: result.hits.length, large_files: result.largeFiles.length, output: outputPath },
-    );
   });
 
 busCommand
@@ -3468,43 +3040,6 @@ busCommand
     console.log(`Approval ${id} -> ${status}`);
   });
 
-busCommand
-  .command('lastpass-cred')
-  .description('Fetch one approved LastPass credential via an explicit legacy Mac proxy')
-  .argument('<service>', 'LastPass service/item key')
-  .option('--ssh-host <host>', 'Explicit SSH host for the guarded legacy Mac credential proxy')
-  .option('--remote-script <path>', 'Remote fetcher path on Mac', '/Users/gregharned/.cortextos/bin/lastpass-cred-fetch.sh')
-  .action(async (service: string, opts: { sshHost?: string; remoteScript?: string }) => {
-    const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    try {
-      const result = await lastpassCred(paths, service, {
-        agentName: env.agentName,
-        org: env.org,
-        frameworkRoot: env.frameworkRoot,
-        agentDir: env.agentDir,
-        sshHost: opts.sshHost,
-        remoteScript: opts.remoteScript,
-      });
-      process.stdout.write(result.credential);
-      if (!result.credential.endsWith('\n')) process.stdout.write('\n');
-    } catch (err) {
-      if (err instanceof LastPassCredApprovalRequiredError) {
-        process.stderr.write(`${err.message}\napproval_id: ${err.approvalId}\n`);
-        process.exit(2);
-      }
-      if (err instanceof LastPassCredRejectedError) {
-        process.stderr.write(`${err.message}\napproval_id: ${err.approvalId}\n`);
-        process.exit(3);
-      }
-      if (err instanceof LastPassCredFetchError) {
-        process.stderr.write(`lastpass-cred failed: ${err.message}\n`);
-        process.exit(1);
-      }
-      throw err;
-    }
-  });
-
 // ---------------------------------------------------------------------------
 // Knowledge Base commands
 // ---------------------------------------------------------------------------
@@ -4410,11 +3945,6 @@ busCommand
   .action(() => runTestHooks());
 
 busCommand
-  .command('hook-skill-autopr')
-  .description('PostToolUse hook: auto-stages community skill writes and opens a draft PR against grandamenium/cortextos')
-  .action(() => runHook('hook-skill-autopr'));
-
-busCommand
   .command('hook-skill-telemetry')
   .description('PostToolUse hook: logs Skill tool calls and SKILL.md Read tool calls to orch_skill_invocations')
   .action(() => runHook('hook-skill-telemetry'));
@@ -4438,24 +3968,6 @@ busCommand
   .command('hook-pr-url-wire')
   .description('PostToolUse hook (Bash): detects gh pr create, extracts PR URL, patches orch_tasks mirror metadata.pr_url for pr_cycle_minutes metric')
   .action(() => runHook('hook-pr-url-wire'));
-
-busCommand
-  .command('create-skill-pr')
-  .description('Background worker: commits and draft-PRs a community skill (called by hook-skill-autopr)')
-  .argument('<skill-name>', 'Skill directory name under community/skills/')
-  .action(async (skillName: string) => {
-    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(skillName)) {
-      console.error(`create-skill-pr: invalid skill name "${skillName}" — must be a lowercase alphanumeric slug`);
-      process.exit(1);
-    }
-    try {
-      await createSkillPr(skillName);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`create-skill-pr failed: ${msg}`);
-      process.exit(1);
-    }
-  });
 
 // --- Brand name command ---
 
@@ -4971,9 +4483,8 @@ busCommand
   .option('--no-plugin', 'Send a plain Codex prompt without the Computer Use plugin')
   .option('--workdir <dir>', 'Working directory for Codex')
   .option('--timeout <seconds>', 'Max wait time in seconds (default: 300)', '300')
-  .option('--ssh-host <host>', 'Explicit SSH host. Use gregs-mac only with --orgo-failure-artifact.')
+  .option('--ssh-host <host>', 'Explicit SSH host for the guarded Mac Codex fallback (e.g. gregs-mac).')
   .option('--dispatch-script <path>', 'Path to codex-dispatch.sh on the Mac', '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh')
-  .option('--orgo-failure-artifact <path>', 'Recent failed Orgo lease attempt artifact required before Mac SSH fallback')
   .option('--disable-fallback', 'Disable localhost codex exec fallback when Mac SSH is unreachable')
   .option('--auto-fallback', 'On Codex long_lock (weekly cap), automatically spawn a claude-opus-4-7 spillover worker. Default OFF — do not enable globally.', false)
   .action(async (
@@ -4985,7 +4496,6 @@ busCommand
       timeout?: string;
       sshHost?: string;
       dispatchScript?: string;
-      orgoFailureArtifact?: string;
       disableFallback?: boolean;
       autoFallback?: boolean;
     },
@@ -4996,7 +4506,6 @@ busCommand
       timeout: parseInt(opts.timeout ?? '300', 10),
       sshHost: opts.sshHost,
       dispatchScript: opts.dispatchScript,
-      orgoFailureArtifact: opts.orgoFailureArtifact,
       noFallback: opts.disableFallback,
     });
 
