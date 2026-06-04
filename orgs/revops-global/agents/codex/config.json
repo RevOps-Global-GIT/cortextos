@@ -45,6 +45,12 @@
       "type": "recurring",
       "interval": "2h",
       "prompt": "Run the supreme-mentions-triage update via direct Slack API (no Orgo): bash /home/cortextos/cortextos/scripts/supreme-mentions-triage-run.sh. Log the exit code. If exit non-zero, send-message analyst normal 'supreme-mentions-triage-run.sh failed: <exit code / last error line>'."
+    },
+    {
+      "name": "advisor-facing-page-canary",
+      "type": "cron",
+      "schedule": "45 7 * * *",
+      "prompt": "Read prompts/cron-advisor-facing-page-canary.md and follow its instructions."
     }
   ],
   "ctx_autoreset_threshold": 0,
