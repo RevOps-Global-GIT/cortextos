@@ -45,5 +45,6 @@
       "data-deletion"
     ],
     "never_ask": []
-  }
+  },
+  "daemon_telegram_alerts": false
 }

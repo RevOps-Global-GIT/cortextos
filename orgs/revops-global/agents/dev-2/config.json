@@ -1,0 +1,52 @@
+{
+  "agent_name": "dev-2",
+  "enabled": true,
+  "runtime": "claude-code",
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "tier": "sonnet",
+  "model": "claude-sonnet-4-6",
+  "working_directory": "/home/cortextos/cortextos/orgs/revops-global/agents/dev-2",
+  "timezone": "America/Los_Angeles",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "30m",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task."
+    },
+    {
+      "name": "experiment-pr-cycle-time",
+      "type": "recurring",
+      "interval": "48h",
+      "prompt": "Read .claude/skills/autoresearch/SKILL.md and execute the experiment loop for cycle pr-cycle-time. Form a hypothesis, make a targeted change, measure outcome, decide keep/discard."
+    },
+    {
+      "name": "autoresearch-loop",
+      "type": "recurring",
+      "interval": "24h",
+      "prompt": "Read .claude/skills/autoresearch/SKILL.md and execute the experiment loop for cycle dev2-task-completion-p90. Run scripts/dev2-pr-cycle-probe.py daily, evaluate signal_a_dev2_completion_min.p90_min vs baseline (514min), form hypothesis if p90 trending up, ship targeted change, measure. Per theta-2026-06-01 H3."
+    }
+  ],
+  "ecosystem": {
+    "local_version_control": {
+      "enabled": true
+    }
+  },
+  "day_mode_start": "07:00",
+  "day_mode_end": "20:00",
+  "communication_style": "technical",
+  "approval_rules": {
+    "always_ask": [
+      "external-comms",
+      "financial",
+      "deployment",
+      "data-deletion"
+    ],
+    "never_ask": []
+  },
+  "telegram_polling": false,
+  "suppress_restart_telegram": true,
+  "daemon_telegram_alerts": false
+}

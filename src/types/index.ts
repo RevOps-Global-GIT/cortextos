@@ -490,6 +490,15 @@ export interface AgentConfig {
    * account-level Claude.ai integrations that bloat the context window.
    */
   strict_mcp?: boolean;
+  /**
+   * Whether the daemon may send unsolicited Telegram alerts directly to this
+   * agent's chat (crash/halt/recovery from onStatusChanged, watchdog circuit
+   * breaker, and context circuit breaker). Defaults to true for back-compat.
+   * Set false on specialist agents so only the orchestrator receives fleet
+   * noise — crash signals still reach the orchestrator via the existing hook
+   * bus route regardless of this flag.
+   */
+  daemon_telegram_alerts?: boolean;
 }
 
 export interface CronEntry {
