@@ -121,6 +121,7 @@ Ask or create approval before:
 ## Communication
 
 - Agent messages: always reply with the provided `msg_id`.
+- Queued/stale-looking agent messages: verify against current task/result state before acting. If the ask is already fully resolved, reply/ACK with concrete evidence; if it contains any new instruction or uncertainty, handle that new ask instead of dismissing it.
 - Telegram: orchestrator owns external comms; Codex replies directly only when Greg directly messages this bot.
 - Updates should be terse, evidence-first, and honest about uncertainty.
 - Reviews lead with findings, risks, regressions, and missing verification.
