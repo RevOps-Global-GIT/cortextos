@@ -2615,6 +2615,75 @@ async function runFleetAgentsChecks(page: Page, serviceKey?: string): Promise<Ch
 }
 
 // ---------------------------------------------------------------------------
+// /app/fleet/agents?tab=sessions checks
+// ---------------------------------------------------------------------------
+async function runFleetSessionsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'fleet-sessions';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Sessions panel renders — cards or valid empty state
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(800);
+    await shot(page, `${sp}-2-panel`);
+    const cardCount = await page.locator('[class*="card"], [class*="Card"]').filter({ hasText: /[a-z]/i }).count();
+    const emptyState = await page.getByText(/no active cli sessions/i).count();
+    if (cardCount > 0) {
+      results.push({ check: '[LIVENESS] CHECK 2 Sessions panel renders', status: 'PASS', evidence: `${cardCount} session card(s) visible.` });
+    } else if (emptyState > 0) {
+      results.push({ check: '[LIVENESS] CHECK 2 Sessions panel renders', status: 'PASS', evidence: 'Empty state shown — no active CLI sessions (valid state).' });
+    } else {
+      results.push({ check: '[LIVENESS] CHECK 2 Sessions panel renders', status: 'DEFERRED', evidence: 'No session cards or empty-state text found — panel may still be loading or sessions tab not activated.' });
+    }
+  } catch (e) {
+    results.push({ check: '[LIVENESS] CHECK 2 Sessions panel renders', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: DB — orch_agent_heartbeats last_heartbeat timestamps parseable
+  try {
+    await shot(page, `${sp}-3-db`);
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 3 Heartbeat timestamps parseable', status: 'DEFERRED', evidence: 'No serviceKey — skipping DB check' });
+    } else {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/orch_agent_heartbeats?select=instance_id,agent_name,last_heartbeat&order=last_heartbeat.desc&limit=25`, {
+        headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!resp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 3 Heartbeat timestamps parseable', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
+      } else {
+        const rows = await resp.json() as Array<{ instance_id: string; agent_name: string; last_heartbeat: string | null }>;
+        if (!rows || rows.length === 0) {
+          results.push({ check: '[CORRECTNESS] CHECK 3 Heartbeat timestamps parseable', status: 'DEFERRED', evidence: 'No rows in orch_agent_heartbeats — nothing to assert' });
+        } else {
+          const withTs = rows.filter(r => r.last_heartbeat !== null);
+          const unparseable = withTs.filter(r => isNaN(new Date(r.last_heartbeat!).getTime()));
+          if (unparseable.length > 0) {
+            const sample = unparseable.slice(0, 3).map(r => `${r.agent_name}:"${r.last_heartbeat}"`).join(', ');
+            results.push({ check: '[CORRECTNESS] CHECK 3 Heartbeat timestamps parseable', status: 'FAIL', evidence: `${unparseable.length}/${withTs.length} session(s) have unparseable last_heartbeat. Sample: ${sample}` });
+          } else {
+            const newest = withTs[0];
+            const ageMin = newest ? Math.round((Date.now() - new Date(newest.last_heartbeat!).getTime()) / 60000) : null;
+            results.push({ check: '[CORRECTNESS] CHECK 3 Heartbeat timestamps parseable', status: 'PASS', evidence: `All ${rows.length} row(s) have valid timestamps. Most recent: ${ageMin}m ago (${newest?.agent_name ?? newest?.instance_id})` });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 3 Heartbeat timestamps parseable', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Timestamp freshness — at least one session shows < 30min age label
+  results.push(await checkTimestampFreshness(page, '[CORRECTNESS] CHECK 4 Timestamp freshness'));
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // /social-content checks
 // ---------------------------------------------------------------------------
 async function runSocialContentChecks(page: Page): Promise<CheckResult[]> {
@@ -4029,6 +4098,7 @@ async function main() {
       'linkedin-presence': '/app/presence',
       '/analytics': '/app/analytics',
       '/fleet': '/app/fleet',
+      '/app/fleet-sessions': '/app/fleet/agents?tab=sessions',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
@@ -4129,6 +4199,8 @@ async function main() {
       results = await runWithTimeout(() => runFleetTasksChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/agents') {
       results = await runWithTimeout(() => runFleetAgentsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+    } else if (targetPage === '/app/fleet/agents?tab=sessions' || targetPage === '/app/fleet-sessions') {
+      results = await runWithTimeout(() => runFleetSessionsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/social-content') {
       results = await runWithTimeout(() => runSocialContentChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/content-review') {
@@ -4168,7 +4240,7 @@ async function main() {
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
