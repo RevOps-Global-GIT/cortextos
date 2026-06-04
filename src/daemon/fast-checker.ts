@@ -46,6 +46,7 @@ export class FastChecker {
   private telegramApi?: TelegramAPI;
   private chatId?: string;
   private allowedUserId?: number;
+  private daemonTelegramAlerts: boolean = true;
 
   // External Telegram handler (set by daemon)
   private telegramMessages: Array<{ formatted: string; ackIds: string[] }> = [];
@@ -134,6 +135,7 @@ export class FastChecker {
       chatId?: string;
       allowedUserId?: number;
       gmailWatch?: { query: string; intervalMs: number };
+      daemonTelegramAlerts?: boolean;
     } = {},
   ) {
     this.agent = agent;
@@ -144,6 +146,7 @@ export class FastChecker {
     this.telegramApi = options.telegramApi;
     this.chatId = options.chatId;
     this.allowedUserId = options.allowedUserId;
+    this.daemonTelegramAlerts = options.daemonTelegramAlerts ?? true;
 
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
@@ -311,7 +314,7 @@ export class FastChecker {
           `Halting auto-restart for ${resetMin}min — likely upstream issue. ` +
           `Check manually with: pm2 logs cortextos-daemon`,
         );
-        if (this.telegramApi && this.chatId) {
+        if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
           this.telegramApi
             .sendMessage(
               this.chatId,
@@ -559,7 +562,7 @@ export class FastChecker {
   private triggerHardRestart(reason: string): void {
     this.watchdogTriggered = true;
     this.lastHardRestartAt = Date.now();
-    if (this.telegramApi && this.chatId) {
+    if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
       this.telegramApi
         .sendMessage(this.chatId, `Got stuck (${reason}). Hard-restarting now.`)
         .catch(() => { /* non-critical */ });
@@ -1786,7 +1789,7 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
       this.saveCtxCircuit();
       const msg = `Context circuit breaker TRIPPED for ${this.agent.name}: 3 restarts in 15min. Watchdog paused 30min. Check logs/${this.agent.name}/restarts.log for details.`;
       this.log(msg);
-      if (this.telegramApi && this.chatId) {
+      if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
         this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
       }
       return;

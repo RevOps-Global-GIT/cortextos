@@ -1,0 +1,14 @@
+{
+  "agent_name": "mac-codex",
+  "enabled": true,
+  "runtime": "script",
+  "script_path": "scripts/mac-codex-bridge.js",
+  "startup_delay": 0,
+  "max_session_seconds": 0,
+  "max_crashes_per_day": 10,
+  "working_directory": "",
+  "timezone": "America/Los_Angeles",
+  "telegram_polling": false,
+  "crons": [],
+  "daemon_telegram_alerts": false
+}

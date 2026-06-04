@@ -54,5 +54,6 @@
     }
   },
   "codex_app_server_transport": "ws",
-  "telegram_polling": false
+  "telegram_polling": false,
+  "daemon_telegram_alerts": false
 }

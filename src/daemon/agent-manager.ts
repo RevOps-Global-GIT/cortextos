@@ -485,15 +485,17 @@ export class AgentManager {
     if (telegramApi && chatId) {
       agentProcess.setTelegramHandle(telegramApi, chatId);
     }
+    const daemonTelegramAlerts = config?.daemon_telegram_alerts ?? true;
     const checker = new FastChecker(agentProcess, paths, this.frameworkRoot, {
       log,
       telegramApi,
       chatId,
       allowedUserId: allowedUserId ? parseInt(allowedUserId, 10) : undefined,
+      daemonTelegramAlerts,
     });
 
     // Send Telegram notification on crashes and session refreshes
-    if (telegramApi && chatId) {
+    if (telegramApi && chatId && daemonTelegramAlerts) {
       const tgApi = telegramApi;
       const tgChatId = chatId;
       let prevStatus: string | null = null;
