@@ -629,6 +629,7 @@ function buildPayload(watermark) {
     if (transitions.length > 0) agentPayload.task_transitions = transitions;
     if (counts.completed > 0) agentPayload.tasks_completed_today = counts.completed;
     if (counts.failed > 0) agentPayload.tasks_failed_today = counts.failed;
+    if (hb?.current_task !== undefined) agentPayload.current_task_id = hb.current_task || null;
 
     agents.push(agentPayload);
   }
