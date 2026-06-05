@@ -1508,11 +1508,13 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
     const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const snoozeFile = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'state', 'pr-stuck-watcher-snooze.json');
     const result = runPrStuckWatcher(paths, env.agentName, env.org, {
       repos: opts.repos ? opts.repos.split(',') : undefined,
       stuckHours: parseNonNegativeNumber(opts.stuckHours, 2),
       alertHours: parseNonNegativeNumber(opts.alertHours, 24),
       outputDir,
+      snoozeFile,
     });
     const actions: Array<{ pr: string; action: string; ok: boolean; detail?: string }> = [];
 
