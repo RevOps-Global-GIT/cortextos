@@ -3226,7 +3226,55 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
   // The hub /app/cortex/theta route redirects to /app/skills?tab=theta (Capabilities page).
   // That page has Radix TabsTrigger buttons (role="tab") before the session cards.
   // Must skip role="tab" buttons or btns[0] clicks the Skills tab, navigating away.
+  // challenger_notes is nullable; only require the Challenger block when the
+  // backing theta_sessions row actually persisted challenger notes.
   try {
+    type LatestThetaFields = {
+      id?: string | null;
+      challenger_notes?: string | null;
+      synthesis_summary?: string | null;
+      consolidated_memories_count?: number | null;
+    };
+
+    let latestTheta: LatestThetaFields | null = null;
+    if (!serviceKey) {
+      results.push({
+        check: '[CORRECTNESS] CHECK 4 PR#688 fields render',
+        status: 'DEFERRED',
+        evidence: 'No serviceKey — cannot query theta_sessions source row for nullable field expectations.',
+      });
+      throw new Error('__CHECK_4_DEFERRED__');
+    }
+
+    const fieldsResp = await fetch(
+      `${SUPA_URL}/rest/v1/theta_sessions?select=id,challenger_notes,synthesis_summary,consolidated_memories_count&order=ran_at.desc&limit=1`,
+      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+    );
+    if (!fieldsResp.ok) {
+      const body = await fieldsResp.text().catch(() => '');
+      results.push({
+        check: '[CORRECTNESS] CHECK 4 PR#688 fields render',
+        status: 'DEFERRED',
+        evidence: `theta_sessions field query returned HTTP ${fieldsResp.status} — cannot safely assert nullable field expectations: ${body.slice(0, 120)}`,
+      });
+      throw new Error('__CHECK_4_DEFERRED__');
+    }
+
+    const latestRows = await fieldsResp.json().catch(() => []) as LatestThetaFields[];
+    latestTheta = Array.isArray(latestRows) ? (latestRows[0] ?? null) : null;
+    if (!latestTheta) {
+      results.push({
+        check: '[CORRECTNESS] CHECK 4 PR#688 fields render',
+        status: 'DEFERRED',
+        evidence: 'No theta_sessions rows yet — cannot assert PR#688 rendered fields.',
+      });
+      throw new Error('__CHECK_4_DEFERRED__');
+    }
+
+    const challengerExpected = typeof latestTheta.challenger_notes === 'string' && latestTheta.challenger_notes.trim().length > 0;
+    const synthesisExpected = typeof latestTheta.synthesis_summary === 'string' && latestTheta.synthesis_summary.trim().length > 0;
+    const consolidationExpected = latestTheta.consolidated_memories_count !== null && latestTheta.consolidated_memories_count !== undefined;
+
     const expandClicked = await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('main button'));
       const cardBtn = btns.find(b => b.getAttribute('role') !== 'tab') as HTMLButtonElement | undefined;
@@ -3248,16 +3296,19 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
     await page.waitForTimeout(400);
     await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-4-fields-bottom.png`), fullPage: false });
     const missing: string[] = [];
-    if (challengerHit === 0) missing.push('challenger_notes');
-    if (synthHit === 0)      missing.push('synthesis_summary');
-    if (memHit === 0)        missing.push('consolidated_memories_count');
+    if (challengerExpected && challengerHit === 0) missing.push('challenger_notes');
+    if (synthesisExpected && synthHit === 0)       missing.push('synthesis_summary');
+    if (consolidationExpected && memHit === 0)     missing.push('consolidated_memories_count');
+    const expectations = `source row ${latestTheta.id ?? '(unknown id)'} expects challenger:${challengerExpected}, synthesis:${synthesisExpected}, consolidation:${consolidationExpected}`;
     if (missing.length === 0) {
-      results.push({ check: '[CORRECTNESS] CHECK 4 PR#688 fields render', status: 'PASS', evidence: `All three fields visible after accordion expand: challenger(${challengerHit}), synthesis(${synthHit}), consolidation(${memHit}).` });
+      results.push({ check: '[CORRECTNESS] CHECK 4 PR#688 fields render', status: 'PASS', evidence: `Expected PR#688 fields visible after accordion expand; ${expectations}. UI hits: challenger(${challengerHit}), synthesis(${synthHit}), consolidation(${memHit}).` });
     } else {
-      results.push({ check: '[CORRECTNESS] CHECK 4 PR#688 fields render', status: 'FAIL', evidence: `Missing field(s) after expand: ${missing.join(', ')}. challenger:${challengerHit}, synthesis:${synthHit}, consolidation:${memHit}.` });
+      results.push({ check: '[CORRECTNESS] CHECK 4 PR#688 fields render', status: 'FAIL', evidence: `Missing expected field(s) after expand: ${missing.join(', ')}. ${expectations}. UI hits: challenger:${challengerHit}, synthesis:${synthHit}, consolidation:${memHit}.` });
     }
   } catch (e) {
-    results.push({ check: '[CORRECTNESS] CHECK 4 PR#688 fields render', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    if ((e as Error).message !== '__CHECK_4_DEFERRED__') {
+      results.push({ check: '[CORRECTNESS] CHECK 4 PR#688 fields render', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    }
   }
 
   // CHECK 5: Latest orch_experiments row has no parse_error and recommendation !== 'malformed'
