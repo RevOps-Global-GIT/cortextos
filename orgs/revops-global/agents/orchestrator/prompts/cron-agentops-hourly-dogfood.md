@@ -24,6 +24,7 @@ npx tsx scripts/hub-qa-playwright.ts --page /app/cortex/theta --no-send
 npx tsx scripts/hub-qa-playwright.ts --page /app/supreme-outstanding --no-send
 npx tsx scripts/hub-qa-playwright.ts --page /app/work/inbox --no-send
 npx tsx scripts/hub-qa-playwright.ts --page /app/work/approvals --no-send
+npx tsx scripts/hub-qa-playwright.ts --page /app/fleet-sessions --no-send
 ```
 
 Each run writes a report to `orgs/revops-global/agents/codex/output/playwright-qa/`. Collect FAIL results across all pages before proceeding.
