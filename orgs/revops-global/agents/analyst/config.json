@@ -144,7 +144,8 @@
       "name": "pr-stuck-watcher",
       "type": "recurring",
       "interval": "1h",
-      "prompt": "Run PR stuck watcher: cd /home/cortextos/cortextos && cortextos bus pr-stuck-watcher --stuck-hours 2 --alert-hours 2 --auto-merge --create-tasks --notify-agent orchestrator. It watches the 5 RevOps repos, auto-merges eligible green PRs under blanket policy, and creates RGOS tasks for stuck PRs that cannot auto-merge."
+      "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-pr-stuck-watcher.md",
+      "prompt": "Run PR stuck watcher: cd /home/cortextos/cortextos && cortextos bus pr-stuck-watcher --stuck-hours 2 --alert-hours 2 --auto-merge --notify-agent orchestrator. It watches the 5 RevOps repos, auto-merges eligible green PRs under blanket policy, and notifies orchestrator for stuck PRs that cannot auto-merge."
     },
     {
       "name": "automation-noise-audit",
