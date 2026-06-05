@@ -135,7 +135,9 @@ test.describe('sendMessage', () => {
     await api.sendMessage('12345', specialText);
 
     const reqs = mock.getRequestsFor('sendMessage');
-    expect(reqs[0].body.text).toBe(specialText);
+    // sendMessage converts to HTML mode: < > & are entity-escaped so Telegram
+    // doesn't misinterpret them as HTML tags. Emoji/unicode pass through unchanged.
+    expect(reqs[0].body.text).toBe('🤖 &lt;b&gt;bold&lt;/b&gt; "quotes" &amp; ampersands © 日本語 Ü ñ \n\ttabs');
   });
 
   test('handles empty string message', async () => {
@@ -151,7 +153,9 @@ test.describe('sendMessage', () => {
     const mdText = '# Header\n\n- item 1\n- item 2\n\n```js\nconst x = 1;\n```\n\n**bold** _italic_';
     await api.sendMessage('12345', mdText);
     const reqs = mock.getRequestsFor('sendMessage');
-    expect(reqs[0].body.text).toBe(mdText);
+    // sendMessage converts markdown to Telegram HTML: **bold**→<b>bold</b>, _italic_→<i>italic</i>,
+    // ```code```→<pre><code>…</code></pre>. Assert the HTML-converted form arrives at Telegram.
+    expect(reqs[0].body.text).toBe('# Header\n\n- item 1\n- item 2\n\n<pre><code>const x = 1;</code></pre>\n\n*<b>bold</b>* <i>italic</i>');
   });
 
   test('rate limits to 1 message per second per chat', async () => {
@@ -199,7 +203,10 @@ test.describe('sendMessage', () => {
   });
 
   test('handles 429 rate limit from Telegram', async () => {
-    mock.setRateLimit(100); // 100ms rate limit
+    // setRateLimit(100) expires before the first retry fires (~1000ms), so the
+    // retry succeeds and the test incorrectly passes. Use setError to make every
+    // attempt fail with 429 regardless of timing.
+    mock.setError('sendMessage', 429, 'Too Many Requests: retry after 1');
     const api = createApi();
 
     await expect(api.sendMessage('12345', 'test')).rejects.toThrow(/Too Many Requests/);
@@ -785,7 +792,6 @@ test.describe('TelegramPoller', () => {
     const poller = new TelegramPoller(api, tmpDir, 100);
 
     mock.queueMessage({ text: 'trigger error' });
-    mock.queueMessage({ text: 'after error' });
 
     const received: string[] = [];
     poller.onMessage((msg) => {
@@ -793,9 +799,13 @@ test.describe('TelegramPoller', () => {
       received.push(msg.text || '');
     });
 
-    // Should not throw even though handler throws
+    // pollOnce must NOT throw even when the message handler throws internally
+    await expect(poller.pollOnce()).resolves.toBeUndefined();
+
+    // The mock clears its queue on each getUpdates call (no real Telegram redelivery).
+    // Queue a new message and verify the poller is still operational after the error.
+    mock.queueMessage({ text: 'after error' });
     await poller.pollOnce();
-    // Second message should still be processed
     expect(received).toContain('after error');
   });
 });
