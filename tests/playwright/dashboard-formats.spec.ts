@@ -130,7 +130,7 @@ test.describe('Task JSON format (dashboard sync compatibility)', () => {
 
     completeTask(paths, taskId, 'Done');
     task = JSON.parse(readFileSync(taskFile, 'utf-8'));
-    expect(task.status).toBe('done');
+    expect(task.status).toBe('completed');
     expect(task.completed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
@@ -303,8 +303,8 @@ test.describe('Heartbeat JSON format (dashboard compatibility)', () => {
     expect(hb.status).toBe('working on task_123');
 
     // last_heartbeat: hb.last_heartbeat ?? hb.timestamp ?? null
-    // Dashboard accepts EITHER last_heartbeat or timestamp
-    expect(hb.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // Heartbeat writes last_heartbeat; dashboard falls back to timestamp if absent
+    expect(hb.last_heartbeat).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
     // Optional fields the dashboard reads:
     // org: hb.org ?? ''
@@ -319,8 +319,8 @@ test.describe('Heartbeat JSON format (dashboard compatibility)', () => {
     updateHeartbeat(paths, 'testbot', 'idle');
 
     const hb = JSON.parse(readFileSync(join(ctxRoot, 'state', 'testbot', 'heartbeat.json'), 'utf-8'));
-    // Dashboard parses with new Date(hb.timestamp) for health calculation
-    const parsed = new Date(hb.timestamp);
+    // Dashboard parses with new Date(hb.last_heartbeat) for health calculation
+    const parsed = new Date(hb.last_heartbeat);
     expect(parsed.getTime()).not.toBeNaN();
     // Should be recent (within last minute)
     expect(Date.now() - parsed.getTime()).toBeLessThan(60000);
@@ -847,7 +847,7 @@ test.describe('Cross-format consistency', () => {
     const outMsg = JSON.parse(readFileSync(outFile, 'utf-8').trim());
 
     // All timestamps should be valid ISO 8601
-    const timestamps = [task.created_at, event.timestamp, hb.timestamp, outMsg.timestamp];
+    const timestamps = [task.created_at, event.timestamp, hb.last_heartbeat, outMsg.timestamp];
     for (const ts of timestamps) {
       expect(ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
       expect(new Date(ts).getTime()).not.toBeNaN();
