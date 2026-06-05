@@ -62,6 +62,8 @@ let draining = false;
 
 export function isEnabled(): boolean {
   if (process.env.BUS_RGOS_MIRROR_DISABLED === '1') return false;
+  // Never mirror to prod from any test runner: vitest, playwright (NODE_ENV=test), or CTX_TEST=1
+  if (process.env.VITEST || process.env.NODE_ENV === 'test' || process.env.CTX_TEST === '1') return false;
   if (!process.env.SUPABASE_RGOS_URL) return false;
   if (!process.env.SUPABASE_RGOS_SERVICE_KEY) return false;
   return true;
