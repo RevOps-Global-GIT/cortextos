@@ -9,6 +9,7 @@ import type { TelegramAPI } from '../telegram/api.js';
 import { ensureDir, atomicWriteSync } from '../utils/atomic.js';
 import { resolveAgentCwd, resolvePaths } from '../utils/paths.js';
 import { logEvent } from '../bus/event.js';
+import { logImplicitInvocation } from '../bus/skill-instrument.js';
 import { WsUnixJsonRpcClient, type JsonRpcResponse, type WebSocketRpcTarget } from '../utils/ws-unix-client.js';
 
 interface IPty {
@@ -634,6 +635,7 @@ export class CodexAppServerPTY {
     if (trailingText?.trim()) {
       input.push({ type: 'text', text: trailingText.trim(), text_elements: [] });
     }
+    void logImplicitInvocation(exact.name, this._env.agentDir, this._env.agentName, { source: 'codex_native' });
     this.queueTurn(input);
   }
 

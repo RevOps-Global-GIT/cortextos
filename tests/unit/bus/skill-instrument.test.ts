@@ -183,6 +183,20 @@ describe('logImplicitInvocation', () => {
     expect(body.agent_role).toBe('codex-3');
   });
 
+  it('can insert a Codex native skill-sourced row', async () => {
+    const agentDir = makeFakeAgentDir(tmpRoot);
+    await logImplicitInvocation('revops-prestige', agentDir, 'codex', { source: 'codex_native' });
+
+    const insertCall = fetchSpy.mock.calls.find(
+      ([url]: [string]) => url.includes('/orch_skill_invocations'),
+    );
+    expect(insertCall).toBeDefined();
+    const body = JSON.parse(insertCall![1].body);
+    expect(body.skill_slug).toBe('revops-prestige');
+    expect(body.source).toBe('codex_native');
+    expect(body.agent_role).toBe('codex');
+  });
+
   it('falls back to org-level secrets.env when agent .env lacks Supabase credentials', async () => {
     const agentDir = join(tmpRoot, 'orgs', 'revops-global', 'agents', 'codex-3');
     mkdirSync(agentDir, { recursive: true });

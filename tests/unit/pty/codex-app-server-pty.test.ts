@@ -42,6 +42,7 @@ const notifyMock = vi.fn();
 const closeMock = vi.fn();
 const respondErrorMock = vi.fn();
 const logEventMock = vi.fn();
+const logImplicitInvocationMock = vi.fn();
 let messageHandler: ((message: unknown) => void) | null = null;
 
 vi.mock('../../../src/utils/ws-unix-client.js', () => ({
@@ -62,6 +63,10 @@ vi.mock('../../../src/utils/ws-unix-client.js', () => ({
 
 vi.mock('../../../src/bus/event.js', () => ({
   logEvent: logEventMock,
+}));
+
+vi.mock('../../../src/bus/skill-instrument.js', () => ({
+  logImplicitInvocation: logImplicitInvocationMock,
 }));
 
 const { CodexAppServerPTY } = await import('../../../src/pty/codex-app-server-pty.js');
@@ -87,6 +92,7 @@ beforeEach(() => {
   closeMock.mockReset();
   respondErrorMock.mockReset();
   logEventMock.mockReset();
+  logImplicitInvocationMock.mockReset().mockResolvedValue(undefined);
   atomicWriteSyncMock.mockReset();
   messageHandler = null;
 });
@@ -337,6 +343,12 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'dangerFullAccess' },
     });
+    expect(logImplicitInvocationMock).toHaveBeenCalledWith(
+      'imagegen',
+      '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      'codex-app-agent',
+      { source: 'codex_native' },
+    );
 
     (pty as unknown as { handleRpcMessage(message: unknown): void }).handleRpcMessage({
       method: 'turn/completed',
@@ -369,6 +381,12 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
       approvalPolicy: 'never',
       sandboxPolicy: { type: 'dangerFullAccess' },
     });
+    expect(logImplicitInvocationMock).toHaveBeenCalledWith(
+      'heartbeat',
+      '/tmp/fw/orgs/acme/agents/codex-app-agent',
+      'codex-app-agent',
+      { source: 'codex_native' },
+    );
   });
 
   it('preserves /goal in the local goal handler (does not rewrite to skill)', async () => {
