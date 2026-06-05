@@ -41,7 +41,7 @@ const KNOWN_QA_ROUTES = new Set([
   '/time', '/my-day', '/tasks', '/', '/dashboard', '/app/orchestrator',
   '/app/fleet/activity', '/app/work/inbox', '/app/work/approvals',
   '/companies', '/projects', '/reports', '/pipeline',
-  '/app/fleet/tasks', '/app/fleet/agents', '/social-content',
+  '/app/fleet/tasks', '/app/fleet/agents', '/app/fleet/agents?tab=sessions', '/social-content',
   '/attribution-deployer', '/content-attribution', '/content-review', '/app/wiki', '/app/cortex/theta', '/app/presence',
   '/app/signals', '/app/supreme-outstanding',
   '/assessment-detail', '/assessment-rubric', '/assessments',
