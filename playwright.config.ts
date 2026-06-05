@@ -1,5 +1,9 @@
 import { defineConfig } from '@playwright/test';
 
+// Suppress bus mirror to prod. Playwright forks workers inheriting this env,
+// so isEnabled() in rgos-mirror.ts returns false for all test-runner tasks.
+process.env.NODE_ENV = 'test';
+
 export default defineConfig({
   testDir: './tests/playwright',
   timeout: 30_000,
