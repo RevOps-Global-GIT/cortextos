@@ -85,6 +85,15 @@ Legacy Chroma paths are deprecated as of 2026-05-14. Use current CortexOS KB com
 
 Configured cron names: `codex-task-poll`, `rgos-task-poll`. Keep this list aligned with `config.json`; heartbeat behavior is defined in AGENTS.md.
 
+## Empty Cron Fast Path
+
+For `rgos-task-poll` and `codex-task-poll`, use a minimal no-op path when the assigned/approved task query and inbox sweep are both empty:
+
+- Run only the required queue/inbox check and return the empty result; do not open broad context, discover tools, inspect repos, or start browser/computer-use work.
+- Do not log claim/dispatch/completion events for an empty poll. Log only when a task is claimed, a message is answered, or dispatch actually runs.
+- Keep heartbeat crons compliant with `HEARTBEAT.md`, but if inbox, pending, and approved queues are empty, write the heartbeat/memory entry and stop instead of doing exploratory goal work.
+- Preserve the unified exec process budget during empty cron cycles: prefer one-shot commands, close/poll any yielded process handles, and defer deeper investigation until new work or a due time-gated task exists.
+
 ## Verification Standard
 
 - `done`, `fixed`, `merged`, `live`, and `verified` require current proof.
