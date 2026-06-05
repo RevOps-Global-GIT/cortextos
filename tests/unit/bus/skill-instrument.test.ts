@@ -27,10 +27,10 @@ function makeFakeAgentDir(root: string, sbUrl = 'https://sb.example.com', sbKey 
 
 /** Make fetch return a minimal ok response for every call. */
 function mockFetchOk() {
-  fetchSpy.mockResolvedValue({
+  fetchSpy.mockImplementation(async (url: string) => ({
     ok: true,
-    json: async () => [],
-  });
+    json: async () => url.includes('/orch_skills?slug=eq.') ? [{ id: 'skill-id' }] : [],
+  }));
 }
 
 describe('SUBCOMMAND_SKILL_MAP', () => {
@@ -87,7 +87,38 @@ describe('logImplicitInvocation', () => {
     expect(body.skill_slug).toBe('heartbeat');
     expect(body.source).toBe('bus_implicit');
     expect(body.succeeded).toBe(true);
+    expect(body.skill_id).toBe('skill-id');
     expect(body.agent_role).toBe('dev');
+  });
+
+  it('auto-creates a skill catalog row when the slug is unknown', async () => {
+    fetchSpy.mockImplementation(async (url: string) => {
+      if (url.includes('/orch_skills?slug=eq.')) return { ok: true, json: async () => [] };
+      if (url.includes('/orch_skills?on_conflict=slug')) return { ok: true, json: async () => [{ id: 'new-skill-id' }] };
+      return { ok: true, json: async () => [] };
+    });
+    const agentDir = makeFakeAgentDir(tmpRoot);
+
+    await logImplicitInvocation('revops-prestige-skill', agentDir, 'codex');
+
+    const createCall = fetchSpy.mock.calls.find(
+      ([url]: [string]) => url.includes('/orch_skills?on_conflict=slug'),
+    );
+    expect(createCall).toBeDefined();
+    const createBody = JSON.parse(createCall![1].body);
+    expect(createBody).toMatchObject({
+      slug: 'revops-prestige-skill',
+      name: 'Revops Prestige Skill',
+      is_active: true,
+    });
+
+    const insertCall = fetchSpy.mock.calls.find(
+      ([url]: [string]) => url.includes('/orch_skill_invocations'),
+    );
+    expect(insertCall).toBeDefined();
+    const insertBody = JSON.parse(insertCall![1].body);
+    expect(insertBody.skill_id).toBe('new-skill-id');
+    expect(insertBody.skill_slug).toBe('revops-prestige-skill');
   });
 
   it('inserts a row for approvals skill', async () => {
@@ -197,7 +228,7 @@ describe('logImplicitInvocation', () => {
 
   it('logs insert failures without throwing', async () => {
     fetchSpy
-      .mockResolvedValueOnce({ ok: true, json: async () => [] })
+      .mockResolvedValueOnce({ ok: true, json: async () => [{ id: 'skill-id' }] })
       .mockResolvedValueOnce({ ok: true, json: async () => [] })
       .mockResolvedValueOnce({ ok: false, status: 400, text: async () => 'bad payload' });
     const agentDir = makeFakeAgentDir(tmpRoot);

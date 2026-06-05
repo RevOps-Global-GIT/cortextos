@@ -31,6 +31,65 @@ import { readStdin, parseHookInput } from './index.js';
 // Matches .claude/skills/<slug>/SKILL.md anywhere in a path
 const SKILL_MD_RE = /\.claude\/skills\/([^/]+)\/SKILL\.md$/;
 
+function titleizeSkillSlug(slug: string): string {
+  return slug
+    .split(/[-_:]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || slug;
+}
+
+async function responseText(res: Response): Promise<string> {
+  try {
+    return await res.text();
+  } catch {
+    return '';
+  }
+}
+
+async function resolveOrCreateSkillId(
+  sbUrl: string,
+  headers: { apikey: string; Authorization: string },
+  slug: string,
+): Promise<string | null> {
+  const skillRes = await fetch(
+    `${sbUrl}/rest/v1/orch_skills?slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`,
+    { headers },
+  );
+  if (skillRes.ok) {
+    const skillRows = (await skillRes.json()) as Array<{ id: string }>;
+    if (skillRows[0]?.id) return skillRows[0].id;
+  } else {
+    process.stderr.write(`hook-skill-telemetry: skill lookup failed (${skillRes.status}): ${await responseText(skillRes)}\n`);
+  }
+
+  const createRes = await fetch(`${sbUrl}/rest/v1/orch_skills?on_conflict=slug`, {
+    method: 'POST',
+    headers: {
+      ...headers,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=representation',
+    },
+    body: JSON.stringify({
+      slug,
+      name: titleizeSkillSlug(slug),
+      description: 'Auto-discovered from skill invocation telemetry.',
+      category: 'general',
+      is_active: true,
+      trigger_keywords: [],
+      applicable_roles: [],
+      library: false,
+    }),
+  });
+  if (!createRes.ok) {
+    process.stderr.write(`hook-skill-telemetry: skill auto-create failed (${createRes.status}): ${await responseText(createRes)}\n`);
+    return null;
+  }
+
+  const created = (await createRes.json()) as Array<{ id: string }>;
+  return created[0]?.id ?? null;
+}
+
 async function main(): Promise<void> {
   const raw = await readStdin();
   const { tool_name, tool_input } = parseHookInput(raw);
@@ -77,23 +136,16 @@ async function main(): Promise<void> {
   const agentRole = process.env.CTX_AGENT_NAME ?? undefined;
 
   try {
-    // Look up skill_id from orch_skills by slug (nullable — graceful if skill not in catalog)
-    let skillId: string | null = null;
-    const skillRes = await fetch(
-      `${sbUrl}/rest/v1/orch_skills?slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`,
-      { headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}` } },
-    );
-    if (skillRes.ok) {
-      const skillRows = (await skillRes.json()) as Array<{ id: string }>;
-      skillId = skillRows[0]?.id ?? null;
-    }
+    const headers = { apikey: sbKey, Authorization: `Bearer ${sbKey}` };
+    const skillId = await resolveOrCreateSkillId(sbUrl, headers, slug);
+    if (!skillId) return;
 
     // Look up agent UUID from orch_agents by role_id or title
     let agentId: string | null = null;
     if (agentRole) {
       const agentRes = await fetch(
         `${sbUrl}/rest/v1/orch_agents?title=ilike.${encodeURIComponent(agentRole)}&select=id&limit=1`,
-        { headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}` } },
+        { headers },
       );
       if (agentRes.ok) {
         const agentRows = (await agentRes.json()) as Array<{ id: string }>;
@@ -104,10 +156,10 @@ async function main(): Promise<void> {
     // Insert directly into orch_skill_invocations via PostgREST
     const body: Record<string, unknown> = {
       skill_slug: slug,
+      skill_id: skillId,
       source,
       succeeded: true,
     };
-    if (skillId) body.skill_id = skillId;
     if (agentId) body.agent_id = agentId;
     if (agentRole) body.agent_role = agentRole;
 
