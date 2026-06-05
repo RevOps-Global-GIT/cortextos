@@ -91,7 +91,7 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function slugFromPath(filePath: string): string {
+export function slugFromPath(filePath: string): string {
   return basename(filePath)
     .replace(/\.(md|txt|prompt)$/i, '')
     .replace(/[^a-zA-Z0-9-]/g, '-')
