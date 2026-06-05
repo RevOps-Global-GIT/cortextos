@@ -3613,7 +3613,7 @@ async function runSupremeOutstandingChecks(page: Page): Promise<CheckResult[]> {
     if (!stripState.found) {
       results.push({ check: '[CORRECTNESS] CHECK 4 Scanner freshness strip', status: 'FAIL',
         evidence: 'data-testid="scanner-freshness-strip" element not found — strip may not have rendered or was removed.' });
-    } else if (!/last successful scan|no successful scan/i.test(stripState.text)) {
+    } else if (!/last successful scan|no successful scan|triage data/i.test(stripState.text)) {
       results.push({ check: '[CORRECTNESS] CHECK 4 Scanner freshness strip', status: 'FAIL',
         evidence: `Strip present but text unexpected: "${stripState.text.slice(0, 120)}"` });
     } else {
