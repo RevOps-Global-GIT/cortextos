@@ -48,7 +48,7 @@ import {
   parseAgentTaskEventPayload,
 } from '../bus/agent-task-events.js';
 import { sendHumanBlockersDigest, digestHumanBlockers } from '../bus/human-blockers-digest.js';
-import { logImplicitInvocation } from '../bus/skill-instrument.js';
+import { logImplicitInvocation, type SkillInvocationSource } from '../bus/skill-instrument.js';
 import { registerCronCommands } from './bus-cmds-crons.js';
 import { registerBatchCommands } from './bus-cmds-batch.js';
 
@@ -1140,6 +1140,23 @@ busCommand
       console.log(`  ${statusIcon}${priIcon}${id}${assignee}${title}`);
     }
     console.log('');
+  });
+
+busCommand
+  .command('log-skill-invocation')
+  .description('Record a skill invocation in orch_skill_invocations without relying on Claude hooks')
+  .argument('<slug>', 'Skill slug/name to record')
+  .option('--source <source>', 'Invocation source', 'manual')
+  .option('--agent <agent>', 'Agent role/name override')
+  .action(async (slug: string, opts: { source: string; agent?: string }) => {
+    const validSources: SkillInvocationSource[] = ['bus_implicit', 'cron', 'codex_native', 'codex_read', 'manual'];
+    if (!validSources.includes(opts.source as SkillInvocationSource)) {
+      console.error(`Invalid source '${opts.source}'. Must be one of: ${validSources.join(', ')}`);
+      process.exit(1);
+    }
+    const env = resolveEnv();
+    await logImplicitInvocation(slug, env.agentDir ?? '', opts.agent ?? env.agentName, { source: opts.source as SkillInvocationSource });
+    console.log(`Logged skill invocation: ${slug} (${opts.source})`);
   });
 
 busCommand

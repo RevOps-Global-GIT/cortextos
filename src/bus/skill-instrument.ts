@@ -28,7 +28,7 @@ export const SUBCOMMAND_SKILL_MAP: Record<string, string> = {
  * Reads Supabase credentials from `agentDir/.env`. No-ops when credentials are
  * absent, and logs non-fatal telemetry errors to stderr.
  */
-export type SkillInvocationSource = 'bus_implicit' | 'cron';
+export type SkillInvocationSource = 'bus_implicit' | 'cron' | 'codex_native' | 'codex_read' | 'manual';
 
 export interface LogImplicitInvocationOptions {
   source?: SkillInvocationSource;
