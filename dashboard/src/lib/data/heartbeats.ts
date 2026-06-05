@@ -3,7 +3,7 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-import { CTX_ROOT, getHeartbeatPath } from '@/lib/config';
+import { CTX_ROOT, getHeartbeatPath, getAllAgents } from '@/lib/config';
 import type { Heartbeat, HealthStatus, HealthSummary } from '@/lib/types';
 
 // Default staleness thresholds (minutes)
@@ -87,6 +87,22 @@ export async function getHeartbeats(org?: string): Promise<Heartbeat[]> {
 }
 
 /**
+ * Get heartbeats for active agents only (excludes retired/decommissioned agents).
+ * Cross-references against enabled-agents.json via getAllAgents() so that agents
+ * with status=deleted or enabled=false are excluded from health counts.
+ */
+export async function getActiveHeartbeats(org?: string): Promise<Heartbeat[]> {
+  const activeAgents = getAllAgents();
+  const activeSet = new Set(activeAgents.map((a) => a.name));
+
+  const all = await getAllHeartbeats();
+  const active = all.filter((hb) => activeSet.has(hb.agent));
+
+  if (!org) return active;
+  return active.filter((hb) => hb.org === org || !hb.org);
+}
+
+/**
  * Compute health status from a heartbeat based on staleness.
  */
 export function computeHealth(
@@ -137,9 +153,10 @@ export async function getStaleAgents(): Promise<Heartbeat[]> {
 
 /**
  * Get a health summary across all agents (optionally filtered by org).
+ * Only counts active agents — retired/decommissioned agents are excluded.
  */
 export async function getHealthSummary(org?: string): Promise<HealthSummary> {
-  const heartbeats = await getHeartbeats(org);
+  const heartbeats = await getActiveHeartbeats(org);
 
   const summary: HealthSummary = {
     healthy: 0,
