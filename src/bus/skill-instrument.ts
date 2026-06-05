@@ -60,6 +60,59 @@ function warn(message: string): void {
   process.stderr.write(`skill-instrument: ${message}\n`);
 }
 
+function titleizeSkillSlug(slug: string): string {
+  return slug
+    .split(/[-_:]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ') || slug;
+}
+
+async function resolveOrCreateSkillId(
+  sbUrl: string,
+  headers: { apikey: string; Authorization: string },
+  skillSlug: string,
+): Promise<string | null> {
+  const encodedSlug = encodeURIComponent(skillSlug);
+  const skillRes = await fetch(
+    `${sbUrl}/rest/v1/orch_skills?slug=eq.${encodedSlug}&select=id&limit=1`,
+    { headers },
+  );
+  if (skillRes.ok) {
+    const rows = (await skillRes.json()) as Array<{ id: string }>;
+    if (rows[0]?.id) return rows[0].id;
+  } else {
+    warn(`skill lookup failed for "${skillSlug}" (${skillRes.status}): ${await responseText(skillRes)}`);
+  }
+
+  const createRes = await fetch(`${sbUrl}/rest/v1/orch_skills?on_conflict=slug`, {
+    method: 'POST',
+    headers: {
+      ...headers,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=representation',
+    },
+    body: JSON.stringify({
+      slug: skillSlug,
+      name: titleizeSkillSlug(skillSlug),
+      description: 'Auto-discovered from skill invocation telemetry.',
+      category: 'general',
+      is_active: true,
+      trigger_keywords: [],
+      applicable_roles: [],
+      library: false,
+    }),
+  });
+
+  if (!createRes.ok) {
+    warn(`skill auto-create failed for "${skillSlug}" (${createRes.status}): ${await responseText(createRes)}`);
+    return null;
+  }
+
+  const created = (await createRes.json()) as Array<{ id: string }>;
+  return created[0]?.id ?? null;
+}
+
 export async function logImplicitInvocation(
   skillSlug: string,
   agentDir: string,
@@ -74,18 +127,8 @@ export async function logImplicitInvocation(
 
     const headers = { apikey: sbKey, Authorization: `Bearer ${sbKey}` };
 
-    // Resolve skill_id (nullable — ok if skill not in catalog yet)
-    let skillId: string | null = null;
-    const skillRes = await fetch(
-      `${sbUrl}/rest/v1/orch_skills?slug=eq.${encodeURIComponent(skillSlug)}&select=id&limit=1`,
-      { headers },
-    );
-    if (skillRes.ok) {
-      const rows = (await skillRes.json()) as Array<{ id: string }>;
-      skillId = rows[0]?.id ?? null;
-    } else {
-      warn(`skill lookup failed for "${skillSlug}" (${skillRes.status}): ${await responseText(skillRes)}`);
-    }
+    const skillId = await resolveOrCreateSkillId(sbUrl, headers, skillSlug);
+    if (!skillId) return;
 
     // Resolve agent_id (nullable)
     let agentId: string | null = null;
@@ -106,8 +149,8 @@ export async function logImplicitInvocation(
       skill_slug: skillSlug,
       source: options.source ?? 'bus_implicit',
       succeeded: true,
+      skill_id: skillId,
     };
-    if (skillId) body.skill_id = skillId;
     if (agentId) body.agent_id = agentId;
     if (agentRole) body.agent_role = agentRole;
 
