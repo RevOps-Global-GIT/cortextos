@@ -182,6 +182,20 @@ interface ObservedPageSignal {
   detail: string;
 }
 
+type FleetTaskCountSource = 'mirror' | 'live';
+
+interface FleetTaskCountRow {
+  id?: string | null;
+  title?: string | null;
+  status?: string | null;
+  source?: string | null;
+  meta?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
+  scheduled_for?: string | null;
+  updated_at?: string | null;
+  created_at?: string | null;
+}
+
 type ButtonCounts = Record<string, number>;
 
 async function countButtons(page: Page, labels: Record<string, RegExp>): Promise<ButtonCounts> {
@@ -212,6 +226,100 @@ async function shot(page: Page, name: string) {
     new Promise<void>(r => setTimeout(r, 3000)),
   ]);
   return file;
+}
+
+function hasFutureSchedule(task: Pick<FleetTaskCountRow, 'scheduled_for'>, now = Date.now()): boolean {
+  if (!task.scheduled_for) return false;
+  const scheduledAt = new Date(task.scheduled_for).getTime();
+  return Number.isFinite(scheduledAt) && scheduledAt > now;
+}
+
+function timestampMs(task: Pick<FleetTaskCountRow, 'updated_at' | 'created_at'>): number {
+  const value = task.updated_at ?? task.created_at ?? '';
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mapsToFleetPendingLane(task: FleetTaskCountRow, source: FleetTaskCountSource, now = Date.now()): boolean {
+  const rawStatus = (task.status ?? '').toString().toLowerCase();
+  const boardStatus = source === 'live' && rawStatus === 'pending' ? 'proposed' : rawStatus;
+  if (boardStatus !== 'proposed') return false;
+  if (hasFutureSchedule(task, now)) return false;
+
+  // The live bus source moves stale pending rows to Blocked after 48h.
+  if (source === 'live') {
+    const updatedAt = timestampMs(task);
+    if (updatedAt > 0 && now - updatedAt >= 48 * 60 * 60 * 1000) return false;
+  }
+
+  return true;
+}
+
+function isFleetTasksMirrorSource(task: Pick<FleetTaskCountRow, 'source' | 'metadata'>): boolean {
+  const metadataSource = typeof task.metadata?.source === 'string' ? task.metadata.source : '';
+  return task.source === 'cortextos_bus_mirror' || task.source === 'hub_ui' || metadataSource === 'cortex';
+}
+
+function filterFleetLiveSourceRows(tasks: FleetTaskCountRow[]): FleetTaskCountRow[] {
+  const taskIdTitles = new Set(
+    tasks
+      .filter((task) => (task.id ?? '').startsWith('task_'))
+      .map((task) => task.title)
+      .filter((title): title is string => typeof title === 'string' && title.length > 0),
+  );
+
+  return tasks.filter((task) => {
+    if ((task.id ?? '').startsWith('task_')) return true;
+    const rgos = task.meta?.rgos as Record<string, unknown> | undefined;
+    if (rgos?.source === 'supabase_orch_tasks') return false;
+    return !task.title || !taskIdTitles.has(task.title);
+  });
+}
+
+async function readFleetPendingHeaderCount(page: Page): Promise<{ count: number; text: string }> {
+  const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+  const extract = (value: string) => {
+    const text = normalize(value);
+    const match = text.match(/\bPending\s*(?:Intake\s*)?(\d+)\b/i);
+    return match ? Number.parseInt(match[1] ?? '', 10) : Number.NaN;
+  };
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const visibleText = await page.locator('body').innerText({ timeout: 2000 }).catch(() => '');
+    const visibleCount = extract(visibleText);
+    if (Number.isFinite(visibleCount)) return { count: visibleCount, text: normalize(visibleText).slice(0, 140) };
+
+    const candidate = await page.evaluate(() => {
+      const normalizeInPage = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
+      const candidates = Array.from(document.querySelectorAll('main [role="heading"], main h1, main h2, main h3, main h4, main section, main [class*="column"], main [class*="Column"], main [class*="kanban"], main [class*="Kanban"]'))
+        .map((el) => normalizeInPage((el as HTMLElement).innerText ?? el.textContent))
+        .filter(Boolean);
+      const bodyText = normalizeInPage(document.querySelector('main')?.textContent ?? document.body.textContent ?? '');
+      return [...candidates, bodyText].find((text) => /\bPending\s*(?:Intake\s*)?\d+\b/i.test(text)) ?? bodyText;
+    }).catch(() => '');
+
+    const candidateCount = extract(candidate);
+    if (Number.isFinite(candidateCount)) return { count: candidateCount, text: normalize(candidate).slice(0, 140) };
+
+    if (attempt < 7) {
+      await page.waitForTimeout(500);
+    }
+  }
+
+  const finalText = await page.locator('body').innerText({ timeout: 1000 }).catch(() => '');
+  return { count: -1, text: normalize(finalText).slice(0, 140) };
+}
+
+async function setFleetTaskSource(page: Page, source: FleetTaskCountSource) {
+  await page.evaluate((nextSource) => {
+    try {
+      localStorage.setItem('cortextos.fleet_tasks_live_source', nextSource);
+      localStorage.removeItem('agentops_dogfood');
+      window.dispatchEvent(new Event('cortextos:fleet-task-source-change'));
+    } catch {}
+  }, source);
+  await page.goto(joinUrl(BASE_URL, '/app/fleet/tasks'), { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(1000);
 }
 
 // ---------------------------------------------------------------------------
@@ -2439,44 +2547,112 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
     results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 6: Pending column count matches bus ledger distinct-open count.
-  // Source of truth: cortextos bus list-tasks (same store useFleetLiveTasks reads via listBusTasks).
-  // Pending column = bus statuses 'pending' + 'proposed' ONLY.
-  // Supabase orch_tasks is NOT the right source — the board never reads it directly.
+  // CHECK 6: Pending column count matches the selected task source.
+  // Fleet Tasks can render either the Supabase mirror (orch_tasks) or the live cortextOS bus.
+  // Dogfood fixtures are client-side only, so raw 1:1 ledger checks are intentionally skipped there.
   try {
-    let busJson: Array<{ status: string }> = [];
-    try {
-      const raw = execSync('cortextos bus list-tasks --format json', { encoding: 'utf8', timeout: 15000 });
-      busJson = JSON.parse(raw);
-    } catch (shellErr) {
-      results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches bus ledger', status: 'DEFERRED', evidence: `bus list-tasks failed: ${(shellErr as Error).message?.split('\n')[0]}` });
-      busJson = null as unknown as Array<{ status: string }>;
-    }
-    if (busJson !== null) {
-      const apiCount = busJson.filter(t => t.status === 'pending' || t.status === 'proposed').length;
-      // Read the rendered Pending column header count from the kanban board
-      const pendingText = await page.evaluate(() => {
-        const els = Array.from(document.querySelectorAll('[class*="column-header"], [class*="columnHeader"], [class*="kanban"], th, [role="columnheader"]'));
-        const pendingEl = els.find(el => /\bpending\b/i.test(el.textContent ?? ''));
-        return pendingEl?.textContent ?? '';
-      }).catch(() => '');
-      const renderedMatch = pendingText.match(/(\d+)/);
-      const renderedCount = renderedMatch ? parseInt(renderedMatch[1], 10) : -1;
-      await shot(page, `${sp}-6-pending-counter`);
-      if (renderedCount < 0) {
-        results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches bus ledger', status: 'DEFERRED', evidence: `Could not read rendered Pending count from kanban header. Bus ledger (pending+proposed): ${apiCount}. Header text found: "${pendingText.trim().slice(0, 100)}"` });
+    if (dogfoodMode) {
+      await shot(page, `${sp}-6-pending-counter-dogfood`);
+      results.push({
+        check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
+        status: 'DEFERRED',
+        evidence: 'Skipped raw ledger count in --dogfood mode: qa-* dogfood tasks are client-side fixtures injected by localStorage and are validated by fixture-specific checks, not by mirror/live source totals.',
+      });
+    } else if (!serviceKey) {
+      results.push({
+        check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
+        status: 'DEFERRED',
+        evidence: 'No serviceKey — cannot query orch_tasks for mirror-source Pending count.',
+      });
+    } else {
+      const originalState = await page.evaluate(() => ({
+        source: localStorage.getItem('cortextos.fleet_tasks_live_source'),
+        dogfood: localStorage.getItem('agentops_dogfood'),
+      })).catch(() => ({ source: null as string | null, dogfood: null as string | null }));
+
+      const evidence: string[] = [];
+      const failures: string[] = [];
+      const deferred: string[] = [];
+      const TOLERANCE = 1;
+
+      await setFleetTaskSource(page, 'mirror');
+      const mirrorRowsResp = await fetch(
+        `${SUPA_URL}/rest/v1/orch_tasks?select=id,status,source,metadata,scheduled_for,updated_at,created_at&status=eq.proposed&limit=10000`,
+        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+      );
+      if (!mirrorRowsResp.ok) {
+        deferred.push(`mirror orch_tasks query HTTP ${mirrorRowsResp.status}`);
       } else {
-        const delta = Math.abs(renderedCount - apiCount);
-        const TOLERANCE = 2;
-        if (delta > TOLERANCE) {
-          results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches bus ledger', status: 'FAIL', evidence: `Pending count mismatch: rendered=${renderedCount}, bus ledger (pending+proposed)=${apiCount}, delta=${delta} > tolerance=${TOLERANCE}. Likely inflation or dedup gap.` });
+        const mirrorRows = await mirrorRowsResp.json() as FleetTaskCountRow[];
+        const mirrorExpected = mirrorRows.filter((task) => isFleetTasksMirrorSource(task) && mapsToFleetPendingLane(task, 'mirror')).length;
+        const mirrorRendered = await readFleetPendingHeaderCount(page);
+        await shot(page, `${sp}-6-pending-counter-mirror`);
+        if (mirrorRendered.count < 0) {
+          deferred.push(`mirror header unreadable; expected orch_tasks proposed=${mirrorExpected}; header="${mirrorRendered.text}"`);
         } else {
-          results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches bus ledger', status: 'PASS', evidence: `Pending count OK: rendered=${renderedCount}, bus ledger=${apiCount}, delta=${delta} ≤ tolerance=${TOLERANCE}.` });
+          const delta = Math.abs(mirrorRendered.count - mirrorExpected);
+          evidence.push(`mirror: rendered=${mirrorRendered.count}, orch_tasks proposed=${mirrorExpected}, delta=${delta}`);
+          if (delta > TOLERANCE) failures.push(`mirror rendered=${mirrorRendered.count} vs orch_tasks proposed=${mirrorExpected}`);
         }
+      }
+
+      await setFleetTaskSource(page, 'live');
+      let busRows: FleetTaskCountRow[] | null = null;
+      try {
+        const raw = execSync('cortextos bus list-tasks --format json', {
+          encoding: 'utf8',
+          timeout: 15000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        busRows = JSON.parse(raw) as FleetTaskCountRow[];
+      } catch (shellErr) {
+        deferred.push(`live bus list-tasks failed: ${(shellErr as Error).message?.split('\n')[0]}`);
+      }
+      if (busRows) {
+        const liveVisibleRows = filterFleetLiveSourceRows(busRows);
+        const liveExpected = liveVisibleRows.filter((task) => mapsToFleetPendingLane(task, 'live')).length;
+        const liveRendered = await readFleetPendingHeaderCount(page);
+        await shot(page, `${sp}-6-pending-counter-live`);
+        if (liveRendered.count < 0) {
+          deferred.push(`live header unreadable; expected bus pending=${liveExpected}; header="${liveRendered.text}"`);
+        } else {
+          const delta = Math.abs(liveRendered.count - liveExpected);
+          evidence.push(`live: rendered=${liveRendered.count}, bus pending-mapped=${liveExpected}, delta=${delta}, source rows ${busRows.length}->${liveVisibleRows.length}`);
+          if (delta > TOLERANCE) failures.push(`live rendered=${liveRendered.count} vs bus pending-mapped=${liveExpected}`);
+        }
+      }
+
+      await page.evaluate((state) => {
+        try {
+          if (state.source) localStorage.setItem('cortextos.fleet_tasks_live_source', state.source);
+          else localStorage.removeItem('cortextos.fleet_tasks_live_source');
+          if (state.dogfood) localStorage.setItem('agentops_dogfood', state.dogfood);
+          else localStorage.removeItem('agentops_dogfood');
+        } catch {}
+      }, originalState).catch(() => {});
+
+      if (failures.length > 0) {
+        results.push({
+          check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
+          status: 'FAIL',
+          evidence: `${failures.join('; ')}. ${evidence.join('; ')}. Tolerance=${TOLERANCE}.`,
+        });
+      } else if (deferred.length > 0) {
+        results.push({
+          check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
+          status: 'DEFERRED',
+          evidence: `${deferred.join('; ')}. Completed source checks: ${evidence.join('; ') || 'none'}.`,
+        });
+      } else {
+        results.push({
+          check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
+          status: 'PASS',
+          evidence: `${evidence.join('; ')}. Dogfood fixtures disabled for source-specific checks.`,
+        });
       }
     }
   } catch (e) {
-    results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches bus ledger', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+    results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches task source', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
   return results;
