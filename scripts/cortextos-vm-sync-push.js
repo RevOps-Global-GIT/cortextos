@@ -729,7 +729,9 @@ const HUB_QA_ROOTS = [
   "/home/cortextos/cortextos/orgs/revops-global/agents/qa-agent/output",
   "/home/cortextos/cortextos/orgs/revops-global/agents/codex/output/playwright-qa",
 ];
-const HUB_QA_PATTERN = /(?:qa-summary|report|dogfood).*\.md$/i;
+// Matches legacy rollup files (qa-summary/report/dogfood) AND per-page playwright
+// QA artifacts written as <surface>-qa-YYYY-MM-DD.md.
+const HUB_QA_PATTERN = /(?:qa-summary|report|dogfood|-qa-\d{4}-\d{2}-\d{2}).*\.md$/i;
 const VM_QA_MONITOR_NODE_KEY = "vm-qa-monitor";
 const ORCH_TASK_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -765,7 +767,7 @@ function computeHubQaStatus() {
       status: "empty",
       label: "No QA artifact found",
       updated_at: null,
-      stale_reason: "No qa-summary/report/dogfood .md found in playwright-qa roots",
+      stale_reason: "No QA artifact found in playwright-qa roots",
       failed_count: 0,
       follow_up_count: 0,
       passed_count: 0,
@@ -773,39 +775,64 @@ function computeHubQaStatus() {
     };
   }
 
-  const best = candidates[0];
-  let text = "";
-  try { text = fs.readFileSync(best.path, "utf8"); } catch { /* skip */ }
-  const updatedAt = new Date(best.mtime).toISOString();
-  const ageMs = Date.now() - best.mtime;
+  // Aggregate all files from the same calendar date as the newest artifact so a
+  // full per-page run (N files × 1 summary each) is rolled up correctly rather
+  // than reporting a single page's numbers.
+  const newestDate = new Date(candidates[0].mtime).toISOString().slice(0, 10);
+  const runFiles = candidates.filter(
+    (c) => new Date(c.mtime).toISOString().slice(0, 10) === newestDate,
+  );
+  const updatedAt = new Date(candidates[0].mtime).toISOString();
+  const ageMs = Date.now() - candidates[0].mtime;
   const ageMinutes = Math.floor(ageMs / 60000);
 
-  function numMatch(pattern) {
-    const m = text.match(pattern);
-    return m ? Number(m[1]) : null;
+  let totalPassed = 0, totalFailed = 0, totalDeferred = 0, parsedCount = 0;
+
+  for (const file of runFiles) {
+    let text = "";
+    try { text = fs.readFileSync(file.path, "utf8"); } catch { continue; }
+
+    // Format priority:
+    //   1. "## Summary: N passed, M failed, K deferred"  — per-page playwright QA
+    //   2. "This pass total:** N passed, M failed, K deferred"  — legacy rollup
+    //   3. "**TOTALS: N passed / M failed / K deferred**"  — legacy rollup
+    //   4. Individual "Checks passed/failed" lines  — fallback
+    const m = text.match(/^##\s+Summary:\s*(\d+)\s+passed,\s*(\d+)\s+failed,\s*(\d+)\s+deferred/im)
+      ?? text.match(/This pass total:\*\*\s*(\d+)\s+passed,\s*(\d+)\s+failed,\s*(\d+)\s+deferred/i)
+      ?? text.match(/\*\*TOTALS?:\s*(\d+)\s+passed\s*\/\s*(\d+)\s+failed\s*\/\s*(\d+)\s+deferred\*\*/i);
+
+    if (m) {
+      totalPassed += Number(m[1]);
+      totalFailed += Number(m[2]);
+      totalDeferred += Number(m[3]);
+      parsedCount++;
+    } else {
+      const p = text.match(/Checks passed:\s*(\d+)/i);
+      const f = text.match(/Checks failed:\s*(\d+)/i);
+      if (p || f) {
+        totalPassed += p ? Number(p[1]) : 0;
+        totalFailed += f ? Number(f[1]) : 0;
+        parsedCount++;
+      }
+    }
   }
-  // Try multiple summary line formats: "This pass total:** X passed, Y failed, Z deferred"
-  // OR "**TOTALS: X passed / Y failed / Z deferred**"
-  const passTotal = text.match(/This pass total:\*\*\s*(\d+)\s+passed,\s*(\d+)\s+failed,\s*(\d+)\s+deferred/i)
-    ?? text.match(/\*\*TOTALS?:\s*(\d+)\s+passed\s*\/\s*(\d+)\s+failed\s*\/\s*(\d+)\s+deferred\*\*/i);
-  const passed = passTotal ? Number(passTotal[1]) : numMatch(/Checks passed:\s*(\d+)/i) ?? 0;
-  const failed = passTotal ? Number(passTotal[2]) : numMatch(/Checks failed:\s*(\d+)/i) ?? 0;
-  const deferred = passTotal ? Number(passTotal[3]) : numMatch(/Checks deferred:\s*(\d+)/i) ?? 0;
 
   const STALE_MINUTES = 6 * 60;
+  // Deferred = intentional --no-send write-mutation skips, not failures.
+  // Only failed > 0 or staleness produce a non-healthy status.
+  const status = totalFailed > 0 ? "error" : ageMinutes > STALE_MINUTES ? "stale" : "healthy";
   return {
-    status: failed > 0 ? "error" : deferred > 0 ? "warning" : ageMinutes > STALE_MINUTES ? "stale" : "healthy",
-    label: `${passed} pass, ${failed} fail, ${deferred} follow-up`,
+    status,
+    label: `${totalPassed} pass, ${totalFailed} fail, ${totalDeferred} skip`,
     updated_at: updatedAt,
     stale_reason:
-      failed > 0 ? `${failed} failing check(s) in ${path.basename(best.path)}`
+      totalFailed > 0 ? `${totalFailed} failing check(s) across ${parsedCount} page(s)`
       : ageMinutes > STALE_MINUTES ? `${ageMinutes}m old; threshold ${STALE_MINUTES}m`
-      : deferred > 0 ? `${deferred} follow-up check(s) need attention`
       : null,
-    failed_count: failed,
-    follow_up_count: deferred,
-    passed_count: passed,
-    artifact_path: best.path,
+    failed_count: totalFailed,
+    follow_up_count: totalDeferred,
+    passed_count: totalPassed,
+    artifact_path: candidates[0].path,
   };
 }
 
