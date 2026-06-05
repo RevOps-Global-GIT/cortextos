@@ -1,8 +1,8 @@
 import { spawnSync } from 'child_process';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import type { CronDefinition } from '../types/index.js';
-import { spawnCodexAsync, type SpawnCodexResult } from '../bus/spawn-codex.js';
+import { slugFromPath, spawnCodexAsync, type SpawnCodexResult } from '../bus/spawn-codex.js';
 import { mirrorReviewToRgos, type ReviewMirrorInput } from '../bus/rgos-mirror.js';
 import { logImplicitInvocation } from '../bus/skill-instrument.js';
 
@@ -209,6 +209,22 @@ export async function dispatchCronFire(cron: CronDefinition, opts: CronFireDispa
     const timeout = metadataNumber(cron, 'timeout_seconds');
     const resolvedPrompt = resolveOrgPath(opts.frameworkRoot, opts.org, promptFile);
     const resolvedWorkdir = workdir ? resolveOrgPath(opts.frameworkRoot, opts.org, workdir) : undefined;
+
+    // Same-day dedup guard: if a sidecar (.json) from today already exists for this
+    // prompt slug, skip spawning. Prevents retry storms where a timeout/failure causes
+    // the daemon to re-fire the cron, accumulating 5-10+ duplicate codex sessions per day.
+    {
+      const today = (opts.now ?? (() => new Date()))().toISOString().slice(0, 10);
+      const promptSlug = slugFromPath(resolvedPrompt);
+      const agentOutputDir = join(opts.frameworkRoot, 'orgs', opts.org, 'agents', targetAgent, 'output');
+      if (existsSync(agentOutputDir)) {
+        const prefix = `${today}-spawn-codex-${promptSlug}-`;
+        if (readdirSync(agentOutputDir).some(e => e.startsWith(prefix) && e.endsWith('.json'))) {
+          return;
+        }
+      }
+    }
+
     // Use spawnCodexAsync so the daemon event loop is NOT blocked while Codex
     // runs (which can take 50–120 s). spawnSync here caused fleet-wide watchdog
     // false-positives and IPC timeouts (root-cause: 2026-05-17 audit M2).

@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchCronFire, extractSkillSlugsFromCronPrompt, type SpawnWorkerOptions, type SpawnWorkerResult } from '../../../src/daemon/cron-fire-dispatch.js';
 import type { CronDefinition } from '../../../src/types/index.js';
@@ -396,6 +399,41 @@ describe('dispatchCronFire', () => {
       injectAgent: vi.fn(),
       spawnWorkerImpl: vi.fn().mockResolvedValue({ ok: false, exitCode: 1 } satisfies SpawnWorkerResult),
     })).rejects.toThrow(/spawn-worker cron "theta-wave" failed with exit code 1/);
+  });
+
+  it('skips spawn-codex when today\'s sidecar already exists (dedup guard)', async () => {
+    const spawnCodexImpl = vi.fn().mockResolvedValue(result(true));
+    const tmpRoot = mkdtempSync(join(tmpdir(), 'ctx-dedup-test-'));
+
+    try {
+      const outputDir = join(tmpRoot, 'orgs', 'revops-global', 'agents', 'codex', 'output');
+      mkdirSync(outputDir, { recursive: true });
+      // Simulate a prior run sidecar from the same day
+      writeFileSync(
+        join(outputDir, '2026-05-16-spawn-codex-evening-review-20260516T000000Z-deadbeef.json'),
+        '{"status":"timed_out"}',
+      );
+
+      const ret = await dispatchCronFire(cron({
+        metadata: {
+          runner: 'spawn-codex',
+          prompt_file: 'prompts/evening-review.md',
+          agent: 'codex',
+        },
+      }), {
+        agentName: 'orchestrator',
+        frameworkRoot: tmpRoot,
+        org: 'revops-global',
+        injectAgent: vi.fn(),
+        spawnCodexImpl,
+        now: () => new Date('2026-05-16T12:00:00.000Z'),
+      });
+
+      expect(spawnCodexImpl).not.toHaveBeenCalled();
+      expect(ret).toBeUndefined();
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 
   it('throws when spawn-worker prompt_file is not readable', async () => {
