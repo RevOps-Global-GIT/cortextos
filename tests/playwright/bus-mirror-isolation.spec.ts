@@ -1,14 +1,15 @@
 /**
  * Regression test: bus mirror must NEVER write to prod orch_tasks during any test run.
  *
- * Root cause of incident: Playwright sets neither VITEST nor NODE_ENV, so
- * mirrorTaskToRgos() call sites in task.ts passed their guards and fired
- * live Supabase upserts, leaking fixture tasks (testbot/boris/my-test-agent)
- * into the prod Intake column.
+ * Root cause of incident: Playwright sets neither VITEST nor NODE_ENV, so the
+ * per-call-site guards in task.ts (`if (!VITEST && NODE_ENV !== 'test')`) did
+ * not fire. createTask/updateTask/completeTask called mirrorTaskToRgos directly,
+ * leaking testbot/boris/my-test-agent fixture tasks into the prod Intake column.
  *
- * Fix: isEnabled() in rgos-mirror.ts now returns false when
- * VITEST || NODE_ENV === 'test' || CTX_TEST === '1'.
- * playwright.config.ts sets NODE_ENV=test so this spec always runs clean.
+ * Fix: playwright.config.ts sets `process.env.NODE_ENV = 'test'` at module level
+ * so worker processes inherit it and the existing per-call-site guards trigger.
+ * isEnabled() is intentionally not changed — unit tests for rgos-mirror need to
+ * call isEnabled() with real creds to test the actual guard logic.
  */
 import { test, expect } from '@playwright/test';
 import { mkdtempSync, rmSync } from 'fs';
@@ -17,7 +18,6 @@ import { tmpdir } from 'os';
 
 require('tsx/cjs');
 
-const { isEnabled } = require('../../src/bus/rgos-mirror');
 const { createTask, updateTask, completeTask } = require('../../src/bus/task');
 
 import type { BusPaths } from '../../src/types';
@@ -40,37 +40,15 @@ function makeTmpPaths(): { paths: BusPaths; dir: string } {
   return { paths, dir };
 }
 
-test.describe('Bus mirror isolation under test environment', () => {
-  test('isEnabled() returns false when NODE_ENV=test', () => {
-    // playwright.config.ts sets NODE_ENV=test — verify the guard fires
+test.describe('Bus mirror isolation under Playwright (NODE_ENV=test)', () => {
+  test('playwright.config.ts sets NODE_ENV=test so per-call-site guards fire', () => {
+    // This is the root-cause guard: task.ts guards each mirrorTaskToRgos call with
+    // `if (!process.env.VITEST && process.env.NODE_ENV !== 'test')`.
+    // playwright.config.ts must set NODE_ENV=test at module level so workers inherit it.
     expect(process.env.NODE_ENV).toBe('test');
-    expect(isEnabled()).toBe(false);
   });
 
-  test('isEnabled() returns false when VITEST is set', () => {
-    const prev = process.env.VITEST;
-    process.env.VITEST = '1';
-    try {
-      expect(isEnabled()).toBe(false);
-    } finally {
-      if (prev === undefined) delete process.env.VITEST;
-      else process.env.VITEST = prev;
-    }
-  });
-
-  test('isEnabled() returns false when CTX_TEST=1', () => {
-    const prev = process.env.CTX_TEST;
-    process.env.CTX_TEST = '1';
-    try {
-      expect(isEnabled()).toBe(false);
-    } finally {
-      if (prev === undefined) delete process.env.CTX_TEST;
-      else process.env.CTX_TEST = prev;
-    }
-  });
-
-  test('createTask/updateTask/completeTask do not call Supabase under NODE_ENV=test', async () => {
-    // Intercept any fetch calls — none should reach Supabase
+  test('createTask/updateTask/completeTask make 0 Supabase calls under NODE_ENV=test', async () => {
     const originalFetch = globalThis.fetch;
     const supabaseCalls: string[] = [];
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -87,7 +65,7 @@ test.describe('Bus mirror isolation under test environment', () => {
       updateTask(paths, taskId, 'in_progress');
       completeTask(paths, taskId, 'Done');
       // Give any fire-and-forget promises a tick to settle
-      await new Promise(r => setTimeout(r, 100));
+      await new Promise(r => setTimeout(r, 200));
       expect(supabaseCalls).toHaveLength(0);
     } finally {
       globalThis.fetch = originalFetch;
