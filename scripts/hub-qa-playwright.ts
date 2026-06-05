@@ -3535,7 +3535,7 @@ async function runFinancialsChecks(page: Page, serviceKey?: string): Promise<Che
 }
 
 // ---------------------------------------------------------------------------
-// /analytics checks
+// /analytics checks (canonical AgentOps analytics reached via /app/analytics)
 // ---------------------------------------------------------------------------
 async function runAnalyticsChecks(page: Page): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
@@ -3545,6 +3545,24 @@ async function runAnalyticsChecks(page: Page): Promise<CheckResult[]> {
   const loadResult = await checkLoad(page, sp);
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 1b: canonical page, not the Hub deal-room [slug] fallback
+  try {
+    const url = page.url();
+    const bodyText = await Promise.race([
+      page.evaluate(() => document.body.textContent ?? ''),
+      new Promise<string>(r => setTimeout(() => r(''), 5000)),
+    ]);
+    const canonical = /agentops\.revopsglobal\.com\/analytics|hub\.revopsglobal\.com\/app\/analytics/.test(url);
+    const shadowed = /Deal Room Not Found/i.test(bodyText);
+    results.push({
+      check: '[CORRECTNESS] CHECK 1b Canonical analytics route',
+      status: canonical && !shadowed ? 'PASS' : 'FAIL',
+      evidence: `URL: ${url}. Deal-room fallback: ${shadowed ? 'yes' : 'no'}.`,
+    });
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 1b Canonical analytics route', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
 
   // CHECK 2: Charts or metric tiles visible
   // Wait for analytics content to hydrate — chart/metric containers load
@@ -3629,7 +3647,7 @@ async function runAnalyticsChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
-// /fleet checks (top-level fleet dashboard, not /app/fleet/*)
+// /fleet checks (canonical AgentOps fleet overview reached via /app/fleet)
 // ---------------------------------------------------------------------------
 async function runFleetChecks(page: Page): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
@@ -3639,6 +3657,24 @@ async function runFleetChecks(page: Page): Promise<CheckResult[]> {
   const loadResult = await checkLoad(page, sp);
   results.push(loadResult);
   if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 1b: canonical page, not the Hub deal-room [slug] fallback
+  try {
+    const url = page.url();
+    const bodyText = await Promise.race([
+      page.evaluate(() => document.body.textContent ?? ''),
+      new Promise<string>(r => setTimeout(() => r(''), 5000)),
+    ]);
+    const canonical = /agentops\.revopsglobal\.com\/fleet|hub\.revopsglobal\.com\/app\/fleet/.test(url);
+    const shadowed = /Deal Room Not Found/i.test(bodyText);
+    results.push({
+      check: '[CORRECTNESS] CHECK 1b Canonical fleet route',
+      status: canonical && !shadowed ? 'PASS' : 'FAIL',
+      evidence: `URL: ${url}. Deal-room fallback: ${shadowed ? 'yes' : 'no'}.`,
+    });
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 1b Canonical fleet route', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
 
   // CHECK 2: Agent cards or rows visible
   // Wait for fleet content to hydrate — agent cards load lazily after the
@@ -4225,9 +4261,9 @@ async function main() {
       results = await runWithTimeout(() => runSettingsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/financials') {
       results = await runWithTimeout(() => runFinancialsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
-    } else if (targetPage === '/analytics') {
+    } else if (targetPage === '/analytics' || targetPage === '/app/analytics') {
       results = await runWithTimeout(() => runAnalyticsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy; manual check recommended' }]);
-    } else if (targetPage === '/fleet') {
+    } else if (targetPage === '/fleet' || targetPage === '/app/fleet') {
       results = await runWithTimeout(() => runFleetChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy; manual check recommended' }]);
     } else if (targetPage === '/app/capabilities') {
       results = await runWithTimeout(() => runCapabilitiesChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
@@ -4240,7 +4276,7 @@ async function main() {
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
