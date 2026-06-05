@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { BusPaths } from '../types/index.js';
 import { logEvent } from './event.js';
@@ -39,11 +39,46 @@ interface GhPullRequest {
   isDraft?: boolean;
 }
 
+interface SnoozeEntry {
+  repo: string;        // short name (e.g. "ob1-app") or full "owner/repo"
+  pr_number: number;
+  snooze_until: string; // ISO timestamp or "freeze_lifts" (indefinite)
+}
+
+interface SnoozeFile {
+  snooze_list?: SnoozeEntry[];
+}
+
+function readSnoozeList(snoozeFile: string): SnoozeEntry[] {
+  if (!existsSync(snoozeFile)) return [];
+  try {
+    const raw = readFileSync(snoozeFile, 'utf-8');
+    const parsed = JSON.parse(raw) as SnoozeFile;
+    return parsed.snooze_list ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function isSnoozed(pr: { repo: string; number: number }, snoozeList: SnoozeEntry[], nowMs: number): boolean {
+  const shortRepo = pr.repo.split('/').pop() ?? pr.repo;
+  for (const entry of snoozeList) {
+    const entryShort = entry.repo.includes('/') ? entry.repo.split('/').pop()! : entry.repo;
+    const repoMatch = entry.repo === pr.repo || entryShort === shortRepo;
+    if (!repoMatch || entry.pr_number !== pr.number) continue;
+    if (entry.snooze_until === 'freeze_lifts') return true;
+    const until = Date.parse(entry.snooze_until);
+    if (Number.isFinite(until) && until > nowMs) return true;
+  }
+  return false;
+}
+
 export interface PrStuckWatcherOptions {
   repos?: string[];
   stuckHours?: number;
   alertHours?: number;
   outputDir?: string;
+  snoozeFile?: string;
 }
 
 export interface PrStuckItem {
@@ -238,6 +273,7 @@ export function runPrStuckWatcher(
   const generatedAt = new Date(now).toISOString();
   const stuckThresholdHours = options.stuckHours ?? 2;
   const alertThresholdHours = options.alertHours ?? 24;
+  const snoozeList = options.snoozeFile ? readSnoozeList(options.snoozeFile) : [];
   const watchedRepos = discoverRepos(options.repos);
   const checkedRepos: string[] = [];
   const failedRepos: Array<{ repo: string; error: string }> = [];
@@ -307,7 +343,8 @@ export function runPrStuckWatcher(
     pr.updatedHoursAgo > alertThresholdHours
     && !pr.awaitingGreg
     && !pr.isDraft
-    && !pr.isManualReviewOnly,
+    && !pr.isManualReviewOnly
+    && !isSnoozed(pr, snoozeList, now),
   );
   const result: PrStuckWatcherResult = {
     generatedAt,
