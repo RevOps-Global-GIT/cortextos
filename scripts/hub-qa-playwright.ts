@@ -4455,6 +4455,9 @@ async function main() {
       '/analytics': '/app/analytics',
       '/fleet': '/app/fleet',
       '/app/fleet-sessions': '/app/fleet/agents?tab=sessions',
+      // hub.revopsglobal.com/clients hits the deal-room router ("Deal Room Not Found");
+      // the admin clients page is at /app/clients → agentops.revopsglobal.com/clients
+      '/clients': '/app/clients',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
