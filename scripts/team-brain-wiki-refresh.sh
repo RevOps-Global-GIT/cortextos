@@ -38,6 +38,8 @@ log_bus_event() {
 
 if [[ ! -d "$REPO_DIR/.git" ]]; then
   echo "ERROR: $REPO_DIR is not a git checkout" >&2
+  log_bus_event team_brain_wiki_refresh_error error "repo_not_a_git_checkout"
+  cortextos bus send-message orchestrator normal "team-brain-wiki-refresh ($MODE) FAILED: $REPO_DIR is not a git repo — manual intervention required" >/dev/null 2>&1 || true
   exit 1
 fi
 
@@ -55,6 +57,8 @@ PY
 
 if [[ "$MODE" == "wiki" && -z "$SUPABASE_RGOS_SERVICE_KEY" ]]; then
   echo "ERROR: SUPABASE_RGOS_SERVICE_KEY not found in env or ~/.claude/settings.json" >&2
+  log_bus_event team_brain_wiki_refresh_error error "missing_supabase_key"
+  cortextos bus send-message orchestrator normal "team-brain-wiki-refresh (wiki) FAILED: SUPABASE_RGOS_SERVICE_KEY missing — check env or ~/.claude/settings.json" >/dev/null 2>&1 || true
   exit 1
 fi
 
