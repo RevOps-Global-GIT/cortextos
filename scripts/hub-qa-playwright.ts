@@ -51,6 +51,7 @@ const OUTPUT_DIR  = path.resolve(REPO_ROOT, 'orgs/revops-global/agents/codex/out
 const HUB_URL     = 'https://hub.revopsglobal.com';
 const SUPA_URL    = 'https://yyizocyaehmqrottmnaz.supabase.co';
 const BASE_URL    = getArg('--base-url', process.env.DASHBOARD_URL || HUB_URL).replace(/\/$/, '');
+const SUPREME_FRESH_MAX_HOURS = 4;
 const PAGE_HEALTH_SURFACE = getArg('--page-health-surface', (() => {
   try {
     const host = new URL(BASE_URL).hostname;
@@ -3597,23 +3598,53 @@ async function runSupremeOutstandingChecks(page: Page): Promise<CheckResult[]> {
       evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
-  // CHECK 4: Scanner freshness strip present and contains recognizable text (correctness check)
+  // CHECK 4: Scanner freshness strip present and fresh within the scanner cadence.
   try {
     const stripState = await wallClock(
-      page.evaluate(() => {
+      page.evaluate((maxHours: number) => {
+        const parseFreshnessAgeMinutes = (text: string): number | null => {
+          const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim();
+          if (/just now|less than a minute|moments? ago/.test(normalized)) return 0;
+
+          const compact = normalized.match(/\b(\d+(?:\.\d+)?)\s*([smhd])\s+ago\b/);
+          if (compact) {
+            const amount = Number(compact[1]);
+            const unit = compact[2];
+            if (!Number.isFinite(amount)) return null;
+            if (unit === 's') return amount / 60;
+            if (unit === 'm') return amount;
+            if (unit === 'h') return amount * 60;
+            if (unit === 'd') return amount * 24 * 60;
+          }
+
+          const words = normalized.match(/\b(\d+(?:\.\d+)?)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)\s+ago\b/);
+          if (words) {
+            const amount = Number(words[1]);
+            const unit = words[2];
+            if (!Number.isFinite(amount)) return null;
+            if (unit.startsWith('sec')) return amount / 60;
+            if (unit.startsWith('min')) return amount;
+            if (unit.startsWith('hour') || unit.startsWith('hr')) return amount * 60;
+            if (unit.startsWith('day')) return amount * 24 * 60;
+          }
+
+          return null;
+        };
+
         const strip = document.querySelector('[data-testid="scanner-freshness-strip"]');
-        if (!strip) return { found: false, text: '', colorClass: '' };
+        if (!strip) return { found: false, text: '', colorClass: '', ageMinutes: null, maxHours, fresh: false };
         const text = (strip.textContent ?? '').trim();
-        // Derive freshness state from border color classes present on the element
         const cls = strip.className ?? '';
         const colorClass = cls.includes('destructive') ? 'red'
           : cls.includes('caution') ? 'amber'
           : cls.includes('positive') ? 'ok'
           : 'unknown';
-        return { found: true, text, colorClass };
-      }),
+        const ageMinutes = parseFreshnessAgeMinutes(text);
+        const fresh = ageMinutes !== null && ageMinutes <= maxHours * 60;
+        return { found: true, text, colorClass, ageMinutes, maxHours, fresh };
+      }, SUPREME_FRESH_MAX_HOURS),
       5000,
-      { found: false, text: '', colorClass: '' },
+      { found: false, text: '', colorClass: '', ageMinutes: null as number | null, maxHours: SUPREME_FRESH_MAX_HOURS, fresh: false },
     );
     if (!stripState.found) {
       results.push({ check: '[CORRECTNESS] CHECK 4 Scanner freshness strip', status: 'FAIL',
@@ -3621,9 +3652,15 @@ async function runSupremeOutstandingChecks(page: Page): Promise<CheckResult[]> {
     } else if (!/triage data|last successful scan|no triage or scan/i.test(stripState.text)) {
       results.push({ check: '[CORRECTNESS] CHECK 4 Scanner freshness strip', status: 'FAIL',
         evidence: `Strip present but text unexpected: "${stripState.text.slice(0, 120)}"` });
+    } else if (stripState.ageMinutes === null) {
+      results.push({ check: '[CORRECTNESS] CHECK 4 Scanner freshness strip', status: 'FAIL',
+        evidence: `Strip present but freshness age was missing/unparseable: "${stripState.text.slice(0, 120)}"` });
+    } else if (!stripState.fresh) {
+      results.push({ check: '[CORRECTNESS] CHECK 4 Scanner freshness strip', status: 'FAIL',
+        evidence: `Scanner data stale: ${Math.round(stripState.ageMinutes)}m old exceeds SUPREME_FRESH_MAX_HOURS=${stripState.maxHours}. text="${stripState.text.slice(0, 120)}"` });
     } else {
       results.push({ check: '[CORRECTNESS] CHECK 4 Scanner freshness strip', status: 'PASS',
-        evidence: `Strip rendered — state=${stripState.colorClass} text="${stripState.text.slice(0, 80)}"` });
+        evidence: `Scanner data fresh within SUPREME_FRESH_MAX_HOURS=${stripState.maxHours}: ${Math.round(stripState.ageMinutes)}m old. state=${stripState.colorClass} text="${stripState.text.slice(0, 80)}"` });
     }
   } catch (e) {
     results.push({ check: '[CORRECTNESS] CHECK 4 Scanner freshness strip', status: 'FAIL',
