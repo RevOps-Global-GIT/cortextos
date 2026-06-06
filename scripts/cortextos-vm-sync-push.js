@@ -724,6 +724,29 @@ async function syncRotationEvents(sinceTsStr) {
 
 // ── Hub QA status sync ────────────────────────────────────────────────────────
 
+// The shared cortextos working tree can drift to grandamenium/main when other
+// crons or agents check out a different ref.  Grandamenium main may be missing
+// the Summary regex in computeHubQaStatus(), producing stale 0/0/0 readings.
+// This guard detects drift, resets to fork/main, and skips the current run so
+// the corrected script version executes on the next cycle.
+const REPO_DIR = path.resolve(__dirname, "..");
+
+function assertForkMainCheckout() {
+  try {
+    const headSha = execFileSync("git", ["-C", REPO_DIR, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", REPO_DIR, "fetch", "fork", "main", "--quiet"], { encoding: "utf8" });
+    const forkMainSha = execFileSync("git", ["-C", REPO_DIR, "rev-parse", "fork/main"], { encoding: "utf8" }).trim();
+    if (headSha === forkMainSha) return true;
+    console.warn(`[vm-sync-push] Checkout drift detected: HEAD=${headSha.slice(0, 7)} fork/main=${forkMainSha.slice(0, 7)} — resetting`);
+    execFileSync("git", ["-C", REPO_DIR, "reset", "--hard", "fork/main"], { encoding: "utf8" });
+    console.log("[vm-sync-push] Reset to fork/main — hub_qa will compute correctly on next run");
+    return false;
+  } catch (err) {
+    console.warn(`[vm-sync-push] assertForkMainCheckout error: ${err.message} — skipping hub_qa this run`);
+    return false;
+  }
+}
+
 const HUB_QA_ROOTS = [
   "/home/cortextos/cortextos/orgs/revops-global/agents/hub-dogfood/output",
   "/home/cortextos/cortextos/orgs/revops-global/agents/qa-agent/output",
@@ -839,6 +862,8 @@ function computeHubQaStatus() {
 async function syncHubQaStatus() {
   const serviceKey = secrets.SUPABASE_RGOS_SERVICE_KEY;
   if (!serviceKey || !SUPABASE_URL) return;
+
+  if (!assertForkMainCheckout()) return;
 
   const hubQa = computeHubQaStatus();
   const row = {
