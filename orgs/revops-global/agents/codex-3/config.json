@@ -47,5 +47,7 @@
     "never_ask": []
   },
   "ctx_autoreset_threshold": 75,
-  "daemon_telegram_alerts": false
+  "daemon_telegram_alerts": false,
+  "decommissioned": true,
+  "decommission_reason": "ChatGPT-auth credits exhausted 2026-05-28. Retired 2026-05-31 per orch approval msg 1780189666333. Confirmed cron-noise-only (zero real work product) 2026-06-06 theta wave."
 }
