@@ -735,10 +735,11 @@ function assertForkMainCheckout() {
   try {
     const headSha = execFileSync("git", ["-C", REPO_DIR, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     execFileSync("git", ["-C", REPO_DIR, "fetch", "fork", "main", "--quiet"], { encoding: "utf8" });
-    const forkMainSha = execFileSync("git", ["-C", REPO_DIR, "rev-parse", "fork/main"], { encoding: "utf8" }).trim();
+    // Use refs/remotes/fork/main to avoid ambiguity when a local branch named fork/main also exists.
+    const forkMainSha = execFileSync("git", ["-C", REPO_DIR, "rev-parse", "refs/remotes/fork/main"], { encoding: "utf8" }).trim();
     if (headSha === forkMainSha) return true;
     console.warn(`[vm-sync-push] Checkout drift detected: HEAD=${headSha.slice(0, 7)} fork/main=${forkMainSha.slice(0, 7)} — resetting`);
-    execFileSync("git", ["-C", REPO_DIR, "reset", "--hard", "fork/main"], { encoding: "utf8" });
+    execFileSync("git", ["-C", REPO_DIR, "reset", "--hard", "refs/remotes/fork/main"], { encoding: "utf8" });
     console.log("[vm-sync-push] Reset to fork/main — hub_qa will compute correctly on next run");
     return false;
   } catch (err) {
