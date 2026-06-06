@@ -42,12 +42,14 @@
     {
       "name": "inbox-drain-watchdog",
       "type": "recurring",
+      "session_cron": true,
       "interval": "10m",
       "prompt": "node /home/cortextos/cortextos/scripts/inbox-drain-watchdog.js"
     },
     {
       "name": "budget-check",
       "type": "recurring",
+      "session_cron": true,
       "interval": "1h",
       "prompt": "node /home/cortextos/cortextos/scripts/cortextos-budget-check.js"
     },
@@ -78,6 +80,7 @@
     {
       "name": "hub-surface-sweep",
       "type": "recurring",
+      "session_cron": true,
       "interval": "6h",
       "prompt": "node /home/cortextos/cortextos/scripts/hub-surface-sweep.js"
     },

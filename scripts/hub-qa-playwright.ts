@@ -2803,6 +2803,39 @@ async function runFleetAgentsChecks(page: Page, serviceKey?: string): Promise<Ch
 }
 
 // ---------------------------------------------------------------------------
+// /app/fleet-board checks (FleetBoard.tsx tab at /app/fleet/agents?tab=board)
+// ---------------------------------------------------------------------------
+async function runFleetBoardChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'fleet-board';
+
+  // CHECK 1: Page load
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+
+  // CHECK 2: Board tab content visible (kanban columns or board-like containers)
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+    await shot(page, `${sp}-2-board`);
+    const colCount  = await page.locator('[class*="column"], [class*="Column"], [class*="lane"], [class*="kanban"], [class*="board"]').count();
+    const cardCount = await page.locator('[class*="card"], [class*="Card"], [class*="task"], [class*="ticket"]').count();
+    const hasBoard  = colCount > 0 || cardCount > 0;
+    if (hasBoard) {
+      results.push({ check: '[LIVENESS] CHECK 2 Board content visible', status: 'PASS', evidence: `${colCount} column(s), ${cardCount} card/task element(s) found.` });
+    } else {
+      const emptyState = await page.getByText(/no tasks|empty|nothing here/i).count();
+      results.push({ check: '[LIVENESS] CHECK 2 Board content visible', status: 'DEFERRED', evidence: emptyState > 0 ? 'Empty board state shown.' : 'No board columns or cards detected — layout may use unrecognized selectors.' });
+    }
+  } catch (e) {
+    results.push({ check: '[LIVENESS] CHECK 2 Board content visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // /app/fleet/agents?tab=sessions checks
 // ---------------------------------------------------------------------------
 async function runFleetSessionsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
@@ -4461,6 +4494,7 @@ async function main() {
       '/analytics': '/app/analytics',
       '/fleet': '/app/fleet',
       '/app/fleet-sessions': '/app/fleet/agents?tab=sessions',
+      '/app/fleet-board': '/app/fleet/agents?tab=board',
       // hub.revopsglobal.com/clients hits the deal-room router ("Deal Room Not Found");
       // the admin clients page is at /app/clients → agentops.revopsglobal.com/clients
       '/clients': '/app/clients',
@@ -4571,6 +4605,8 @@ async function main() {
       results = await runWithTimeout(() => runFleetAgentsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/fleet/agents?tab=sessions' || targetPage === '/app/fleet-sessions') {
       results = await runWithTimeout(() => runFleetSessionsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+    } else if (targetPage === '/app/fleet-board' || targetPage === '/app/fleet/agents?tab=board') {
+      results = await runWithTimeout(() => runFleetBoardChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/social-content') {
       results = await runWithTimeout(() => runSocialContentChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/content-review') {
@@ -4610,7 +4646,7 @@ async function main() {
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /app/fleet-board, /app/fleet/agents?tab=board, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);

@@ -277,7 +277,7 @@ If it requires domain expertise (code, content, email, research), delegate to th
 
 ## Local Cron Catalog
 
-Configured cron names: `agentops-hourly-dogfood`, `blocked-uat-escalator`, `collaboration-optimizer`, `fleet-tick`, `human-blockers-digest`, `idle-overlap-watcher`, `kanban-sync`, `overnight-permission-loop`, `rgos-task-poll`, `wip-enforcer`. Keep this list aligned with `config.json`.
+Configured cron names: `agentops-hourly-dogfood`, `blocked-uat-escalator`, `collaboration-optimizer`, `fleet-tick`, `hero-publish-watchdog`, `human-blockers-digest`, `idle-overlap-watcher`, `kanban-sync`, `overnight-permission-loop`, `rgos-task-poll`, `wip-enforcer`. Keep this list aligned with `config.json`.
 
 ---
 

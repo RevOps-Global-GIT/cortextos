@@ -33,6 +33,13 @@
       "prompt": "Read .claude/skills/evening-review/SKILL.md and execute the full evening review workflow. Summarize the day, propose overnight tasks, queue nighttime work. ALSO update heartbeat and surface any pending approvals to Greg."
     },
     {
+      "name": "hero-publish-watchdog",
+      "type": "recurring",
+      "session_cron": true,
+      "cron": "17 9,11,13 * * *",
+      "prompt": "OB1 daily-hero publish watchdog (self-healing). Steps: (1) PUB=$(curl -s https://ob1.revopsglobal.com/vignettes/latest.json | python3 -c 'import sys,json;print(json.load(sys.stdin).get(\"date\",\"\"))'); TODAY=$(date +%F). (2) If PUB equals TODAY: hero published — NO action, done. (3) If STALE (PUB != TODAY): SSH gregharned@100.84.86.6 (ConnectTimeout 10) and check whether a Flow run is currently active: `ps aux | grep -Ei 'generate-daily-vignette|playwright' | grep -v grep` and `pgrep -f SkyComputerUseClient | wc -l`. If a run IS active (matching proc present OR skycompute count > 0): it is still generating — NO action, let it finish. (4) If STALE and NO run active (Mac idle): re-kick via `cortextos bus send-message mac-codex normal 'Hero watchdog: today hero not published — latest.json still stale, Codex.app idle. Please re-run scripts/generate-daily-vignette-flow.mjs in /Users/gregharned/work/ob1-app — Flow ONLY (never the VM Nano-Banana generator), multi-char via Flow CHARACTER LIBRARY, publish after verify. Report when latest.json flips to today.'`. (5) Only Telegram Greg (chat 8567114601) on the LAST (13:17 PT) check IF still stale after a prior re-kick already fired this morning — surface as \"hero still not publishing after re-kick, may need your eyes.\" Otherwise stay silent. NEVER run the VM Nano-Banana generator yourself — the canonical hero is Greg's Mac Flow automation only. This is a cron-triggered turn: do NOT reschedule any loop."
+    },
+    {
       "name": "weekly-review",
       "type": "recurring",
       "cron": "7 8 * * 0",
