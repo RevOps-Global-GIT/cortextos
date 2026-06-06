@@ -38,7 +38,7 @@
       "name": "codex-task-poll",
       "type": "recurring",
       "interval": "10m",
-      "prompt": "Check inbox for tasks routed from orchestrator or dev. For browser/UI/web automation use agent-browser by default (dev-browser --headless for stateless scripted checks); for OB1 e2e/dogfood target https://ob1.revopsglobal.com. Use `cortextos bus computer-use --ssh-host gregs-mac` only for non-browser work or genuine Mac-only state. Capture the response, validate completeness, reply to the requesting agent, and log a codex_dispatched event with the task summary, prompt length, runtime target, and duration."
+      "prompt": "Check inbox for tasks routed from orchestrator or dev. Do not dispatch browser/UI/web automation to Greg's Mac. Use Orgo/Codex-CU VM paths by default; for OB1 e2e/dogfood specifically use Compl1 VM 23e7d600 targeting https://ob1.revopsglobal.com. Only use `cortextos bus computer-use` for non-browser work or when a current explicit Orgo-failure artifact authorizes Mac fallback. Capture the response, validate completeness, reply to the requesting agent, and log a codex_dispatched event with the task summary, prompt length, runtime target, and duration."
     },
     {
       "name": "supreme-mentions-triage-ingest",

@@ -1,6 +1,6 @@
 {
   "agent_name": "agentops-orch",
-  "enabled": true,
+  "enabled": false,
   "runtime": "codex-app-server",
   "model": "gpt-5.5",
   "startup_delay": 0,
@@ -37,5 +37,7 @@
       "data-deletion"
     ],
     "never_ask": []
-  }
+  },
+  "decommissioned": true,
+  "decommission_reason": "Decommissioned per registry"
 }
