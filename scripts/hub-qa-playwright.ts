@@ -1826,7 +1826,10 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,company,domain,is_archived&is_archived=eq.false&order=created_at.desc&limit=25`, {
+      // Use name.asc to match the UI sort order (useFilteredCompanies orders by name ASC).
+      // created_at.desc returned recently-created companies that may be below the scroll fold
+      // in a virtualized table, so their names were absent from document.body.textContent.
+      const resp = await fetch(`${SUPA_URL}/rest/v1/companies?select=id,name,company,domain,is_archived&is_archived=eq.false&order=name.asc&limit=25`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
@@ -1842,11 +1845,14 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No companies in DB — UI empty state is correct' });
         } else {
+          // Wait for real data rows (>5 rows means actual data, not skeleton loaders).
+          // After CHECK 4 navigates back with domcontentloaded only, React is still
+          // hydrating — rowCount>0 fires on skeleton rows before real data arrives.
           await page.waitForFunction(() => {
             const rowCount = document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"])').length;
             const hasEmptyState = /no companies|no results|no clients/i.test(document.body.textContent ?? '');
-            return rowCount > 0 || hasEmptyState;
-          }, null, { timeout: 10000 }).catch(() => {});
+            return rowCount > 5 || hasEmptyState;
+          }, null, { timeout: 15000 }).catch(() => {});
           const pageText = (await Promise.race([
             page.evaluate(() => document.body.textContent ?? ''),
             new Promise<string>(r => setTimeout(() => r(''), 5000)),
