@@ -19,7 +19,6 @@ const SCRIPT_DIR  = path.dirname(new URL(import.meta.url).pathname);
 const REPO_ROOT   = path.resolve(SCRIPT_DIR, '..');
 const SECRETS_ENV = path.resolve(REPO_ROOT, 'orgs/revops-global/secrets.env');
 const OUTPUT_DIR  = path.resolve(REPO_ROOT, 'orgs/revops-global/agents/codex/output/playwright-qa/sweep');
-const REPORT_PATH = path.resolve(REPO_ROOT, 'orgs/revops-global/agents/codex/output/2026-05-08-hub-full-review.md');
 const HUB_URL     = 'https://hub.revopsglobal.com';
 const SUPA_URL    = 'https://yyizocyaehmqrottmnaz.supabase.co';
 const USER_EMAIL  = 'greg@revopsglobal.com';
@@ -416,6 +415,7 @@ async function main() {
 
   // Generate report
   const now = new Date().toISOString();
+  const reportPath = path.resolve(REPO_ROOT, `orgs/revops-global/agents/codex/output/${now.slice(0, 10)}-hub-full-review.md`);
   let md = `# hub.revopsglobal.com — Full QA Review\n`;
   md += `**Date:** ${now.slice(0, 10)}  \n`;
   md += `**Run at:** ${now}  \n`;
@@ -450,8 +450,8 @@ async function main() {
     }
   }
 
-  fs.writeFileSync(REPORT_PATH, md);
-  console.log(`\n[sweep] Report written to ${REPORT_PATH}`);
+  fs.writeFileSync(reportPath, md);
+  console.log(`\n[sweep] Report written to ${reportPath}`);
   console.log(`[sweep] ${critical.length} CRITICAL, ${high.length} HIGH, ${ok.length} OK`);
 }
 
