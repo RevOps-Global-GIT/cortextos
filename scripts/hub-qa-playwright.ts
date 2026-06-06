@@ -938,7 +938,8 @@ async function checkDataOrEmpty(
   checkName: string,
   itemSelector: string,
   emptyPattern: RegExp = /no |empty|nothing|none/i,
-  minTextLength: number = 0
+  minTextLength: number = 0,
+  sampleSize: number = 3
 ): Promise<CheckResult> {
   try {
     const count = await page.locator(itemSelector).count();
@@ -955,7 +956,7 @@ async function checkDataOrEmpty(
       // Catches the "empty placeholder rows render but contain no data" failure mode.
       if (minTextLength > 0) {
         const sampleTexts: string[] = [];
-        const sampleN = Math.min(count, 3);
+        const sampleN = Math.min(count, sampleSize);
         for (let i = 0; i < sampleN; i++) {
           const t = ((await page.locator(itemSelector).nth(i).textContent().catch(() => '')) ?? '').trim().replace(/\s+/g, ' ');
           sampleTexts.push(t);
@@ -1101,9 +1102,11 @@ async function runMyDayChecks(page: Page): Promise<CheckResult[]> {
 
   // CHECK 3: Content sections (comms feed items, cards, etc.) — 570f517f-phase2 PR1: upgrade to CORRECTNESS
   // (require card text >=20 chars, catches the "empty placeholder card" failure mode where cards render but contain no data).
-  await page.waitForSelector('[class*="card"], [class*="section"], [class*="item"], li', { timeout: 3000 }).catch(() => {});
+  // Selector scoped to main content area to avoid matching nav/menu list items (avoids 916-empty-li false-failure).
+  // sampleSize=5 per analyst: require >3 sampled nodes before concluding no meaningful content.
+  await page.waitForSelector('main [class*="card"], main [class*="item"], main li', { timeout: 3000 }).catch(() => {});
   results.push(await checkDataOrEmpty(page, sp, '[CORRECTNESS] CHECK 3 Content sections visible',
-    '[class*="card"], [class*="section"], [class*="item"], li', /no tasks|nothing scheduled|empty/i, 20));
+    'main [class*="card"], main [class*="item"], main li', /no tasks|nothing scheduled|empty/i, 20, 5));
 
   // CHECK 4: Per-item action button (Dismiss/Respond/Review) on comms feed items
   // Scope strictly to short-text buttons to avoid matching article headlines
@@ -1978,15 +1981,17 @@ async function runProjectsChecks(page: Page, serviceKey?: string): Promise<Check
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
     } else {
-      const resp = await fetch(`${SUPA_URL}/rest/v1/projects?select=id,name,status&order=created_at.desc&limit=5`, {
+      const resp = await fetch(`${SUPA_URL}/rest/v1/projects?select=id,name,status&order=created_at.desc&limit=25`, {
         headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
       });
       if (!resp.ok) {
         results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'FAIL', evidence: `Supabase query failed: HTTP ${resp.status}` });
       } else {
-        const rows = await resp.json() as Array<{ id: string; name: string | null; status: string | null }>;
+        const allProjects = await resp.json() as Array<{ id: string; name: string | null; status: string | null }>;
+        // Exclude SMOKE-TEST fixtures (same pattern as companies CHECK 6)
+        const rows = allProjects.filter(r => !/^SMOKE-TEST/i.test(r.name ?? '')).slice(0, 5);
         if (!rows || rows.length === 0) {
-          results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'DEFERRED', evidence: 'No projects in DB — UI empty state is correct' });
+          results.push({ check: '[CORRECTNESS] CHECK 6 Projects DB vs UI match', status: 'DEFERRED', evidence: 'No non-fixture projects in DB — UI empty state is correct' });
         } else {
           const pageText = (await Promise.race([
             page.evaluate(() => document.body.textContent ?? ''),
