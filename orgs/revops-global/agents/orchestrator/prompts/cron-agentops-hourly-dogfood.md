@@ -13,7 +13,11 @@ Evaluate AgentOps like a product expert and a real operator, not just a selector
 Run it for every priority page on each pass (rotate to cover all 8 within 2–3 passes if time-constrained):
 
 ```bash
-cd /home/cortextos/cortextos
+# Sync QA worktree to current fork/main (always use fully-qualified ref — bare fork/main is ambiguous)
+git -C /home/cortextos/cortextos fetch fork main --quiet
+git -C /home/cortextos/cortextos-qa reset --hard refs/remotes/fork/main --quiet
+
+cd /home/cortextos/cortextos-qa
 
 # Priority pages — run each individually via npx tsx:
 npx tsx scripts/hub-qa-playwright.ts --page /analytics --no-send
@@ -28,6 +32,8 @@ npx tsx scripts/hub-qa-playwright.ts --page /app/fleet-sessions --no-send
 ```
 
 Each run writes a report to `orgs/revops-global/agents/codex/output/playwright-qa/`. Collect FAIL results across all pages before proceeding.
+
+The QA worktree (`/home/cortextos/cortextos-qa`) is a git worktree always synced to `refs/remotes/fork/main` before each run — harness code is always current main, eliminating stale-harness false-positives. FAILs from this worktree are real.
 
 **Fallback command if `npx tsx` is not available:** `npx ts-node --esm scripts/hub-qa-playwright.ts`
 
