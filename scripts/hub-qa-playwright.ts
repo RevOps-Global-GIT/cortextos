@@ -4458,6 +4458,9 @@ async function main() {
       // hub.revopsglobal.com/clients hits the deal-room router ("Deal Room Not Found");
       // the admin clients page is at /app/clients → agentops.revopsglobal.com/clients
       '/clients': '/app/clients',
+      // RGOS router registers the route as "config/behavior" (slash), not "config-behavior" (dash);
+      // /app/config-behavior → 404 on agentops; /app/config/behavior → agentops/config/behavior ✓
+      '/app/config-behavior': '/app/config/behavior',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
