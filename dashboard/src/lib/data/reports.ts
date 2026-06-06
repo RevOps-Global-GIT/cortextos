@@ -14,6 +14,7 @@ export interface FleetHealthAgent {
   name: string;
   heartbeatAgeMin: number;
   isStale: boolean;
+  isRetired: boolean;
   events: number;
   realErrors: number;
   crashes: number;
@@ -33,6 +34,7 @@ export interface FleetHealth {
   fleetStability: number;
   staleCount: number;
   errorCount: number;
+  retiredCount: number;
 }
 
 export interface AgentCostData {
@@ -90,7 +92,20 @@ export function getLatestSnapshot(org: string): LatestSnapshot | null {
 // Fleet Health (Phase 1)
 // ---------------------------------------------------------------------------
 
+function isAgentRetired(org: string, name: string, frameworkRoot: string): boolean {
+  const cfgFile = path.join(frameworkRoot, 'orgs', org, 'agents', name, 'config.json');
+  try {
+    if (fs.existsSync(cfgFile)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgFile, 'utf-8'));
+      return cfg.enabled === false;
+    }
+  } catch { /* treat as active if unreadable */ }
+  return false;
+}
+
 export function getFleetHealth(org: string): FleetHealth | null {
+  const CTX_FRAMEWORK_ROOT = process.env.CTX_FRAMEWORK_ROOT ?? path.join(path.dirname(CTX_ROOT), '..');
+
   const snapshot = getLatestSnapshot(org);
   if (!snapshot?.health) {
     // Fallback: build fleet health from live heartbeat files
@@ -114,15 +129,23 @@ export function getFleetHealth(org: string): FleetHealth | null {
   let totalStability = 0;
   let staleCount = 0;
   let errorCount = 0;
+  let retiredCount = 0;
 
   if (healthData.agents) {
     for (const [name, data] of Object.entries(healthData.agents)) {
       const hb = data.heartbeats || 1;
       // Stability based on real errors, not total restarts (which include planned restarts)
       const stability = Math.round(((hb - data.real_errors) / hb) * 100);
-      if (data.is_stale) staleCount++;
-      errorCount += data.real_errors;
-      totalStability += stability;
+
+      const retired = isAgentRetired(org, name, CTX_FRAMEWORK_ROOT);
+
+      if (!retired) {
+        if (data.is_stale) staleCount++;
+        errorCount += data.real_errors;
+        totalStability += stability;
+      } else {
+        retiredCount++;
+      }
 
       // Read live heartbeat for real-time Last Seen
       let liveAgeMin = data.heartbeat_age_min;
@@ -140,7 +163,8 @@ export function getFleetHealth(org: string): FleetHealth | null {
       agents.push({
         name,
         heartbeatAgeMin: liveAgeMin,
-        isStale: liveAgeMin > 300, // 5 hours = stale
+        isStale: !retired && liveAgeMin > 300, // 5 hours = stale
+        isRetired: retired,
         events: data.events,
         realErrors: data.real_errors,
         crashes: data.crashes,
@@ -150,8 +174,9 @@ export function getFleetHealth(org: string): FleetHealth | null {
     }
   }
 
-  const fleetStability = agents.length > 0
-    ? Math.round(totalStability / agents.length)
+  const activeAgents = agents.filter(a => !a.isRetired);
+  const fleetStability = activeAgents.length > 0
+    ? Math.round(totalStability / activeAgents.length)
     : 100;
 
   // Count messages per agent from processed/inbox directories
@@ -210,6 +235,7 @@ export function getFleetHealth(org: string): FleetHealth | null {
     fleetStability,
     staleCount,
     errorCount,
+    retiredCount,
   };
 }
 
@@ -235,10 +261,13 @@ function getFleetHealthFromHeartbeats(org: string): FleetHealth | null {
       }
     } catch { /* skip */ }
 
+    const retired = isAgentRetired(org, name, CTX_FRAMEWORK_ROOT);
+
     agents.push({
       name,
       heartbeatAgeMin: ageMin,
-      isStale: ageMin > 300,
+      isStale: !retired && ageMin > 300,
+      isRetired: retired,
       events: 0,
       realErrors: 0,
       crashes: 0,
@@ -249,12 +278,14 @@ function getFleetHealthFromHeartbeats(org: string): FleetHealth | null {
 
   if (agents.length === 0) return null;
 
+  const activeAgents = agents.filter(a => !a.isRetired);
   return {
     agents,
     messageBus: { totalToday: 0, pending: 0, perAgent: [] },
     fleetStability: 100,
-    staleCount: agents.filter(a => a.isStale).length,
+    staleCount: activeAgents.filter(a => a.isStale).length,
     errorCount: 0,
+    retiredCount: agents.filter(a => a.isRetired).length,
   };
 }
 

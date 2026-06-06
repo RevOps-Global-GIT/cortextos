@@ -10,6 +10,7 @@ interface FleetHealthAgent {
   name: string;
   heartbeatAgeMin: number;
   isStale: boolean;
+  isRetired: boolean;
   events: number;
   realErrors: number;
   crashes: number;
@@ -29,6 +30,7 @@ interface FleetHealthData {
   fleetStability: number;
   staleCount: number;
   errorCount: number;
+  retiredCount: number;
 }
 
 interface FleetHealthProps {
@@ -57,6 +59,9 @@ export function FleetHealth({ data }: FleetHealthProps) {
       </Card>
     );
   }
+
+  const activeAgents = data.agents.filter(a => !a.isRetired);
+  const retiredAgents = data.agents.filter(a => a.isRetired);
 
   return (
     <div className="space-y-4">
@@ -107,7 +112,7 @@ export function FleetHealth({ data }: FleetHealthProps) {
         </Card>
       </div>
 
-      {/* Agent health grid */}
+      {/* Agent health grid (active agents only) */}
       <Card>
         <CardContent className="pt-4">
           <div className="overflow-x-auto">
@@ -123,7 +128,7 @@ export function FleetHealth({ data }: FleetHealthProps) {
                 </tr>
               </thead>
               <tbody>
-                {data.agents.map((agent) => (
+                {activeAgents.map((agent) => (
                   <tr key={agent.name} className="border-b last:border-0">
                     <td className="py-2 flex items-center gap-2">
                       <StatusDot stability={agent.stability} />
@@ -150,6 +155,18 @@ export function FleetHealth({ data }: FleetHealthProps) {
               </tbody>
             </table>
           </div>
+          {retiredAgents.length > 0 && (
+            <details className="mt-3 text-xs text-muted-foreground">
+              <summary className="cursor-pointer select-none py-1 hover:text-foreground transition-colors">
+                Retired agents ({retiredAgents.length})
+              </summary>
+              <ul className="mt-1.5 space-y-0.5 pl-2">
+                {retiredAgents.map(a => (
+                  <li key={a.name}>{a.name}</li>
+                ))}
+              </ul>
+            </details>
+          )}
         </CardContent>
       </Card>
 
