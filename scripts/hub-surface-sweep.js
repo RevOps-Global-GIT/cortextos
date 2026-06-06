@@ -140,6 +140,9 @@ const KNOWN_QA_ROUTES = new Set([
   '/beehives', '/beehives/langstroth', '/beehives/warre',
   '/cottage', '/farm', '/field', '/grounds', '/mushrooms', '/music', '/orchard',
   '/talk',
+  // 2026-06-06: blind-spot closure — fleet-board is FleetBoard.tsx tab at /app/fleet/agents?tab=board;
+  // audit/ios is IOSAuditPage in ob1-app (iOS Audit Bridge)
+  '/app/fleet-board', '/audit/ios',
 ]);
 
 // Routes to skip — auth/redirects/portals/guides not worth QA-scanning
@@ -405,6 +408,9 @@ function scanZombieCrons() {
       const live     = cronMap[name];
 
       if (!live) {
+        // session_cron: true marks crons managed via CronCreate (session-only) rather than
+        // the daemon. They never appear in bus list-crons by design — not a zombie.
+        if (cron.session_cron) continue;
         noData.push({ agent, name, reason: 'not found in bus list-crons' });
         continue;
       }
