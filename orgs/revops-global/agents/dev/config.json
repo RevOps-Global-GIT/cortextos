@@ -92,6 +92,18 @@
       "type": "recurring",
       "interval": "6h",
       "prompt": "node /home/cortextos/cortextos/scripts/vm-disk-watchdog.js"
+    },
+    {
+      "name": "daily-hero-watchdog",
+      "type": "recurring",
+      "cron": "33 6 * * *",
+      "prompt": "Read prompts/cron-daily-hero-watchdog.md and execute exactly one bounded hero trigger pass; check latest.json, dispatch to mac-codex if missing, log result and exit."
+    },
+    {
+      "name": "daily-hero-verify",
+      "type": "recurring",
+      "cron": "3 8 * * *",
+      "prompt": "Read prompts/cron-daily-hero-verify.md and execute exactly one bounded hero verification pass; check latest.json date==today, alert orchestrator if deadline breached, log result and exit."
     }
   ],
   "ctx_autoreset_threshold": 85,
