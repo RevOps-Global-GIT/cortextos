@@ -80,6 +80,18 @@
       "type": "recurring",
       "interval": "6h",
       "prompt": "node /home/cortextos/cortextos/scripts/hub-surface-sweep.js"
+    },
+    {
+      "name": "vm-stale-worktree-gc",
+      "type": "recurring",
+      "cron": "0 3 * * *",
+      "prompt": "node /home/cortextos/cortextos/scripts/vm-stale-worktree-gc.js"
+    },
+    {
+      "name": "vm-disk-watchdog",
+      "type": "recurring",
+      "interval": "6h",
+      "prompt": "node /home/cortextos/cortextos/scripts/vm-disk-watchdog.js"
     }
   ],
   "ctx_autoreset_threshold": 85,
