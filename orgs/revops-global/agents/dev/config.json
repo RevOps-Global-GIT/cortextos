@@ -25,7 +25,7 @@
       "name": "vm-sync-push",
       "type": "recurring",
       "interval": "15m",
-      "prompt": "node /home/cortextos/cortextos/scripts/cortextos-vm-sync-push.js"
+      "prompt": "cd /home/cortextos/cortextos && git fetch fork main --quiet 2>/dev/null; git checkout refs/remotes/fork/main -- scripts/cortextos-vm-sync-push.js 2>/dev/null; node scripts/cortextos-vm-sync-push.js"
     },
     {
       "name": "mac-task-sync",
