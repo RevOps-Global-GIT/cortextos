@@ -1845,13 +1845,16 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No companies in DB — UI empty state is correct' });
         } else {
-          // Wait for real data rows (>5 rows means actual data, not skeleton loaders).
-          // After CHECK 4 navigates back with domcontentloaded only, React is still
-          // hydrating — rowCount>0 fires on skeleton rows before real data arrives.
+          // Wait for real data rows with non-empty text content.
+          // rowCount>5 alone can fire on skeleton rows (empty DOM elements) before
+          // React hydration completes — especially in fast batch sweeps under VM load.
+          // Require at least one row to have visible text (>3 chars) before capturing pageText.
           await page.waitForFunction(() => {
-            const rowCount = document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"])').length;
+            const rows = Array.from(document.querySelectorAll('table tbody tr, [role="row"]:not([role="columnheader"])'));
+            const rowCount = rows.length;
+            const hasText = rowCount > 0 && rows.some(r => (r.textContent ?? '').trim().length > 3);
             const hasEmptyState = /no companies|no results|no clients/i.test(document.body.textContent ?? '');
-            return rowCount > 5 || hasEmptyState;
+            return (rowCount > 5 && hasText) || hasEmptyState;
           }, null, { timeout: 15000 }).catch(() => {});
           const pageText = (await Promise.race([
             page.evaluate(() => document.body.textContent ?? ''),
