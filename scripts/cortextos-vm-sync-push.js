@@ -727,7 +727,9 @@ async function syncRotationEvents(sinceTsStr) {
 const HUB_QA_ROOTS = [
   "/home/cortextos/cortextos/orgs/revops-global/agents/hub-dogfood/output",
   "/home/cortextos/cortextos/orgs/revops-global/agents/qa-agent/output",
-  "/home/cortextos/cortextos/orgs/revops-global/agents/codex/output/playwright-qa",
+  // cortextos-qa is the live QA worktree; hourly-dogfood resets+writes there each run.
+  // The main-repo path only gets morning full-rotation writes (06:37) and goes stale by noon.
+  "/home/cortextos/cortextos-qa/orgs/revops-global/agents/codex/output/playwright-qa",
 ];
 // Matches legacy rollup files (qa-summary/report/dogfood) AND per-page playwright
 // QA artifacts written as <surface>-qa-YYYY-MM-DD.md.
