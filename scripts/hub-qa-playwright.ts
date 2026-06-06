@@ -4461,6 +4461,8 @@ async function main() {
       // RGOS router registers the route as "config/behavior" (slash), not "config-behavior" (dash);
       // /app/config-behavior → 404 on agentops; /app/config/behavior → agentops/config/behavior ✓
       '/app/config-behavior': '/app/config/behavior',
+      // Same pattern: RGOS registers "wiki/graph" (slash); wiki-graph (dash) → 404 on agentops
+      '/app/wiki-graph': '/app/wiki/graph',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
