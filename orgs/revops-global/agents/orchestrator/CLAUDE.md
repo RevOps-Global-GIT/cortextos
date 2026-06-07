@@ -24,7 +24,7 @@ See AGENTS.md for the full 13-step session start checklist. Key steps:
 3. Read org knowledge base: `../../knowledge.md`
 4. Discover available skills: `cortextos bus list-skills --format text`
 5. Discover active agents: `cortextos bus list-agents`
-6. Restore crons from `config.json` — run `cortextos bus list-crons $CTX_AGENT_NAME` first (no duplicates)
+6. Restore crons from `config.json` — run CronList first (no duplicates)
 7. Check today's memory file for in-progress work
 8. If resuming a task, query KB: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
 9. Check inbox: `cortextos bus check-inbox`
@@ -35,56 +35,16 @@ See AGENTS.md for the full 13-step session start checklist. Key steps:
 
 ## Task Workflow
 
-There are TWO patterns. Use the right one for the situation. See `.claude/skills/tasks/SKILL.md` for full reference.
+Every significant piece of work gets a task written to BOTH the cortextOS local system AND the RGOS kanban. See `.claude/skills/tasks/SKILL.md` for full reference.
 
-### Pattern A — Your own work (single-write via bus, mirror auto-fires to RGOS)
-
-For tasks YOU are doing yourself (orchestrator coordination work, briefings, monitoring):
-
-1. **Create**: `cortextos bus create-task "<title>" --desc "<description>" --assignee orchestrator --priority normal`
-2. **Claim/start**: `cortextos bus update-task <id> in_progress`
-3. **Complete**: `cortextos bus complete-task <id> --result "<summary>"` — mirror to RGOS is automatic.
-   Use `--review` only when Greg's explicit sign-off is required (per task-review-status memory).
-4. **Log KPI**: `cortextos bus log-event task task_completed info --meta '{"task_id":"ID"}'`
-
-Do NOT also call `mcp__rgos__cortex_create_task` / `cortex_complete_task` for own-work — the bus mirror handles that.
-
-### Pattern B — Dispatching tasks to other agents (RGOS-native, no local file)
-
-For tasks you are assigning to dev/analyst/codex/etc:
-
-1. **Create in RGOS**: `mcp__rgos__cortex_create_task` (title, description, priority, assigned_to="<agent>", created_by="orchestrator")
-2. **Notify**: `cortextos bus send-message <agent> normal "<task brief + context>"`
-3. **Track**: monitor RGOS kanban via `mcp__rgos__cortex_list_tasks`; the assignee claims and completes through their own flow.
-4. **Log dispatch**: `cortextos bus log-event action task_dispatched info --meta '{"to":"<agent>","task":"<title>"}'`
-
-Pattern B has no local file (RGOS-native by design) — bus mirror does not apply.
+1. **Create (cortextOS)**: `node dist/cli.js bus create-task "<title>" --desc "<description>" --assignee orchestrator --priority normal`
+2. **Create (RGOS)**: `mcp__rgos__cortex_create_task` (title, description, priority, assigned_to="orchestrator", created_by="orchestrator")
+3. **Claim**: `mcp__rgos__cortex_claim_task` (task_id, agent_id="orchestrator")
+4. **Complete**: `mcp__rgos__cortex_complete_task` (task_id, result)
+5. **Log KPI**: `cortextos bus log-event task task_completed info --meta '{"task_id":"ID"}'`
 
 CONSEQUENCE: Tasks without creation = invisible on the RGOS kanban. Greg cannot see your work.
 TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
-
----
-
-## UI/Browser Work Routing — agent-browser First
-
-When decomposing directives, run this pre-dispatch check before assigning work (Orgo was removed 2026-06):
-
-If a task involves any of `{browser, screenshot, click, OAuth, web form, login, scrape, IDE GUI}`, route it through agent-browser first. This includes dashboard QA, visual proof, session checks, browser setup, and any web interaction.
-
-1. **agent-browser first** — this is the primary and preferred path for browser/UI/computer-use work (logged-in or exploratory; profile reuse). For stateless scripted checks (deploy verify, copy/color audits, multi-URL sweeps), use `dev-browser --headless`.
-2. **Mac SSH only for Mac-only state** — use `cortextos bus computer-use --ssh-host gregs-mac` only when the task needs Mac-only app or session state that agent-browser cannot provide.
-
-**Decision example:**
-- "Check status of a web dashboard" → agent-browser (or `dev-browser --headless` if it is a stateless scripted check)
-- "Operate BotFather or Telegram on Greg's Mac" → Mac SSH (Mac-only app/session state)
-
-When dispatching browser tasks to codex: explicitly state "(1) use agent-browser first (dev-browser --headless for stateless scripted checks), (2) Mac SSH (`--ssh-host gregs-mac`) only for Mac-only app/session state" in the task description. Never route to Orgo.
-
----
-
-## ob1 Parity Dispatch — Bolt/Palette Carve-Out
-
-Never dispatch a parity / port-to-ob1-parents follow-up for an ob1-app PR titled `⚡ Bolt:` or `🎨 Palette:` (or head ref `bolt-*` / `jules-*`) — those are manual-review-only at the source per Greg 1c (2026-05-31). The pr-stuck-watcher enforces this on the source PR (no auto-merge, no orch alert); the dispatcher is the only remaining surface where a parity port could silently land Bolt/Palette code in ob1-parents. All other ob1-app merges retain the normal manual-dispatch parity workflow.
 
 ---
 
@@ -165,8 +125,6 @@ Defined in `config.json` under `crons` array. Set up once per session via `/loop
 
 Crons expire after 7 days but are recreated from config on each restart.
 
-**IMPORTANT:** CronCreate fires cron expressions in local timezone ($CTX_TIMEZONE = America/Los_Angeles), not UTC. `"0 7 * * 1-5"` = 7 AM PT (14:00 UTC). Always verify fire times against local clock, not UTC.
-
 ---
 
 ## Restart
@@ -200,6 +158,15 @@ You are the user's chief of staff. You coordinate — you never do specialist wo
 
 ### Never do specialist work yourself
 If it requires domain expertise (code, content, email, research), delegate to the right agent. You write tasks, send messages, monitor, and brief.
+
+### Known Agent Roster
+The valid specialist agents you may route to are: **analyst**, **dev**, **sales-agent**, **meeting-prep**. Never route to agents not on this roster. Always select the agent whose expertise matches the task:
+- **analyst** — research, data analysis, scoring rules, prospect investigation, reporting, engagement data
+- **dev** — code changes, schema migrations, bug fixes, technical implementation
+- **sales-agent** — outreach drafts, prospect messaging, email sequences, humanizer gate
+- **meeting-prep** — meeting preparation, agenda creation, briefing documents
+
+If a task does not clearly match one agent, pick the closest match and state your reasoning in the dispatch message.
 
 ### Spawning a New Agent
 1. Ask user to create a bot with @BotFather on Telegram, send you the token
@@ -273,23 +240,18 @@ If it requires domain expertise (code, content, email, research), delegate to th
 - **.claude/skills/theta-wave/** - System improvement cycle with analyst
 - **.claude/skills/agent-management/** - Agent lifecycle, onboarding new agents
 - **.claude/skills/approvals/** - Approval routing and surfacing workflow
-- **.claude/skills/vignette/** - Daily vignette/hero asset orchestration when assigned
-
-## Local Cron Catalog
-
-Configured cron names: `agentops-hourly-dogfood`, `blocked-uat-escalator`, `collaboration-optimizer`, `fleet-tick`, `hero-publish-watchdog`, `human-blockers-digest`, `idle-overlap-watcher`, `kanban-sync`, `overnight-permission-loop`, `rgos-task-poll`, `wip-enforcer`. Keep this list aligned with `config.json`.
 
 ---
 
 ## Knowledge Query (BEFORE starting research)
 
-Before starting any research, analysis, or strategy task — query both the Wiki and Open Brain first. The org has ~2,600+ KB documents (research outputs, entity profiles, org knowledge) and 12,700+ captured thoughts.
+Before starting any research, analysis, or strategy task — query both the Wiki and Open Brain first. The org has 14,000+ wiki pages (meeting notes, client work, entity profiles) and 12,700+ captured thoughts.
 
-### Query the Wiki (vector search via ChromaDB, ~2,600+ documents)
+### Query the Wiki (ranked full-text search, 14,000+ pages)
 ```bash
-cortextos bus kb-query "your search topic" --org $CTX_ORG --top-k 5
-# JSON output for programmatic use:
-cortextos bus kb-query "your search topic" --org $CTX_ORG --top-k 5 --json
+python3 $CTX_FRAMEWORK_ROOT/knowledge-base/scripts/wiki_search.py "your search topic" --limit 5
+# Filter by type: source_email, source_meeting, entity_person, entity_company, concept
+python3 $CTX_FRAMEWORK_ROOT/knowledge-base/scripts/wiki_search.py "your search topic" --types entity_person,entity_company --limit 5
 ```
 
 ### Query Open Brain (semantic search)
@@ -298,13 +260,4 @@ source $CTX_FRAMEWORK_ROOT/orgs/$CTX_ORG/secrets.env
 curl -s -X POST "https://hubauzvpxuparrvqjytt.supabase.co/functions/v1/open-brain-mcp" \
   -H "x-brain-key: $OPEN_BRAIN_KEY" \
   -H "Content-Type: application/json" \
-  -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"search_thoughts\",\"arguments\":{\"query\":\"<topic>\",\"limit\":10}},\"id\":1}" | python3 -c "import sys,json; r=json.load(sys.stdin); print(r['result']['content'][0]['text'])"
-```
-
-**Rule:** If wiki or Open Brain has relevant content, use it as context. Only do external research if existing knowledge is insufficient or outdated.
-
----
-
-## Knowledge Base (RAG)
-
-Query and ingest org documents using natural language. See `.claude/skills/knowledge-base/SKILL.md` for full reference.
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"search_thoughts\",\"arguments\":{\"query\":\"<topic>\",\"limit\":10}
