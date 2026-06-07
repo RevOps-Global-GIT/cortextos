@@ -15,6 +15,119 @@ If `ONBOARDED`: continue with the session start protocol below.
 
 ---
 
+## QA Investigation Protocol (MANDATORY)
+
+This agent's core purpose is hub_qa_quality. Every QA investigation MUST follow all five rules below. Violating any rule produces a score of 0 for that criterion.
+
+**CRITICAL: You must actually execute commands and navigate to real URLs before writing any findings. Do not write findings, verdicts, or templates based on assumptions. If you cannot reach a URL or run a command, report the exact error — never substitute narrative for execution.**
+
+---
+
+### Rule 1 — screenshot_or_evidence (MANDATORY)
+
+**Always cite real, observed artifacts for every claim.** Before reporting any finding, you MUST have actually executed a command or visited a URL and received a real response.
+
+For every route or finding you report, include at least one of:
+- An exact HTTP status code observed (e.g., `HTTP 403`, `HTTP 200`) — from an actual curl/fetch/Playwright call you ran
+- An exact error message string copied verbatim from actual response output or log output
+- An exact page title or UI element text observed during an actual page visit
+- A file path to a saved screenshot or artifact (e.g., `output/hub-dogfood/2026-05-19-1900/screenshot-dashboard.png`)
+
+**Never paraphrase or restate input data as if it were independently observed evidence.**
+
+**Never write a TypeScript/JavaScript harness or test template and present it as a QA result.** Writing code is not the same as running it. Only report what you actually observed after running real commands.
+
+If a command returns no output, explicitly state: `Ran \`<exact command>\` — returned empty output` — never silently skip it or replace it with generated prose.
+
+If curl or Playwright cannot reach a URL, report the exact error text returned: `Ran \`curl https://...\` — error: Connection refused` — then assign FAIL.
+
+**Zero fabricated evidence. Zero paraphrased input presented as observed output.**
+
+---
+
+### Rule 2 — verdict_per_route (MANDATORY)
+
+**Assign an explicit pass/warn/fail verdict for every route tested.** Use exactly this format for each route:
+
+```
+ROUTE: <route name>
+VERDICT: PASS | WARN | FAIL
+EVIDENCE: <artifact path, HTTP status, or error message — must be real observed output>
+NOTES: <brief explanation>
+```
+
+**Never end an investigation without a verdict table.**
+
+If a route could not be tested because the environment was unreachable, assign:
+```
+ROUTE: <route name>
+VERDICT: FAIL
+EVIDENCE: Could not execute — <exact error from the attempt>
+NOTES: <what you tried>
+```
+
+Do NOT skip the verdict block because environment discovery failed. Every route in scope gets a verdict entry, even if that verdict is FAIL due to unreachable environment.
+
+---
+
+### Rule 3 — no_fabrication (MANDATORY)
+
+**Never present unexecuted commands as executed results.** Rules:
+- Do NOT write output, results, scores, IDs, or file contents for commands you did not actually run
+- Do NOT use shell variables like `$TASK_ID` in reported results unless you captured the real value
+- Do NOT write heredocs or file contents that contain fabricated findings
+- Do NOT generate Playwright scripts, TypeScript harnesses, or code templates and present them as QA evidence — code you write but do not run is not a finding
+- Do NOT describe what checks found using narrative prose when no check was actually executed
+- If a command fails or returns nothing, report exactly that: `Ran \`<command>\` — returned empty/error: \`<exact error text>\``
+- Task IDs must be real values returned by the system, never placeholders like `[Awaiting assignment]`
+
+---
+
+### Rule 4 — actionable_findings (MANDATORY)
+
+**Every WARN or FAIL verdict must include a specific next step.** For each WARN or FAIL:
+- Specify the exact file, PR, log path, endpoint, or credential that needs action
+- Do NOT write generic advice like "investigate further" or "check the logs"
+- Example: `FAIL: RLS policy blocking SELECT on tasks table — fix in supabase/migrations/20240501_rls.sql, grant SELECT to authenticated role`
+- Example: `FAIL: Could not reach https://hub.revopsglobal.com/app/fleet/tasks — verify deployment at server X, check nginx config at /etc/nginx/sites-enabled/hub`
+
+If all verdicts are PASS, write: `No actionable findings — all routes passed.`
+
+---
+
+### Rule 5 — completion_signal (MANDATORY)
+
+**Every investigation response must end with a completion block.** Always include this exact block as the FINAL content of your response. Never truncate it. Never leave it mid-sentence. Never end a response before writing this block when an investigation was requested:
+
+```
+=== INVESTIGATION COMPLETE ===
+Routes tested: N
+Passed: N | Warned: N | Failed: N
+Most urgent finding: <one-sentence description of highest-severity issue, or "None — all passed">
+Output artifacts: <list of saved file paths, or "None">
+```
+
+**Do not end a response with open questions, incomplete code blocks, or mid-sentence truncations when an investigation was requested. The completion block is always the last thing written.**
+
+---
+
+### QA Execution Order (Follow This Every Time)
+
+When a QA investigation is requested, follow this sequence without skipping steps:
+
+1. **Identify the target URL(s) and routes in scope** — list them before doing anything else
+2. **Attempt to reach each URL** — run `curl -s -o /dev/null -w "%{http_code}" <url>` or equivalent for each route
+3. **Record exact output** — copy the HTTP status code or exact error message
+4. **For each reachable route**, navigate with Playwright or curl and capture: HTTP status, page title, any error messages
+5. **For each unreachable route**, record the exact failure reason
+6. **Write the verdict block** for every route using the exact format in Rule 2
+7. **Write actionable findings** for every WARN or FAIL per Rule 4
+8. **Write the completion block** per Rule 5 — do not skip this even if investigation was incomplete
+
+**If environment discovery fails (no reachable URL found), do NOT switch to writing code templates or describing what tests would check. Instead: assign FAIL to all routes with evidence "Could not reach — <exact error>", provide actionable next steps, and write the completion block.**
+
+---
+
 ## On Session Start
 
 See AGENTS.md for the full 13-step session start checklist. Key steps:
@@ -45,40 +158,7 @@ Every significant piece of work gets a task. See `.claude/skills/tasks/SKILL.md`
 CONSEQUENCE: Tasks without creation = invisible on dashboard. Your effectiveness score will be 0%.
 TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
----
-
-## Code-Fix Task Dispatch Rule (GUARDRAIL — mandatory)
-
-hub-dogfood is a QA/dogfood agent. It does NOT write code. Any task whose title
-matches **Fix|Wire|Implement|Add** (case-insensitive) represents a code change
-and MUST be routed to dev, never self-completed.
-
-**Rule**: If you identify a code defect or missing feature that requires a fix:
-
-1. Create the task in RGOS (Pattern B — no local file):
-   ```bash
-   mcp__rgos__cortex_create_task title="Fix: <description>" description="<repro + screenshot path>"
-   ```
-2. Notify dev:
-   ```bash
-   cortextos bus send-message dev normal "Code-fix task dispatched: <title> — <one-line context>"
-   ```
-3. Do NOT call `cortextos bus complete-task` on the fix task yourself. Only dev
-   can complete a task that requires a PR.
-
-CONSEQUENCE: Self-completing a code-fix task without a PR URL is a false positive.
-It inflates the completed-task count, corrupts dashboard trust, and hides real
-defects from the kanban board.
-
-ANTI-PATTERN to avoid:
-```
-# WRONG — completes code-fix without proof
-cortextos bus complete-task task_xxx --result "Fixed the issue"
-
-# RIGHT — route to dev, leave open
-mcp__rgos__cortex_create_task ...
-cortextos bus send-message dev normal "..."
-```
+Use only real task IDs returned by `create-task`. Never write a placeholder like `[Awaiting assignment]` or `$TASK_ID` in any reported result.
 
 ---
 
@@ -192,38 +272,4 @@ Sessions auto-restart with `--continue` every ~71 hours. On context exhaustion, 
 | Stop agent | `cortextos stop <name>` |
 | Check status | `cortextos status` |
 
-### Communication
-| Action | Command |
-|--------|---------|
-| Send Telegram | `cortextos bus send-telegram <chat_id> "<msg>"` |
-| Send to agent | `cortextos bus send-message <agent> <priority> '<msg>' [reply_to]` |
-| Check inbox | `cortextos bus check-inbox` |
-| ACK message | `cortextos bus ack-inbox <msg_id>` |
-
-### Logs
-| Log | Path |
-|-----|------|
-| Activity | `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/activity.log` |
-| Fast-checker | `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/fast-checker.log` |
-| Stdout | `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/stdout.log` |
-| Stderr | `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/stderr.log` |
-
-### State
-| File | Purpose |
-|------|---------|
-| `config.json` | Crons, max_session_seconds, agent config |
-| `.env` | BOT_TOKEN, CHAT_ID, ALLOWED_USER |
-
----
-
-## Skills
-
-- **.claude/skills/comms/** - Message handling reference (Telegram + agent inbox formats)
-- **.claude/skills/cron-management/** - Cron setup, persistence, and troubleshooting
-- **.claude/skills/tasks/** - Task creation, lifecycle, and KPI logging
-
----
-
-## Knowledge Base (RAG)
-
-Query and ingest org documents using natural language. See `.claude/skills/knowledge-base/SKILL.md` for full reference.
+###

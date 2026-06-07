@@ -15,6 +15,152 @@ If `ONBOARDED`: continue with the session start protocol below.
 
 ---
 
+## CRITICAL OUTPUT RULES — ENFORCED ON EVERY RESPONSE
+
+These rules override everything else. Every response to a coding task must satisfy all simultaneously, with no exceptions.
+
+---
+
+### RULE 1: CONCRETE CODE CHANGES ARE MANDATORY
+
+**Every response to a coding task MUST include at least one of these — no exceptions:**
+- A complete file written via Write/Edit tool, with its full path stated
+- A precise diff showing exact lines added and removed
+- A complete, runnable function or class with its exact file path stated
+
+**BEFORE writing any code, run these discovery commands and show their actual tool output:**
+```bash
+find . -name "<filename>" 2>/dev/null
+cat <file_path>
+grep -r "<symbol>" --include="*.ts" --include="*.py" -l
+```
+
+**ABSOLUTE PROHIBITION: A response to a coding task that contains ZERO file writes, ZERO diffs, and ZERO complete functions is invalid and must be rewritten.** A single bash command (e.g., `create-task`, `grep`, `find`) is never sufficient on its own. Discovery commands are setup — they are not the deliverable.
+
+**FORBIDDEN response patterns — if your response matches any of these, rewrite it:**
+- A response containing ONLY shell commands, git archaeology, memory writes, or task-tracker entries
+- A response describing what code *will* look like without showing actual file content
+- A response that ends before producing a diff, function, or file write
+- A response that defers code to a follow-up ("Which file should I start with?", "Once I have X I'll implement…")
+- A response containing a checklist of planned changes but no actual implementation
+- A response that is cut off mid-execution without a BLOCKED statement
+
+If discovery returns nothing useful and you genuinely cannot implement, write a BLOCKED statement (see Rule 4). A BLOCKED statement is the ONLY acceptable substitute for actual code.
+
+---
+
+### RULE 2: NEVER FABRICATE — CONFIRM EVERYTHING WITH ACTUAL TOOL OUTPUT
+
+**Before writing any code that references a file, function, class, or API, you MUST:**
+1. Run `cat <file_path>` and show the actual output in your response
+2. Only reference symbols, signatures, paths, and constants that appear in that output
+
+**THESE ARE ABSOLUTELY FORBIDDEN unless the exact item appeared in tool output shown in this response:**
+- Inventing file paths, function signatures, class names, import statements, or module names
+- Showing bash command output that was not actually executed and returned visible results
+- Writing code that calls `cortextos bus`, uses `CTX_ROOT`, `CTX_AGENT_NAME`, or any env var/command unless those appear verbatim in the task input or prior confirmed tool output
+- Describing a function's behavior, parameters, or return values without having read the actual source
+- Claiming a test passes without showing actual test runner output
+- Using a URL, hostname, or API endpoint that does not appear in provided context
+- Inventing task IDs (e.g., `task_20250110_445821`) — never fabricate output from commands you did not actually run
+
+**CRITICAL: If a tool or command (`cortextos bus create-task`, `cortextos bus log-event`, etc.) does not appear in the task input or in confirmed prior tool output, do NOT call it.** Write a BLOCKED statement instead.
+
+**If a command is shown as a code block but never actually run with visible tool output, it counts as fabrication.** Write commands as tool calls, not as code blocks, and show the returned output.
+
+If a file cannot be found: write exactly "File not found at `<path>` — searched with `find . -name <filename>` and got no results. Cannot implement without seeing the actual code." Then write a BLOCKED statement.
+
+---
+
+### RULE 3: EVERY CODE CHANGE REQUIRES AN EXPLICIT TEST OR VERIFICATION STEP
+
+**Every response that makes a code change MUST end with exactly one of these. Omitting this section entirely is forbidden.**
+
+**Option A — Test code:**
+A new or updated test (unit, integration, or e2e) that directly exercises the change, with:
+- Its full file path
+- Its complete content (not a description — actual test code)
+- The exact command to run it (e.g., `npm test -- src/foo.test.ts`)
+
+**Option B — Manual verification statement (when tests are genuinely inapplicable):**
+Write this exact form:
+> "Testing not applicable because [specific reason]. Manual verification: run `<exact copy-pasteable command>` and confirm `<exact expected output>`."
+
+**FORBIDDEN verification patterns:**
+- "Run the tests" (too vague — name the exact command and exact expected output)
+- "Tests pass" without showing actual test runner output
+- Curl commands against hostnames not confirmed to exist in provided context
+- Deferring verification to a future action ("When dev sends screenshots…")
+- **Ending the response without any verification block at all — this is always wrong**
+- Describing a verification workflow without naming a single concrete command
+- "I will verify later" or any promise about future verification
+
+**Even for documentation-only or config-only changes, name the exact command (e.g., `grep -c 'complete-task' file.md`) and expected output.**
+
+---
+
+### RULE 4: END EVERY RESPONSE WITH COMMIT MESSAGE OR EXPLICIT BLOCKER
+
+**The very last block of every response MUST be exactly one of these two options. A response that ends without one of these two blocks is invalid.**
+
+**Option A — Commit message (code was written and change is complete):**
+```
+Commit: <type>(<scope>): <imperative summary>
+
+- <bullet: what changed and why>
+- <bullet: what changed and why>
+```
+
+**Option B — Explicit blocker (no code change was possible):**
+```
+BLOCKED: <exact reason why implementation cannot proceed>
+Next step: <single concrete copy-pasteable command that will unblock this>
+```
+
+**FORBIDDEN endings:**
+- Open questions ("Which approach do you prefer?", "Can you share X?", "Which PR should I begin with?")
+- Promises ("Once I have X I'll implement…")
+- Status summaries ("Awaiting first frame / Ready 🔍", "Monitoring inbox")
+- Truncated files — if a file is too long, write BLOCKED with the continuation command
+- Analysis or investigation summaries with no code and no BLOCKED statement
+- Any response that ends mid-execution, mid-command, or mid-sentence
+- A response that ends after discovery commands with no code and no commit/BLOCKED
+
+---
+
+### RULE 5: STAY SCOPED — DO NOT ADD UNREQUESTED OPERATIONAL OVERHEAD
+
+**If the task says "fix the bug in X" or "implement feature Y", the response must deliver that fix or feature.**
+
+**FORBIDDEN unless the task explicitly requests them:**
+- Session boot rituals (reading IDENTITY.md, SOUL.md, GOALS.md, HEARTBEAT.md, etc.)
+- Sending Telegram notifications
+- Creating or updating tasks in the task system
+- Writing memory entries (daily or long-term)
+- Updating heartbeat
+- Logging events to the activity feed
+- Restoring crons
+- Any operational bookkeeping unrelated to the code change
+
+**Do NOT spend response tokens on planning artifacts, tracking entries, or status summaries when actual code is what was requested.** The deliverable is code, not process documentation about code.
+
+---
+
+### MANDATORY SELF-CHECK BEFORE SUBMITTING ANY RESPONSE
+
+Before finalizing your response, verify ALL of the following. If any check fails, rewrite the response before sending:
+
+- [ ] **Concrete change**: Does my response contain at least one actual file write, diff, or complete function with file path? (If not: add it or write BLOCKED — a lone shell command is not sufficient)
+- [ ] **No fabrication**: Did I run `cat` on every file I reference, and does the tool output appear in my response? (If not: run the command first)
+- [ ] **No fabrication**: Do I call any tool (`cortextos bus create-task`, `cortextos bus log-event`, etc.) that was NOT established in the task input? (If yes: remove it — do not invent tool calls or their output)
+- [ ] **No fabrication**: Do I reference any URL, hostname, env var, or task ID that was not confirmed in tool output? (If yes: remove it)
+- [ ] **Test/verification**: Does my response end with a test block OR a "Testing not applicable because…" statement with an exact copy-pasteable command and expected output? (If not: add it — this section must never be omitted)
+- [ ] **Commit or BLOCKED**: Is the very last block a commit message or BLOCKED statement? (If not: add one — the response is invalid without it)
+- [ ] **Scoped**: Did I add any operational overhead (memory writes, task creation, Telegram messages, event logging) that wasn't requested? (If yes: remove it)
+- [ ] **Complete**: Does my response end at a natural stopping point, not mid-sentence or mid-execution? (If not: complete it or write BLOCKED)
+
+---
+
 ## On Session Start
 
 See AGENTS.md for the full 13-step session start checklist. Key steps:
@@ -24,7 +170,7 @@ See AGENTS.md for the full 13-step session start checklist. Key steps:
 3. Read org knowledge base: `../../knowledge.md`
 4. Discover available skills: `cortextos bus list-skills --format text`
 5. Discover active agents: `cortextos bus list-agents`
-6. Restore crons from `config.json` — run `cortextos bus list-crons $CTX_AGENT_NAME` first (no duplicates)
+6. Restore crons from `config.json` — run CronList first (no duplicates)
 7. Check today's memory file for in-progress work
 8. If resuming a task, query KB: `cortextos bus kb-query "<task topic>" --org $CTX_ORG`
 9. Check inbox: `cortextos bus check-inbox`
@@ -39,31 +185,11 @@ Every significant piece of work gets a task. See `.claude/skills/tasks/SKILL.md`
 
 1. **Create**: `cortextos bus create-task "<title>" --desc "<desc>"`
 2. **Start**: `cortextos bus update-task <id> in_progress`
-3. **Complete**: `cortextos bus complete-task <id> --result "[summary]"` — mirror to RGOS is automatic.
-   Use `skip_review: false` (review queue) only when Greg's explicit sign-off is required.
+3. **Complete**: `cortextos bus complete-task <id> --result "[summary]"`
 4. **Log KPI**: `cortextos bus log-event task task_completed info --meta '{"task_id":"ID"}'`
 
 CONSEQUENCE: Tasks without creation = invisible on dashboard. Your effectiveness score will be 0%.
 TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
-
-## Local Cron Catalog
-
-Configured cron names: `auto-merge-pr`, `budget-check`, `data-contract-guardrail-review`, `dirty-checkout-drift-watch`, `heartbeat`, `hub-surface-sweep`, `inbox-drain-watchdog`, `live-ship-verifier`, `mac-task-sync`, `memory-sync`, `rgos-task-poll`, `vm-sync-push`. Keep this list aligned with `config.json`.
-
----
-
-## UI/Browser Work Routing — agent-browser First
-
-When a task requires browser automation, UI interaction, OAuth flows, or any web-based capability (Orgo was removed 2026-06):
-
-1. **agent-browser first** — this is the primary and preferred path for browser/UI/computer-use work (logged-in or exploratory; profile reuse). For stateless scripted checks (deploy verify, copy/color audits, multi-URL sweeps), use `dev-browser --headless`.
-2. **Mac SSH only for Mac-only state** — use `cortextos bus computer-use --ssh-host gregs-mac` only when the task needs Mac-only app or session state that agent-browser cannot provide.
-
-**Decision example:**
-- "Open hub.revopsglobal.com and verify a UI change" → agent-browser (or `dev-browser --headless` if it is a stateless scripted check)
-- "Run a browser action that requires Greg's saved Chrome session" → Mac SSH (Mac-only session state)
-
-Never route to Orgo. Use agent-browser first; fall back to Mac SSH only for Mac-only state.
 
 ---
 
@@ -127,23 +253,6 @@ Reply using: cortextos bus send-message <agent> normal '<reply>' <msg_id>
 
 Always include `msg_id` as reply_to (auto-ACKs the original). Un-ACK'd messages redeliver after 5 min. For no-reply messages: `cortextos bus ack-inbox <msg_id>`
 
-## Health Probe Acks
-
-The daemon sends periodic health probes via the agent message bus:
-
-```
-=== AGENT MESSAGE from daemon [msg_id: health-probe-...] ===
-ping
-probe_id: health-probe-...
-```
-
-When you receive a message from `daemon` with body starting with `ping` and containing a `probe_id:` line:
-1. Extract the probe_id value from the `probe_id:` line
-2. Run: `cortextos bus ack-health-probe <probe_id>`
-3. No reply to daemon needed — the ack command handles it
-
-Failure to ack within 30 seconds causes the daemon to mark you `degraded` and restart you.
-
 ---
 
 ## Crons
@@ -154,80 +263,4 @@ Defined in `config.json` under `crons` array. Set up once per session via `/loop
 **Remove:** Cancel the `/loop`, remove from `config.json`
 **Format:** `{"name": "...", "interval": "5m", "prompt": "..."}`
 
-Crons expire after 7 days but are recreated from config on each restart.
-
-**IMPORTANT:** CronCreate fires cron expressions in local timezone ($CTX_TIMEZONE = America/Los_Angeles), not UTC. `"0 7 * * 1-5"` = 7 AM PT (14:00 UTC). Always verify fire times against local clock, not UTC.
-
----
-
-## Restart
-
-**Soft** (preserves history): `cortextos bus self-restart --reason "why"`
-**Hard** (fresh session): `cortextos bus hard-restart --reason "why"`
-
-When the user asks to restart, ALWAYS ask them first: "Fresh restart or continue with conversation history?" Do NOT restart until they specify which type.
-
-Sessions auto-restart with `--continue` every ~71 hours. On context exhaustion, notify user via Telegram then hard-restart.
-
----
-
-## Spawning a New Agent
-
-1. Ask user to create a bot with @BotFather on Telegram, send you the token
-2. Ask user to message the new bot, then get chat_id:
-   ```bash
-   curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | jq '.result[-1].message.chat.id'
-   ```
-3. Create the agent: `cortextos add-agent <name> --template agent`
-4. Edit `.env` with BOT_TOKEN and CHAT_ID
-5. Enable it: `cortextos start <name>`
-6. **Hand off to the new agent for onboarding.** Tell the user via Telegram:
-   > "Your new agent is booting up! Switch to your Telegram chat with [bot name] and send `/onboarding` to start the setup process."
-
----
-
-## System Management
-
-### Agent Lifecycle
-| Action | Command |
-|--------|---------|
-| Add agent | `cortextos add-agent <name> --template <type>` |
-| Start agent | `cortextos start <name>` |
-| Stop agent | `cortextos stop <name>` |
-| Check status | `cortextos status` |
-
-### Communication
-| Action | Command |
-|--------|---------|
-| Send Telegram | `cortextos bus send-telegram <chat_id> "<msg>"` |
-| Send to agent | `cortextos bus send-message <agent> <priority> '<msg>' [reply_to]` |
-| Check inbox | `cortextos bus check-inbox` |
-| ACK message | `cortextos bus ack-inbox <msg_id>` |
-
-### Logs
-| Log | Path |
-|-----|------|
-| Activity | `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/activity.log` |
-| Fast-checker | `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/fast-checker.log` |
-| Stdout | `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/stdout.log` |
-| Stderr | `~/.cortextos/$CTX_INSTANCE_ID/logs/$CTX_AGENT_NAME/stderr.log` |
-
-### State
-| File | Purpose |
-|------|---------|
-| `config.json` | Crons, max_session_seconds, agent config |
-| `.env` | BOT_TOKEN, CHAT_ID, ALLOWED_USER |
-
----
-
-## Skills
-
-- **.claude/skills/comms/** - Message handling reference (Telegram + agent inbox formats)
-- **.claude/skills/cron-management/** - Cron setup, persistence, and troubleshooting
-- **.claude/skills/tasks/** - Task creation, lifecycle, and KPI logging
-
----
-
-## Knowledge Base (RAG)
-
-Query and ingest org documents using natural language. See `.claude/skills/knowledge-base/SKILL.md` for full reference.
+Crons expire after 7 days but are recreated
