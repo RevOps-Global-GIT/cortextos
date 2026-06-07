@@ -1710,6 +1710,12 @@ async function runCompaniesChecks(page: Page, serviceKey?: string): Promise<Chec
 
   // CHECK 6: DB-comparison — sample 5 visible companies from Supabase, verify display labels appear in UI
   try {
+    // Re-navigate with networkidle to guarantee the page is fully rendered.
+    // CHECK 4 navigates back with domcontentloaded which leaves the page in
+    // a "Loading..." spinner state — rows never appear in the DOM before the
+    // waitForFunction timeout fires (confirmed via screenshot).
+    await page.goto(`${HUB_URL}/companies`, { waitUntil: 'networkidle', timeout: 20000 }).catch(() => {});
+    await new Promise<void>(r => setTimeout(r, 1000));
     await shot(page, `${sp}-6-db-compare`);
     if (!serviceKey) {
       results.push({ check: '[CORRECTNESS] CHECK 6 Companies DB vs UI match', status: 'DEFERRED', evidence: 'No serviceKey — cannot query Supabase; skipping DB correctness check' });
