@@ -1015,6 +1015,9 @@ export class AgentProcess implements ManagedAgent {
     const onboardingPath = join(this.env.agentDir, 'ONBOARDING.md');
     const heartbeatPath = join(this.env.ctxRoot, 'state', this.name, 'heartbeat.json');
     let onboardingAppend = '';
+    // Telegram-optional: when no bot is configured, this is a UI-only deployment.
+    const hasTelegram = !!(this.telegramApi && this.telegramChatId);
+    const stateDir = join(this.env.ctxRoot, 'state', this.name);
 
     // If agent has a heartbeat but no .onboarded marker, they completed onboarding but
     // forgot to write the marker. Auto-write it so they don't re-onboard next restart.
@@ -1026,7 +1029,9 @@ export class AgentProcess implements ManagedAgent {
     }
 
     if (!existsSync(onboardedPath) && existsSync(onboardingPath)) {
-      onboardingAppend = ' IMPORTANT: This is your FIRST BOOT. Before doing anything else, read ONBOARDING.md and complete the onboarding protocol.';
+      onboardingAppend = hasTelegram
+        ? ' IMPORTANT: This is your FIRST BOOT. Before doing anything else, read ONBOARDING.md and complete the onboarding protocol.'
+        : ` IMPORTANT: This is your FIRST BOOT in a UI-ONLY deployment — Telegram is NOT configured. Do NOT run any send-telegram or *-telegram commands, and do NOT wait for Telegram input. Read AGENTS.md and ONBOARDING.md for context but SKIP every Telegram step. Your identity is already set in IDENTITY.md — do not re-ask it. Read the org context.json and goals.json for configuration. Then SELF-COMPLETE onboarding non-interactively: (1) write your first heartbeat exactly as described in HEARTBEAT.md; (2) mark onboarding complete by running this Bash command verbatim: mkdir -p "${stateDir}" && touch "${onboardedPath}" ; then begin normal operations. You are driven by your inbox and the dashboard Tasks board, not Telegram.`;
     }
 
     // Rate-limit recovery: if .rate-limited marker exists, prepend context
@@ -1063,7 +1068,7 @@ export class AgentProcess implements ManagedAgent {
     const silentUxOverride = isSilentRestart && !isHandoffRestart
       ? ' SILENT AUTO-RESET: This session was automatically reset by the daemon at the configured ctx_autoreset_threshold. Do NOT send any Telegram messages about booting, being back online, or restarting — the reset is internal and the user did not ask for it. Skip AGENTS.md step 1 (boot message) and step 14 (online status message) entirely. Restore crons, check inbox, pick up the highest-priority task silently.'
       : '';
-    const onlineMessage = isHandoffRestart || isSilentRestart
+    const onlineMessage = isHandoffRestart || isSilentRestart || !hasTelegram
       ? ''
       : ' After setting up crons, send a Telegram message to the user saying you are back online.';
     return `You are starting a new session. Current UTC time: ${nowUtc}.${rateLimitBlock} Read AGENTS.md and all bootstrap files listed there. Then restore your crons from config.json: CRITICAL DEDUP: Always call CronList BEFORE creating any cron. Also run 'cortextos bus list-crons $CTX_AGENT_NAME' to check daemon-managed crons. For each config.json entry, search BOTH the CronList output AND the bus list-crons output for its prompt text — if the prompt already appears in either, SKIP that cron entirely. For entries NOT already listed: for each entry with type "recurring" (or no type field), call CronCreate directly (do NOT use /loop — /loop will prompt the user about cloud scheduling which blocks boot in autonomous mode). Convert the interval to a cron expression: 1h→"0 */1 * * *", 2h→"0 */2 * * *", 4h→"0 */4 * * *", 6h→"0 */6 * * *", 12h→"0 */12 * * *", 24h→"0 0 * * *", Nm→"*/N * * * *". Pass recurring:true. For entries with type "once": compare fire_at against the current UTC time — if fire_at is in the future call CronCreate (one-shot, no recurring flag), if in the past delete that entry from config.json.${reminderBlock}${deliverablesBlock}${handoffBlock}${handoffUxOverride}${silentUxOverride}${onlineMessage}${onboardingAppend}`;
@@ -1073,7 +1078,11 @@ export class AgentProcess implements ManagedAgent {
     const nowUtc = new Date().toISOString();
     const reminderBlock = this.buildReminderBlock();
     const deliverablesBlock = this.buildDeliverablesBlock();
-    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Restore your crons from config.json ONLY if missing. CRITICAL DEDUP: Call CronList FIRST AND run 'cortextos bus list-crons $CTX_AGENT_NAME'. For each config.json entry, search BOTH the CronList output AND the bus list-crons output for its prompt text — if the prompt already appears in either, SKIP that cron. For entries NOT already listed: use CronCreate directly (do NOT use /loop — /loop will prompt about cloud scheduling which blocks autonomous boot). Convert interval to cron expression: 1h→"0 */1 * * *", 6h→"0 */6 * * *", 24h→"0 0 * * *", Nm→"*/N * * * *". Pass recurring:true for recurring entries, no recurring flag for once entries (only if fire_at is in the future). Rapid --continue restarts must not accumulate duplicates.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations. After restoring crons and checking inbox, send a Telegram message to the user saying you are back online.`;
+    const hasTelegram = !!(this.telegramApi && this.telegramChatId);
+    const onlineNote = hasTelegram
+      ? ' After restoring crons and checking inbox, send a Telegram message to the user saying you are back online.'
+      : ' Telegram is not configured (UI-only) — do NOT run any send-telegram commands.';
+    return `SESSION CONTINUATION: Your CLI process was restarted with --continue to reload configs. Current UTC time: ${nowUtc}. Your full conversation history is preserved. Re-read AGENTS.md and ALL bootstrap files listed there. Restore your crons from config.json ONLY if missing. CRITICAL DEDUP: Call CronList FIRST AND run 'cortextos bus list-crons $CTX_AGENT_NAME'. For each config.json entry, search BOTH the CronList output AND the bus list-crons output for its prompt text — if the prompt already appears in either, SKIP that cron. For entries NOT already listed: use CronCreate directly (do NOT use /loop — /loop will prompt about cloud scheduling which blocks autonomous boot). Convert interval to cron expression: 1h→"0 */1 * * *", 6h→"0 */6 * * *", 24h→"0 0 * * *", Nm→"*/N * * * *". Pass recurring:true for recurring entries, no recurring flag for once entries (only if fire_at is in the future). Rapid --continue restarts must not accumulate duplicates.${reminderBlock}${deliverablesBlock} Check inbox. Resume normal operations.${onlineNote}`;
   }
 
   /**
