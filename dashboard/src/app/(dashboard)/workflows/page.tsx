@@ -27,6 +27,7 @@ import {
   IconAlertTriangle,
   IconCircleX,
   IconArrowRight,
+  IconShieldCheck,
 } from '@tabler/icons-react';
 import { formatRelative, formatSchedule, isValidScheduleClient } from '@/lib/cron-utils';
 
@@ -82,6 +83,14 @@ interface FleetHealthSummary {
   warning: number;
   failure: number;
   neverFired: number;
+}
+
+interface AutomationRegistrySummary {
+  total: number;
+  ok: number;
+  needsAction: number;
+  highRisk: number;
+  duplicateGroups: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +185,8 @@ export default function WorkflowsPage() {
   // ── Fleet health summary (from /api/workflows/health) ─────────────────────
   const [fleetHealth, setFleetHealth] = useState<FleetHealthSummary | null>(null);
   const [healthLoading, setHealthLoading] = useState(true);
+  const [registrySummary, setRegistrySummary] = useState<AutomationRegistrySummary | null>(null);
+  const [registryLoading, setRegistryLoading] = useState(true);
 
   // ── Cron-status data (from /api/workflows/crons) ──────────────────────────
   const [cronRows, setCronRows] = useState<CronSummaryRow[]>([]);
@@ -219,6 +230,23 @@ export default function WorkflowsPage() {
       console.error('[workflows] Failed to fetch fleet health:', err);
     } finally {
       setHealthLoading(false);
+    }
+  }, []);
+
+  const fetchAutomationRegistry = useCallback(async () => {
+    setRegistryLoading(true);
+    try {
+      const res = await fetch('/api/workflows/registry');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data.summary === 'object') {
+          setRegistrySummary(data.summary as AutomationRegistrySummary);
+        }
+      }
+    } catch (err) {
+      console.error('[workflows] Failed to fetch automation registry:', err);
+    } finally {
+      setRegistryLoading(false);
     }
   }, []);
 
@@ -286,6 +314,7 @@ export default function WorkflowsPage() {
     fetchAll();
     fetchCronStatus();
     fetchFleetHealth();
+    fetchAutomationRegistry();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -465,6 +494,7 @@ export default function WorkflowsPage() {
     fetchAll();
     fetchCronStatus();
     fetchFleetHealth();
+    fetchAutomationRegistry();
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -482,6 +512,14 @@ export default function WorkflowsPage() {
         <div className="flex items-center gap-2">
           <Button
             size="sm"
+            variant="outline"
+            onClick={() => router.push('/workflows/registry')}
+          >
+            <IconShieldCheck size={14} className="mr-1" />
+            Registry
+          </Button>
+          <Button
+            size="sm"
             onClick={() => router.push('/workflows/new')}
           >
             <IconPlus size={14} className="mr-1" />
@@ -497,15 +535,16 @@ export default function WorkflowsPage() {
         </div>
       </div>
 
-      {/* ── Fleet Health Panel ─────────────────────────────────────────────────── */}
+      {/* ── Fleet Schedules panels ─────────────────────────────────────────────── */}
+      <div className="grid gap-3 lg:grid-cols-2">
       <Card className={
-        !healthLoading && fleetHealth &&
-        (fleetHealth.failure > 0 || fleetHealth.neverFired > 0)
-          ? 'border-red-500/30'
-          : !healthLoading && fleetHealth && fleetHealth.warning > 0
-            ? 'border-yellow-500/30'
-            : ''
-      }>
+          !healthLoading && fleetHealth &&
+          (fleetHealth.failure > 0 || fleetHealth.neverFired > 0)
+            ? 'border-red-500/30'
+            : !healthLoading && fleetHealth && fleetHealth.warning > 0
+              ? 'border-yellow-500/30'
+              : ''
+        }>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-medium">Fleet Health</CardTitle>
@@ -567,6 +606,57 @@ export default function WorkflowsPage() {
           )}
         </CardContent>
       </Card>
+      <Card className={
+          !registryLoading && registrySummary && registrySummary.needsAction > 0
+            ? 'border-yellow-500/30'
+            : ''
+        }>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm font-medium">Fleet Schedules / Automation Registry</CardTitle>
+            <button
+              onClick={() => router.push('/workflows/registry')}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              View registry
+              <IconArrowRight size={12} />
+            </button>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-0">
+          {registryLoading ? (
+            <div className="grid grid-cols-4 gap-2">
+              {[1, 2, 3, 4].map(i => (
+                <div key={i} className="h-12 rounded-md bg-muted/30 animate-pulse" />
+              ))}
+            </div>
+          ) : registrySummary ? (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="text-center">
+                <p className="text-2xl font-semibold">{registrySummary.total}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">entries</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-semibold text-green-600 dark:text-green-400">{registrySummary.ok}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">ok</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-semibold text-yellow-600 dark:text-yellow-400">{registrySummary.needsAction}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">needs action</p>
+              </div>
+              <div className="text-center">
+                <p className="text-2xl font-semibold">{registrySummary.duplicateGroups}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">duplicate groups</p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground text-center py-2">
+              Registry data unavailable
+            </p>
+          )}
+        </CardContent>
+      </Card>
+      </div>
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
