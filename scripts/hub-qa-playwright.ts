@@ -3460,6 +3460,288 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
 }
 
 // ---------------------------------------------------------------------------
+// /app/cortex/experiments checks
+// The live route redirects to /skills?tab=experiments. Validate the real
+// Experiments panel because its mixed-unit headline and missing scores have
+// regressed without automated coverage.
+// ---------------------------------------------------------------------------
+type ExperimentApiRow = {
+  id?: string;
+  agent?: string;
+  metric?: string;
+  direction?: string;
+  status?: string;
+  baseline_value?: number | string | null;
+  result_value?: number | string | null;
+  score?: number | string | null;
+  results_json?: unknown;
+  completed_at?: string | null;
+};
+
+type OrchExperimentRow = {
+  id?: string;
+  status?: string;
+  proposed_by?: string | null;
+  success_criteria?: string | null;
+  results_json?: unknown;
+  completed_at?: string | null;
+};
+
+type ExperimentsApiResponse = {
+  agents?: Array<{ agent?: string; experiments?: ExperimentApiRow[] }>;
+  experiments?: ExperimentApiRow[];
+};
+
+function numericValue(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.replace(/[,%]/g, ''));
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function metricFamily(metric: string | undefined, baseline: number, result: number): string {
+  const name = (metric ?? '').toLowerCase();
+  if (name.includes('rate') || name.includes('percent') || name.includes('%')) return 'percent';
+  if (name.includes('hour')) return 'hours';
+  if (name.includes('minute')) return 'minutes';
+  if (name.includes('second')) return 'seconds';
+  if (name.includes('count') || name.includes('tasks') || (Number.isInteger(baseline) && Number.isInteger(result))) return 'count';
+  return name.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'unitless';
+}
+
+function hasExplicitScore(exp: ExperimentApiRow): boolean {
+  return numericValue(exp.score) !== null;
+}
+
+function flattenExperiments(payload: ExperimentsApiResponse): ExperimentApiRow[] {
+  if (Array.isArray(payload.experiments)) return payload.experiments;
+  if (Array.isArray(payload.agents)) {
+    return payload.agents.flatMap((agent) => {
+      const rows = Array.isArray(agent.experiments) ? agent.experiments : [];
+      return rows.map((row) => ({ ...row, agent: row.agent ?? agent.agent }));
+    });
+  }
+  return [];
+}
+
+function isCompleteStatus(status: string | undefined): boolean {
+  const normalized = (status ?? '').toLowerCase();
+  return normalized === 'complete' || normalized === 'completed';
+}
+
+function mapOrchExperiment(row: OrchExperimentRow): ExperimentApiRow {
+  const results = row.results_json && typeof row.results_json === 'object'
+    ? row.results_json as Record<string, unknown>
+    : {};
+  const success = row.success_criteria ?? '';
+  const metricMatch = success.match(/^(.+?)\s*\((higher|lower)\)/i);
+  return {
+    id: row.id,
+    agent: row.proposed_by ?? undefined,
+    metric: typeof results.metric === 'string' ? results.metric : metricMatch?.[1]?.trim(),
+    direction: typeof results.direction === 'string' ? results.direction : metricMatch?.[2]?.toLowerCase(),
+    status: row.status,
+    baseline_value: results.baseline as number | string | null | undefined,
+    result_value: results.result as number | string | null | undefined,
+    score: results.score as number | string | null | undefined,
+    results_json: row.results_json,
+    completed_at: row.completed_at,
+  };
+}
+
+async function fetchExperimentsFromPage(page: Page, serviceKey?: string): Promise<{
+  rows: ExperimentApiRow[];
+  source: string;
+  error?: string;
+}> {
+  if (serviceKey) {
+    const resp = await fetch(
+      `${SUPA_URL}/rest/v1/orch_experiments?select=id,status,proposed_by,success_criteria,results_json,completed_at&order=created_at.desc&limit=200`,
+      { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+    );
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      return { rows: [], source: 'supabase:orch_experiments', error: `HTTP ${resp.status}: ${body.slice(0, 180)}` };
+    }
+    const rows = await resp.json().catch(() => []) as OrchExperimentRow[];
+    return { rows: rows.map(mapOrchExperiment), source: 'supabase:orch_experiments' };
+  }
+
+  const apiResult = await page.evaluate(async () => {
+    const candidates = ['/api/experiments', '/api/cortex/experiments'];
+    const errors: string[] = [];
+    for (const url of candidates) {
+      try {
+        const response = await fetch(url, { credentials: 'include' });
+        const text = await response.text();
+        if (!response.ok) {
+          errors.push(`${url} HTTP ${response.status}: ${text.slice(0, 120)}`);
+          continue;
+        }
+        return { ok: true, source: url, payload: JSON.parse(text) };
+      } catch (error) {
+        errors.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return { ok: false, source: candidates.join(','), error: errors.join(' | ') || 'No experiments endpoint succeeded' };
+  }) as { ok: boolean; source: string; payload?: ExperimentsApiResponse; error?: string };
+
+  if (!apiResult.ok || !apiResult.payload) {
+    return { rows: [], source: apiResult.source, error: apiResult.error ?? 'Unknown API error' };
+  }
+
+  return { rows: flattenExperiments(apiResult.payload), source: apiResult.source };
+}
+
+async function runCortexExperimentsChecks(page: Page, serviceKey?: string): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'cortex-experiments';
+
+  // CHECK 1: Page load and redirect target
+  try {
+    await page.waitForSelector('main, h1, h2, [role="tab"], [class*="card"]', { timeout: 15000 });
+    await page.waitForTimeout(2000);
+    await shot(page, `${sp}-1-load`);
+    const state = await page.evaluate(() => {
+      const text = document.body.innerText ?? '';
+      const tabs = Array.from(document.querySelectorAll('[role="tab"], button'))
+        .map((el) => el.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+        .filter(Boolean);
+      return {
+        title: document.querySelector('h1,h2,[class*="title"],[class*="heading"]')?.textContent?.trim() ?? '',
+        hasExperimentsCopy: /experiments?|autoresearch|avg improvement|improvement|score/i.test(text),
+        tabs: tabs.slice(0, 10),
+        textSample: text.replace(/\s+/g, ' ').trim().slice(0, 240),
+      };
+    });
+    if (page.url().includes('/auth')) {
+      results.push({ check: '[LIVENESS] CHECK 1 Experiments tab loads', status: 'FAIL', evidence: `Auth redirect — URL: ${page.url()}` });
+      return results;
+    }
+    if (state.hasExperimentsCopy) {
+      results.push({ check: '[LIVENESS] CHECK 1 Experiments tab loads', status: 'PASS', evidence: `Loaded experiments surface at ${page.url()}. Title="${state.title}". Tabs/buttons: ${state.tabs.join(', ') || '(none)'}` });
+    } else {
+      results.push({ check: '[LIVENESS] CHECK 1 Experiments tab loads', status: 'FAIL', evidence: `Page loaded at ${page.url()} but no experiments/improvement/score copy was visible. Sample="${state.textSample}"` });
+      return results;
+    }
+  } catch (e) {
+    await shot(page, `${sp}-1-load-fail`);
+    results.push({ check: '[LIVENESS] CHECK 1 Experiments tab loads', status: 'FAIL', evidence: `Did not load within 15s: ${(e as Error).message?.split('\n')[0]}` });
+    return results;
+  }
+
+  const { rows, source, error } = await fetchExperimentsFromPage(page, serviceKey);
+  if (error) {
+    results.push({ check: '[CORRECTNESS] CHECK 2 Experiments API reachable', status: 'FAIL', evidence: `${source} failed: ${error}` });
+    return results;
+  }
+  results.push({ check: '[CORRECTNESS] CHECK 2 Experiments API reachable', status: 'PASS', evidence: `${source} returned ${rows.length} experiment row(s).` });
+
+  const completed = rows.filter((row) => isCompleteStatus(row.status));
+  const scored = completed
+    .map((row) => ({ row, score: numericValue(row.score) }))
+    .filter((entry): entry is { row: ExperimentApiRow; score: number } => entry.score !== null);
+  const families = new Set(scored.map(({ row }) => {
+    const baseline = numericValue(row.baseline_value) ?? 0;
+    const result = numericValue(row.result_value) ?? 0;
+    return metricFamily(row.metric, baseline, result);
+  }));
+  const scoreAverage = scored.length > 0
+    ? scored.reduce((sum, entry) => sum + entry.score, 0) / scored.length
+    : null;
+  const rawDeltaRows = completed.filter((row) => numericValue(row.baseline_value) !== null && numericValue(row.result_value) !== null);
+  const rawDeltaAverage = rawDeltaRows.length > 0
+    ? rawDeltaRows.reduce((sum, row) => {
+      const baseline = numericValue(row.baseline_value) ?? 0;
+      const result = numericValue(row.result_value) ?? 0;
+      return sum + (result - baseline);
+    }, 0) / rawDeltaRows.length
+    : null;
+
+  // CHECK 3: AVG IMPROVEMENT headline is real, non-zero when scored rows exist,
+  // and labelled/behaving like a normalized value, not the raw mixed-unit mean.
+  try {
+    const bodyText = (await page.locator('body').innerText({ timeout: 5000 }).catch(() => '')).replace(/\s+/g, ' ').trim();
+    const headlineMatch = bodyText.match(/(?:avg(?:erage)?\s+improvement|improvement)\s*([+-]?\d+(?:\.\d+)?)/i);
+    const headline = headlineMatch
+      ? {
+        text: bodyText.slice(Math.max(0, headlineMatch.index ?? 0), Math.min(bodyText.length, (headlineMatch.index ?? 0) + 180)),
+        numbers: [Number(headlineMatch[1])],
+      }
+      : null;
+
+    if (scored.length === 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 3 AVG IMPROVEMENT headline normalized', status: 'DEFERRED', evidence: `No completed experiments with results_json.score in ${rows.length} source row(s); cannot assert headline value.` });
+    } else if (!headline) {
+      results.push({ check: '[CORRECTNESS] CHECK 3 AVG IMPROVEMENT headline normalized', status: 'FAIL', evidence: `No visible AVG IMPROVEMENT headline found despite ${scored.length} scored completed experiment(s).` });
+    } else {
+      const visible = headline.numbers[0];
+      const rawLooksSame = rawDeltaAverage !== null && rawDeltaRows.length > 1 && Math.abs(visible - rawDeltaAverage) <= Math.max(0.2, Math.abs(rawDeltaAverage) * 0.03);
+      const hasNormalizedLabel = /normalized|%/.test(headline.text.toLowerCase());
+      if (visible === 0) {
+        results.push({ check: '[CORRECTNESS] CHECK 3 AVG IMPROVEMENT headline normalized', status: 'FAIL', evidence: `AVG IMPROVEMENT headline is zero (${headline.text}) while ${scored.length} completed row(s) have results_json.score.` });
+      } else if (!hasNormalizedLabel) {
+        results.push({ check: '[CORRECTNESS] CHECK 3 AVG IMPROVEMENT headline normalized', status: 'FAIL', evidence: `AVG IMPROVEMENT headline is not labelled as normalized/percent: "${headline.text}"` });
+      } else if (rawLooksSame) {
+        results.push({ check: '[CORRECTNESS] CHECK 3 AVG IMPROVEMENT headline normalized', status: 'FAIL', evidence: `AVG IMPROVEMENT appears to be raw mixed-unit mean (${visible.toFixed(1)}) from ${rawDeltaRows.length} baseline/result row(s), not normalized. Families=${Array.from(families).join(', ')}. Text="${headline.text}"` });
+      } else {
+        results.push({ check: '[CORRECTNESS] CHECK 3 AVG IMPROVEMENT headline normalized', status: 'PASS', evidence: `Headline ${visible.toFixed(1)} is finite, non-zero, normalized-labelled, and not raw mixed-unit mean (${rawDeltaAverage?.toFixed(1) ?? 'n/a'}). Scored rows=${scored.length}/${completed.length}; avg score=${scoreAverage?.toFixed(1) ?? 'n/a'}.` });
+      }
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 3 AVG IMPROVEMENT headline normalized', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Completed rows with source results render a per-row Score instead of "-".
+  try {
+    const scoredSourceIds = scored.map(({ row }) => (row.id ?? '').slice(0, 16)).filter(Boolean);
+    const scoreText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    const scoreUi = {
+      scoreLabels: (scoreText.match(/\bScore\b/gi) ?? []).length,
+      dashScoreRows: (scoreText.match(/\bScore\s*[-–—]\b/gi) ?? []).length,
+      visibleIds: scoredSourceIds.filter((id) => scoreText.includes(id)),
+      scoreNumbers: Array.from(scoreText.matchAll(/\bScore\b[\s:]*([+-]?\d+(?:\.\d+)?%?)/gi))
+        .map((match) => match[1])
+        .filter(Boolean)
+        .slice(0, 8),
+    };
+
+    if (scored.length === 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 4 Completed rows show Score', status: 'DEFERRED', evidence: 'No completed experiments with numeric baseline/result; cannot assert per-row Score rendering.' });
+    } else if (scoreUi.dashScoreRows > 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 4 Completed rows show Score', status: 'FAIL', evidence: `${scoreUi.dashScoreRows} visible Score row(s) render "-" despite ${scored.length} scored completed source row(s).` });
+    } else if (scoreUi.scoreLabels === 0 && scoreUi.scoreNumbers.length === 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 4 Completed rows show Score', status: 'FAIL', evidence: `No per-row Score labels/numbers visible for ${scored.length} scored completed source row(s). Visible source ids: ${scoreUi.visibleIds.join(', ') || '(none)'}` });
+    } else {
+      results.push({ check: '[CORRECTNESS] CHECK 4 Completed rows show Score', status: 'PASS', evidence: `Score UI present for completed source rows: labels=${scoreUi.scoreLabels}, numeric score hits=${scoreUi.scoreNumbers.join(', ') || '(none)'}, visible ids=${scoreUi.visibleIds.length}/${scoredSourceIds.length}.` });
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 4 Completed rows show Score', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Runner writeback gap — completed rows should mostly have scores.
+  try {
+    if (completed.length === 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 5 Scored-row coverage', status: 'DEFERRED', evidence: `No completed experiments in ${rows.length} API row(s).` });
+    } else {
+      const scoredCount = completed.filter(hasExplicitScore).length;
+      const coverage = scoredCount / completed.length;
+      if (completed.length >= 3 && coverage < 0.5) {
+        results.push({ check: '[CORRECTNESS] CHECK 5 Scored-row coverage', status: 'FAIL', evidence: `Only ${scoredCount}/${completed.length} completed experiment(s) have results_json.score (${(coverage * 100).toFixed(0)}%) — suspicious runner-writeback gap.` });
+      } else {
+        results.push({ check: '[CORRECTNESS] CHECK 5 Scored-row coverage', status: 'PASS', evidence: `${scoredCount}/${completed.length} completed experiment(s) have results_json.score (${(coverage * 100).toFixed(0)}%).` });
+      }
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 5 Scored-row coverage', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // /app/presence checks
 // Validates the LinkedIn Presence page shell, signal selector, and draft editor.
 // ---------------------------------------------------------------------------
@@ -4516,6 +4798,7 @@ async function main() {
     // Alias → canonical URL map for short-form --page args
     const PAGE_URL_MAP: Record<string, string> = {
       'cortex-theta': '/app/cortex/theta',
+      'cortex-experiments': '/app/cortex/experiments',
       'linkedin-presence': '/app/presence',
       '/analytics': '/app/analytics',
       '/fleet': '/app/fleet',
@@ -4641,6 +4924,8 @@ async function main() {
       results = await runWithTimeout(() => runWikiChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/cortex/theta' || targetPage === 'cortex-theta') {
       results = await runWithTimeout(() => runCortexThetaChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
+    } else if (targetPage === '/app/cortex/experiments' || targetPage === 'cortex-experiments') {
+      results = await runWithTimeout(() => runCortexExperimentsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Experiments tab loads', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/presence' || targetPage === 'linkedin-presence') {
       results = await runWithTimeout(() => runLinkedInPresenceChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/signals' || targetPage === '/signals') {
@@ -4672,7 +4957,7 @@ async function main() {
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /app/fleet-board, /app/fleet/agents?tab=board, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /app/fleet-board, /app/fleet/agents?tab=board, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/cortex/experiments, cortex-experiments, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
