@@ -104,6 +104,12 @@
       "type": "recurring",
       "interval": "1h",
       "prompt": "Read prompts/cron-agentops-hourly-dogfood.md and execute one bounded AgentOps product/operator dogfood pass using Codex/Chrome-capable routes while Claude is constrained. Do not deploy, merge, post externally, or create duplicate tasks. Route/update scoped defects only, log results, and Telegram Greg only for P0/P1 or human-action blockers."
+    },
+    {
+      "name": "deliverables-snapshot",
+      "type": "recurring",
+      "cron": "0 5,17 * * *",
+      "prompt": "Run: node /home/cortextos/cortextos/scripts/cortextos-deliverables-snapshot.js — pushes the deliverables snapshot to the agentops-deliverables-push edge function so /api/agentops/overview and the Advisor canary stay fresh (threshold 1440m). Twice daily (5am/5pm PT) keeps the canary well under the staleness window. This is a cron-triggered turn: do NOT reschedule any loop. Silent unless the script errors."
     }
   ],
   "ctx_warning_threshold": 0,
