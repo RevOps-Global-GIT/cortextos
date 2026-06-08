@@ -37,6 +37,27 @@ The QA worktree (`/home/cortextos/cortextos-qa`) is a git worktree always synced
 
 **Fallback command if `npx tsx` is not available:** `npx ts-node --esm scripts/hub-qa-playwright.ts`
 
+## Mandatory Second Step: Operator Health Panels (the surfaces Greg screenshots)
+
+Page-load PASS is NOT enough. Greg screenshots the operator panels, not the route checks. Every pass MUST inspect these four panels and assert the data is TRUE, not just present. For each, record the concrete number and whether it is a real problem or panel noise.
+
+1. **NEEDS YOU** — `[N] Task blocked`, `[N] Supreme`, `[N] Cron misses`.
+   - For each blocked task: is it genuinely blocked on a HUMAN action (surface to orchestrator with the exact step), or stranded on a dead/idle agent (re-home it)? A blocked card stranded on a dead agent is a FAIL, not "owned."
+   - `Cron misses > 0`: name the missed cron and confirm whether it silently failed (`last_fired_at` vs `last_fire_attempted_at`) — do not leave it unexplained.
+
+2. **RGOS Recurring Tasks** (Late/Stale badge) — list every task showing "Late."
+   - A recurring task firing into a frozen/unwired pipeline (e.g. LinkedIn Engage while outbound is frozen) is NOISE → it should be PAUSED, not left to re-alert. Flag any such task for pause.
+   - A real missed window on a live task is a P2 → route it.
+
+3. **Quality + Knowledge Health** — Supreme scanner, Hub QA, Wiki health, **Advisor canary**.
+   - For Advisor canary (and any "X old; threshold Ymin" row): compute age vs threshold. If age > threshold it is STALE → find what writes its health-state and why it stopped, restart it. Do not report the panel "healthy" while any row reads Stale.
+
+4. **Capabilities → Experiments** — `AVG IMPROVEMENT` and the per-row `Score` column.
+   - `AVG IMPROVEMENT` of exactly `+0.0` with blank `Score` ("-") on completed runs is a BROKEN measurement display, NOT a real flat-line — the computed deltas live in `orch_agent_memory` optimization entries (verify via `mcp__rgos__cortex_optimization_status`). Treat blank scores on completed experiments as a P2 data-truthfulness defect.
+   - Separately note the REAL trajectory (best_score_ratio trend) so a stuck/regressing metric is surfaced honestly, not hidden behind a display bug.
+
+Record each panel's numbers in the report. If any panel shows a real problem, it is a finding — a green route-check does NOT override a red operator panel.
+
 ## Runtime Preference (after Playwright)
 
 Use routes in this priority order — never report "blocked" due to Codex credits, as alternatives are always available:
