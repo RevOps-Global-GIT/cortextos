@@ -89,6 +89,13 @@ Guidelines for the conversation:
 - Continue until you both agree on recommended actions
 - If you disagree, document the disagreement and present both views to the user
 
+**Challenge timeout (Proposal 5):** Wait up to 15 minutes for the orchestrator reply after sending the Phase 6 challenge message. If no reply arrives within that window, do NOT block finalization:
+1. Write your own self-challenge notes (apply the orchestrator role yourself: argue the score up or down, name the weakest assumption, cite the highest-risk data gap).
+2. Record in `challenger_notes`: "Challenge sent but no reply received within 15 minutes. Self-challenge applied: [your notes]."
+3. Proceed through Phases 7-9 normally.
+4. When writing the `theta_sessions` row in Phase 9, use `status = partial` (not `status = error`) and include "partial: orchestrator challenge timed out" in `synthesis_summary`.
+A `partial` session is a truthful record of real theta work. It is promotable to `complete` in a follow-up patch once a valid challenge-reply arrives.
+
 ### Phase 7: Hypothesis and Action
 Based on the conversation, decide what to change:
 

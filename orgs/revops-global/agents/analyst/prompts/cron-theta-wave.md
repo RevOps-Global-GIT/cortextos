@@ -6,7 +6,7 @@ Hard guardrails:
 
 - Do not deploy, merge, rotate secrets, or change provider/account settings.
 - Do not mark the cycle successful unless the `theta_sessions` row is written.
-- Do not hide stale/error states. If the workflow cannot complete, record a truthful error status instead of leaving the dashboard ambiguous.
+- Do not hide stale/error states. Use the truthful status: `complete` when all phases including orchestrator challenge succeeded; `partial` when substantive theta work completed but the Phase 6 challenge-reply did not arrive within 15 minutes; `error` when a fundamental failure prevented theta work (auth failure, DB write failure, Phase 1-5 crash).
 - Use UTC timestamps for internal records; the schedule fires at 10:00 PM America/Los_Angeles, which is normally the next UTC date at 05:00.
 
 Required workflow:
@@ -18,17 +18,22 @@ Required workflow:
    - `ran_at = current UTC timestamp`
    - `status = error`
    - `synthesis_summary` must say the artifact-backed cron started and is not yet complete.
-   - This intentional placeholder uses the current `theta_sessions` contract (`complete`, `error`, or `partial`) and must be patched to `complete` after the cycle succeeds.
+   - This intentional placeholder uses the current `theta_sessions` contract (`complete`, `partial`, or `error`) and must be patched to the appropriate terminal status at the end of the cycle (see steps 6 and 7).
 4. Write a markdown session artifact under `output/YYYY-MM-DD-theta-wave-session.md`.
 5. Execute the theta-wave cycle from the skill, including the orchestrator challenge step.
-6. Patch the same `theta_sessions` row at completion:
-   - `status = complete`
-   - `analyst_report`, `challenger_notes`, and `synthesis_summary` populated from the artifact
-   - `proposals_count`, `consolidated_memories_count`, and `duration_seconds` set truthfully
-7. If any required step fails, patch the same row to:
+6. Patch the same `theta_sessions` row at completion. Use the appropriate terminal status:
+   - **`status = complete`**: Phases 1-9 all succeeded, including a live Phase 6 orchestrator challenge-reply within 15 minutes.
+     - `analyst_report`, `challenger_notes`, and `synthesis_summary` populated from the artifact
+     - `proposals_count`, `consolidated_memories_count`, and `duration_seconds` set truthfully
+   - **`status = partial`**: Phases 1-5 and 7-9 completed successfully, but the Phase 6 orchestrator challenge-reply did not arrive within 15 minutes of sending the challenge message.
+     - `challenger_notes` should record: "Challenge sent but no reply received within 15 minutes. Self-challenge applied: [your own pushback notes on the proposed score]."
+     - `synthesis_summary` must include "partial: orchestrator challenge timed out" and the artifact path.
+     - All other fields (`analyst_report`, `proposals_count`, `consolidated_memories_count`, `duration_seconds`) populated as normal.
+7. If a fundamental failure prevented substantive theta work (auth failure, Phase 1-5 crash, DB write failure), patch the same row to:
    - `status = error`
    - `synthesis_summary` includes the exact blocker and artifact path
    - `duration_seconds` set if known
+   Note: a missing challenge-reply is NOT a fundamental failure — use `partial` per step 6, not `error`.
 8. Before closing, run:
 
    ```bash
@@ -41,6 +46,6 @@ Required final response:
 
 - `SESSION_ID`
 - theta artifact path
-- `theta_sessions` write result: `complete` or `error`
+- `theta_sessions` write result: `complete`, `partial`, or `error` (with reason)
 - watchdog result
 - any owner action needed
