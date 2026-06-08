@@ -1,4 +1,4 @@
-import { spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join, resolve } from 'path';
 import type { CronDefinition } from '../types/index.js';
@@ -149,8 +149,9 @@ async function spawnWorkerDefault(opts: SpawnWorkerOptions): Promise<SpawnWorker
   ];
   if (opts.model) args.push('--model', opts.model);
   if (opts.home) args.push('--home', opts.home);
-  const result = spawnSync('cortextos', args, { stdio: 'pipe', timeout: 30_000 });
-  return { ok: result.status === 0, exitCode: result.status };
+  const child = spawn('cortextos', args, { stdio: 'ignore', detached: true });
+  child.unref();
+  return { ok: true, exitCode: null };
 }
 
 async function mirrorSpawnCodexReview(

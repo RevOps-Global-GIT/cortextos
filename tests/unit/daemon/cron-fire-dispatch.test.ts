@@ -1,10 +1,19 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { spawn } from 'child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { dispatchCronFire, extractSkillSlugsFromCronPrompt, type SpawnWorkerOptions, type SpawnWorkerResult } from '../../../src/daemon/cron-fire-dispatch.js';
 import type { CronDefinition } from '../../../src/types/index.js';
 import type { SpawnCodexResult } from '../../../src/bus/spawn-codex.js';
+
+vi.mock('child_process', async () => {
+  const actual = await vi.importActual<typeof import('child_process')>('child_process');
+  return {
+    ...actual,
+    spawn: vi.fn(actual.spawn),
+  };
+});
 
 function cron(overrides: Partial<CronDefinition> = {}): CronDefinition {
   return {
@@ -386,6 +395,38 @@ describe('dispatchCronFire', () => {
       dir: '/repo/orgs/revops-global/agents/analyst',
       model: 'claude-haiku-4-5',
     }));
+  });
+
+  it('launches default spawn-worker crons detached and unreferences the child', async () => {
+    const unref = vi.fn();
+    vi.mocked(spawn).mockReturnValue({ unref } as never);
+
+    await dispatchCronFire(cron({
+      name: 'theta-wave',
+      prompt: 'Run theta-wave now.',
+      metadata: {
+        runner: 'spawn-worker',
+        worker_name: 'theta-worker',
+        agent: 'analyst',
+        model: 'gpt-5.5',
+        home: '/tmp/codex-home',
+      },
+    }), {
+      agentName: 'orchestrator',
+      frameworkRoot: '/repo',
+      org: 'revops-global',
+      injectAgent: vi.fn(),
+    });
+
+    expect(spawn).toHaveBeenCalledWith('cortextos', [
+      'bus', 'spawn-worker', 'theta-worker',
+      '--dir', '/repo/orgs/revops-global/agents/analyst',
+      '--prompt', 'Run theta-wave now.',
+      '--parent', 'orchestrator',
+      '--model', 'gpt-5.5',
+      '--home', '/tmp/codex-home',
+    ], { stdio: 'ignore', detached: true });
+    expect(unref).toHaveBeenCalledOnce();
   });
 
   it('throws when spawn-worker cron fails', async () => {
