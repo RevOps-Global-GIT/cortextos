@@ -226,11 +226,11 @@ function summarizeAdvisorCanary() {
       'agents/codex/output/advisor-facing-page-canary',
     ),
   ];
-  // Accept both "canary-browser-results.json" (canonical) and "browser-results.json"
-  // (fallback — codex sometimes writes without the "canary-" prefix).
+  // Accept canonical name, legacy prefix-free name, and current results.json schema.
   const jsonArtifact =
     latestTextArtifact(roots, /canary-browser-results\.json$/i) ||
-    latestTextArtifact(roots, /(?:^|[/\\])browser-results\.json$/i);
+    latestTextArtifact(roots, /(?:^|[/\\])browser-results\.json$/i) ||
+    latestTextArtifact(roots, /(?:^|[/\\])results\.json$/i);
   const reportArtifact = latestTextArtifact(roots, /report\.md$/i);
   const artifact = jsonArtifact || reportArtifact;
 
@@ -253,12 +253,26 @@ function summarizeAdvisorCanary() {
   if (jsonArtifact) {
     try {
       const parsed = JSON.parse(jsonArtifact.text);
-      generatedAt = parsed.generated_at ?? generatedAt;
-      failures =
-        Number(parsed.pageErrors?.length ?? 0) +
-        Number(parsed.failedResponses?.length ?? 0);
-      checked = Array.isArray(parsed.results) ? parsed.results.length : 0;
-      label = `${checked} advisor canary URL(s) checked`;
+      // Old schema: { generated_at, results[], pageErrors[], failedResponses[] }
+      // New schema: { checked_at, pages[{ pageErrors[], failedRequests[] }], findings[] }
+      generatedAt = parsed.generated_at ?? parsed.checked_at ?? generatedAt;
+      if (Array.isArray(parsed.results)) {
+        failures =
+          Number(parsed.pageErrors?.length ?? 0) +
+          Number(parsed.failedResponses?.length ?? 0);
+        checked = parsed.results.length;
+      } else if (Array.isArray(parsed.pages)) {
+        checked = parsed.pages.length;
+        failures =
+          parsed.pages.reduce(
+            (sum, p) =>
+              sum +
+              Number(p.pageErrors?.length ?? 0) +
+              Number(p.failedRequests?.length ?? 0),
+            0,
+          ) + Number(parsed.findings?.length ?? 0);
+      }
+      label = `${checked} advisor canary page(s) checked`;
     } catch {
       failures = 1;
       label = 'Advisor canary JSON parse failed';
