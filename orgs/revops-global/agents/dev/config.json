@@ -99,13 +99,13 @@
     {
       "name": "ob1-daily-vignette",
       "type": "recurring",
-      "cron": "33 6 * * *",
+      "cron": "0 6 * * *",
       "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.js"
     },
     {
       "name": "daily-hero-watchdog",
       "type": "recurring",
-      "cron": "33 6 * * *",
+      "cron": "0 8 * * *",
       "prompt": "Read prompts/cron-daily-hero-watchdog.md and execute exactly one bounded hero trigger pass; check latest.json, dispatch to mac-codex if missing, log result and exit."
     },
     {
