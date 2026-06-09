@@ -5,7 +5,7 @@
  * Asserts two failure classes that previously went through 8+ Greg iterations
  * uninstrumented:
  *   1. canonical-ref: all cast reference images are in latest.json + accessible
- *   2. mobile safe-area: hero <img> uses object-fit:contain on 390px viewport
+ *   2. mobile safe-area: hero <img> or <video> uses object-fit:contain on 390px viewport
  *
  * Exit 0 = all pass. Exit 1 = any failure (cron treats non-zero as hard error).
  *
@@ -45,6 +45,7 @@ interface AssertionResult {
 interface LatestJson {
   date?: string;
   image?: string;
+  video?: string;
   cast?: Array<{ id: string; name: string; reference_image?: string }>;
   cast_members?: Array<{ id: string; name: string; reference_image?: string }>;
 }
@@ -261,7 +262,7 @@ async function main() {
   const safeAreaResults = await checkMobileSafeArea();
   allResults.push(...safeAreaResults);
   for (const r of safeAreaResults) {
-    const icon = r.status === 'PASS' ? '✓' : r.status === 'FAIL' ? '~' : '~';
+    const icon = r.status === 'PASS' ? '✓' : r.status === 'FAIL' ? '✗' : '~';
     console.log(`  ${icon} ${r.check}: ${r.status}`);
     if (r.status !== 'PASS') console.log(`      ${r.evidence}`);
   }
