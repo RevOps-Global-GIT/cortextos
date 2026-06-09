@@ -357,6 +357,7 @@ function scanZombieCrons() {
   const runningAgents = getRunningAgents();
 
   const zombies          = [];
+  const runnerDown       = [];   // cron fires on schedule but its runner agent fails (attempted fresh, fired stale)
   const healthy          = [];
   const noData           = [];
   const disabledCrons    = [];   // Rule 2: intentionally disabled — not zombies
@@ -381,24 +382,27 @@ function scanZombieCrons() {
       continue;
     }
 
-    // Get live cron data from daemon
-    const raw = run(`cortextos bus list-crons ${agent} 2>/dev/null`, { silent: true });
+    // Get live cron data from daemon (JSON for last_fire_attempted_at access)
+    const raw = run(`cortextos bus list-crons ${agent} --json 2>/dev/null`, { silent: true });
 
-    // Build map: cron name → last fire + success info
-    // Output format: "  name    schedule    enabled  Last Fire    Next Fire    Prompt"
+    // Build map: cron name → daemon record
     const cronMap = {};
-    for (const line of raw.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('Name') || trimmed.startsWith('-') || trimmed.startsWith('Crons')) continue;
-      // Fields are whitespace-separated; grab first token as name
-      const parts = trimmed.split(/\s{2,}/);
-      if (parts.length < 4) continue;
-      const name     = parts[0];
-      const schedule = parts[1];
-      const enabled  = parts[2];
-      const lastFire = parts[3]; // "2026-05-22 06:06 UTC" or "-"
-      cronMap[name] = { schedule, enabled, lastFire };
-    }
+    try {
+      const records = JSON.parse(raw || '[]');
+      for (const r of records) {
+        if (!r.name) continue;
+        // Normalise enabled: daemon JSON uses boolean, text table used 'yes'/'no'
+        cronMap[r.name] = {
+          schedule:            r.schedule,
+          enabled:             r.enabled ? 'yes' : 'no',
+          lastFire:            r.last_fired_at
+            ? new Date(r.last_fired_at).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+            : '-',
+          lastFireAttemptedAt: r.last_fire_attempted_at || null,
+          lastFiredAt:         r.last_fired_at || null,
+        };
+      }
+    } catch { /* empty / malformed — cronMap stays {} */ }
 
     for (const cron of crons) {
       const name     = cron.name;
@@ -471,7 +475,38 @@ function scanZombieCrons() {
       }
 
       if (ratio > 2) {
-        // Rule 3: spawn-codex / spawn-worker crons — stale last-fire may reflect
+        // Rule 3a: distinguish "cron not firing" from "cron fires but runner fails".
+        // last_fired_at only advances on SUCCESS, so it freezes when the runner is down.
+        // last_fire_attempted_at advances every time the daemon tries — if it is fresh,
+        // the cron IS being dispatched on schedule; the runner is just failing.
+        // Only classify as a true zombie when BOTH timestamps are stale.
+        const attemptedAt = live.lastFireAttemptedAt;
+        const attemptedMs = attemptedAt ? new Date(attemptedAt).getTime() : null;
+        const attemptedAgeMs = attemptedMs ? Date.now() - attemptedMs : null;
+        const attemptedFresh = attemptedAgeMs !== null && attemptedAgeMs < intervalMs * 2;
+
+        if (attemptedFresh) {
+          // Cron is firing on schedule — runner agent is down or erroring.
+          // Check the runner agent heartbeat to diagnose.
+          const runnerAgent = cron.metadata?.runner_agent || agent;
+          const runnerHeartbeat = run(
+            `cortextos bus list-agents 2>/dev/null | grep -i "^\\s*${runnerAgent}" | head -1`,
+            { silent: true }
+          ).trim();
+          const runnerStatus = runnerHeartbeat ? runnerHeartbeat : 'unknown';
+          runnerDown.push({
+            agent, name,
+            reason: `cron fires on schedule (attempted ${Math.round(attemptedAgeMs/60000)}m ago) but last success=${Math.round(ageMs/60000)}m ago — runner agent may be down or erroring`,
+            lastFire: lastFireStr,
+            lastFireAttempted: attemptedAt,
+            schedule: live.schedule,
+            runnerAgent,
+            runnerStatus,
+          });
+          continue;
+        }
+
+        // Rule 3b: spawn-codex / spawn-worker crons — stale last-fire may reflect
         // a blocked worker (e.g. auth token invalid) rather than a dead cron.
         // Flag separately so ops can verify the worker auth rather than the cron itself.
         const spawnWorker = isSpawnWorkerCron(prompt, cron.metadata);
@@ -494,7 +529,7 @@ function scanZombieCrons() {
     }
   }
 
-  return { zombies, healthy, noData, disabledCrons, stoppedAgentCrons };
+  return { zombies, runnerDown, healthy, noData, disabledCrons, stoppedAgentCrons };
 }
 
 // ---------------------------------------------------------------------------
@@ -646,11 +681,12 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
   lines.push('');
   const trueZombies = cronResult.zombies.filter(z => !z.status.startsWith('blocked-by-worker'));
   const workerBlocked = cronResult.zombies.filter(z => z.status.startsWith('blocked-by-worker'));
-  lines.push(`**Healthy:** ${cronResult.healthy.length}  **Zombies:** ${trueZombies.length}  **Worker-blocked:** ${workerBlocked.length}  **No data:** ${cronResult.noData.length}  **Disabled:** ${cronResult.disabledCrons.length}  **Agent stopped:** ${cronResult.stoppedAgentCrons.length}`);
+  const runnerDownList = cronResult.runnerDown || [];
+  lines.push(`**Healthy:** ${cronResult.healthy.length}  **Zombies:** ${trueZombies.length}  **Runner-down:** ${runnerDownList.length}  **Worker-blocked:** ${workerBlocked.length}  **No data:** ${cronResult.noData.length}  **Disabled:** ${cronResult.disabledCrons.length}  **Agent stopped:** ${cronResult.stoppedAgentCrons.length}`);
   lines.push('');
 
   if (trueZombies.length > 0) {
-    lines.push('### Zombie Crons');
+    lines.push('### Zombie Crons (not firing — both attempted and fired timestamps stale)');
     lines.push('');
     lines.push('| Agent | Cron | Reason | Last Fire | Success Signal |');
     lines.push('|-------|------|--------|-----------|----------------|');
@@ -661,6 +697,22 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
     lines.push('');
   } else {
     lines.push('No zombie crons detected.');
+    lines.push('');
+  }
+
+  if (runnerDownList.length > 0) {
+    lines.push('### Runner-Down Crons (firing on schedule — runner agent failing)');
+    lines.push('');
+    lines.push('> Cron dispatch is working (last_fire_attempted_at is recent) but the runner agent is down or erroring (last_fired_at frozen). Check the runner agent heartbeat, not the cron.');
+    lines.push('');
+    lines.push('| Agent | Cron | Last Attempted | Last Success | Runner |');
+    lines.push('|-------|------|----------------|--------------|--------|');
+    for (const r of runnerDownList) {
+      const attempted = r.lastFireAttempted
+        ? new Date(r.lastFireAttempted).toISOString().replace('T', ' ').slice(0, 16) + ' UTC'
+        : '-';
+      lines.push(`| ${r.agent} | ${r.name} | ${attempted} | ${r.lastFire || '-'} | ${r.runnerAgent} |`);
+    }
     lines.push('');
   }
 
@@ -739,15 +791,17 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
   // Summary
   const trueZombieCount = cronResult.zombies.filter(z => !z.status.startsWith('blocked-by-worker')).length;
   const workerBlockedCount = cronResult.zombies.filter(z => z.status.startsWith('blocked-by-worker')).length;
+  const runnerDownCount = (cronResult.runnerDown || []).length;
   const issueCount = webResult.blindSpots.length + trueZombieCount;
   lines.push('## Summary');
   lines.push('');
-  if (issueCount === 0 && escalations.length === 0 && rcaOnFile.length === 0) {
+  if (issueCount === 0 && runnerDownCount === 0 && escalations.length === 0 && rcaOnFile.length === 0) {
     lines.push('No issues found. All surfaces covered, all crons healthy.');
   } else {
     const parts = [];
     if (webResult.blindSpots.length > 0)  parts.push(`${webResult.blindSpots.length} uncovered route(s)`);
     if (trueZombieCount > 0)              parts.push(`${trueZombieCount} zombie cron(s)`);
+    if (runnerDownCount > 0)              parts.push(`${runnerDownCount} runner-down cron(s) (check runner agent heartbeat)`);
     if (workerBlockedCount > 0)           parts.push(`${workerBlockedCount} worker-blocked cron(s) (auth check needed)`);
     if (escalations.length > 0)           parts.push(`${escalations.length} repeat-regression MERGE-BLOCKER(s)`);
     if (rcaOnFile.length > 0)             parts.push(`${rcaOnFile.length} RCA-on-file validating`);
@@ -770,7 +824,7 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
 
   console.log('[surface-sweep] Scanning crons for zombies...');
   const cronResult = scanZombieCrons();
-  console.log(`[surface-sweep] ${cronResult.zombies.length} zombies, ${cronResult.healthy.length} healthy, ${cronResult.noData.length} no-data`);
+  console.log(`[surface-sweep] ${cronResult.zombies.length} zombies, ${(cronResult.runnerDown || []).length} runner-down, ${cronResult.healthy.length} healthy, ${cronResult.noData.length} no-data`);
 
   console.log('[surface-sweep] Running repeat-regression escalator...');
   const { escalations, rcaOnFile } = runRepeatRegressionEscalator(webResult, cronResult);
@@ -781,7 +835,7 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
   console.log(`[surface-sweep] Report written: ${REPORT}`);
 
   // Log event
-  run(`cortextos bus log-event action surface_sweep info --meta '{"blind_spots":${webResult.blindSpots.length},"zombies":${cronResult.zombies.length},"escalations":${escalations.length},"rca_suppressed":${rcaOnFile.length}}'`, { silent: true });
+  run(`cortextos bus log-event action surface_sweep info --meta '{"blind_spots":${webResult.blindSpots.length},"zombies":${cronResult.zombies.length},"runner_down":${(cronResult.runnerDown || []).length},"escalations":${escalations.length},"rca_suppressed":${rcaOnFile.length}}'`, { silent: true });
 
   // Spawn RGOS tasks for newly-escalated surfaces
   for (const e of escalations) {
@@ -791,11 +845,13 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
   }
 
   // Notify orchestrator if issues found
-  const issueCount = webResult.blindSpots.length + cronResult.zombies.length + escalations.length;
+  const runnerDownCount2 = (cronResult.runnerDown || []).length;
+  const issueCount = webResult.blindSpots.length + cronResult.zombies.length + runnerDownCount2 + escalations.length;
   if (issueCount > 0) {
     const parts = [];
     if (webResult.blindSpots.length > 0) parts.push(`${webResult.blindSpots.length} blind spot(s)`);
     if (cronResult.zombies.length > 0)   parts.push(`${cronResult.zombies.length} zombie cron(s)`);
+    if (runnerDownCount2 > 0)            parts.push(`${runnerDownCount2} runner-down cron(s)`);
     if (escalations.length > 0)          parts.push(`${escalations.length} MERGE-BLOCKER repeat regression(s)`);
     if (rcaOnFile.length > 0)            parts.push(`${rcaOnFile.length} RCA-on-file validating`);
     const summary = `Surface sweep: ${parts.join(', ')}. Report: ${REPORT}`;
