@@ -47,6 +47,12 @@
       "prompt": "Run the supreme-mentions-triage update via direct Slack API (no Orgo): bash /home/cortextos/cortextos/scripts/supreme-mentions-triage-run.sh. Log the exit code. If exit non-zero, send-message analyst normal 'supreme-mentions-triage-run.sh failed: <exit code / last error line>'."
     },
     {
+      "name": "app-signals-deep-qa",
+      "type": "recurring",
+      "interval": "6h",
+      "prompt": "Read prompts/cron-app-signals-deep-qa.md and follow its instructions."
+    },
+    {
       "name": "advisor-facing-page-canary",
       "type": "cron",
       "schedule": "45 7 * * *",
