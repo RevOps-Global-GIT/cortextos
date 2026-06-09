@@ -7,7 +7,7 @@ import { hardRestart } from '../bus/system.js';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
 import { updateApproval, listPendingApprovals, readApproval } from '../bus/approval.js';
-import { listTasks } from '../bus/task.js';
+import { listTasks, recoverStaleInProgressTasks } from '../bus/task.js';
 import { mirrorTaskToRgos, drainRetryQueue, isEnabled as isMirrorEnabled } from '../bus/rgos-mirror.js';
 import { AgentProcess } from './agent-process.js';
 import type { TelegramAPI } from '../telegram/api.js';
@@ -60,6 +60,7 @@ export class FastChecker {
 
   // Idle-session heartbeat watchdog
   private heartbeatTimer: NodeJS.Timeout | null = null;
+  private staleTaskRecoveryTimer: NodeJS.Timeout | null = null;
 
   // Poll-cycle stall watchdog + circuit breaker
   private pollCycleWatchdog: NodeJS.Timeout | null = null;
@@ -215,6 +216,26 @@ export class FastChecker {
         if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
       });
     }, HEARTBEAT_INTERVAL_MS);
+
+    // Stale-task recovery: hourly sweep (plus one at boot) that flips
+    // in_progress tasks untouched for 24h+ to blocked with blocker context.
+    // Without it a task claimed by a crashed agent sat in_progress forever.
+    const STALE_RECOVERY_INTERVAL_MS = 60 * 60 * 1000;
+    const runStaleRecovery = () => {
+      try {
+        const result = recoverStaleInProgressTasks(this.paths);
+        if (result.recovered.length > 0) {
+          this.log(`stale-task-recovery: blocked ${result.recovered.length} stale in_progress task(s): ${result.recovered.join(', ')}`);
+        }
+        for (const e of result.errors) {
+          this.log(`stale-task-recovery: failed for ${e.id}: ${e.error}`);
+        }
+      } catch (err) {
+        this.log(`stale-task-recovery error: ${err}`);
+      }
+    };
+    runStaleRecovery();
+    this.staleTaskRecoveryTimer = setInterval(runStaleRecovery, STALE_RECOVERY_INTERVAL_MS);
 
     // Poll-cycle stall watchdog: runs independently every 30s.
     // If pollCycle hasn't completed in 90s the loop is wedged — hard-restart.
@@ -391,6 +412,10 @@ export class FastChecker {
     if (this.pollCycleWatchdog !== null) {
       clearInterval(this.pollCycleWatchdog);
       this.pollCycleWatchdog = null;
+    }
+    if (this.staleTaskRecoveryTimer !== null) {
+      clearInterval(this.staleTaskRecoveryTimer);
+      this.staleTaskRecoveryTimer = null;
     }
   }
 

@@ -1049,6 +1049,67 @@ function readAllTasks(taskDir: string): Task[] {
 /**
  * Check for stale tasks. Matches bash check-stale-tasks.sh behavior.
  */
+/** Result of one recoverStaleInProgressTasks() sweep. */
+export interface StaleRecoveryReport {
+  scanned: number;
+  recovered: string[];
+  errors: Array<{ id: string; error: string }>;
+}
+
+/**
+ * Recover in_progress tasks whose claiming agent has presumably died.
+ *
+ * checkStaleTasks() only *reports* stale in_progress tasks (CLI surface);
+ * nothing automated ever recovered them, so a task claimed by an agent that
+ * crashed sat in_progress forever — invisible to re-claiming and rendered as
+ * live work in AgentOps. This sweep flips tasks with no update for
+ * `maxAgeHours` (default 24h, matching the RGOS-side orch-tasks-stale-blocker
+ * cron) to `blocked` with full blocker context + audit trail, routing them to
+ * the human/digest surfaces instead of silently rotting.
+ *
+ * Goes through updateTask() so the status change takes the per-task lock,
+ * mirrors to RGOS, appends the audit entry, and emits the task event.
+ */
+export function recoverStaleInProgressTasks(
+  paths: BusPaths,
+  opts: { maxAgeHours?: number } = {},
+): StaleRecoveryReport {
+  const maxAgeMs = (opts.maxAgeHours ?? 24) * 3_600_000;
+  const now = Date.now();
+  const report: StaleRecoveryReport = { scanned: 0, recovered: [], errors: [] };
+
+  let tasks: Task[];
+  try {
+    tasks = listTasks(paths, { status: 'in_progress' });
+  } catch {
+    return report; // missing task dir (first boot) — nothing to recover
+  }
+
+  for (const task of tasks) {
+    report.scanned++;
+    const updatedMs = new Date(task.updated_at).getTime();
+    if (Number.isNaN(updatedMs) || now - updatedMs < maxAgeMs) continue;
+    const staleHours = Math.round((now - updatedMs) / 3_600_000);
+    try {
+      updateTask(paths, task.id, 'blocked', {
+        blocker: {
+          blocker_reason:
+            `Auto-recovered: in_progress with no update for ${staleHours}h — claiming agent presumed dead`,
+          next_proof_required:
+            'An agent or human re-claims the task and posts a status update, or cancels it',
+        },
+        auto_blocked_by: 'stale-task-recovery',
+        auto_blocked_at: new Date(now).toISOString(),
+      });
+      report.recovered.push(task.id);
+    } catch (err) {
+      report.errors.push({ id: task.id, error: String(err) });
+    }
+  }
+
+  return report;
+}
+
 export function checkStaleTasks(paths: BusPaths): StaleTaskReport {
   const nowEpoch = Math.floor(Date.now() / 1000);
   const STALE_IN_PROGRESS = 7200;   // 2 hours
