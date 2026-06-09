@@ -3512,7 +3512,15 @@ function metricFamily(metric: string | undefined, baseline: number, result: numb
 }
 
 function hasExplicitScore(exp: ExperimentApiRow): boolean {
-  return numericValue(exp.score) !== null;
+  if (numericValue(exp.score) !== null) return true;
+  // Also accept the runner-writeback fields (improvement_delta or baseline+result)
+  // written by attachMetricsDelta in experiment-runner.
+  const rj = exp.results_json && typeof exp.results_json === 'object'
+    ? exp.results_json as Record<string, unknown>
+    : {};
+  if (typeof rj.improvement_delta === 'number') return true;
+  if (typeof rj.baseline === 'number' && typeof rj.result === 'number') return true;
+  return false;
 }
 
 function flattenExperiments(payload: ExperimentsApiResponse): ExperimentApiRow[] {
@@ -3729,9 +3737,9 @@ async function runCortexExperimentsChecks(page: Page, serviceKey?: string): Prom
       const scoredCount = completed.filter(hasExplicitScore).length;
       const coverage = scoredCount / completed.length;
       if (completed.length >= 3 && coverage < 0.5) {
-        results.push({ check: '[CORRECTNESS] CHECK 5 Scored-row coverage', status: 'FAIL', evidence: `Only ${scoredCount}/${completed.length} completed experiment(s) have results_json.score (${(coverage * 100).toFixed(0)}%) — suspicious runner-writeback gap.` });
+        results.push({ check: '[CORRECTNESS] CHECK 5 Scored-row coverage', status: 'FAIL', evidence: `Only ${scoredCount}/${completed.length} completed experiment(s) have a score signal (score/improvement_delta/baseline+result) (${(coverage * 100).toFixed(0)}%) — suspicious runner-writeback gap.` });
       } else {
-        results.push({ check: '[CORRECTNESS] CHECK 5 Scored-row coverage', status: 'PASS', evidence: `${scoredCount}/${completed.length} completed experiment(s) have results_json.score (${(coverage * 100).toFixed(0)}%).` });
+        results.push({ check: '[CORRECTNESS] CHECK 5 Scored-row coverage', status: 'PASS', evidence: `${scoredCount}/${completed.length} completed experiment(s) have a score signal (score/improvement_delta/baseline+result) (${(coverage * 100).toFixed(0)}%).` });
       }
     }
   } catch (e) {
