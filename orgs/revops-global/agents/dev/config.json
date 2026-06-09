@@ -97,6 +97,12 @@
       "prompt": "node /home/cortextos/cortextos/scripts/vm-disk-watchdog.js"
     },
     {
+      "name": "ob1-daily-vignette",
+      "type": "recurring",
+      "cron": "33 6 * * *",
+      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.js"
+    },
+    {
       "name": "daily-hero-watchdog",
       "type": "recurring",
       "cron": "33 6 * * *",
