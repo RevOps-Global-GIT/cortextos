@@ -297,34 +297,6 @@ def is_action_item(text: str) -> bool:
     return bool(ACTION_VERB_RE.search(text))
 
 
-CLOSING_PLEASANTRY_RE = re.compile(
-    r"\b(thanks|thank you|thank you so much|thanks so much|appreciate it|many thanks)\b",
-    re.IGNORECASE,
-)
-
-
-def is_closing_pleasantry(text: str) -> bool:
-    """Return True if the message is a closing pleasantry (e.g. 'Thanks Becky!').
-
-    A message is a closing pleasantry only when ALL of:
-      - Contains a thanks/thank-you expression
-      - No question mark at the end
-      - No ACTION_VERB_RE match (no actionable verb)
-      - Fewer than 20 words
-    """
-    if not text:
-        return False
-    if not CLOSING_PLEASANTRY_RE.search(text):
-        return False
-    if QUESTION_RE.search(text.strip()):
-        return False
-    if ACTION_VERB_RE.search(text):
-        return False
-    if len(text.split()) >= 20:
-        return False
-    return True
-
-
 def unanswered_direct_question(is_dm: bool, is_mpim: bool, text: str,
                                last_thread_user: Optional[str]) -> bool:
     return (
@@ -524,10 +496,11 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
             continue  # Greg sent the last message — answered
         if latest_msg.get("subtype"):
             continue
+        _dm_text = latest_msg.get("text") or ""
+        if not is_question(_dm_text) and not ACTION_VERB_RE.search(_dm_text):
+            continue  # non-actionable (gratitude, acknowledgment, etc.)
         ch_name = f"DM:{user_name(latest_msg.get('user'))}"
-        hydrate_mentions(latest_msg.get("text") or "")
-        if is_closing_pleasantry(latest_msg.get("text") or ""):
-            continue  # skip closing pleasantries (e.g. "Thanks Becky!")
+        hydrate_mentions(_dm_text)
         items.append(build_item(
             source="dm",
             status="unanswered",
@@ -586,9 +559,6 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
         direct_unanswered = unanswered_direct_question(False, is_mpim, text, last_thread_user)
         if replied and not direct_unanswered:
             continue
-
-        if is_closing_pleasantry(text):
-            continue  # skip closing pleasantries (e.g. "Thanks Becky!")
 
         if direct_unanswered:
             source = "channel_mention"
