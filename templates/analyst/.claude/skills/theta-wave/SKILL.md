@@ -93,8 +93,8 @@ Guidelines for the conversation:
 1. Write your own self-challenge notes (apply the orchestrator role yourself: argue the score up or down, name the weakest assumption, cite the highest-risk data gap).
 2. Record in `challenger_notes`: "Challenge sent but no reply received within 15 minutes. Self-challenge applied: [your notes]."
 3. Proceed through Phases 7-9 normally.
-4. When writing the `theta_sessions` row in Phase 9, use `status = partial` (not `status = error`) and include "partial: orchestrator challenge timed out" in `synthesis_summary`.
-A `partial` session is a truthful record of real theta work. It is promotable to `complete` in a follow-up patch once a valid challenge-reply arrives.
+4. When writing the `theta_sessions` row in Phase 9, use `status = complete` and include "complete; challenge-reply late/skipped" in `synthesis_summary`. A late or absent challenge handshake does NOT degrade the session: when all content phases (1-7) finished, the learning is done and the session is complete.
+Reserve `status = partial` for sessions where one or more content phases (1-7) genuinely did not finish, and `status = error` for sessions that failed outright. Never stamp partial/error solely because the orchestrator challenge-reply was late or absent.
 
 ### Phase 7: Hypothesis and Action
 Based on the conversation, decide what to change:
