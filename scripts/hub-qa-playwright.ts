@@ -3437,11 +3437,19 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
           const row = rows[0];
           const badStatus = row.status !== 'complete' && row.status !== 'partial';
           if (badStatus) {
-            results.push({
-              check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions',
-              status: 'FAIL',
-              evidence: `Latest theta_session id=${row.id} status="${row.status}" — expected complete/partial.`,
-            });
+            if (row.status === 'running') {
+              results.push({
+                check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions',
+                status: 'DEFERRED',
+                evidence: `Latest theta_session id=${row.id} is in-progress (status="running") — wave still running, check again after completion.`,
+              });
+            } else {
+              results.push({
+                check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions',
+                status: 'FAIL',
+                evidence: `Latest theta_session id=${row.id} status="${row.status}" — expected complete/partial.`,
+              });
+            }
           } else {
             results.push({
               check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions',
