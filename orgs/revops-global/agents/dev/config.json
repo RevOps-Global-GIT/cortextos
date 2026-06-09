@@ -5,6 +5,8 @@
   "max_session_seconds": 255600,
   "max_crashes_per_day": 10,
   "tier": "sonnet",
+  "model": "claude-fable-5",
+  "model_pilot_note": "2026-06-09: time-boxed Fable-5 pilot (Greg-approved). Baseline = dev sonnet PRs #765/#766. Revert to tier:sonnet (remove this model override) if not adopted.",
   "working_directory": "/home/cortextos/cortextos/orgs/revops-global/agents/dev",
   "timezone": "America/Los_Angeles",
   "crons_tz": "All cron expressions use local timezone (America/Los_Angeles). 0 7 = 7 AM PT = 14:00 UTC.",
