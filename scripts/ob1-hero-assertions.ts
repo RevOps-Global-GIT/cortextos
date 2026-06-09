@@ -139,6 +139,7 @@ async function checkCanonicalRefs(): Promise<AssertionResult[]> {
 
 // ---------------------------------------------------------------------------
 // Check 2: mobile safe-area — hero uses object-fit:contain on 390px viewport
+// Handles both <img> and <video> heroes (today's vignette may use either).
 // ---------------------------------------------------------------------------
 
 async function checkMobileSafeArea(): Promise<AssertionResult[]> {
@@ -156,20 +157,27 @@ async function checkMobileSafeArea(): Promise<AssertionResult[]> {
       // networkidle can timeout on SPAs; fall through and check what loaded
     }
 
-    // Find the hero image. Next.js Image optimization rewrites src to /_next/image?url=...
-    // so we match by src containing "vignette" or the year pattern, or by data attributes.
+    // Find the hero media element. Priority order:
+    //   1. video selectors (vignettes with video field render <video> not <img>)
+    //   2. img selectors with vignette-specific markers
+    //   3. structural selectors scoped to the hero container
+    // We intentionally do NOT fall through to bare `img:first-of-type` — that
+    // matches cast thumbnails and avatars which legitimately use object-fit:cover.
     const heroSelectors = [
+      // video — highest priority when today has a video vignette
+      'video[src*="vignette"]',
+      '.daily-vignette-hero__image video',
+      // img — Next.js Image rewrites src to /_next/image?url=... so match container
+      '.daily-vignette-hero__image img',
       'img[src*="vignette"]',
       'img[src*="/_next/image"][src*="vignette"]',
       'img[alt*="hero"]',
       'img[alt*="vignette"]',
-      // Fallback: first img with aspect ratio close to 16:9 that is large
-      'main img:first-of-type',
-      'img:first-of-type',
     ];
 
     let heroHandle: import('playwright').Locator | null = null;
     let heroSrc = '';
+    let heroTag = '';
 
     for (const sel of heroSelectors) {
       const loc = page.locator(sel).first();
@@ -177,8 +185,10 @@ async function checkMobileSafeArea(): Promise<AssertionResult[]> {
       if (count > 0) {
         try {
           await loc.waitFor({ timeout: 5000 });
-          heroSrc = await loc.getAttribute('src') ?? '';
-          if (heroSrc) {
+          // Accept src OR srcset (video uses src; Next.js img may only have srcset)
+          heroSrc = (await loc.getAttribute('src') ?? '') || (await loc.getAttribute('srcset') ?? '');
+          heroTag = await loc.evaluate((el: Element) => el.tagName.toLowerCase());
+          if (heroSrc || heroTag === 'video') {
             heroHandle = loc;
             break;
           }
@@ -190,23 +200,32 @@ async function checkMobileSafeArea(): Promise<AssertionResult[]> {
 
     if (!heroHandle) {
       results.push({
-        check: '[SAFE-AREA] hero image element found',
+        check: '[SAFE-AREA] hero media element found',
         status: 'SKIP',
-        evidence: `No hero <img> found on ${BASE_URL} within 5s on 390px viewport. Selectors tried: ${heroSelectors.join(', ')}. Page may need auth or selector needs update.`,
+        evidence: `No hero <img> or <video> found on ${BASE_URL} within 5s on 390px viewport. Selectors tried: ${heroSelectors.join(', ')}. Page may need auth or selector needs update.`,
       });
       return results;
     }
 
-    // Check object-fit computed style
-    const computedObjectFit = await heroHandle.evaluate((el: HTMLImageElement) => {
+    results.push({
+      check: '[SAFE-AREA] hero media element found',
+      status: 'PASS',
+      evidence: `Found <${heroTag}> via selector (src: ${heroSrc ? heroSrc.slice(0, 80) : '(empty)'})`,
+    });
+
+    // Check object-fit computed style — works for both <img> and <video>
+    const computedObjectFit = await heroHandle.evaluate((el: Element) => {
       const style = window.getComputedStyle(el);
+      const vid = el as HTMLVideoElement;
+      const img = el as HTMLImageElement;
       return {
         objectFit: style.objectFit,
         objectPosition: style.objectPosition,
         width: el.clientWidth,
         height: el.clientHeight,
-        naturalWidth: el.naturalWidth,
-        naturalHeight: el.naturalHeight,
+        // naturalWidth/naturalHeight only exist on <img>; use videoWidth/videoHeight for <video>
+        naturalWidth: img.naturalWidth || vid.videoWidth || 0,
+        naturalHeight: img.naturalHeight || vid.videoHeight || 0,
       };
     });
 
@@ -219,7 +238,7 @@ async function checkMobileSafeArea(): Promise<AssertionResult[]> {
         : `object-fit: ${objFit} — hero will CROP on mobile, faces may exit safe zone. Expected "contain", got "${objFit}". (Regression of PR #443 fix)`,
     });
 
-    // Aspect ratio guard: natural dims should be ~16:9
+    // Aspect ratio guard: natural dims should be ~16:9 (skip for video if not yet loaded)
     if (computedObjectFit.naturalWidth > 0 && computedObjectFit.naturalHeight > 0) {
       const ratio = computedObjectFit.naturalWidth / computedObjectFit.naturalHeight;
       const is16x9 = ratio > 1.60 && ratio < 1.90;
