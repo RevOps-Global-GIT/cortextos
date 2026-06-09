@@ -16,9 +16,9 @@ Required workflow:
 3. Create or update a `theta_sessions` placeholder row before deep work begins:
    - `session_id = SESSION_ID`
    - `ran_at = current UTC timestamp`
-   - `status = error`
+   - `status = running`
    - `synthesis_summary` must say the artifact-backed cron started and is not yet complete.
-   - This intentional placeholder uses the current `theta_sessions` contract (`complete`, `partial`, or `error`) and must be patched to the appropriate terminal status at the end of the cycle (see steps 6 and 7).
+   - This intentional placeholder uses `running` (the in-progress sentinel) and must be patched to the appropriate terminal status (`complete`, `partial`, or `error`) at the end of the cycle (see steps 6 and 7). Do NOT use `error` for the placeholder — `error` is a terminal failure status and causes the QA harness to fail the theta health check prematurely.
 4. Write a markdown session artifact under `output/YYYY-MM-DD-theta-wave-session.md`.
 5. Execute the theta-wave cycle from the skill, including the orchestrator challenge step.
 6. Patch the same `theta_sessions` row at completion. Use the appropriate terminal status:
