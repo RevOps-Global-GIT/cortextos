@@ -29,6 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const https = require('https');
+const { HUB_QA_ROOTS, HUB_QA_PATTERN } = require('./hub-qa-constants');
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
@@ -119,15 +120,8 @@ function numberMatch(text, pattern) {
 // ── source: hub_qa ──────────────────────────────────────────────────────────
 
 function summarizeHubQa() {
-  const roots = [
-    path.join(ORG_ROOT, 'agents/hub-dogfood/output'),
-    path.join(ORG_ROOT, 'agents/qa-agent/output'),
-    path.join(ORG_ROOT, 'agents/codex/output/playwright-qa'),
-  ];
-  const artifact = latestTextArtifact(
-    roots,
-    /(?:qa-summary|-qa-|report|dogfood).*\.md$/i,
-  );
+  const roots = HUB_QA_ROOTS;
+  const artifact = latestTextArtifact(roots, HUB_QA_PATTERN);
 
   if (!artifact) {
     return {

@@ -25,6 +25,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { execFileSync } = require("child_process");
+const { HUB_QA_ROOTS, HUB_QA_PATTERN } = require("./hub-qa-constants");
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -724,16 +725,7 @@ async function syncRotationEvents(sinceTsStr) {
 
 // ── Hub QA status sync ────────────────────────────────────────────────────────
 
-const HUB_QA_ROOTS = [
-  "/home/cortextos/cortextos/orgs/revops-global/agents/hub-dogfood/output",
-  "/home/cortextos/cortextos/orgs/revops-global/agents/qa-agent/output",
-  // cortextos-qa is the live QA worktree; hourly-dogfood resets+writes there each run.
-  // The main-repo path only gets morning full-rotation writes (06:37) and goes stale by noon.
-  "/home/cortextos/cortextos-qa/orgs/revops-global/agents/codex/output/playwright-qa",
-];
-// Matches legacy rollup files (qa-summary/report/dogfood) AND per-page playwright
-// QA artifacts written as <surface>-qa-YYYY-MM-DD.md.
-const HUB_QA_PATTERN = /(?:qa-summary|report|dogfood|-qa-\d{4}-\d{2}-\d{2}).*\.md$/i;
+// HUB_QA_ROOTS and HUB_QA_PATTERN imported from hub-qa-constants.js (shared with deliverables-snapshot.js)
 const VM_QA_MONITOR_NODE_KEY = "vm-qa-monitor";
 const ORCH_TASK_ORG_ID = "00000000-0000-0000-0000-000000000001";
 
