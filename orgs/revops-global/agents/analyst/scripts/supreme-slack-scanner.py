@@ -496,8 +496,11 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
             continue  # Greg sent the last message — answered
         if latest_msg.get("subtype"):
             continue
+        dm_text = latest_msg.get("text") or ""
+        if not is_question(dm_text) and not ACTION_VERB_RE.search(dm_text):
+            continue  # pure acknowledgement / closer — not reply-needed
         ch_name = f"DM:{user_name(latest_msg.get('user'))}"
-        hydrate_mentions(latest_msg.get("text") or "")
+        hydrate_mentions(dm_text)
         items.append(build_item(
             source="dm",
             status="unanswered",
