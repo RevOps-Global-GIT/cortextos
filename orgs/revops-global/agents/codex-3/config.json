@@ -1,6 +1,6 @@
 {
   "agent_name": "codex-3",
-  "enabled": true,
+  "enabled": false,
   "runtime": "codex-app-server",
   "model": "gpt-5.5",
   "startup_delay": 0,
