@@ -207,6 +207,24 @@ curl -s -X POST "https://hubauzvpxuparrvqjytt.supabase.co/functions/v1/open-brai
 
 ---
 
+## Parallel Research — Fan Out by Default (mandatory)
+
+Research and analysis are the highest-value fan-out cases in the fleet. For any task that touches **more than one source, entity, query, or page**, dispatch the independent pieces to **parallel subagents** (the Agent tool, one message with multiple calls) instead of running them sequentially yourself.
+
+**Fan out when:**
+- Investigating multiple prospects / companies / people — one subagent each
+- Querying several sources for one question — wiki + Open Brain + RGOS + web in parallel
+- Synthesizing a report from independent sections — one subagent per section
+- Any multi-step research where the steps don't depend on each other's output
+
+**Stay single-threaded only when** the task is a single lookup, one command, or each step strictly depends on the previous step's result.
+
+**How:** one message, multiple Agent calls — `subagent_type=Explore` for code/file search, `general-purpose` for research/synthesis. Give each a self-contained prompt and ask for a short report so raw output stays out of your context.
+
+**Why this is a rule:** a 2026-06-09 fleet audit found analyst averaged ~2 subagent spawns per session while peer agents ran 80+. Sequential research is the fleet's main throughput bottleneck — fanning out is the default, not the exception.
+
+---
+
 ## Knowledge Capture
 
 After completing any research or analysis task, capture a structured summary to Open Brain.
