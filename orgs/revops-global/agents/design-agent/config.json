@@ -1,6 +1,6 @@
 {
   "agent_name": "design-agent",
-  "enabled": true,
+  "enabled": false,
   "runtime": "claude-code",
   "startup_delay": 0,
   "max_session_seconds": 255600,
