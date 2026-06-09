@@ -55,13 +55,13 @@
       "name": "fleet-tick",
       "type": "recurring",
       "interval": "2h",
-      "prompt": "Fleet-tick: light coordination pass \u2014 (1) cortextos bus list-tasks; (2) check heartbeats; (3) scan inbox; (4) update heartbeat. Silent unless action needed."
+      "prompt": "Fleet-tick: light coordination pass — (1) cortextos bus list-tasks; (2) check heartbeats; (3) scan inbox; (4) update heartbeat. Silent unless action needed."
     },
     {
       "name": "kanban-sync",
       "type": "recurring",
       "cron": "0 8,17 * * *",
-      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator \u2014 compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
+      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator — compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
     },
     {
       "name": "blocked-uat-escalator",
@@ -176,6 +176,10 @@
   "home": "/home/cortextos",
   "tier": "opus",
   "model": "claude-fable-5",
+  "fallbackModel": [
+    "claude-opus-4-7",
+    "claude-sonnet-4-6"
+  ],
   "model_pilot_note": "2026-06-09: Greg-approved orchestrator upgrade to Fable-5 (above Opus). Rationale: orchestrator is the fleet judgment engine; reasoning premium pays off on routing/defect-catch/ambiguous-directive work. Cost caveat: orchestrator is the highest-volume 24/7 token consumer. Revert to tier:opus (remove this model override) if cost/quality not justified.",
   "runtime": "claude-code",
   "codex_app_server_transport": "ws",
