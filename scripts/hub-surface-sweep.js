@@ -400,6 +400,7 @@ function scanZombieCrons() {
             : '-',
           lastFireAttemptedAt: r.last_fire_attempted_at || null,
           lastFiredAt:         r.last_fired_at || null,
+          daemonMetadata:      r.metadata || {},
         };
       }
     } catch { /* empty / malformed — cronMap stays {} */ }
@@ -488,7 +489,13 @@ function scanZombieCrons() {
         if (attemptedFresh) {
           // Cron is firing on schedule — runner agent is down or erroring.
           // Check the runner agent heartbeat to diagnose.
-          const runnerAgent = cron.metadata?.runner_agent || agent;
+          // When runner=spawn-codex, the actual failing agent is metadata.agent (e.g. codex),
+          // not the owning agent. Use daemon metadata first (authoritative), then config.json fallback.
+          const daemonMeta = live.daemonMetadata || {};
+          const isSpawnCodex = daemonMeta.runner === 'spawn-codex' || cron.metadata?.runner === 'spawn-codex';
+          const runnerAgent = isSpawnCodex
+            ? (daemonMeta.agent || cron.metadata?.agent || 'codex')
+            : (cron.metadata?.runner_agent || agent);
           const runnerHeartbeat = run(
             `cortextos bus list-agents 2>/dev/null | grep -i "^\\s*${runnerAgent}" | head -1`,
             { silent: true }
@@ -844,14 +851,27 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
     run(`cortextos bus create-task ${JSON.stringify(title)} --desc ${JSON.stringify(desc)} --priority high 2>/dev/null`, { silent: true });
   }
 
-  // Notify orchestrator if issues found
-  const runnerDownCount2 = (cronResult.runnerDown || []).length;
-  const issueCount = webResult.blindSpots.length + cronResult.zombies.length + runnerDownCount2 + escalations.length;
-  if (issueCount > 0) {
+  // Notify orchestrator — suppress repeat runner-down noise.
+  // Runner-down items that appeared in the last sweep and haven't changed are
+  // already acknowledged; only ping on NEW findings to avoid recurring spam.
+  const runnerDownList2 = cronResult.runnerDown || [];
+  const runnerDownCount2 = runnerDownList2.length;
+
+  // Load + diff runner-down state from history
+  const history2 = loadHistory();
+  const prevRunnerDownKeys = new Set(history2.runnerDownKeys || []);
+  const currRunnerDownKeys = new Set(runnerDownList2.map(r => `${r.agent}/${r.name}`));
+  const newRunnerDown = runnerDownList2.filter(r => !prevRunnerDownKeys.has(`${r.agent}/${r.name}`));
+  // Persist current runner-down state for next sweep
+  history2.runnerDownKeys = [...currRunnerDownKeys];
+  try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(history2, null, 2), 'utf8'); } catch { /* ignore */ }
+
+  const notifyIssueCount = webResult.blindSpots.length + cronResult.zombies.length + newRunnerDown.length + escalations.length;
+  if (notifyIssueCount > 0) {
     const parts = [];
     if (webResult.blindSpots.length > 0) parts.push(`${webResult.blindSpots.length} blind spot(s)`);
     if (cronResult.zombies.length > 0)   parts.push(`${cronResult.zombies.length} zombie cron(s)`);
-    if (runnerDownCount2 > 0)            parts.push(`${runnerDownCount2} runner-down cron(s)`);
+    if (newRunnerDown.length > 0)        parts.push(`${newRunnerDown.length} NEW runner-down cron(s): ${newRunnerDown.map(r => `${r.agent}/${r.name}(runner:${r.runnerAgent})`).join(', ')}`);
     if (escalations.length > 0)          parts.push(`${escalations.length} MERGE-BLOCKER repeat regression(s)`);
     if (rcaOnFile.length > 0)            parts.push(`${rcaOnFile.length} RCA-on-file validating`);
     const summary = `Surface sweep: ${parts.join(', ')}. Report: ${REPORT}`;
