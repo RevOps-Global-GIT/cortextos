@@ -3464,6 +3464,52 @@ async function runCortexThetaChecks(page: Page, serviceKey?: string): Promise<Ch
     results.push({ check: '[CORRECTNESS] CHECK 6 No parse_error in theta_sessions', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
   }
 
+  // CHECK 7: [CORRECTNESS] Live overview API treats theta status=partial as healthy.
+  // Regression guard for rgos #1523: thetaRunHealth recognizes status=partial as a
+  // designed graceful state (theta work completed, challenge-reply timed out;
+  // cortextos #742/#743). When the live latest theta session is partial, the live
+  // /api/agentops/overview must report freshness.theta.status="healthy" — never a
+  // needs-attention (warning/error) state. Only enforceable while live data is
+  // actually partial; otherwise DEFERRED (partial path not exercisable on live data).
+  // The overview API accepts the Supabase service key as bearer (service-role bypass).
+  try {
+    if (!serviceKey) {
+      results.push({ check: '[CORRECTNESS] CHECK 7 Overview API theta partial=healthy', status: 'DEFERRED', evidence: 'No serviceKey — cannot bearer-auth the overview API or query theta_sessions.' });
+    } else {
+      const statusResp = await fetch(
+        `${SUPA_URL}/rest/v1/theta_sessions?select=id,status&order=ran_at.desc&limit=1`,
+        { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+      );
+      const ovResp = await fetch(`${BASE_URL}/api/agentops/overview`, {
+        headers: { Authorization: `Bearer ${serviceKey}` },
+      });
+      if (!statusResp.ok || !ovResp.ok) {
+        results.push({ check: '[CORRECTNESS] CHECK 7 Overview API theta partial=healthy', status: 'DEFERRED', evidence: `Cannot evaluate — theta_sessions HTTP ${statusResp.status}, overview HTTP ${ovResp.status}.` });
+      } else {
+        const statusRows = await statusResp.json().catch(() => []) as Array<{ id: string; status: string }>;
+        const latest = Array.isArray(statusRows) ? statusRows[0] : undefined;
+        const ov = await ovResp.json().catch(() => null) as { freshness?: { theta?: { status?: string; label?: string } } } | null;
+        const thetaHealth = ov?.freshness?.theta;
+        const latestStatus = String(latest?.status ?? '').trim().toLowerCase();
+        if (!latest) {
+          results.push({ check: '[CORRECTNESS] CHECK 7 Overview API theta partial=healthy', status: 'DEFERRED', evidence: 'No theta_sessions rows yet — cannot evaluate overview theta health.' });
+        } else if (!thetaHealth || typeof thetaHealth.status !== 'string') {
+          results.push({ check: '[CORRECTNESS] CHECK 7 Overview API theta partial=healthy', status: 'FAIL', evidence: `Overview API 200 but freshness.theta health object missing/malformed — shape regression. Got: ${JSON.stringify(ov?.freshness ?? null)?.slice(0, 160)}` });
+        } else if (latestStatus === 'partial') {
+          if (thetaHealth.status === 'healthy') {
+            results.push({ check: '[CORRECTNESS] CHECK 7 Overview API theta partial=healthy', status: 'PASS', evidence: `Latest theta_session id=${latest.id} status=partial; overview freshness.theta.status="healthy" label="${thetaHealth.label ?? ''}" — #1523 guard holds.` });
+          } else {
+            results.push({ check: '[CORRECTNESS] CHECK 7 Overview API theta partial=healthy', status: 'FAIL', evidence: `REGRESSION (#1523): latest theta_session id=${latest.id} status=partial but overview freshness.theta.status="${thetaHealth.status}" (label="${thetaHealth.label ?? ''}") — partial must report healthy.` });
+          }
+        } else {
+          results.push({ check: '[CORRECTNESS] CHECK 7 Overview API theta partial=healthy', status: 'DEFERRED', evidence: `Latest theta_session id=${latest.id} status="${latestStatus}" (not partial) — #1523 partial path not exercisable on live data now; overview freshness.theta.status="${thetaHealth.status}".` });
+        }
+      }
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 7 Overview API theta partial=healthy', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
   return results;
 }
 
