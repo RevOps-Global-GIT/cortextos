@@ -5,6 +5,7 @@
   "max_session_seconds": 255600,
   "max_crashes_per_day": 10,
   "fallbackModel": [
+    "claude-fable-5",
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001"
   ],

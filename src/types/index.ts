@@ -390,6 +390,14 @@ export interface AgentConfig {
     backoff_seconds?: number;
   };
   model?: string;
+  /**
+   * Ordered fallback model IDs to try when the primary model is unavailable
+   * (rate-limited / overloaded), highest preference first.
+   * Advisory today: read by operators and planned restart/backoff logic; not yet
+   * passed to interactive sessions because `claude --fallback-model` only works
+   * with `--print`.
+   */
+  fallbackModel?: string[];
   /** Override the HOME path so claude reads credentials from $home/.claude/ instead of ~/.claude/ */
   home?: string;
   /**
