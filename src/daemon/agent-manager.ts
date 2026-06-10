@@ -582,6 +582,14 @@ export class AgentManager {
     // Start agent
     await agentProcess.start();
 
+    // Spawn-verify (gen-B): if the PTY could not be spawned after retries
+    // (posix_spawnp / OS resource exhaustion), the agent is NOT running. Do not
+    // start its cron scheduler, fast-checker, or pollers.
+    if (agentProcess.getStatus().status === 'spawn-failed') {
+      log(`[agent-manager] ${name}: SPAWN-FAILED — not starting checker/crons/pollers (agent is not running)`);
+      return;
+    }
+
     // Single-session-per-identity enforcement: write state/{name}/session.lock
     // with the daemon's own pid right after the PTY is up. AgentPTY injects
     // CTX_SESSION_OWNER_PID=<daemonPid> into the PTY env, so every

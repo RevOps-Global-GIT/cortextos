@@ -7,7 +7,7 @@ const mockPty = {
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn(),
   write: vi.fn(),
-  getPid: vi.fn().mockReturnValue(12345),
+  getPid: vi.fn().mockReturnValue(process.pid), // a LIVE pid so spawn-verify's isPidAlive() passes
   isAlive: vi.fn().mockReturnValue(true),
   // Default: no rate-limit signature in output (safe for all existing tests)
   getOutputBuffer: vi.fn().mockReturnValue({ hasRateLimitSignature: () => false }),
@@ -492,6 +492,33 @@ describe('AgentProcess — CrashLoopPauser (instar-inspired sliding window)', ()
     }
     // Should be 'crashed' (recovering), NOT 'halted', because daily max is 5
     expect(ap.getStatus().status).not.toBe('halted');
+  });
+});
+
+describe('AgentProcess — spawn-verify (gen-B: no Running for a corpse)', () => {
+  it('marks SPAWN-FAILED (never running) when spawn yields a dead pid, after retries', async () => {
+    vi.useFakeTimers();
+    // node-pty "succeeds" but the process is a corpse — getPid returns a pid
+    // that is NOT alive (posix_spawnp failure shape).
+    mockPty.getPid.mockReturnValue(2_000_000_000);
+    try {
+      const ap = new AgentProcess('alice', mockEnv, {});
+      const startP = ap.start();
+      // drive the retry backoff (1s + 2s) to exhaustion
+      await vi.advanceTimersByTimeAsync(6000);
+      await startP;
+      expect(ap.getStatus().status).toBe('spawn-failed');
+      expect(ap.getStatus().status).not.toBe('running');
+    } finally {
+      mockPty.getPid.mockReturnValue(process.pid); // restore for other tests
+      vi.useRealTimers();
+    }
+  });
+
+  it('declares running when the spawn yields a LIVE pid (verification passes)', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+    expect(ap.getStatus().status).toBe('running');
   });
 });
 
