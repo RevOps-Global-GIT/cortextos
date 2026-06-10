@@ -18,14 +18,31 @@ interface AgentConfig {
   max_session_seconds?: number;
   max_crashes_per_day?: number;
   startup_delay?: number;
-  runtime?: 'claude-code' | 'codex-app-server' | 'hermes';
+  runtime?: 'claude-code' | 'codex-app-server' | 'hermes' | 'script';
+  script_path?: string;
 }
 
-const MODEL_PLACEHOLDER: Record<NonNullable<AgentConfig['runtime']>, string> = {
+const MODEL_PLACEHOLDER: Record<string, string> = {
   'claude-code': 'claude-sonnet-4-6',
   'codex-app-server': 'gpt-5-codex',
   hermes: 'hermes-1',
 };
+
+/**
+ * Runtime-appropriate model placeholder. Script agents are external bridges
+ * (e.g. mac-codex-bridge.js) whose model is owned by the bridged runtime, so
+ * a Claude model label must never appear for them — show the bridge name
+ * instead. Unknown runtimes get a neutral label rather than the claude-code
+ * default.
+ */
+function modelPlaceholder(config: AgentConfig): string {
+  const runtime = config.runtime ?? 'claude-code';
+  if (runtime === 'script') {
+    const base = config.script_path?.split('/').pop()?.replace(/\.[^.]+$/, '');
+    return base || 'script-managed';
+  }
+  return MODEL_PLACEHOLDER[runtime] ?? 'runtime-managed';
+}
 
 interface SettingsTabProps {
   agentName: string;
@@ -311,7 +328,7 @@ export function SettingsTab({ agentName }: SettingsTabProps) {
               type="text"
               value={config.model || ''}
               onChange={e => setConfig(p => ({ ...p, model: e.target.value }))}
-              placeholder={MODEL_PLACEHOLDER[config.runtime ?? 'claude-code']}
+              placeholder={modelPlaceholder(config)}
               readOnly={modelSource === 'tier'}
               title={modelSource === 'tier' ? `Derived from tier "${config.tier}". Set model explicitly in config.json to override.` : undefined}
               className={`mt-1 block w-full rounded-md border bg-background px-3 py-1.5 text-sm focus:border-primary focus:outline-none${modelSource === 'tier' ? ' cursor-not-allowed opacity-70' : ''}`}
