@@ -1,6 +1,7 @@
 {
   "agent_name": "monitor",
-  "enabled": true,
+  "enabled": false,
+  "on_demand_note": "2026-06-10 (fleet shrink): merged into analyst \u2014 experiment-probe-precision cron moved there; only heartbeat remains here, dormant. Start with `cortextos start monitor` if a dedicated watch seat is needed again. NOTE: requires the AgentOps watch-set change (rgos same-branch PR) or the Warden will page + auto-restart monitor forever. Re-evaluate July 1.",
   "runtime": "claude-code",
   "startup_delay": 0,
   "max_session_seconds": 255600,
@@ -14,12 +15,6 @@
       "type": "recurring",
       "interval": "30m",
       "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task."
-    },
-    {
-      "name": "experiment-probe-precision",
-      "type": "recurring",
-      "interval": "24h",
-      "prompt": "Read .claude/skills/autoresearch/SKILL.md and execute the experiment loop for cycle probe-precision. Form a hypothesis, make a targeted change, measure outcome, decide keep/discard."
     }
   ],
   "ecosystem": {

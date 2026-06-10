@@ -104,6 +104,40 @@ describe('checkUsageApi', () => {
     expect(mockFetch).toHaveBeenCalledOnce();
   });
 
+  it('captures unrecognized top-level fields into extra_fields (billing-change canary)', async () => {
+    writeStore();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        five_hour_utilization: 0.2,
+        seven_day_utilization: 0.1,
+        programmatic_credit: { used_usd: 12.5, limit_usd: 200 },
+      }),
+    });
+
+    const result = await checkUsageApi(tmpDir, { force: true });
+    expect(result.extra_fields).toEqual({
+      programmatic_credit: { used_usd: 12.5, limit_usd: 200 },
+    });
+
+    // Must be persisted in the snapshot files, not just returned in-memory.
+    const latest = JSON.parse(
+      readFileSync(join(tmpDir, 'state', 'usage', 'latest.json'), 'utf-8'),
+    );
+    expect(latest.extra_fields.programmatic_credit.used_usd).toBe(12.5);
+  });
+
+  it('omits extra_fields when the response has only known fields', async () => {
+    writeStore();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ five_hour_utilization: 0.2, seven_day_utilization: 0.1 }),
+    });
+
+    const result = await checkUsageApi(tmpDir, { force: true });
+    expect(result.extra_fields).toBeUndefined();
+  });
+
   it('normalizes 0-100 values to 0.0-1.0', async () => {
     writeStore();
     mockFetch.mockResolvedValueOnce({

@@ -1,12 +1,12 @@
 {
   "agent_name": "dev",
-  "enabled": true,
+  "enabled": false,
+  "on_demand_note": "2026-06-10 (fleet shrink, deeper cut per Greg): moved to on-demand. Load-bearing infra crons migrated to analyst (see analyst fleet_shrink_note); remaining crons here are dev-work-specific and dormant until `cortextos start dev`. daily-hero-watchdog left dormant \u2014 orchestrator's hero-publish-watchdog (9:17/11:17/13:17 PT, self-healing) covers it. mac-task-sync removed (permanently quarantined per org CLAUDE.md). Re-evaluate July 1.",
   "startup_delay": 0,
   "max_session_seconds": 255600,
   "max_crashes_per_day": 10,
   "tier": "sonnet",
-  "model": "claude-fable-5",
-  "model_pilot_note": "2026-06-09: time-boxed Fable-5 pilot (Greg-approved). Baseline = dev sonnet PRs #765/#766. Revert to tier:sonnet (remove this model override) if not adopted.",
+  "model_revert_note": "2026-06-10: Fable-5 pilot (2026-06-09) reverted to tier:sonnet per June 15 billing migration plan \u2014 second 24/7 frontier-model seat; pilot note pre-authorized revert ('remove this model override'). Re-evaluate at July 1 review.",
   "working_directory": "/home/cortextos/cortextos/orgs/revops-global/agents/dev",
   "timezone": "America/Los_Angeles",
   "crons_tz": "All cron expressions use local timezone (America/Los_Angeles). 0 7 = 7 AM PT = 14:00 UTC.",
@@ -24,24 +24,6 @@
       "prompt": "Check for tasks assigned to you in the RGOS kanban: use mcp__rgos__cortex_list_tasks with assigned_to=\"dev\" and status=\"approved\". If any tasks are found, claim each one with mcp__rgos__cortex_claim_task (agent_id=\"dev\"), then work them in priority order. Log a cortextos bus log-event for each claimed task. If no tasks, do nothing."
     },
     {
-      "name": "vm-sync-push",
-      "type": "recurring",
-      "interval": "15m",
-      "prompt": "cd /home/cortextos/cortextos && git fetch fork main --quiet 2>/dev/null; git checkout refs/remotes/fork/main -- scripts/cortextos-vm-sync-push.js 2>/dev/null; node scripts/cortextos-vm-sync-push.js"
-    },
-    {
-      "name": "mac-task-sync",
-      "type": "recurring",
-      "interval": "30m",
-      "prompt": "node /home/cortextos/cortextos/scripts/cortextos-mac-task-sync.js"
-    },
-    {
-      "name": "memory-sync",
-      "type": "recurring",
-      "interval": "30m",
-      "prompt": "node /home/cortextos/cortextos/scripts/sync-agent-memories.js"
-    },
-    {
       "name": "inbox-drain-watchdog",
       "type": "recurring",
       "session_cron": true,
@@ -54,12 +36,6 @@
       "session_cron": true,
       "interval": "1h",
       "prompt": "node /home/cortextos/cortextos/scripts/cortextos-budget-check.js"
-    },
-    {
-      "name": "auto-merge-pr",
-      "type": "recurring",
-      "interval": "15m",
-      "prompt": "node /home/cortextos/cortextos/scripts/auto-merge-pr.js"
     },
     {
       "name": "data-contract-guardrail-review",
@@ -87,34 +63,10 @@
       "prompt": "node /home/cortextos/cortextos/scripts/hub-surface-sweep.js"
     },
     {
-      "name": "vm-stale-worktree-gc",
-      "type": "recurring",
-      "cron": "0 3 * * *",
-      "prompt": "node /home/cortextos/cortextos/scripts/vm-stale-worktree-gc.js"
-    },
-    {
-      "name": "vm-disk-watchdog",
-      "type": "recurring",
-      "interval": "6h",
-      "prompt": "node /home/cortextos/cortextos/scripts/vm-disk-watchdog.js"
-    },
-    {
-      "name": "ob1-daily-vignette",
-      "type": "recurring",
-      "cron": "0 6 * * *",
-      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.js"
-    },
-    {
       "name": "daily-hero-watchdog",
       "type": "recurring",
       "cron": "0 8 * * *",
       "prompt": "Read prompts/cron-daily-hero-watchdog.md and execute exactly one bounded hero trigger pass; check latest.json, dispatch to mac-codex if missing, log result and exit."
-    },
-    {
-      "name": "daily-hero-verify",
-      "type": "recurring",
-      "cron": "3 8 * * *",
-      "prompt": "Read prompts/cron-daily-hero-verify.md and execute exactly one bounded hero verification pass; check latest.json date==today, alert orchestrator if deadline breached, log result and exit."
     }
   ],
   "ctx_autoreset_threshold": 85,
