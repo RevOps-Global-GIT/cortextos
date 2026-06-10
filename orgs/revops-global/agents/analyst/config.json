@@ -182,7 +182,7 @@
       "prompt": "python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/greg-qa-defect-rate.py"
     }
   ],
-  "ctx_autoreset_threshold": 45,
+  "ctx_autoreset_threshold": 85,
   "ecosystem": {
     "local_version_control": {
       "enabled": true
