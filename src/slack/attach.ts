@@ -79,6 +79,28 @@ export async function attachSlackToAgent(params: AttachSlackParams): Promise<Sla
     return null;
   }
 
+  // Only poll for agents that actually have a Slack app provisioned —
+  // otherwise every agent would hit agent_slack_inbox on a 5s loop for rows
+  // that can never exist.
+  try {
+    const appsUrl = `${url}/rest/v1/agent_slack_apps?select=id&agent_id=eq.${agentId}&limit=1`;
+    const res = await fetch(appsUrl, {
+      headers: { apikey: key, Authorization: `Bearer ${key}` },
+    });
+    if (!res.ok) {
+      log(`[slack] agent_slack_apps lookup for ${agentName} returned ${res.status}`);
+      return null;
+    }
+    const apps = (await res.json()) as Array<{ id: string }>;
+    if (apps.length === 0) {
+      log(`[slack] no agent_slack_apps row for ${agentName} — Slack poller not started`);
+      return null;
+    }
+  } catch (err) {
+    log(`[slack] agent_slack_apps lookup threw: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+
   const poller = new SlackPoller(
     { url, serviceKey: key },
     agentId,
