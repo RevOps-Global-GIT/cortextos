@@ -11,6 +11,8 @@ interface Cron {
   type?: 'recurring' | 'once';
   /** Required for recurring crons (e.g. "4h", "1d"). */
   interval?: string;
+  /** Config-seed cron expression (e.g. "0 8 * * *") — alternative to interval. */
+  cron?: string;
   /** Required for once crons — ISO 8601 datetime. */
   fire_at?: string;
   prompt: string;

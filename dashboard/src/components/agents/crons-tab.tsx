@@ -7,6 +7,8 @@ interface Cron {
   name: string;
   type?: 'recurring' | 'once';
   interval?: string;
+  /** Config-seed cron expression (e.g. "0 8 * * *") — alternative to interval. */
+  cron?: string;
   fire_at?: string;
   prompt: string;
   // Live daemon fields (read-only)
@@ -94,11 +96,13 @@ export function CronsTab({ agentName }: CronsTabProps) {
       const d = new Date(cron.fire_at);
       return isNaN(d.getTime()) ? 'One-time (invalid time)' : `Once at ${d.toLocaleString()}`;
     }
-    // Live crons use cron expression in `schedule` field
-    if (cron.schedule) return `cron: ${cron.schedule}`;
-    const interval = cron.interval ?? '';
-    const match = interval.match(/^(\d+)([smhd])$/);
-    if (!match) return interval || '(no schedule)';
+    // Schedule sources in priority order: live `schedule` (interval shorthand
+    // like "30m" OR a cron expression), config-seed `cron` expression, config
+    // `interval`. All three are rendered, not just `interval`.
+    const raw = cron.schedule ?? cron.cron ?? cron.interval ?? '';
+    if (!raw) return '(no schedule)';
+    const match = raw.match(/^(\d+)([smhd])$/);
+    if (!match) return `cron: ${raw}`;
     const [, num, unit] = match;
     const labels: Record<string, string> = { s: 'sec', m: 'min', h: 'hr', d: 'day' };
     return `Every ${num} ${labels[unit]}${Number(num) > 1 ? 's' : ''}`;
