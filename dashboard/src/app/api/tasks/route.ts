@@ -114,7 +114,10 @@ export async function POST(request: NextRequest) {
   // Call the Node CLI directly instead of going through bash wrapper.
   // create-task.sh just runs: node dist/cli.js bus create-task <title> [options]
   const cliPath = join(frameworkRoot, 'dist', 'cli.js');
-  const args: string[] = ['bus', 'create-task', title.trim()];
+  // Dashboard creates come from the UI form, which cannot author the 8-field
+  // brief contract enforced by the CLI since PR #363 — skip it or every
+  // dashboard create exits non-zero and surfaces as a 500.
+  const args: string[] = ['bus', 'create-task', title.trim(), '--skip-brief-validation'];
   if (description) { args.push('--desc', String(description).slice(0, 2000)); }
   if (assignee) { args.push('--assignee', String(assignee)); }
   if (priority) { args.push('--priority', priority); }
