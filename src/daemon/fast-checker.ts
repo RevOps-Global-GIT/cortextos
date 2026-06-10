@@ -10,7 +10,7 @@ import { updateApproval, listPendingApprovals, readApproval } from '../bus/appro
 import { listTasks, recoverStaleInProgressTasks } from '../bus/task.js';
 import { mirrorTaskToRgos, drainRetryQueue, isEnabled as isMirrorEnabled } from '../bus/rgos-mirror.js';
 import { AgentProcess } from './agent-process.js';
-import { DeadAirGuard, HOLDING_REPLY_TEXT } from './dead-air-guard.js';
+import { DeadAirGuard, HOLDING_REPLY_TEXT, matchesUsageLimitBounce } from './dead-air-guard.js';
 import { logEvent } from '../bus/event.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
@@ -26,6 +26,45 @@ import {
 } from './fast-checker-formatters.js';
 
 type LogFn = (msg: string) => void;
+
+/**
+ * How long Tier 3 defers a context force-restart while the session is bouncing
+ * on usage limits. Restarting a rate-limited session is pure thrash: the fresh
+ * session burns rate-limited tokens on bootstrap, crosses the ctx threshold
+ * again, and loops (session 62a6bac2: 5 rate-limit hits → 10 handoff cascades).
+ * Deferring is safe because context cannot grow while turns are bouncing.
+ */
+export const RATE_LIMIT_HANDOFF_BACKOFF_MS = 10 * 60_000;
+
+export type HandoffDeadlineAction =
+  | { action: 'skip'; reason: 'pressure-resolved' }
+  | { action: 'backoff'; nextDeadlineAt: number }
+  | { action: 'restart' };
+
+/**
+ * Decide what an expired Tier 3 handoff deadline should do.
+ *
+ * - Context pressure already resolved (auto-compaction dropped usage below the
+ *   handoff threshold, observed as low as 28%): skip the restart entirely and
+ *   re-arm Tier 2 for a future climb.
+ * - Session currently rate-limited: push the deadline back instead of
+ *   restarting — the agent could not have cooperated with the handoff prompt.
+ * - Otherwise: pressure persists and the agent ignored the prompt → restart.
+ */
+export function resolveHandoffDeadlineAction(opts: {
+  now: number;
+  effectivePct: number;
+  handoffThreshold: number;
+  rateLimited: boolean;
+}): HandoffDeadlineAction {
+  if (opts.effectivePct < opts.handoffThreshold) {
+    return { action: 'skip', reason: 'pressure-resolved' };
+  }
+  if (opts.rateLimited) {
+    return { action: 'backoff', nextDeadlineAt: opts.now + RATE_LIMIT_HANDOFF_BACKOFF_MS };
+  }
+  return { action: 'restart' };
+}
 
 /**
  * Fast message checker for a single agent.
@@ -1652,6 +1691,18 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
   }
 
   /**
+   * Whether the tail of the PTY output shows a usage-limit turn bounce.
+   * Reuses the dead-air guard's bounce patterns (status-bar usage text does
+   * NOT match). Window is deliberately small: once the agent produces ~4KB of
+   * normal output past a bounce, it no longer counts as "currently limited".
+   * A quiet agent keeps matching, which is fine — deferral while idle is free
+   * because context cannot grow without processed turns.
+   */
+  private isRecentOutputRateLimited(): boolean {
+    return matchesUsageLimitBounce(this.agent.getOutputBuffer()?.getRecent(4000) ?? '');
+  }
+
+  /**
    * Context monitor — called on every poll cycle.
    * Reads context_status.json written by the statusLine bridge hook and takes
    * action when thresholds are crossed.
@@ -1729,8 +1780,28 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     const effectivePct = pct ?? (exceeds200k ? 101 : null);
     if (effectivePct === null) return;
 
-    // Tier 3: deadline exceeded — force restart if agent ignored handoff prompt
+    // Tier 3: deadline exceeded — restart only if context pressure still exists
+    // and the session is not currently bouncing on usage limits. The deadline
+    // alone is not evidence the agent is stuck: auto-compaction may have already
+    // resolved the pressure, and a rate-limited agent cannot cooperate at all.
     if (this.ctxHandoffDeadlineAt > 0 && now > this.ctxHandoffDeadlineAt) {
+      const decision = resolveHandoffDeadlineAction({
+        now,
+        effectivePct,
+        handoffThreshold: handoff,
+        rateLimited: this.isRecentOutputRateLimited(),
+      });
+      if (decision.action === 'skip') {
+        this.ctxHandoffDeadlineAt = 0;
+        this.ctxHandoffFiredAt = 0; // re-arm Tier 2 in case context climbs again
+        this.log(`Handoff deadline expired but ctx is ${Math.round(effectivePct)}% (< ${handoff}%) — pressure resolved, skipping restart`);
+        return;
+      }
+      if (decision.action === 'backoff') {
+        this.ctxHandoffDeadlineAt = decision.nextDeadlineAt;
+        this.log(`Handoff deadline expired at ${Math.round(effectivePct)}% but session is rate-limited — deferring restart ${Math.round(RATE_LIMIT_HANDOFF_BACKOFF_MS / 60_000)}min`);
+        return;
+      }
       this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
       this.ctxHandoffDeadlineAt = 0;
       this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within 5min`);
@@ -1756,6 +1827,13 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
       if (sessionAge >= 0 && sessionAge < 60_000) {
         this.log(`Tier 0 would fire at ${Math.round(effectivePct)}% but session is only ${Math.round(sessionAge / 1000)}s old — skipping (boot-window guard)`);
         return; // do not latch — let the next poll reconsider after boot window
+      }
+      // Rate-limit guard: a restart now would burn rate-limited tokens on
+      // bootstrap and immediately re-cross the threshold. Context cannot grow
+      // while turns bounce, so deferring is safe; next poll reconsiders.
+      if (this.isRecentOutputRateLimited()) {
+        this.log(`Tier 0 would fire at ${Math.round(effectivePct)}% but session is rate-limited — deferring (no latch)`);
+        return;
       }
       const restartPlannedMarker = join(this.paths.stateDir, '.restart-planned');
       if (existsSync(restartPlannedMarker)) {
@@ -1812,6 +1890,15 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
       const sessionAge = this.ctxSessionStartedAt > 0 ? now - this.ctxSessionStartedAt : Infinity;
       if (sessionAge >= 0 && sessionAge < 90_000) {
         // Do not latch ctxHandoffFiredAt — allow Tier 2 to fire once the session is settled.
+        return;
+      }
+
+      // Rate-limit guard: injecting the handoff prompt into a session whose
+      // turns are bouncing arms a 5-min deadline the agent cannot possibly meet,
+      // guaranteeing a Tier 3 force-restart. Defer without latching — context
+      // cannot grow while turns bounce, so Tier 2 fires once the limit lifts.
+      if (this.isRecentOutputRateLimited()) {
+        this.log(`Tier 2 would fire at ${Math.round(effectivePct)}% but session is rate-limited — deferring handoff prompt (no latch)`);
         return;
       }
 

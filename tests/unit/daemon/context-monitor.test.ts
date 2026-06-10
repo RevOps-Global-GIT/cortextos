@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdirSync, writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { resolveHandoffDeadlineAction, RATE_LIMIT_HANDOFF_BACKOFF_MS } from '../../../src/daemon/fast-checker';
 
 /**
  * Unit tests for the context monitor logic in fast-checker.ts.
@@ -449,5 +450,57 @@ describe('threshold=0 treated as disabled', () => {
 
   it('only autoreset=60 → anyThresholdSet is true (arms Tier 0)', () => {
     expect(anyThresholdSet({ autoreset: 60 })).toBe(true);
+  });
+});
+
+// --- Tier 3 deadline action: ctx gate + rate-limit backoff ---
+//
+// Incident: session 62a6bac2 hit 5 usage-limit bounces and cascaded through
+// 10 handoffs, force-restarting at 28% context. The 5-min deadline timer alone
+// is not evidence the agent is stuck: auto-compaction may have already dropped
+// usage below the handoff threshold, and a rate-limited agent cannot cooperate
+// with the handoff prompt at all.
+
+describe('resolveHandoffDeadlineAction (Tier 3 gating)', () => {
+  const HANDOFF = 80;
+  const now = 1_750_000_000_000;
+
+  it('restarts when pressure persists and not rate-limited', () => {
+    expect(resolveHandoffDeadlineAction({ now, effectivePct: 85, handoffThreshold: HANDOFF, rateLimited: false }))
+      .toEqual({ action: 'restart' });
+  });
+
+  it('skips restart when ctx dropped below handoff threshold (auto-compaction resolved pressure)', () => {
+    expect(resolveHandoffDeadlineAction({ now, effectivePct: 28, handoffThreshold: HANDOFF, rateLimited: false }))
+      .toEqual({ action: 'skip', reason: 'pressure-resolved' });
+  });
+
+  it('skips restart at 0% (status file reset by Tier 2, no fresh reading yet)', () => {
+    expect(resolveHandoffDeadlineAction({ now, effectivePct: 0, handoffThreshold: HANDOFF, rateLimited: false }))
+      .toEqual({ action: 'skip', reason: 'pressure-resolved' });
+  });
+
+  it('backs off instead of restarting when rate-limited with pressure persisting', () => {
+    const decision = resolveHandoffDeadlineAction({ now, effectivePct: 90, handoffThreshold: HANDOFF, rateLimited: true });
+    expect(decision).toEqual({ action: 'backoff', nextDeadlineAt: now + RATE_LIMIT_HANDOFF_BACKOFF_MS });
+  });
+
+  it('pressure-resolved wins over rate-limited (no restart needed at all)', () => {
+    expect(resolveHandoffDeadlineAction({ now, effectivePct: 28, handoffThreshold: HANDOFF, rateLimited: true }))
+      .toEqual({ action: 'skip', reason: 'pressure-resolved' });
+  });
+
+  it('restarts at exactly the handoff threshold', () => {
+    expect(resolveHandoffDeadlineAction({ now, effectivePct: 80, handoffThreshold: HANDOFF, rateLimited: false }))
+      .toEqual({ action: 'restart' });
+  });
+
+  it('restarts on overflow signal (effectivePct=101) when not rate-limited', () => {
+    expect(resolveHandoffDeadlineAction({ now, effectivePct: 101, handoffThreshold: HANDOFF, rateLimited: false }))
+      .toEqual({ action: 'restart' });
+  });
+
+  it('backoff pushes the deadline by the documented constant (10 min)', () => {
+    expect(RATE_LIMIT_HANDOFF_BACKOFF_MS).toBe(10 * 60_000);
   });
 });
