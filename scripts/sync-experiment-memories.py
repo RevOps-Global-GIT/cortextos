@@ -9,6 +9,12 @@ and posts each new file to Supabase agent-memory-store with memory_type
 optimization page filters orch_agent_memory by tag="optimization" to render
 runs, so this is the producer it was always waiting for.
 
+Records produced by the weekly optimize-agent-claude-md timer additionally
+get the "claude-md-optimizer" tag (detected via payload.source or the
+"run-<timestamp>" experiment_id shape). AgentOps overview freshness keys on
+that tag specifically, so agent-authored hypothesis experiments living in the
+same history dirs cannot mask a dead weekly timer.
+
 Idempotent via a .synced-<sha256prefix> sidecar next to each source file.
 Runs safely every 15 min; only new/changed files POST.
 
@@ -77,6 +83,29 @@ def _augment_for_ui(payload: dict) -> dict:
     return out
 
 
+CLAUDE_MD_OPTIMIZER_TAG = "claude-md-optimizer"
+
+
+def derive_tags(payload: dict) -> list:
+    """Tags for the memory row. Everything in experiments/history/ gets
+    ["optimization", "experiment"] (+ metric:<name>); records written by the
+    weekly CLAUDE.md optimizer also get CLAUDE_MD_OPTIMIZER_TAG so the
+    AgentOps freshness source can watch the weekly timer specifically.
+    Detection: explicit payload.source (new runner versions) or the
+    "run-<timestamp>" experiment_id shape (history written by older
+    versions)."""
+    tags = ["optimization", "experiment"]
+    metric = payload.get("metric")
+    if metric:
+        tags.append(f"metric:{metric}")
+    if (
+        payload.get("source") == "optimize-agent-claude-md"
+        or str(payload.get("experiment_id") or "").startswith("run-")
+    ):
+        tags.append(CLAUDE_MD_OPTIMIZER_TAG)
+    return tags
+
+
 def pick_importance(payload: dict) -> int:
     delta = _augment_for_ui(payload).get("score_delta")
     if delta is None:
@@ -142,10 +171,7 @@ def sync_one(src: pathlib.Path, agent_id: str) -> str:
         return f"SKIP invalid JSON {src}: {e}"
 
     content = build_content(agent_id, payload, src.name)
-    tags = ["optimization", "experiment"]
-    metric = payload.get("metric")
-    if metric:
-        tags.append(f"metric:{metric}")
+    tags = derive_tags(payload)
     importance = pick_importance(payload)
     ok, detail = post_memory(agent_id, content, tags, importance)
     if not ok:
