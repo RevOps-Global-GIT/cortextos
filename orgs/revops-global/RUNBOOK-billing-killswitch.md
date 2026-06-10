@@ -30,9 +30,10 @@ if the bet fails. Target: **< 1 hour from detection to stabilized fleet.**
 Per the approved migration plan, the default response is NOT to start paying — it is to shed load:
 
 1. **Tier-down** per the `rate-limit-management` skill (3-tier wind-down). Practically:
-   - Stop all non-core Claude agents immediately:
-     `cortextos stop dev` (and any on-demand agents currently running: dev-2, qa-agent, mobile-agent, family-agent, design-agent, hub-dogfood).
-   - Keep: `orchestrator` (coordination + Telegram front-door), `monitor` (haiku, near-free), `analyst` only if mid-critical-task.
+   - Stop any on-demand Claude agents currently running
+     (`cortextos stop dev` / dev-2 / monitor / qa-agent / mobile-agent / family-agent / design-agent / hub-dogfood).
+   - Resident set after the 2026-06-10 shrink is only `orchestrator` + `analyst`; keep
+     orchestrator (coordination + Telegram front-door), stop analyst only if not mid-critical-task.
 2. **Codex spillover** for execution work: the orchestrator routes execution-shaped tasks to the
    Codex lane (`codex`, `codex-2` agents; `src/bus/spawn-codex.ts`; account pool in
    `orchestrator/config.json` `codex_account_pool` — 1 active + 2 standby). This lane already
@@ -44,12 +45,13 @@ Per the approved migration plan, the default response is NOT to start paying —
 
 ## Response — Stage 2 (Greg-gated escalation): API-key cutover
 
-Only on Greg's explicit go (this converts $0 marginal into real API spend; the July-1 review
-in the migration plan owns this decision):
+Only on Greg's explicit go. A capped workspace key already exists for the supervisor + loops
+(decided 2026-06-10, "capped key now") — Stage 2 means extending key billing to the PTY agents,
+which converts their $0 marginal into real API spend:
 
-1. Create a dedicated workspace + API key in the Anthropic console with a **hard monthly cap**
-   (recommended $500–1,000/mo). The workspace cap is the runaway backstop — set it before the key
-   is used anywhere.
+1. Use the existing capped workspace, or create a second workspace + key in the Anthropic
+   console with its own **hard monthly cap** so PTY spend is a separate line item. The workspace
+   cap is the runaway backstop — set it before the key is used anywhere.
 2. Flip agents to the key using `scripts/billing-killswitch.sh` (see `--help`), or manually:
    append to `orgs/revops-global/agents/<agent>/.env` (loaded last into the PTY env, overrides
    org `secrets.env` — see `src/pty/agent-pty.ts` lines ~118-131):
