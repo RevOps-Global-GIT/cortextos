@@ -10,6 +10,8 @@ import { updateApproval, listPendingApprovals, readApproval } from '../bus/appro
 import { listTasks, recoverStaleInProgressTasks } from '../bus/task.js';
 import { mirrorTaskToRgos, drainRetryQueue, isEnabled as isMirrorEnabled } from '../bus/rgos-mirror.js';
 import { AgentProcess } from './agent-process.js';
+import { DeadAirGuard, HOLDING_REPLY_TEXT } from './dead-air-guard.js';
+import { logEvent } from '../bus/event.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
 import { stripControlChars } from '../utils/validate.js';
@@ -47,6 +49,13 @@ export class FastChecker {
   private chatId?: string;
   private allowedUserId?: number;
   private daemonTelegramAlerts: boolean = true;
+  private org: string = 'unknown';
+
+  // Usage-limit dead-air guard: detects consecutive bounced turns and sends
+  // one cooldown-guarded holding reply so the user never gets silent dead air.
+  private deadAirGuard: DeadAirGuard = new DeadAirGuard();
+  // stdout.log byte offset at probe arm time; -1 = no armed probe.
+  private deadAirStdoutOffset: number = -1;
 
   // External Telegram handler (set by daemon)
   private telegramMessages: Array<{ formatted: string; ackIds: string[] }> = [];
@@ -137,6 +146,7 @@ export class FastChecker {
       allowedUserId?: number;
       gmailWatch?: { query: string; intervalMs: number };
       daemonTelegramAlerts?: boolean;
+      org?: string;
     } = {},
   ) {
     this.agent = agent;
@@ -148,6 +158,7 @@ export class FastChecker {
     this.chatId = options.chatId;
     this.allowedUserId = options.allowedUserId;
     this.daemonTelegramAlerts = options.daemonTelegramAlerts ?? true;
+    this.org = options.org ?? 'unknown';
 
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
@@ -496,6 +507,7 @@ export class FastChecker {
         // restart the typing indicator after Stop has cleared it.
         if (hasTelegramMessage) {
           this.lastMessageInjectedAt = Date.now();
+          this.armDeadAirProbe();
         }
         // Cooldown after injection (deliberate delay — not a blocker, not timed).
         await sleep(5000);
@@ -513,6 +525,10 @@ export class FastChecker {
     this.watchdogCheck();
     mark('watchdogCheck');
 
+    // Dead-air guard: detect usage-limit bounced turns after Telegram injection
+    this.checkDeadAir();
+    mark('checkDeadAir');
+
     // Gmail watch: check on configured interval (default 15 min)
     await this.checkGmailWatch();
     mark('checkGmailWatch');
@@ -524,6 +540,82 @@ export class FastChecker {
     // Context monitor: check usage thresholds and fire warnings/handoffs
     await this.checkContextStatus();
     mark('checkContextStatus');
+  }
+
+  /**
+   * Arm the dead-air probe after a Telegram message is injected: remember the
+   * current stdout.log size so checkDeadAir() only scans output produced after
+   * this injection.
+   */
+  private armDeadAirProbe(): void {
+    const now = Date.now();
+    this.deadAirGuard.onInjection(now);
+    const stdoutPath = join(this.paths.logDir, 'stdout.log');
+    try {
+      this.deadAirStdoutOffset = existsSync(stdoutPath) ? statSync(stdoutPath).size : 0;
+    } catch {
+      this.deadAirStdoutOffset = 0;
+    }
+  }
+
+  /**
+   * Tail stdout.log from the armed offset and feed new output to the guard.
+   * When the guard fires (N consecutive usage-limit bounces, cooldown clear),
+   * send ONE holding Telegram reply and log a bus event so the incident
+   * surfaces in the morning brief / Warden.
+   */
+  private checkDeadAir(): void {
+    if (this.deadAirStdoutOffset < 0) return;
+    const now = Date.now();
+
+    const stdoutPath = join(this.paths.logDir, 'stdout.log');
+    let newOutput = '';
+    try {
+      if (existsSync(stdoutPath)) {
+        const size = statSync(stdoutPath).size;
+        if (size < this.deadAirStdoutOffset) {
+          // Log rotated underneath us — restart scan from the top of the new file.
+          this.deadAirStdoutOffset = 0;
+        }
+        if (size > this.deadAirStdoutOffset) {
+          const fd = openSync(stdoutPath, 'r');
+          try {
+            // Cap each scan at 64 KB — bounce error text is short and recent.
+            const len = Math.min(size - this.deadAirStdoutOffset, 64 * 1024);
+            const buf = Buffer.alloc(len);
+            const bytesRead = readSync(fd, buf, 0, len, this.deadAirStdoutOffset);
+            newOutput = buf.toString('utf-8', 0, bytesRead);
+            this.deadAirStdoutOffset += bytesRead;
+          } finally {
+            closeSync(fd);
+          }
+        }
+      }
+    } catch {
+      // Unreadable log never blocks the poll cycle.
+    }
+
+    const fired = this.deadAirGuard.onOutput(newOutput, now);
+    if (!this.deadAirGuard.isArmed()) {
+      this.deadAirStdoutOffset = -1;
+    }
+    if (!fired) return;
+
+    const bounces = this.deadAirGuard.getConsecutiveBounces();
+    this.log(`Dead-air guard fired: ${bounces} consecutive usage-limit bounced turns — sending holding reply`);
+    // Sent even when daemonTelegramAlerts is off: this is conversation
+    // continuity for a user actively messaging this agent, not a proactive
+    // daemon alert.
+    if (this.telegramApi && this.chatId) {
+      this.telegramApi.sendMessage(this.chatId, HOLDING_REPLY_TEXT).catch(() => {});
+    }
+    try {
+      logEvent(this.paths, this.agent.name, this.org, 'action', 'degraded_responder_fired', 'warning', {
+        consecutive_bounces: bounces,
+      });
+    } catch (err) {
+      this.log(`Dead-air guard logEvent failed: ${err}`);
+    }
   }
 
   /**
