@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync, copyFileSync, chmodSync, statSync } from 'fs';
+import { spawn as spawnChild } from 'child_process';
 import { join, relative } from 'path';
 import { sendMessage } from '../bus/message.js';
 import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, TelegramMessage } from '../types/index.js';
@@ -1328,7 +1329,27 @@ export class AgentManager {
 
     this.workers.set(name, worker);
 
-    worker.onDone((workerName) => {
+    worker.onDone((workerName, exitCode) => {
+      // theta-wave workers write a status='running' placeholder row at session
+      // start; if the worker dies before its terminal MCP write (or the write
+      // is lost in-flight), the row sticks in 'running' forever. Restamp it to
+      // a truthful terminal state via a detached script (guarded by
+      // status=eq.running, so a session that wrote its own terminal status is
+      // never overwritten).
+      if (workerName.includes('theta-wave')) {
+        try {
+          const script = join(this.frameworkRoot, 'scripts', 'theta-restamp-on-exit.js');
+          const child = spawnChild('node', [script, '--worker', workerName, '--exit-code', String(exitCode)], {
+            stdio: 'ignore',
+            detached: true,
+          });
+          child.unref();
+          console.log(`[worker:${workerName}] theta-restamp-on-exit dispatched (exit=${exitCode})`);
+        } catch (err) {
+          console.error(`[worker:${workerName}] failed to dispatch theta-restamp-on-exit: ${err}`);
+        }
+      }
+
       // Auto-remove finished workers after a short delay so list-workers
       // can still show the final status briefly before cleanup
       setTimeout(() => {
