@@ -59,7 +59,7 @@
       "prompt": "Read prompts/cron-advisor-facing-page-canary.md and follow its instructions."
     }
   ],
-  "ctx_autoreset_threshold": 0,
+  "ctx_autoreset_threshold": 75,
   "ecosystem": {
     "local_version_control": {
       "enabled": true

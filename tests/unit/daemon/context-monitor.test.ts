@@ -314,6 +314,27 @@ describe('Tier 0 autoreset tier selection', () => {
     expect(selectTier(55, false, { autoreset: -10 })).toBe('none');
     expect(selectTier(55, false, { autoreset: Number.NaN })).toBe('none');
   });
+
+  // --- codex-shaped cases (armed codex config: ctx_autoreset_threshold 75) ---
+
+  it('75% with autoreset=75 (armed codex config) triggers tier0', () => {
+    expect(selectTier(75, false, { autoreset: 75 })).toBe('tier0');
+  });
+
+  it('codex payload shape: totalTokens 192000 / cap 256000 = 75% triggers tier0', () => {
+    // Mirrors writeContextStatus: used_percentage = Math.min(100, totalTokens / cap * 100)
+    const totalTokens = 192_000;
+    const cap = 256_000;
+    const pct = Math.min(100, (totalTokens / cap) * 100);
+    expect(pct).toBe(75);
+    expect(selectTier(pct, false, { autoreset: 75 })).toBe('tier0');
+  });
+
+  it('codex clamped 100% (totalTokens far above cap) still fires tier0 when not yet fired', () => {
+    const pct = Math.min(100, (3_650_000_000 / 256_000) * 100); // 3.65B-token runaway thread clamps to 100
+    expect(pct).toBe(100);
+    expect(selectTier(pct, false, { autoreset: 75, autoresetFiredAt: 0 })).toBe('tier0');
+  });
 });
 
 // --- Tier 0 boot-window guard ---
