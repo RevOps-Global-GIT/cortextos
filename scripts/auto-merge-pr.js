@@ -39,6 +39,11 @@ const SKIP_BODY_PATTERNS = [
   /greg\s*merges/i,
 ];
 
+// A PR updated moments ago may have an event-triggered check re-run that has
+// not yet registered as a check run (#1469: an 'edited'-event gate re-run
+// concluded FAILURE 8s after the merge). Defer such PRs to the next cycle.
+const SETTLE_WINDOW_MS = 90 * 1000;
+
 const CTX_ROOT = process.env.CTX_ROOT || `${process.env.HOME}/.cortextos/default`;
 const CTX_AGENT_NAME = process.env.CTX_AGENT_NAME || 'dev';
 const CTX_ORG = process.env.CTX_ORG || 'revops-global';
@@ -280,6 +285,51 @@ function shouldSkipBody(body) {
   return SKIP_BODY_PATTERNS.some(p => p.test(body));
 }
 
+function isWithinSettleWindow(updatedAt, nowMs = Date.now(), windowMs = SETTLE_WINDOW_MS) {
+  const t = new Date(updatedAt).getTime();
+  if (Number.isNaN(t)) return false;
+  return nowMs - t < windowMs;
+}
+
+/**
+ * Evaluate REST check-runs for merge safety. Only the latest run per check
+ * name counts (re-runs create new runs on the same SHA). Unsafe when any
+ * latest run is still in flight or concluded badly.
+ */
+function evaluateCheckRuns(checkRuns) {
+  const latestByName = new Map();
+  for (const r of checkRuns || []) {
+    const prev = latestByName.get(r.name);
+    if (!prev || new Date(r.started_at) > new Date(prev.started_at)) {
+      latestByName.set(r.name, r);
+    }
+  }
+  const inFlight = [];
+  const failed = [];
+  for (const r of latestByName.values()) {
+    if (r.status !== 'completed') inFlight.push(r.name);
+    else if (['failure', 'timed_out', 'cancelled', 'action_required'].includes(r.conclusion)) failed.push(r.name);
+  }
+  if (inFlight.length > 0) return { ok: false, reason: `checks in flight: ${inFlight.join(', ')}` };
+  if (failed.length > 0) return { ok: false, reason: `checks failed: ${failed.join(', ')}` };
+  return { ok: true, reason: '' };
+}
+
+/**
+ * Re-verify a PR immediately before merging. The GraphQL snapshot can be
+ * tens of seconds stale by the time the merge fires (memo-conflict checks,
+ * earlier PRs in the loop); a check re-run registered in that gap must
+ * block the merge.
+ */
+function preMergeFreshnessCheck(repo, number, evalHeadSha) {
+  const fresh = JSON.parse(gh(['api', `repos/${repo}/pulls/${number}`]));
+  if (fresh.state !== 'open') return { ok: false, reason: `state=${fresh.state}` };
+  if (fresh.head?.sha !== evalHeadSha) return { ok: false, reason: 'head SHA moved since evaluation' };
+  if (isWithinSettleWindow(fresh.updated_at)) return { ok: false, reason: 'updated inside settle window' };
+  const runs = JSON.parse(gh(['api', `repos/${repo}/commits/${evalHeadSha}/check-runs?per_page=100`])).check_runs || [];
+  return evaluateCheckRuns(runs);
+}
+
 function isCarvedOut(repo) {
   return CARVE_OUTS.some(co => repo.includes(co));
 }
@@ -299,6 +349,8 @@ function fetchPRs(repo) {
             body
             isDraft
             headRefName
+            headRefOid
+            updatedAt
             mergeable
             mergeStateStatus
             autoMergeRequest { mergeMethod }
@@ -352,6 +404,8 @@ function fetchPRs(repo) {
       body: pr.body ?? '',
       isDraft: pr.isDraft ?? false,
       headRefName: pr.headRefName ?? '',
+      headSha: pr.headRefOid ?? '',
+      updatedAt: pr.updatedAt ?? '',
       mergeable: pr.mergeable,
       mergeStateStatus: pr.mergeStateStatus,
       ciPassed: !hasFailure && allPassed,
@@ -380,7 +434,7 @@ async function main() {
     }
 
     for (const pr of prs) {
-      const { number, title, body, isDraft, headRefName, mergeable, mergeStateStatus, ciPassed, hasChangesRequested } = pr;
+      const { number, title, body, isDraft, headRefName, headSha, updatedAt, mergeable, mergeStateStatus, ciPassed, hasChangesRequested } = pr;
 
       // Skip conditions
       if (isDraft) {
@@ -407,6 +461,10 @@ async function main() {
         console.log(`[auto-merge] SKIP #${number} ${repo} — CHANGES_REQUESTED review`);
         continue;
       }
+      if (isWithinSettleWindow(updatedAt)) {
+        console.log(`[auto-merge] SKIP #${number} ${repo} — updated <${SETTLE_WINDOW_MS / 1000}s ago, waiting for event-triggered checks to register`);
+        continue;
+      }
 
       // Memo-conflict check (skip if body contains 'memo-conflict-ok')
       if (!/memo-conflict-ok/i.test(body)) {
@@ -427,6 +485,11 @@ async function main() {
 
       // Merge
       try {
+        const freshness = preMergeFreshnessCheck(repo, number, headSha);
+        if (!freshness.ok) {
+          console.log(`[auto-merge] SKIP #${number} ${repo} — pre-merge freshness: ${freshness.reason}`);
+          continue;
+        }
         console.log(`[auto-merge] MERGING #${number} ${repo} — "${title}"`);
         gh(['pr', 'merge', String(number), '-R', repo, '--squash', '--delete-branch']);
         merged.push({ repo, number, title, headRefName });
@@ -486,6 +549,6 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, REPOS, CARVE_OUTS, FILE_ROUTE_MAP };
+  module.exports = { shouldSkipBody, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
 }
 

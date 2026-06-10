@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 
 const require = createRequire(import.meta.url);
-const { shouldSkipBody, isCarvedOut, REPOS, CARVE_OUTS } =
+const { shouldSkipBody, isCarvedOut, isWithinSettleWindow, evaluateCheckRuns, REPOS, CARVE_OUTS, SETTLE_WINDOW_MS } =
   require('../../../scripts/auto-merge-pr.js');
 
 describe('shouldSkipBody', () => {
@@ -90,5 +90,86 @@ describe('CARVE_OUTS config', () => {
   it('includes charlie-holstine and grandamenium', () => {
     expect(CARVE_OUTS).toContain('charlie-holstine');
     expect(CARVE_OUTS).toContain('grandamenium');
+  });
+});
+
+describe('isWithinSettleWindow', () => {
+  const now = Date.parse('2026-06-05T16:02:00Z');
+
+  it('true for a PR updated seconds ago (the #1469 race window)', () => {
+    expect(isWithinSettleWindow('2026-06-05T16:01:55Z', now)).toBe(true);
+  });
+
+  it('false for a PR updated beyond the window', () => {
+    expect(isWithinSettleWindow('2026-06-05T15:58:00Z', now)).toBe(false);
+  });
+
+  it('false exactly at the window boundary', () => {
+    expect(isWithinSettleWindow(new Date(now - SETTLE_WINDOW_MS).toISOString(), now)).toBe(false);
+  });
+
+  it('false for missing/invalid timestamps (does not wedge the merge loop)', () => {
+    expect(isWithinSettleWindow('', now)).toBe(false);
+    expect(isWithinSettleWindow(undefined, now)).toBe(false);
+    expect(isWithinSettleWindow('not-a-date', now)).toBe(false);
+  });
+});
+
+describe('evaluateCheckRuns', () => {
+  const run = (name: string, status: string, conclusion: string | null, started_at: string) =>
+    ({ name, status, conclusion, started_at });
+
+  it('ok for all-green runs', () => {
+    expect(evaluateCheckRuns([
+      run('screenshot-evidence-gate', 'completed', 'success', '2026-06-05T16:00:00Z'),
+      run('Build & Type Check', 'completed', 'success', '2026-06-05T16:00:00Z'),
+    ])).toEqual({ ok: true, reason: '' });
+  });
+
+  it('blocks when a run is in flight', () => {
+    const res = evaluateCheckRuns([
+      run('screenshot-evidence-gate', 'in_progress', null, '2026-06-05T16:02:20Z'),
+    ]);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain('in flight');
+    expect(res.reason).toContain('screenshot-evidence-gate');
+  });
+
+  it('only the LATEST run per name counts — green old run does not mask an in-flight re-run (#1469)', () => {
+    const res = evaluateCheckRuns([
+      run('screenshot-evidence-gate', 'completed', 'success', '2026-06-05T15:50:00Z'),
+      run('screenshot-evidence-gate', 'queued', null, '2026-06-05T16:02:20Z'),
+    ]);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain('in flight');
+  });
+
+  it('only the LATEST run per name counts — green old run does not mask a failed re-run', () => {
+    const res = evaluateCheckRuns([
+      run('screenshot-evidence-gate', 'completed', 'success', '2026-06-05T15:50:00Z'),
+      run('screenshot-evidence-gate', 'completed', 'failure', '2026-06-05T16:02:20Z'),
+    ]);
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain('failed');
+  });
+
+  it('a superseded failure overridden by a newer green re-run is ok', () => {
+    expect(evaluateCheckRuns([
+      run('screenshot-evidence-gate', 'completed', 'failure', '2026-06-05T15:50:00Z'),
+      run('screenshot-evidence-gate', 'completed', 'success', '2026-06-05T16:02:20Z'),
+    ]).ok).toBe(true);
+  });
+
+  it('blocks on timed_out / cancelled / action_required conclusions', () => {
+    for (const conclusion of ['timed_out', 'cancelled', 'action_required']) {
+      expect(evaluateCheckRuns([run('ci', 'completed', conclusion, '2026-06-05T16:00:00Z')]).ok).toBe(false);
+    }
+  });
+
+  it('ok for neutral/skipped conclusions and empty input', () => {
+    expect(evaluateCheckRuns([run('ci', 'completed', 'neutral', '2026-06-05T16:00:00Z')]).ok).toBe(true);
+    expect(evaluateCheckRuns([run('ci', 'completed', 'skipped', '2026-06-05T16:00:00Z')]).ok).toBe(true);
+    expect(evaluateCheckRuns([]).ok).toBe(true);
+    expect(evaluateCheckRuns(undefined).ok).toBe(true);
   });
 });
