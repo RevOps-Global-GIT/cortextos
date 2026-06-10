@@ -1852,6 +1852,15 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
       this.ctxAutoresetFiredAt = now;
       const pctRound = Math.round(effectivePct);
       this.log(`Tier 0 auto-reset fired at ${pctRound}% (threshold ${autoreset}%)`);
+      try {
+        logEvent(this.paths, this.agent.name, this.org, 'action', 'context_autoreset_fired', 'warning', {
+          agent: this.agent.name,
+          used_percentage: pctRound,
+          threshold: autoreset,
+        });
+      } catch (err) {
+        this.log(`Tier 0 logEvent failed: ${err}`);
+      }
       this.runAutoresetSnapshot(`ctx auto-reset at ${pctRound}%`);
       // Reset context_status.json pre-emptively so the restarted session's
       // FastChecker does not immediately re-fire Tier 0 off the stale value.
