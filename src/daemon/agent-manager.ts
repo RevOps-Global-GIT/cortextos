@@ -11,6 +11,8 @@ import { migrateCronsForAgent } from './cron-migration.js';
 import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
+import { attachSlackToAgent } from '../slack/attach.js';
+import type { SlackPoller } from '../slack/poller.js';
 import { isAgentDirScaffolded, resolvePaths } from '../utils/paths.js';
 import { acquireSession, releaseSession } from '../utils/session-lock.js';
 import { parseEnvFile, resolveEnv } from '../utils/env.js';
@@ -29,7 +31,7 @@ type LogFn = (msg: string) => void;
  */
 export class AgentManager {
   private static readonly HEALTH_RESTART_COOLDOWN_MS = 5 * 60 * 1000;
-  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; pollerToken?: string; activityPollerToken?: string; telegramRejectCount?: number; telegramLastRejectAlertAt?: number }> = new Map();
+  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; slackPoller?: SlackPoller; pollerToken?: string; activityPollerToken?: string; telegramRejectCount?: number; telegramLastRejectAlertAt?: number }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
   /** Daemon-level cron scheduler registry: one CronScheduler per enabled agent. */
   private cronSchedulers: Map<string, CronScheduler> = new Map();
@@ -566,6 +568,30 @@ export class AgentManager {
       console.error(`[${name}] Fast checker error:`, err);
     });
 
+    // Wire inbound Slack delivery through the same FastChecker queue as
+    // Telegram. attachSlackToAgent resolves agent identity from Supabase and
+    // returns null (no-op) when the agent has no SUPABASE_RGOS_* creds in its
+    // .env, no orch_agents row, or no agent_slack_apps row — so this is safe
+    // to call unconditionally for every agent.
+    attachSlackToAgent({
+      agentName: name,
+      agentDir,
+      checker,
+      log,
+      staggerMs: this.agents.size * 2000,
+    }).then((slackPoller) => {
+      if (!slackPoller) return;
+      const entry = this.agents.get(name);
+      if (entry && entry.checker === checker) {
+        entry.slackPoller = slackPoller;
+      } else {
+        // Agent was stopped/replaced while attach was in flight.
+        slackPoller.stop();
+      }
+    }).catch((err) => {
+      log(`[slack] attach failed for ${name}: ${err instanceof Error ? err.message : err}`);
+    });
+
     // Register Telegram slash commands at startup (fix for issue #1)
     if (telegramApi && botToken) {
       const scanDirs = [agentDir, this.frameworkRoot].filter(Boolean);
@@ -1060,6 +1086,7 @@ export class AgentManager {
       entry.activityPoller.stop();
       if (entry.activityPollerToken) this.unregisterPoller(entry.activityPollerToken, entry.activityPoller);
     }
+    if (entry.slackPoller) entry.slackPoller.stop();
     entry.checker.stop();
     await entry.process.stop();
     this.agents.delete(name);
