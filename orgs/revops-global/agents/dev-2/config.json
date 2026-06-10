@@ -1,6 +1,7 @@
 {
   "agent_name": "dev-2",
-  "enabled": true,
+  "enabled": false,
+  "on_demand_note": "2026-06-10: moved to on-demand per June 15 billing migration plan (fleet shrink). Second 24/7 opus seat was the most expensive least-justified residency; its crons are experiment loops, not time-critical. Start manually with `cortextos start dev-2` when a parallel dev worker is needed; stop with `cortextos stop dev-2` when done. Re-evaluate at July 1 review.",
   "runtime": "claude-code",
   "startup_delay": 0,
   "max_session_seconds": 255600,

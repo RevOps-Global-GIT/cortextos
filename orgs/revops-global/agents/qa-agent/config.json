@@ -1,6 +1,7 @@
 {
   "agent_name": "qa-agent",
-  "enabled": true,
+  "enabled": false,
+  "on_demand_note": "2026-06-10: moved to on-demand per June 15 billing migration plan (fleet shrink). Intermittent specialist (warden watch-set classifies as digest-only, idle 16h-6d); only cron was a 4h heartbeat. Start with `cortextos start qa-agent` when needed; stop with `cortextos stop qa-agent` when done. Re-evaluate at July 1 review.",
   "runtime": "claude-code",
   "startup_delay": 0,
   "max_session_seconds": 255600,

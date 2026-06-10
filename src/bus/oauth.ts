@@ -50,6 +50,14 @@ export interface UsageSnapshot {
   five_hour_utilization: number;
   seven_day_utilization: number;
   fetched_at: string;
+  /**
+   * Top-level usage-API fields we don't recognize (e.g. a programmatic-credit
+   * dimension added by the 2026-06-15 billing change). Persisted into
+   * state/usage/ snapshots so a new billing signal is recorded the day it
+   * appears instead of being silently dropped. Absent when the response
+   * contains only known fields.
+   */
+  extra_fields?: Record<string, unknown>;
 }
 
 export interface UsageCache {
@@ -63,6 +71,8 @@ export interface CheckUsageResult {
   seven_day_utilization: number;
   cached: boolean;
   fetched_at: string;
+  /** Unrecognized usage-API fields — see UsageSnapshot.extra_fields. */
+  extra_fields?: Record<string, unknown>;
 }
 
 export interface RotateResult {
@@ -249,7 +259,21 @@ export async function checkUsageApi(
     seven_day_utilization?: number;
     fiveHourUtilization?: number;
     sevenDayUtilization?: number;
-  };
+  } & Record<string, unknown>;
+
+  // Capture any top-level fields we don't recognize. The 2026-06-15 billing
+  // change may add a programmatic-credit dimension to this endpoint; persisting
+  // unknown fields means the daily JSONLs record it from day one (reclassification
+  // canary — see orgs/<org>/RUNBOOK-billing-killswitch.md).
+  const KNOWN_FIELDS = new Set([
+    'five_hour', 'seven_day',
+    'five_hour_utilization', 'seven_day_utilization',
+    'fiveHourUtilization', 'sevenDayUtilization',
+  ]);
+  const extraFields: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (!KNOWN_FIELDS.has(key)) extraFields[key] = value;
+  }
 
   // Normalize 0–100 → 0.0–1.0 if needed
   const normalize = (v: number | undefined) => {
@@ -270,6 +294,7 @@ export async function checkUsageApi(
     five_hour_utilization: fiveHour,
     seven_day_utilization: sevenDay,
     fetched_at: fetchedAt,
+    ...(Object.keys(extraFields).length > 0 ? { extra_fields: extraFields } : {}),
   };
 
   // Update cache and accounts.json utilization fields
