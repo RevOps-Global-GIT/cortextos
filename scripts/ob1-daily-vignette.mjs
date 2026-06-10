@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ob1-daily-vignette.js
+ * ob1-daily-vignette.mjs
  *
  * VM daemon cron runner for the OB1 daily vignette.
  * Replaces the GHA daily-vignette.yml schedule trigger.
