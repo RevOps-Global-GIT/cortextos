@@ -27,6 +27,12 @@
       "type": "recurring",
       "interval": "24h",
       "prompt": "Read .claude/skills/autoresearch/SKILL.md and execute the experiment loop for cycle dev2-task-completion-p90. Run scripts/dev2-pr-cycle-probe.py daily, evaluate signal_a_dev2_completion_min.p90_min vs baseline (514min), form hypothesis if p90 trending up, ship targeted change, measure. Per theta-2026-06-01 H3."
+    },
+    {
+      "name": "page-health-runner",
+      "type": "recurring",
+      "interval": "60m",
+      "prompt": "Page-health runner (re-homed from codex per card d6ced12a; codex died 2026-06-02 and left this single-homed). Run this one command and nothing else: cd /home/cortextos/cortextos && timeout 300 npx tsx scripts/hub-qa-playwright.ts --page / --write-page-health --page-health-mode live --no-send 2>&1 | grep -E 'page-health\\] wrote|Summary:|Error'. This refreshes the newest agentops_page_health checked_at under the warden 75min freshness threshold so the runner is not single-homed on codex. Then log: cortextos bus log-event action page_health_runner info --meta '{\"agent\":\"dev-2\",\"surface\":\"/\"}'."
     }
   ],
   "ecosystem": {
