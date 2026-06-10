@@ -76,6 +76,19 @@ function isMerged(worktreePath) {
   return false;
 }
 
+// Standalone clones (e.g. work/team-brain) have a .git DIRECTORY; linked
+// worktrees have a .git FILE pointing at the primary repo. Only linked
+// worktrees are GC candidates — `git worktree remove` on a standalone clone is
+// meaningless, and the bogus attempt risks data loss if the removal path ever
+// changes.
+function isLinkedWorktree(p) {
+  try {
+    return fs.lstatSync(path.join(p, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function isClean(worktreePath) {
   const r = run(`git -C "${worktreePath}" status --porcelain 2>/dev/null`);
   return r.ok && r.stdout === "";
@@ -147,6 +160,7 @@ function main() {
       const p = path.join(root, entry);
       if (seen.has(p)) continue;
       seen.add(p);
+      if (!isLinkedWorktree(p)) continue;
       // Need to identify the owning primary repo.
       // Use `git -C <path> rev-parse --git-common-dir` to find the common git dir.
       const r = run(`git -C "${p}" rev-parse --git-common-dir 2>/dev/null`);
@@ -222,7 +236,7 @@ function main() {
   return { removed, removedMb, skippedDirty, skippedUnmerged, errors };
 }
 
-module.exports = { main };
+module.exports = { main, isLinkedWorktree };
 
 if (require.main === module) {
   main();
