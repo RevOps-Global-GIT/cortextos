@@ -17,6 +17,7 @@ import { chromium, Browser, Page } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import { detectStaleness, STATUS_LABEL_SELECTORS } from './page-health-staleness';
 
 // ---------------------------------------------------------------------------
 // Args
@@ -70,13 +71,6 @@ const EDGE_FAILURE_PATTERNS = [
   /Failed to load quality data/i,
   /CORTEXTOS_JWT/i,
   /\/api\/knowledge endpoint not exposed/i,
-];
-
-const STALENESS_PATTERNS = [
-  /\b([2-9]|\d{2,})\s+days?\s+ago\b/i,
-  /\b([2-9]|\d{2,})d\s+stale\b/i,
-  /\b(\d{4,})m\s+stale\b/i,
-  /\b([3-9]\d|[1-9]\d{2,})h\s+stale\b/i,
 ];
 
 const OFF_SOURCE_PATTERNS = [
@@ -4670,9 +4664,22 @@ async function collectPageHealthIssues(
   if (edgeSnippet) {
     issues.push({ kind: 'edge_function', severity: 'error', detail: edgeSnippet });
   }
-  const staleSnippet = firstMatchingSnippet(bodyText, STALENESS_PATTERNS);
-  if (staleSnippet) {
-    issues.push({ kind: 'staleness', severity: 'warning', detail: staleSnippet });
+  // Staleness: detect ONLY in short status-label elements (badges/chips/banners) plus the
+  // explicit "Nd stale" badge form — never bare relative timestamps in listed content, which
+  // made every list surface a permanent false warning. See scripts/page-health-staleness.ts.
+  const statusLabels = await wallClock(
+    page.$$eval(STATUS_LABEL_SELECTORS, (els) =>
+      els.map((el) => {
+        const e = el as HTMLElement;
+        return (e.getAttribute('aria-label') || e.getAttribute('title') || e.innerText || '').trim();
+      }).filter(Boolean),
+    ),
+    5000,
+    [] as string[],
+  );
+  const staleness = detectStaleness(statusLabels, bodyText);
+  if (staleness.stale) {
+    issues.push({ kind: 'staleness', severity: 'warning', detail: staleness.detail ?? 'stale status label detected' });
   }
   const offSnippet = firstMatchingSnippet(bodyText, OFF_SOURCE_PATTERNS);
   if (offSnippet) {
