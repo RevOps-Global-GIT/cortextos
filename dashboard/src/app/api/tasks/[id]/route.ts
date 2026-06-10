@@ -12,7 +12,9 @@ export const dynamic = 'force-dynamic';
 // Validation
 // ---------------------------------------------------------------------------
 
-const VALID_STATUSES = ['pending', 'in_progress', 'blocked', 'completed'];
+// Must mirror the bus TaskStatus enum (src/types/index.ts) — omitting a bus
+// status here silently 400s callers like the rgos hub→bus reverse-sync.
+const VALID_STATUSES = ['pending', 'in_progress', 'blocked', 'completed', 'cancelled'];
 const VALID_PRIORITIES = ['urgent', 'high', 'normal', 'low'];
 
 // Reject IDs that look like path traversal attempts
