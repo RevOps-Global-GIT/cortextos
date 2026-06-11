@@ -2,9 +2,10 @@
 """
 greg-qa-defect-rate.py — count Greg-as-QA incidents in a time window.
 
-Scans analyst inbound messages (Telegram + agent bus inbox) for QA complaint
-patterns within a rolling time window. Uses message timestamps to enforce the
-window (not unbounded grep).
+Scans inbound messages across all active agent logs for QA complaint patterns
+within a rolling time window. Greg's messages land in orchestrator's inbox (via
+external-comms funnel), so we scan orchestrator + dev + dev-2 + mac-codex +
+analyst logs to capture the full trust-class signal.
 
 Output to stdout:
   {"window_hours": 4, "matches": [...], "count": N, "false_positives_filtered": M}
@@ -23,8 +24,13 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 INSTANCE_ID = os.environ.get("CTX_INSTANCE_ID", "cortextos1")
-LOG_DIR = Path(f"/home/cortextos/.cortextos/{INSTANCE_ID}/logs/analyst")
-INBOUND_LOG = LOG_DIR / "inbound-messages.jsonl"
+LOG_BASE = Path(f"/home/cortextos/.cortextos/{INSTANCE_ID}/logs")
+
+# Greg's messages funnel through orchestrator; also scan dev/dev-2/mac-codex
+# for trust-class signals that land there via specialist routing.
+SCAN_AGENTS = ["orchestrator", "dev", "dev-2", "mac-codex", "analyst"]
+
+INBOUND_LOGS = [LOG_BASE / agent / "inbound-messages.jsonl" for agent in SCAN_AGENTS]
 INBOX_DIR = Path(f"/home/cortextos/.cortextos/{INSTANCE_ID}/inbox/analyst")
 
 QA_PATTERNS = [
@@ -36,9 +42,18 @@ QA_PATTERNS = [
     r"\bnot working\b",
     r"\bregression\b",
     r"\bfailed\b",
+    r"\bfailing\b",
     r"\bfix this\b",
     r"\bwhy is\b",
+    r"\bwhere is\b",
     r"\bwhat happened\b",
+    r"\bisn['']t\b",
+    r"\bweren['']t\b",
+    r"\bdid not\b",
+    r"\bdoesn['']t\b",
+    r"\bmissing\b",
+    r"\bnone of these\b",
+    r"\ball wrong\b",
 ]
 
 QA_PATTERN_RE = re.compile("|".join(QA_PATTERNS), re.IGNORECASE)
@@ -63,28 +78,29 @@ def is_self_referential(text: str) -> bool:
 
 def load_inbound_messages(since: datetime) -> list[str]:
     texts: list[str] = []
-    if not INBOUND_LOG.exists():
-        return texts
-    with INBOUND_LOG.open() as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            ts_str = obj.get("timestamp") or obj.get("archived_at") or ""
-            if not ts_str:
-                continue
-            try:
-                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if ts >= since:
-                text = obj.get("text") or obj.get("body") or obj.get("message") or ""
-                if text:
-                    texts.append(text)
+    for log_path in INBOUND_LOGS:
+        if not log_path.exists():
+            continue
+        with log_path.open() as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                ts_str = obj.get("timestamp") or obj.get("archived_at") or ""
+                if not ts_str:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if ts >= since:
+                    text = obj.get("text") or obj.get("body") or obj.get("message") or ""
+                    if text:
+                        texts.append(text)
     return texts
 
 
