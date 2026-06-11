@@ -49,7 +49,7 @@
       "proofRequired": "Non-posting validation result and observed auth surface classification",
       "lastCheckedAt": "2026-06-10T09:02:11.707Z",
       "lastAuthority": "LinkedIn-Session browser/cookie jar or a Hub presence route that performs real upstream validation",
-      "observed": "No linkedin-cookies.json found — session not provisioned on this VM",
+      "observed": "No linkedin-cookies.json found \u2014 session not provisioned on this VM",
       "lastEventName": "capability_check_passed"
     },
     {
@@ -115,6 +115,27 @@
       "observed": "Authenticated as revopsglobal; scopes=admin:org, admin:org_hook, admin:public_key, admin:repo_hook, admin:ssh_signing_key, notifications, project, repo, user, workflow, write:discussion",
       "proof": "GET /user ok; login=revopsglobal",
       "lastEventName": "capability_check_passed"
+    },
+    {
+      "id": "ob1_app_nav",
+      "label": "OB1-App Nav",
+      "userCapability": "Detect ob1-app nav/auth/ServiceWorker-wedge regressions before Greg finds them in morning dogfood.",
+      "authority": "ob1.revopsglobal.com production routes via ob1-auth session cookie",
+      "sentinels": [
+        "/garden",
+        "/insights"
+      ],
+      "currentStatus": "unknown",
+      "freshnessTarget": "30m probe cadence",
+      "warnWhen": "probe errors out (network/transport) without a definitive route result",
+      "failWhen": "auth-wall redirect to /unlock, non-200 on a sentinel, or body under 5KB (blank shell)",
+      "renewalPath": "Refresh OB1_SESSION_TOKEN in orgs/revops-global/secrets.env from a live ob1 session",
+      "proofRequired": "Latest probe event with per-route status + body size",
+      "lastCheckedAt": null,
+      "lastAuthority": null,
+      "observed": null,
+      "proof": null,
+      "lastEventName": null
     }
   ]
 }
