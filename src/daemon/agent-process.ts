@@ -17,6 +17,7 @@ import { getOverdueReminders } from '../bus/reminders.js';
 import { resolveAgentCwd, resolvePaths } from '../utils/paths.js';
 import type { CronScheduler, ManagedAgent } from './cron-scheduler.js';
 import { detectContextCap, archiveCappedSession } from './context-cap-detect.js';
+import { rotateOversizedDailyMemory } from './daily-memory-guard.js';
 
 type LogFn = (msg: string) => void;
 
@@ -225,6 +226,10 @@ export class AgentProcess implements ManagedAgent {
     if (this.env.agentDir) {
       writeCortextosEnv(this.env.agentDir, this.env);
     }
+
+    // Boot-loop guard: rotate an oversized daily memory file before the session
+    // reads it whole during its boot checklist (see card d30fe222).
+    this.guardOversizedDailyMemory();
 
     // Determine start mode
     const mode = this.shouldContinue() ? 'continue' : 'fresh';
@@ -995,6 +1000,14 @@ export class AgentProcess implements ManagedAgent {
     }
 
     return true;
+  }
+
+  /**
+   * Boot-loop guard (card d30fe222): rotate an oversized daily memory file before
+   * the session reads it whole during boot. See daily-memory-guard.ts for the why.
+   */
+  private guardOversizedDailyMemory(): void {
+    rotateOversizedDailyMemory(this.env.agentDir, this.name, undefined, (msg) => this.log(msg));
   }
 
   private buildStartupPrompt(): string {
