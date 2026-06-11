@@ -306,6 +306,34 @@ def unanswered_direct_question(is_dm: bool, is_mpim: bool, text: str,
     )
 
 
+def is_actionable_text(text: str) -> bool:
+    return bool(text) and (is_question(text) or bool(ACTION_VERB_RE.search(text)))
+
+
+def oldest_unanswered_actionable(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Oldest actionable non-Greg message sent after Greg's last message, or None.
+
+    Evaluates every message in the conversation rather than only the newest:
+    a non-actionable follow-up (bare URL, "thanks") sent after a question must
+    not mask the question.
+    """
+    greg_last_ts = max(
+        (float(m.get("ts") or 0) for m in messages if m.get("user") == GREG_USER_ID),
+        default=0.0,
+    )
+    candidates = [
+        m for m in messages
+        if m.get("user")
+        and m.get("user") != GREG_USER_ID
+        and not m.get("subtype")
+        and float(m.get("ts") or 0) > greg_last_ts
+        and is_actionable_text(m.get("text") or "")
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda m: float(m.get("ts") or 0))
+
+
 def message_preview(text: str, user_lookup: Optional[Dict[str, str]] = None, cap: int = 280) -> str:
     if not text:
         return ""
@@ -475,39 +503,34 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
     # users.conversations(types=im) never returns 'latest' for IM channels, making
     # the pre-filter a no-op. search.messages is:dm uses 1-3 calls regardless of DM count.
     #
-    # Strategy: search returns DM messages newest-first. Group by channel; the first
-    # (newest) message per channel determines answered state — if it's not from Greg,
-    # the DM is unanswered. No additional history calls needed.
+    # Strategy: search returns DM messages newest-first. Group by channel, then
+    # evaluate EVERY non-Greg message sent after Greg's last reply in that DM.
+    # Checking only the newest message masks unanswered questions whenever a
+    # non-actionable follow-up (bare URL, "thanks") arrives after the question.
     dm_msgs = slack_search_dms(token, since_seconds)
-    dm_latest: Dict[str, Dict[str, Any]] = {}  # ch_id → latest message
+    dm_by_channel: Dict[str, List[Dict[str, Any]]] = {}
     for m in dm_msgs:
         ch_obj = m.get("channel") or {}
         ch_id = ch_obj.get("id", "") if isinstance(ch_obj, dict) else str(ch_obj)
         if not ch_id:
             continue
-        ts = float(m.get("ts") or 0)
-        existing = dm_latest.get(ch_id)
-        if existing is None or ts > float(existing.get("ts") or 0):
-            dm_latest[ch_id] = m
+        dm_by_channel.setdefault(ch_id, []).append(m)
 
-    for ch_id, latest_msg in dm_latest.items():
+    for ch_id, ch_msgs in dm_by_channel.items():
         check_budget()
-        if latest_msg.get("user") == GREG_USER_ID:
-            continue  # Greg sent the last message — answered
-        if latest_msg.get("subtype"):
-            continue
-        _dm_text = latest_msg.get("text") or ""
-        if not is_question(_dm_text) and not ACTION_VERB_RE.search(_dm_text):
-            continue  # non-actionable (gratitude, acknowledgment, etc.)
-        ch_name = f"DM:{user_name(latest_msg.get('user'))}"
+        flag_msg = oldest_unanswered_actionable(ch_msgs)
+        if flag_msg is None:
+            continue  # answered, or only non-actionable messages outstanding
+        _dm_text = flag_msg.get("text") or ""
+        ch_name = f"DM:{user_name(flag_msg.get('user'))}"
         hydrate_mentions(_dm_text)
         items.append(build_item(
             source="dm",
             status="unanswered",
             channel_id=ch_id,
             channel_name=ch_name,
-            msg=latest_msg,
-            sender_name=user_name(latest_msg.get("user")),
+            msg=flag_msg,
+            sender_name=user_name(flag_msg.get("user")),
             user_lookup=user_cache,
         ))
 
@@ -542,6 +565,7 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
         hydrate_mentions(text)
         replied = False
         last_thread_user = m.get("user")
+        followup_msg: Optional[Dict[str, Any]] = None
         if m.get("reply_count", 0):
             reps = slack_get(token, "conversations.replies", {
                 "channel": ch_id,
@@ -554,10 +578,27 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
                 last_thread_user,
             )
             replied = any(r.get("user") == GREG_USER_ID for r in thread_messages[1:])
+            # Same masking flaw as DMs: Greg's earlier thread reply must not bury
+            # an actionable follow-up posted after it.
+            followup_msg = oldest_unanswered_actionable(thread_messages[1:])
             time.sleep(API_DELAY_MS / 1000)
 
         direct_unanswered = unanswered_direct_question(False, is_mpim, text, last_thread_user)
-        if replied and not direct_unanswered:
+        if replied and not direct_unanswered and followup_msg is None:
+            continue
+
+        if replied and not direct_unanswered and followup_msg is not None:
+            followup_text = followup_msg.get("text") or ""
+            hydrate_mentions(followup_text)
+            items.append(build_item(
+                source="thread_mention",
+                status="unanswered",
+                channel_id=ch_id,
+                channel_name=ch_name,
+                msg=followup_msg,
+                sender_name=user_name(followup_msg.get("user")),
+                user_lookup=user_cache,
+            ))
             continue
 
         if direct_unanswered:
