@@ -767,3 +767,23 @@ describe('AgentProcess — premature voluntary exit guard', () => {
     expect(String(lastCall?.[1])).toMatch(/\] PREMATURE_EXIT: /);
   });
 });
+
+describe('AgentProcess — AGENTS.md double-count guard (boot prompt)', () => {
+  // The codex-app-server runtime auto-injects AGENTS.md as its project doc, so the
+  // boot prompt must NOT also tell it to read AGENTS.md (that re-reads ~5k tokens
+  // every boot). Other runtimes do not auto-inject it and still need the explicit read.
+  it('codex-app-server boot prompt does NOT instruct re-reading AGENTS.md', () => {
+    const ap = new AgentProcess('alice', mockEnv, { runtime: 'codex-app-server' });
+    const prompt: string = (ap as any).buildStartupPrompt();
+    expect(prompt).toContain('AGENTS.md is already loaded into your context');
+    expect(prompt).toContain('do NOT re-read or cat AGENTS.md');
+    expect(prompt).not.toContain('Read AGENTS.md and all bootstrap files listed there.');
+  });
+
+  it('claude-code (default) boot prompt keeps the explicit AGENTS.md read', () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    const prompt: string = (ap as any).buildStartupPrompt();
+    expect(prompt).toContain('Read AGENTS.md and all bootstrap files listed there.');
+    expect(prompt).not.toContain('AGENTS.md is already loaded into your context');
+  });
+});
