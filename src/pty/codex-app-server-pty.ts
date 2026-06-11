@@ -792,34 +792,41 @@ export class CodexAppServerPTY {
    * monitor. Writes atomically; failures are non-fatal (observability only).
    *
    * Mapping (per codex schema ThreadTokenUsageUpdatedNotification):
-   *   - used_percentage = total.totalTokens / cap * 100  (clamped to [0, 100])
+   *   - used_percentage = last.inputTokens / cap * 100  (clamped to [0, 100])
    *   - context_window_size = modelContextWindow ?? config.codex_context_cap ?? 256000
-   *   - exceeds_200k_tokens = total.totalTokens > 200000
-   *   - current_usage.{input,output,cache_read} from total.{input,output,cachedInput}Tokens
+   *   - exceeds_200k_tokens = last.inputTokens > 200000
+   *   - current_usage.{input,output,cache_read} from last.{input,output,cachedInput}Tokens
    *   - session_id = current threadId
+   *
+   * Window occupancy is the per-turn `last` block, NOT cumulative `total`. The
+   * codex notification carries `total` (summed across every turn — grows
+   * unbounded and pins used_percentage at 100% by the third turn) and `last`
+   * (the most recent turn, whose inputTokens is the full prompt = the actual
+   * context-window fill). Keying off `total` made the FastChecker auto-reset and
+   * handoff tiers force-restart healthy sessions on a false 100% reading.
    */
   private writeContextStatus(params: Record<string, unknown>): void {
     const tokenUsage = isRecord(params.tokenUsage) ? params.tokenUsage : null;
     if (!tokenUsage) return;
     const total = isRecord(tokenUsage.total) ? tokenUsage.total : null;
-    if (!total) return;
-    const totalTokens = typeof total.totalTokens === 'number' ? total.totalTokens : null;
-    if (totalTokens === null) return;
+    const last = isRecord(tokenUsage.last) ? tokenUsage.last : null;
+    const usage = last ?? total;
+    if (!usage) return;
+
+    const inputTokens = typeof usage.inputTokens === 'number' ? usage.inputTokens : 0;
+    const outputTokens = typeof usage.outputTokens === 'number' ? usage.outputTokens : 0;
+    const cachedInputTokens = typeof usage.cachedInputTokens === 'number' ? usage.cachedInputTokens : 0;
 
     const modelContextWindow = typeof tokenUsage.modelContextWindow === 'number'
       ? tokenUsage.modelContextWindow
       : null;
     const cap = modelContextWindow ?? this._config.codex_context_cap ?? 256000;
-    const usedPct = cap > 0 ? Math.min(100, (totalTokens / cap) * 100) : null;
-
-    const inputTokens = typeof total.inputTokens === 'number' ? total.inputTokens : 0;
-    const outputTokens = typeof total.outputTokens === 'number' ? total.outputTokens : 0;
-    const cachedInputTokens = typeof total.cachedInputTokens === 'number' ? total.cachedInputTokens : 0;
+    const usedPct = cap > 0 ? Math.min(100, (inputTokens / cap) * 100) : null;
 
     const payload = JSON.stringify({
       used_percentage: usedPct,
       context_window_size: cap,
-      exceeds_200k_tokens: totalTokens > 200000,
+      exceeds_200k_tokens: inputTokens > 200000,
       current_usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
