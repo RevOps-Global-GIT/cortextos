@@ -47,7 +47,8 @@ async function rest(url, key, pathAndQuery, init = {}) {
 
 async function main() {
   try {
-    execFileSync("git", ["-C", WIKI_REPO, "pull", "--ff-only", "--quiet"], { timeout: 60_000 });
+    // team-brain main has no upstream tracking — bare `git pull` fails; name remote+branch explicitly.
+    execFileSync("git", ["-C", WIKI_REPO, "pull", "--ff-only", "--quiet", "origin", "main"], { timeout: 60_000 });
   } catch (err) {
     console.error(`[publish-signal-diff] wiki pull failed (continuing with local copy): ${err.message}`);
   }
