@@ -1,13 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Capture the PTY exit handler so tests can simulate exits at controlled times
 let capturedOnExit: ((exitCode: number, signal?: number) => void) | null = null;
+const TEST_PTY_PID = 424242;
 
 const mockPty = {
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn(),
   write: vi.fn(),
-  getPid: vi.fn().mockReturnValue(12345),
+  getPid: vi.fn().mockReturnValue(TEST_PTY_PID), // a LIVE fake pid so spawn-verify's isPidAlive() passes
   isAlive: vi.fn().mockReturnValue(true),
   // Default: no rate-limit signature in output (safe for all existing tests)
   getOutputBuffer: vi.fn().mockReturnValue({ hasRateLimitSignature: () => false }),
@@ -96,6 +97,17 @@ const mockEnv = {
 };
 
 beforeEach(() => {
+  // Default: skip the spawn settle window so healthy boots are instant in tests.
+  // Corpse tests that need the window set it explicitly.
+  AgentProcess.spawnSettleMs = 0;
+  vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+    if (signal === 0 && pid !== TEST_PTY_PID) {
+      const err = new Error('no such process') as NodeJS.ErrnoException;
+      err.code = 'ESRCH';
+      throw err;
+    }
+    return true;
+  }) as typeof process.kill);
   capturedOnExit = null;
   mockPty.spawn.mockClear();
   mockPty.kill.mockClear();
@@ -111,6 +123,10 @@ beforeEach(() => {
   fsMocks.writeFileSync.mockReset();
   fsMocks.appendFileSync.mockReset();
   fsMocks.statSync.mockReset();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
@@ -161,6 +177,7 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     await ap.start();
     expect(ap.getStatus().status).toBe('running');
 
+    ap.markBootstrapped(); // a crash is post-bootstrap by definition (spawn-verify boundary)
     // Fire the exit handler WITHOUT calling stop() first — simulates a real crash
     capturedOnExit!(1, 0);
 
@@ -174,6 +191,7 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     await ap.start();
     expect(ap.getStatus().status).toBe('running');
 
+    ap.markBootstrapped(); // post-bootstrap crash (spawn-verify boundary)
     // Fire exit handler WITHOUT calling stop() first — simulates a real crash.
     capturedOnExit!(1, 0);
 
@@ -234,6 +252,7 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
 
     const ap = new AgentProcess('alice', mockEnv, {});
     await ap.start();
+    ap.markBootstrapped(); // post-bootstrap crash (spawn-verify boundary)
     capturedOnExit!(1, 0);
 
     expect(ap.getStatus().status).toBe('crashed');
@@ -428,6 +447,7 @@ describe('AgentProcess - updateRotationResumeSuccess called after restart (2b634
       const ap = new AgentProcess('alice', mockEnv, {});
       await ap.start();
       expect(ap.getStatus().status).toBe('running');
+      ap.markBootstrapped();
 
       const rrsSpy = vi.spyOn(ap as unknown as { updateRotationResumeSuccess: () => Promise<void> }, 'updateRotationResumeSuccess')
         .mockResolvedValue(undefined);
@@ -452,6 +472,7 @@ describe('AgentProcess — CrashLoopPauser (instar-inspired sliding window)', ()
       crash_window: { seconds: 60, max_crashes: 3 },
     });
     await ap.start();
+    ap.markBootstrapped(); // these are post-bootstrap crashes (spawn-verify boundary); everBootstrapped latches
 
     // Fire 3 crashes in rapid succession (well within the 60s window).
     capturedOnExit!(1, 0);
@@ -479,6 +500,7 @@ describe('AgentProcess — CrashLoopPauser (instar-inspired sliding window)', ()
       max_crashes_per_day: 5,
     });
     await ap.start();
+    ap.markBootstrapped(); // post-bootstrap crashes (spawn-verify boundary)
 
     // 3 crashes — without crash_window, these are just normal crash recovery
     for (let i = 0; i < 3; i++) {
@@ -492,6 +514,72 @@ describe('AgentProcess — CrashLoopPauser (instar-inspired sliding window)', ()
     }
     // Should be 'crashed' (recovering), NOT 'halted', because daily max is 5
     expect(ap.getStatus().status).not.toBe('halted');
+  });
+});
+
+describe('AgentProcess — spawn-verify (gen-B: bootstrap-completion boundary)', () => {
+  it('immediate dead pid → never running, retries the budget → SPAWN-FAILED', async () => {
+    vi.useFakeTimers();
+    mockPty.getPid.mockReturnValue(2_000_000_000); // not alive (posix_spawnp corpse)
+    try {
+      const ap = new AgentProcess('alice', mockEnv, {});
+      void ap.start();
+      await vi.advanceTimersByTimeAsync(6000); // drive 1s + 2s retry backoffs
+      expect(ap.getStatus().status).toBe('spawn-failed');
+    } finally {
+      mockPty.getPid.mockReturnValue(TEST_PTY_PID);
+      vi.useRealTimers();
+    }
+  });
+
+  it('BRIEF-ALIVE wrapper corpse (alive t0, dies within settle) → retry budget → SPAWN-FAILED', async () => {
+    vi.useFakeTimers();
+    AgentProcess.spawnSettleMs = 500; // poll the settle window
+    // getPid is alive at the immediate probe, but the wrapper dies during the
+    // settle (isAlive flips false) — the exact gen-B brief-alive-wrapper shape.
+    mockPty.getPid.mockReturnValue(TEST_PTY_PID);
+    let aliveCalls = 0;
+    mockPty.isAlive.mockImplementation(() => { aliveCalls += 1; return aliveCalls <= 2; }); // dies ~t+300
+    try {
+      const ap = new AgentProcess('alice', mockEnv, {});
+      void ap.start();
+      await vi.advanceTimersByTimeAsync(10000); // settle polls + retry backoffs
+      expect(ap.getStatus().status).toBe('spawn-failed');
+      expect(ap.getStatus().status).not.toBe('running');
+    } finally {
+      AgentProcess.spawnSettleMs = 0;
+      mockPty.isAlive.mockReturnValue(true);
+      vi.useRealTimers();
+    }
+  });
+
+  it('LATE-dying corpse (survives settle, exits BEFORE bootstrap) → handleExit routes to the SAME budget → SPAWN-FAILED', async () => {
+    vi.useFakeTimers();
+    try {
+      const ap = new AgentProcess('alice', mockEnv, {});
+      await ap.start();
+      expect(ap.getStatus().status).toBe('running'); // declared running, NOT bootstrapped
+      // It dies pre-bootstrap (no markBootstrapped). Each exit consumes the budget.
+      for (let i = 0; i < 3; i++) {
+        capturedOnExit?.(1, 0);            // pre-bootstrap exit → onPreBootstrapExit
+        await vi.advanceTimersByTimeAsync(5000); // drive retry backoff → re-start
+      }
+      expect(ap.getStatus().status).toBe('spawn-failed');
+      expect(ap.getStatus().status).not.toBe('crashed'); // NOT crash-recovery
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('healthy: LIVE pid → running; markBootstrapped resets the budget so a later exit is a CRASH not spawn-failed', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+    expect(ap.getStatus().status).toBe('running');
+    ap.markBootstrapped();
+    expect(ap.hasBootstrapped()).toBe(true);
+    // A post-bootstrap exit is a crash (crash-recovery), NOT spawn-failed.
+    capturedOnExit?.(1, 0);
+    expect(ap.getStatus().status).toBe('crashed');
   });
 });
 
@@ -520,6 +608,7 @@ describe('AgentProcess — premature voluntary exit guard', () => {
       });
       await ap.start();
       expect(ap.getStatus().status).toBe('running');
+      ap.markBootstrapped();
       const before = ap.getStatus().crashCount ?? 0;
 
       // Simulate `/exit` inside the claude session: clean exit, no signal,
@@ -555,6 +644,7 @@ describe('AgentProcess — premature voluntary exit guard', () => {
         premature_exit_window: { seconds: 600, max_exits: 3, threshold_seconds: 60, backoff_seconds: 300 },
       });
       await ap.start();
+      ap.markBootstrapped();
 
       // Spy AFTER initial start so the restart-scheduled start() is observable
       vi.spyOn(ap, 'start').mockImplementation(startSpy);
@@ -580,6 +670,7 @@ describe('AgentProcess — premature voluntary exit guard', () => {
       premature_exit_window: { seconds: 600, max_exits: 3, threshold_seconds: 30, backoff_seconds: 60 },
     });
     await ap.start();
+    ap.markBootstrapped();
 
     // Premature exit #1 — should keep us in crashed, schedule a restart
     capturedOnExit!(0, 0);
@@ -611,6 +702,7 @@ describe('AgentProcess — premature voluntary exit guard', () => {
       premature_exit_window: { seconds: 600, max_exits: 3 },
     });
     await ap.start();
+    ap.markBootstrapped();
     const beforeCrash = ap.getStatus().crashCount ?? 0;
 
     // exit_code=1 (real failure), uptime well below threshold — must NOT
@@ -631,6 +723,7 @@ describe('AgentProcess — premature voluntary exit guard', () => {
       premature_exit_window: { seconds: 600, max_exits: 3 },
     });
     await ap.start();
+    ap.markBootstrapped();
     const beforeCrash = ap.getStatus().crashCount ?? 0;
 
     // exit_code=0 but signal=15 (SIGTERM) — process was killed, not a
@@ -646,6 +739,7 @@ describe('AgentProcess — premature voluntary exit guard', () => {
       premature_exit_window: { seconds: 0 },
     });
     await ap.start();
+    ap.markBootstrapped();
     const beforeCrash = ap.getStatus().crashCount ?? 0;
 
     capturedOnExit!(0, 0);
@@ -663,6 +757,7 @@ describe('AgentProcess — premature voluntary exit guard', () => {
     // the fleet-wide footgun guarded without operators needing to opt in.
     const ap = new AgentProcess('alice', mockEnv, {});
     await ap.start();
+    ap.markBootstrapped();
 
     capturedOnExit!(0, 0);
 

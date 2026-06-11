@@ -1125,7 +1125,11 @@ export interface AgentInfo {
 
 export interface AgentStatus {
   name: string;
-  status: 'running' | 'stopped' | 'crashed' | 'starting' | 'halted' | 'rate-limited';
+  // 'spawn-failed': the PTY could not be spawned (e.g. posix_spawnp / OS
+  // resource exhaustion) and retries were exhausted — the agent is NOT running
+  // and was never bootstrapped. Registry truth that replaces the gen-B lie
+  // where a corpse spawn was reported as 'running'.
+  status: 'running' | 'stopped' | 'crashed' | 'starting' | 'halted' | 'rate-limited' | 'spawn-failed';
   pid?: number;
   uptime?: number; // seconds
   lastHeartbeat?: string;

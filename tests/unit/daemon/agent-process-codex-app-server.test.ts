@@ -1,12 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 let capturedOnExit: ((exitCode: number, signal?: number) => void) | null = null;
+const TEST_PTY_PID = 424243;
 
 const mockCodexAppServerPty = {
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn(),
   write: vi.fn(),
-  getPid: vi.fn().mockReturnValue(24680),
+  getPid: vi.fn().mockReturnValue(TEST_PTY_PID), // LIVE fake pid so spawn-verify's isPidAlive() passes
   isAlive: vi.fn().mockReturnValue(true),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
@@ -92,6 +93,14 @@ const mockEnv = {
 };
 
 beforeEach(() => {
+  vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+    if (signal === 0 && pid !== TEST_PTY_PID) {
+      const err = new Error('no such process') as NodeJS.ErrnoException;
+      err.code = 'ESRCH';
+      throw err;
+    }
+    return true;
+  }) as typeof process.kill);
   capturedOnExit = null;
   for (const pty of [mockCodexAppServerPty, mockAgentPty]) {
     pty.spawn.mockClear();
@@ -111,13 +120,17 @@ beforeEach(() => {
   fsMocks.statSync.mockReset();
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('AgentProcess codex-app-server runtime', () => {
   it('selects CodexAppServerPTY for runtime codex-app-server', async () => {
     const ap = new AgentProcess('codex-app-agent', mockEnv, { runtime: 'codex-app-server' });
     await ap.start();
 
     expect(mockCodexAppServerPty.spawn).toHaveBeenCalledWith('fresh', expect.any(String));
-    expect(ap.getStatus().pid).toBe(24680);
+    expect(ap.getStatus().pid).toBe(TEST_PTY_PID); // mock getPid -> live fake pid (spawn-verify)
   });
 
   it('wires Telegram handle to CodexAppServerPTY before start', async () => {

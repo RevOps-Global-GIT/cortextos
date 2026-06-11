@@ -1,13 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Capture the PTY exit handler so tests can simulate exits
 let capturedOnExit: ((exitCode: number, signal?: number) => void) | null = null;
+const TEST_PTY_PID = 424244;
 
 const mockPty = {
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn(),
   write: vi.fn(),
-  getPid: vi.fn().mockReturnValue(12345),
+  getPid: vi.fn().mockReturnValue(TEST_PTY_PID), // LIVE fake pid so spawn-verify's isPidAlive() passes
   isAlive: vi.fn().mockReturnValue(true),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
     capturedOnExit = cb;
@@ -87,6 +88,14 @@ const mockEnv = {
 };
 
 beforeEach(() => {
+  vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | 0) => {
+    if (signal === 0 && pid !== TEST_PTY_PID) {
+      const err = new Error('no such process') as NodeJS.ErrnoException;
+      err.code = 'ESRCH';
+      throw err;
+    }
+    return true;
+  }) as typeof process.kill);
   capturedOnExit = null;
   mockHermesDbExists.mockReset().mockReturnValue(false);
   mockPty.spawn.mockClear();
@@ -100,6 +109,10 @@ beforeEach(() => {
   fsMocks.writeFileSync.mockReset();
   fsMocks.appendFileSync.mockReset();
   fsMocks.statSync.mockReset();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('AgentProcess - Hermes runtime: shouldContinue', () => {

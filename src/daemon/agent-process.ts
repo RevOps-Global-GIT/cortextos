@@ -11,6 +11,7 @@ import { CodexAppServerPTY } from '../pty/codex-app-server-pty.js';
 import { HermesPTY, hermesDbExists } from '../pty/hermes-pty.js';
 import { ScriptPTY } from '../pty/script-pty.js';
 import { MessageDedup, injectMessage } from '../pty/inject.js';
+import { recordSpawnFailure } from './spawn-failure-alerter.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { ensureDir } from '../utils/atomic.js';
 import { writeCortextosEnv } from '../utils/env.js';
@@ -89,6 +90,18 @@ export class AgentProcess implements ManagedAgent {
   // (each start() recreates the PTY, but the Telegram handle persists).
   private telegramApi: TelegramAPI | null = null;
   private telegramChatId: string | null = null;
+  // Spawn-verify (gen-B): bootstrap-completion is the line between the spawn-
+  // retry budget and crash-recovery. everBootstrapped flips on a real bootstrap
+  // (markBootstrapped) and routes future exits to crash-recovery; spawnAttempts
+  // is the unified pre-bootstrap budget (reset on bootstrap); spawnVerifying
+  // makes handleExit defer to the settle poll during the post-spawn window.
+  private everBootstrapped = false;
+  private spawnAttempts = 0;
+  private spawnVerifying = false;
+  /** Settle window (ms) to confirm a spawned pid stays alive — INJECTABLE for tests. */
+  static spawnSettleMs = 500;
+  /** Settle poll interval (ms) — INJECTABLE for tests. */
+  static spawnSettlePollMs = 100;
 
   constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn, cronScheduler?: CronScheduler | null) {
     this.name = name;
@@ -255,6 +268,14 @@ export class AgentProcess implements ManagedAgent {
     const logPath = join(this.env.ctxRoot, 'logs', this.name, 'stdout.log');
     ensureDir(join(this.env.ctxRoot, 'logs', this.name));
     this.log(`Log path: ${logPath}`);
+
+    // Spawn with verification + bounded retry (gen-B spawn-verify). One call to
+    // start() consumes one persistent pre-bootstrap spawn attempt. node-pty can
+    // return a PTY object for a dead or briefly-alive wrapper process, so require
+    // both an immediately live pid and survival through a bounded settle window.
+    // Any pre-bootstrap exit routes to onPreBootstrapExit, which retries up to
+    // MAX_SPAWN_ATTEMPTS then records SPAWN-FAILED registry truth.
+    this.spawnAttempts++;
     this.pty = this.config.runtime === 'hermes'
       ? new HermesPTY(this.env, this.config, logPath)
       : this.config.runtime === 'codex-app-server'
@@ -263,33 +284,23 @@ export class AgentProcess implements ManagedAgent {
           ? new ScriptPTY(this.env, this.config, logPath)
           : new AgentPTY(this.env, this.config, logPath);
 
-    // Issue #330: re-wire the Telegram handle on every start() (session refresh
-    // creates a fresh CodexAppServerPTY). Only CodexAppServerPTY uses this — Claude / Hermes
-    // typing indicators flow through fast-checker.
+    // Issue #330: re-wire the Telegram handle (only CodexAppServerPTY uses it).
     if (this.config.runtime === 'codex-app-server' && this.telegramApi && this.telegramChatId) {
       (this.pty as CodexAppServerPTY).setTelegramHandle(this.telegramApi, this.telegramChatId);
     }
 
-    // BUG-011 fix: create a fresh exit signal for this run. resolveExit is
-    // called from the onExit handler below; stop() awaits exitPromise to
-    // guarantee the exit handler has fired before clearing stopping.
+    // BUG-011 fix: fresh exit signal; stop() awaits exitPromise.
     this.exitPromise = new Promise<void>((resolve) => {
       this.resolveExit = resolve;
     });
-
-    // Handle exit
     this.pty.onExit((exitCode, signal) => {
-      // BUG-040 fix: if the lifecycle has moved on (a new start() incremented
-      // the generation since this PTY was spawned), this is an old PTY's late
-      // exit. Ignore it entirely — we don't want it to trigger handleExit on
-      // the current PTY's state.
+      // BUG-040 fix: ignore a late exit from a superseded lifecycle generation.
       if (myGeneration !== this.lifecycleGeneration) {
         this.log(`Ignoring late exit from previous lifecycle gen ${myGeneration} (current: ${this.lifecycleGeneration})`);
         return;
       }
       this.log(`Exited with code ${exitCode} signal ${signal}`);
       this.handleExit(exitCode, signal);
-      // Signal anyone awaiting this PTY's exit (e.g. stop() — BUG-011 fix)
       this.resolveExit?.();
       this.resolveExit = null;
     });
@@ -301,21 +312,49 @@ export class AgentProcess implements ManagedAgent {
         agent: agentName,
         attributes: { mode, has_prompt: prompt ? 'true' : 'false' },
       });
-      // Codex exec-per-turn race: the new PTY's onExit can fire BEFORE this
-      // line if `codex exec` completes its prompt quickly (CodexAppServerPTY's spawn
-      // resolves once exec is launched, but the process may exit moments
-      // later as it finishes the bootstrap turn). handleExit() nulls
-      // this.pty and schedules crash recovery — we must not claim 'running'
-      // or call getPid() on null in that window.
+
+      // Codex exec-per-turn legit fast exit: onExit nulled this.pty. handleExit
+      // owns it — not a spawn failure.
       if (!this.pty) {
         this.log('PTY exited during spawn — handleExit will recover');
         return;
       }
+
+      // Immediate pid probe: a posix_spawnp corpse is dead/absent right away.
+      const spawnedPid = this.pty.getPid();
+      if (spawnedPid === null || spawnedPid <= 0 || !isPidAlive(spawnedPid)) {
+        this.onPreBootstrapExit(`spawn produced no live pid (pid=${spawnedPid ?? 'null'})`);
+        return;
+      }
+
+      // SETTLE: catch a briefly-alive WRAPPER pid that dies as the exec fails
+      // inside (the gen-B shape the immediate probe misses). spawnVerifying makes
+      // handleExit defer to this poll so a mid-settle death routes exactly once.
+      // Skipped for codex-app-server (its exec-per-turn model legitimately exits).
+      if (this.config.runtime !== 'codex-app-server') {
+        this.spawnVerifying = true;
+        try {
+          for (let waited = 0; waited < AgentProcess.spawnSettleMs; waited += AgentProcess.spawnSettlePollMs) {
+            await sleep(AgentProcess.spawnSettlePollMs);
+            if (!this.pty || !this.pty.isAlive() || !isPidAlive(spawnedPid)) {
+              this.spawnVerifying = false;
+              this.onPreBootstrapExit(`pid ${spawnedPid} died within the ${AgentProcess.spawnSettleMs}ms settle window`);
+              return;
+            }
+          }
+        } finally {
+          this.spawnVerifying = false;
+        }
+      }
+
+      // Survived the settle window. 'running', but NOT yet bootstrapped — a
+      // pre-bootstrap exit from here still routes to the spawn-retry budget; only
+      // a real bootstrap (markBootstrapped, from the fast-checker) hands the
+      // agent over to crash-recovery and resets the budget.
       this.status = 'running';
       this.sessionStart = new Date();
       this.lastInjectedAt = 0;
-      this.log(`Running (pid: ${this.pty.getPid()})`);
-
+      this.log(`Running (pid: ${spawnedPid})`);
       // Write an initial heartbeat.json at process-start so the stale-heartbeat
       // watcher sees a fresh timestamp immediately. Without this, an agent whose
       // heartbeat cron fired shortly before restart won't write a new heartbeat
@@ -339,27 +378,80 @@ export class AgentProcess implements ManagedAgent {
       } catch (err) {
         this.log(`Boot heartbeat write failed (non-fatal): ${err}`);
       }
-
-      // Start session timer
       this.startSessionTimer();
-
       // Attach to the daemon-side CronScheduler so config.json crons fire
-      // via PTY injection regardless of in-session CronCreate state. This is
-      // the reliable path that survives --continue restarts and ctx handoffs;
-      // the in-session /loop setup remains as a redundant backup (MessageDedup
-      // in injectMessage prevents double-firing when both paths are active).
+      // via PTY injection regardless of in-session CronCreate state.
       try {
         this.cronScheduler?.attachAgent(this);
       } catch (err) {
         this.log(`CronScheduler attach failed (non-fatal): ${err}`);
       }
-
       this.notifyStatusChange();
     } catch (err) {
-      this.log(`Failed to start: ${err}`);
-      this.status = 'crashed';
-      this.notifyStatusChange();
+      try { this.pty?.kill(); } catch { /* already dead */ }
+      this.pty = null;
+      this.onPreBootstrapExit(`spawn threw: ${err}`);
     }
+  }
+
+  /**
+   * A pre-bootstrap exit (the process died before it ever bootstrapped, and was
+   * not intentionally stopped) — from the settle poll or from handleExit. Routes
+   * to the unified bounded spawn-retry budget: retry up to MAX_SPAWN_ATTEMPTS,
+   * then SPAWN-FAILED + fleet alert + STOP (no crash-loop). This REPLACES the
+   * crash-recovery path for pre-bootstrap exits (which is now post-bootstrap
+   * only), tightening the bound from max_crashes_per_day (~10, silent) to 3-loud.
+   */
+  private onPreBootstrapExit(reason: string): void {
+    if (this.everBootstrapped || this.status === 'spawn-failed' || this.stopRequested) return;
+    this.clearSessionTimer();
+    this.pty = null;
+    const failureClass = classifySpawnFailure(reason);
+    if (this.spawnAttempts >= MAX_SPAWN_ATTEMPTS) {
+      this.markSpawnFailed(failureClass);
+      return;
+    }
+    // The agent died — it is no longer running, so clear the 'running' status or
+    // the retry's start() would bail with "Already running".
+    this.status = 'starting';
+    const backoff = SPAWN_RETRY_BASE_MS * 2 ** (this.spawnAttempts - 1); // 1s, 2s
+    this.log(`Pre-bootstrap exit (attempt ${this.spawnAttempts}/${MAX_SPAWN_ATTEMPTS}, ${failureClass}): ${reason} — retrying in ${backoff}ms`);
+    setTimeout(() => {
+      if (this.status === 'spawn-failed' || this.stopRequested || this.everBootstrapped) return;
+      void this.start();
+    }, backoff);
+  }
+
+  /**
+   * Record SPAWN-FAILED registry truth + feed the fleet-wide operator alert, and
+   * STOP (no retry, no crash-recovery). Recoverable: the operator alert prompts a
+   * `cortextos enable` (resets the budget), and a daemon restart re-attempts with
+   * spawnAttempts=0.
+   */
+  private markSpawnFailed(failureClass: string): void {
+    if (this.status === 'spawn-failed') return;
+    this.status = 'spawn-failed';
+    this.pty = null;
+    this.clearSessionTimer();
+    this.notifyStatusChange();
+    recordSpawnFailure(this.name, failureClass);
+    this.log(`SPAWN-FAILED after ${MAX_SPAWN_ATTEMPTS} attempts (${failureClass}) — agent is NOT running (recover via re-enable or daemon restart)`);
+  }
+
+  /**
+   * The agent reached bootstrap — hand it over to crash-recovery for any future
+   * exit, and reset the spawn-retry budget so a long-lived agent that crashes
+   * months later isn't judged against stale pre-boot attempts. Called by the
+   * fast-checker when waitForBootstrap succeeds (incl. the alive-but-quiet path).
+   */
+  markBootstrapped(): void {
+    this.everBootstrapped = true;
+    this.spawnAttempts = 0;
+  }
+
+  /** True once the agent has bootstrapped at least once this lifecycle. */
+  hasBootstrapped(): boolean {
+    return this.everBootstrapped;
   }
 
   /**
@@ -576,6 +668,18 @@ export class AgentProcess implements ManagedAgent {
   }
 
   /**
+   * True if the agent's PTY process is alive at the OS level. Unlike the PTY
+   * wrapper's optimistic `_alive` flag (set true on spawn and only cleared by
+   * onExit — a posix_spawnp corpse keeps it true), this probes the real pid, so
+   * the fast-checker can distinguish a dead process from an alive-but-quiet one
+   * during the bootstrap wait (gen-B: never log "Bootstrap complete" for a corpse).
+   */
+  isProcessAlive(): boolean {
+    const pid = this.pty?.getPid();
+    return pid != null && pid > 0 && isPidAlive(pid);
+  }
+
+  /**
    * Get current agent status.
    */
   getStatus(): AgentStatus {
@@ -659,6 +763,13 @@ export class AgentProcess implements ManagedAgent {
     const rateLimitResetSeconds = isRateLimited
       ? (this.pty?.getOutputBuffer()?.getRateLimitResetSeconds() ?? null)
       : null;
+
+    // Spawn-verify: during the post-spawn settle window the settle poll owns the
+    // death (it routes to onPreBootstrapExit exactly once). Defer — do NOT null
+    // pty or recover here, or the settle's pid probe loses its handle.
+    if (this.spawnVerifying) {
+      return;
+    }
 
     this.pty = null;
     this.clearSessionTimer();
@@ -759,6 +870,15 @@ export class AgentProcess implements ManagedAgent {
         }
       }, pauseSeconds * 1000);
 
+      return;
+    }
+
+    // Spawn-verify boundary (gen-B): bootstrap-completion is the semantic line.
+    // An exit BEFORE the agent ever bootstrapped is a failed start — route it to
+    // the unified spawn-retry budget, not crash-recovery. Crash-recovery below
+    // serves post-bootstrap crashes only.
+    if (!this.everBootstrapped && this.status !== 'spawn-failed') {
+      this.onPreBootstrapExit(`exited code ${exitCode} before bootstrap`);
       return;
     }
 
@@ -1513,7 +1633,12 @@ function sleep(ms: number): Promise<void> {
  */
 const HARD_KILL_GRACE_MS = 8000;
 
-/** True if `pid` is still a live process. `process.kill(pid, 0)` only probes. */
+/** Max spawn attempts before declaring SPAWN-FAILED (gen-B spawn-verify). */
+const MAX_SPAWN_ATTEMPTS = 3;
+/** Base backoff between spawn retries (×2^(attempt-1) → 1s, 2s). */
+const SPAWN_RETRY_BASE_MS = 1000;
+
+/** True if `pid` is a live process. `process.kill(pid, 0)` only probes. */
 export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -1579,4 +1704,24 @@ export function hardKillProcessGroup(pid: number): void {
       // Already gone between the liveness check and here — nothing to do.
     }
   }
+}
+
+/**
+ * Classify a spawn failure into a coarse CLASS for fleet-wide alert dedup.
+ * posix_spawnp / EAGAIN / ENOMEM all mean OS process/resource exhaustion — the
+ * gen-B cause — and should collapse into one operator alert. Unknown errors
+ * get a generic class so they still dedup per-class.
+ */
+export function classifySpawnFailure(err: unknown): string {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  if (msg.includes('posix_spawnp') || msg.includes('eagain') || msg.includes('enomem') || msg.includes('resource temporarily unavailable')) {
+    return 'posix_spawnp';
+  }
+  if (msg.includes('no live process')) {
+    // Our own verification failure — node-pty returned a corpse (the classic
+    // gen-B shape); treat as the exhaustion class so it dedups with it.
+    return 'posix_spawnp';
+  }
+  if (msg.includes('enoent')) return 'ENOENT';
+  return 'spawn-error';
 }
