@@ -37,7 +37,7 @@
       "type": "recurring",
       "session_cron": true,
       "cron": "17 9,11,13 * * *",
-      "prompt": "OB1 daily-hero publish watchdog (self-healing). Steps: (1) PUB=$(curl -s https://ob1.revopsglobal.com/vignettes/latest.json | python3 -c 'import sys,json;print(json.load(sys.stdin).get(\"date\",\"\"))'); TODAY=$(date +%F). (2) If PUB equals TODAY: hero published — NO action, done. (3) If STALE (PUB != TODAY): SSH gregharned@100.84.86.6 (ConnectTimeout 10) and check whether a Flow run is currently active: `ps aux | grep -Ei 'generate-daily-vignette|playwright' | grep -v grep` and `pgrep -f SkyComputerUseClient | wc -l`. If a run IS active (matching proc present OR skycompute count > 0): it is still generating — NO action, let it finish. (4) If STALE and NO run active (Mac idle): re-kick via `cortextos bus send-message mac-codex normal 'Hero watchdog: today hero not published — latest.json still stale, Codex.app idle. Please re-run scripts/generate-daily-vignette-flow.mjs in /Users/gregharned/work/ob1-app — Flow ONLY (never the VM Nano-Banana generator), multi-char via Flow CHARACTER LIBRARY, publish after verify. Report when latest.json flips to today.'`. (5) Only Telegram Greg (chat 8567114601) on the LAST (13:17 PT) check IF still stale after a prior re-kick already fired this morning — surface as \"hero still not publishing after re-kick, may need your eyes.\" Otherwise stay silent. NEVER run the VM Nano-Banana generator yourself — the canonical hero is Greg's Mac Flow automation only. This is a cron-triggered turn: do NOT reschedule any loop."
+      "prompt": "OB1 daily-hero publish watchdog (self-healing). Steps: (1) PUB=$(curl -s https://ob1.revopsglobal.com/vignettes/latest.json | python3 -c 'import sys,json;print(json.load(sys.stdin).get(\"date\",\"\"))'); TODAY=$(date +%F). (2) If PUB equals TODAY: hero published \u2014 NO action, done. (3) If STALE (PUB != TODAY): SSH gregharned@100.84.86.6 (ConnectTimeout 10) and check whether a Flow run is currently active: `ps aux | grep -Ei 'generate-daily-vignette|playwright' | grep -v grep` and `pgrep -f SkyComputerUseClient | wc -l`. If a run IS active (matching proc present OR skycompute count > 0): it is still generating \u2014 NO action, let it finish. (4) If STALE and NO run active (Mac idle): re-kick via `cortextos bus send-message mac-codex normal 'Hero watchdog: today hero not published \u2014 latest.json still stale, Codex.app idle. Please re-run scripts/generate-daily-vignette-flow.mjs in /Users/gregharned/work/ob1-app \u2014 Flow ONLY (never the VM Nano-Banana generator), multi-char via Flow CHARACTER LIBRARY, publish after verify. Report when latest.json flips to today.'`. (5) Only Telegram Greg (chat 8567114601) on the LAST (13:17 PT) check IF still stale after a prior re-kick already fired this morning \u2014 surface as \"hero still not publishing after re-kick, may need your eyes.\" Otherwise stay silent. NEVER run the VM Nano-Banana generator yourself \u2014 the canonical hero is Greg's Mac Flow automation only. This is a cron-triggered turn: do NOT reschedule any loop."
     },
     {
       "name": "weekly-review",
@@ -55,13 +55,13 @@
       "name": "fleet-tick",
       "type": "recurring",
       "interval": "2h",
-      "prompt": "Fleet-tick: light coordination pass — (1) cortextos bus list-tasks; (2) check heartbeats; (3) scan inbox; (4) update heartbeat. Silent unless action needed."
+      "prompt": "Fleet-tick: light coordination pass \u2014 (1) cortextos bus list-tasks; (2) check heartbeats; (3) scan inbox; (4) update heartbeat. Silent unless action needed."
     },
     {
       "name": "kanban-sync",
       "type": "recurring",
       "cron": "0 8,17 * * *",
-      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator — compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
+      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator \u2014 compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
     },
     {
       "name": "blocked-uat-escalator",
@@ -109,7 +109,12 @@
       "name": "deliverables-snapshot",
       "type": "recurring",
       "cron": "0 5,17 * * *",
-      "prompt": "Run: node /home/cortextos/cortextos/scripts/cortextos-deliverables-snapshot.js — pushes the deliverables snapshot to the agentops-deliverables-push edge function so /api/agentops/overview and the Advisor canary stay fresh (threshold 1440m). Twice daily (5am/5pm PT) keeps the canary well under the staleness window. This is a cron-triggered turn: do NOT reschedule any loop. Silent unless the script errors."
+      "prompt": "Run: node /home/cortextos/cortextos/scripts/cortextos-deliverables-snapshot.js \u2014 pushes the deliverables snapshot to the agentops-deliverables-push edge function so /api/agentops/overview and the Advisor canary stay fresh (threshold 1440m). Twice daily (5am/5pm PT) keeps the canary well under the staleness window. This is a cron-triggered turn: do NOT reschedule any loop. Silent unless the script errors."
+    },
+    {
+      "name": "supreme-scanner-2h",
+      "interval": "2h",
+      "prompt": "Run the Supreme Slack scanner. Execute: cd /home/cortextos/cortextos/orgs/revops-global && source secrets.env && python3 agents/analyst/scripts/supreme-slack-scanner.py 2>&1 | tail -5. If exit code non-zero or output contains 'timeout' or 'error', insert a failed scanner_triggers row and Telegram Greg with the error. On success, log cortextos bus log-event action supreme_scanner_run info."
     }
   ],
   "ctx_warning_threshold": 0,

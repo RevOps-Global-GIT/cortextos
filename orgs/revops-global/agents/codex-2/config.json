@@ -34,6 +34,7 @@
     ],
     "never_ask": []
   },
+  "ctx_autoreset_threshold": 75,
   "telegram_polling": false,
   "daemon_telegram_alerts": false
 }

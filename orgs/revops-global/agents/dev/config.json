@@ -102,13 +102,19 @@
       "name": "ob1-daily-vignette",
       "type": "recurring",
       "cron": "0 6 * * *",
-      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.js"
+      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.mjs"
     },
     {
       "name": "daily-hero-watchdog",
       "type": "recurring",
       "cron": "0 8 * * *",
       "prompt": "Read prompts/cron-daily-hero-watchdog.md and execute exactly one bounded hero trigger pass; check latest.json, dispatch to mac-codex if missing, log result and exit."
+    },
+    {
+      "name": "supabase-outage-detector",
+      "type": "recurring",
+      "interval": "5m",
+      "prompt": "node /home/cortextos/cortextos/scripts/supabase-outage-detector.js"
     },
     {
       "name": "daily-hero-verify",
