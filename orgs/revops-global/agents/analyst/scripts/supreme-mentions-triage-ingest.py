@@ -347,17 +347,26 @@ def parse_table_items(text: str, scanned_at: str, raw_proof_path: str) -> List[D
     return rows
 
 
+def drop_synthetic_triage_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Rows without a real Slack channel_id+message_ts fall back to stable_id(), minting a
+    # "supreme-mentions-triage-<hash>" id whose hash drifts every pass (the header carries a
+    # relative age like "13h ago"), so each cron run inserts a brand-new twin. The read side
+    # (supreme-triage-run edge fn + supreme_outstanding_open_24h view) already excludes this
+    # prefix, so these rows are never consumed — they only accumulate. Drop at ingest.
+    return [r for r in rows if not str(r.get("id", "")).startswith("supreme-mentions-triage-")]
+
+
 def parse_items(text: str, scanned_at: str, raw_proof_path: str) -> List[Dict[str, Any]]:
     json_rows = parse_json_items(text, scanned_at)
     if json_rows is not None:
         for row in json_rows:
             row.setdefault("raw_json", {})["cu_capture_at"] = scanned_at
             row.setdefault("raw_json", {})["raw_proof_path"] = raw_proof_path
-        return json_rows
+        return drop_synthetic_triage_rows(json_rows)
 
     table_rows = parse_table_items(text, scanned_at, raw_proof_path)
     if table_rows:
-        return table_rows
+        return drop_synthetic_triage_rows(table_rows)
 
     rows: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -369,7 +378,7 @@ def parse_items(text: str, scanned_at: str, raw_proof_path: str) -> List[Dict[st
         row.setdefault("raw_json", {})["raw_proof_path"] = raw_proof_path
         rows.append(row)
         seen.add(row["id"])
-    return rows
+    return drop_synthetic_triage_rows(rows)
 
 
 def preview_key(value: str) -> str:
