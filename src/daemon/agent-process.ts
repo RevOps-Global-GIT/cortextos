@@ -355,7 +355,6 @@ export class AgentProcess implements ManagedAgent {
       this.sessionStart = new Date();
       this.lastInjectedAt = 0;
       this.log(`Running (pid: ${spawnedPid})`);
-      this.maybeSendCodexBootNotification();
       // Write an initial heartbeat.json at process-start so the stale-heartbeat
       // watcher sees a fresh timestamp immediately. Without this, an agent whose
       // heartbeat cron fired shortly before restart won't write a new heartbeat
