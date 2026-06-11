@@ -19,7 +19,7 @@ const mockPty = {
   spawn: vi.fn().mockResolvedValue(undefined),
   kill: vi.fn(),
   write: vi.fn(),
-  getPid: vi.fn().mockReturnValue(99999),
+  getPid: vi.fn().mockReturnValue(process.pid),
   isAlive: vi.fn().mockReturnValue(true),
   getOutputBuffer: vi.fn(() => mockOutputBuffer),
   onExit: vi.fn().mockImplementation((cb: (exitCode: number, signal?: number) => void) => {
@@ -104,11 +104,13 @@ const mockEnv = {
 };
 
 beforeEach(() => {
+  AgentProcess.spawnSettleMs = 0;
   capturedOnExit = null;
   mockHasRateLimitSignature = false;
   mockPty.spawn.mockClear();
   mockPty.kill.mockClear();
   mockPty.write.mockClear();
+  mockPty.getPid.mockReturnValue(process.pid);
   mockPty.isAlive.mockReturnValue(true);
   mockPty.onExit.mockClear();
   mockPty.getOutputBuffer.mockClear();
@@ -131,6 +133,7 @@ describe('AgentProcess - rate-limit recovery', () => {
     expect(capturedOnExit).not.toBeNull();
     expect(ap.getStatus().status).toBe('running');
 
+    ap.markBootstrapped();
     capturedOnExit!(1, 0);
 
     expect(ap.getStatus().status).toBe('rate-limited');
@@ -142,6 +145,7 @@ describe('AgentProcess - rate-limit recovery', () => {
     await ap.start();
 
     // Fire two rate-limit exits — should not exhaust crash budget
+    ap.markBootstrapped();
     capturedOnExit!(1, 0);
     expect(ap.getStatus().crashCount).toBe(0);
   });
@@ -151,6 +155,7 @@ describe('AgentProcess - rate-limit recovery', () => {
     const ap = new AgentProcess('alice', mockEnv, {});
     await ap.start();
 
+    ap.markBootstrapped();
     capturedOnExit!(1, 0);
 
     expect(mockRecordFailure).not.toHaveBeenCalled();
@@ -161,6 +166,7 @@ describe('AgentProcess - rate-limit recovery', () => {
     const ap = new AgentProcess('alice', mockEnv, {});
     await ap.start();
 
+    ap.markBootstrapped();
     capturedOnExit!(1, 0);
 
     const writeCall = mockWriteFileSync.mock.calls.find(
@@ -177,6 +183,7 @@ describe('AgentProcess - rate-limit recovery', () => {
       await ap.start();
       const startSpy = vi.spyOn(ap, 'start');
 
+      ap.markBootstrapped();
       capturedOnExit!(1, 0);
       expect(ap.getStatus().status).toBe('rate-limited');
 
@@ -196,6 +203,7 @@ describe('AgentProcess - rate-limit recovery', () => {
       await ap.start();
       const startSpy = vi.spyOn(ap, 'start');
 
+      ap.markBootstrapped();
       capturedOnExit!(1, 0);
       expect(ap.getStatus().status).toBe('rate-limited');
 
@@ -216,6 +224,7 @@ describe('AgentProcess - rate-limit recovery', () => {
     const ap = new AgentProcess('alice', mockEnv, {});
     await ap.start();
 
+    ap.markBootstrapped();
     capturedOnExit!(1, 0);
 
     expect(ap.getStatus().crashCount).toBe(1);
