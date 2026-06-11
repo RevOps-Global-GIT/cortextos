@@ -497,22 +497,41 @@ function readTaskCountsToday() {
   return byAgent;
 }
 
+/** Event roots: legacy instance-level dir plus org-scoped dirs (bus log-event
+ * writes to orgs/<org>/analytics/events/<agent>/ — see src/utils/paths.ts). */
+function eventRootDirs() {
+  const roots = [EVENTS_DIR];
+  const orgsDir = path.join(CTX_ROOT, "orgs");
+  if (fs.existsSync(orgsDir)) {
+    try {
+      for (const org of fs.readdirSync(orgsDir)) {
+        const dir = path.join(orgsDir, org, "analytics", "events");
+        if (fs.existsSync(dir)) roots.push(dir);
+      }
+    } catch { /* unreadable orgs dir — fall back to legacy root only */ }
+  }
+  return roots;
+}
+
 /** Read activity events since watermark from event JSONL files */
 function readEventsSince(sinceTsStr) {
   const sinceTs = new Date(sinceTsStr).getTime();
   const byAgent = {};
 
-  const eventSubdirs = fs.existsSync(EVENTS_DIR)
-    ? fs.readdirSync(EVENTS_DIR).filter((d) => {
-        return fs.statSync(path.join(EVENTS_DIR, d)).isDirectory();
-      })
-    : [];
+  const eventSubdirs = eventRootDirs().flatMap((root) => {
+    if (!fs.existsSync(root)) return [];
+    return fs.readdirSync(root)
+      .map((d) => path.join(root, d))
+      .filter((p) => {
+        try { return fs.statSync(p).isDirectory(); } catch { return false; }
+      });
+  });
 
   const dates = [yesterdayDateStr(), todayDateStr()];
 
   for (const subdir of eventSubdirs) {
     for (const date of dates) {
-      const file = path.join(EVENTS_DIR, subdir, `${date}.jsonl`);
+      const file = path.join(subdir, `${date}.jsonl`);
       const lines = readJsonlFile(file);
 
       for (const evt of lines) {
