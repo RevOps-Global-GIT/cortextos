@@ -57,7 +57,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCANNER_PATH = SCRIPT_DIR / "supreme-slack-scanner.py"
-LATEST_JSON = SCRIPT_DIR.parent / "output" / "supreme-outstanding-latest.json"
+# Scheduled scanner cron runs from the cortextos-qa worktree (fork/main reset at fire time)
+# and writes its artifact there. The main-clone output/ is only written by on-demand runs.
+_QA_WORKTREE_LATEST = Path("/home/cortextos/cortextos-qa/orgs/revops-global/agents/analyst/output/supreme-outstanding-latest.json")
+_MAIN_CLONE_LATEST = SCRIPT_DIR.parent / "output" / "supreme-outstanding-latest.json"
+
+
+def _find_latest_json() -> Optional[Path]:
+    """Prefer the QA-worktree artifact (written by the scheduled scanner cron)."""
+    for p in [_QA_WORKTREE_LATEST, _MAIN_CLONE_LATEST]:
+        if p.exists():
+            return p
+    return None
 
 # The scanner cron uses DEFAULT_SINCE_HOURS=48; match it so the windows align.
 DEFAULT_SINCE_HOURS = 48
@@ -71,38 +82,47 @@ TRIAGE_DIVERGENCE_ALERT_HOURS = 2.5
 EVIDENCE_CAP = 4
 
 
+_QA_WORKTREE_SCANNER = Path("/home/cortextos/cortextos-qa/orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py")
+_REPO_ROOT = Path(__file__).resolve().parents[4]  # cortextos repo root
+_SCANNER_FORK_PATH = "orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py"
+
+
 def get_scanner_version() -> Dict[str, Any]:
-    """Compare the running scanner file against fork/main to distinguish stale-deployment
-    from logic regression when a masking alert fires.
+    """Compare the scanner the cron actually executed (QA worktree) against fork/main blob.
+
+    Uses `git hash-object` on the QA worktree file and `git rev-parse` for the fork/main
+    blob hash — both are git's own object identifiers, so the comparison is exact.
+    Hashing the shared clone is wrong: it sits on a feature branch by design and will
+    always appear diverged even when the scanner is correct.
 
     Returns: {local_sha8, remote_sha8, diverged, error}
-    Errors are non-fatal — the caller includes them in the alert for transparency.
     """
-    def sha8(data: bytes) -> str:
-        return hashlib.sha256(data).hexdigest()[:8]
-
     try:
-        local_bytes = SCANNER_PATH.read_bytes()
-        local = sha8(local_bytes)
-    except OSError as e:
-        return {"error": f"cannot read local scanner: {e}"}
-
-    try:
-        res = subprocess.run(
-            ["git", "show", "fork/main:orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py"],
-            capture_output=True, timeout=15,
-            cwd=Path(__file__).resolve().parents[4],  # cortextos repo root
+        res_local = subprocess.run(
+            ["git", "hash-object", str(_QA_WORKTREE_SCANNER)],
+            capture_output=True, timeout=15, cwd=_REPO_ROOT,
         )
-        if res.returncode != 0:
-            return {"local_sha8": local, "error": f"git show fork/main failed: {res.stderr.decode()[:80]}"}
-        remote = sha8(res.stdout)
+        if res_local.returncode != 0:
+            return {"error": f"git hash-object failed: {res_local.stderr.decode()[:80]}"}
+        local_hash = res_local.stdout.decode().strip()[:8]
     except Exception as e:  # noqa: BLE001
-        return {"local_sha8": local, "error": f"git show exception: {e}"}
+        return {"error": f"hash-object exception: {e}"}
+
+    try:
+        res_remote = subprocess.run(
+            ["git", "rev-parse", f"fork/main:{_SCANNER_FORK_PATH}"],
+            capture_output=True, timeout=15, cwd=_REPO_ROOT,
+        )
+        if res_remote.returncode != 0:
+            return {"local_sha8": local_hash, "error": f"rev-parse fork/main failed: {res_remote.stderr.decode()[:80]}"}
+        remote_hash = res_remote.stdout.decode().strip()[:8]
+    except Exception as e:  # noqa: BLE001
+        return {"local_sha8": local_hash, "error": f"rev-parse exception: {e}"}
 
     return {
-        "local_sha8": local,
-        "remote_sha8": remote,
-        "diverged": local != remote,
+        "local_sha8": local_hash,
+        "remote_sha8": remote_hash,
+        "diverged": local_hash != remote_hash,
     }
 
 
@@ -159,11 +179,16 @@ def should_alert_triage_divergence(divergence_hours: float) -> bool:
 # -- I/O -----------------------------------------------------------------------
 
 def read_scanner_output() -> Optional[Tuple[int, datetime]]:
-    """Return (items_scanned, generated_at) from the scanner's latest snapshot, or None."""
-    if not LATEST_JSON.exists():
+    """Return (items_scanned, generated_at) from the scanner's latest snapshot, or None.
+
+    Prefers the QA-worktree artifact (written by the scheduled scanner cron which resets
+    to fork/main at fire time). Falls back to the main-clone output/ for on-demand runs.
+    """
+    path = _find_latest_json()
+    if path is None:
         return None
     try:
-        d = json.loads(LATEST_JSON.read_text())
+        d = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return None
     total = d.get("total_count")
