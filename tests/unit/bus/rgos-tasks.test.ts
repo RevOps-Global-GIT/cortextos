@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { makeBusPaths, makeTempDir } from '../../setup';
-import { importApprovedRgosTasks, importRgosTaskById, readImportedRgosTask } from '../../../src/bus/rgos-tasks';
+import { importApprovedRgosTasks, importRgosTaskById, readImportedRgosTask, reconcileCompletedRgosTasks } from '../../../src/bus/rgos-tasks';
 
 describe('rgos-tasks import helpers', () => {
   let tmpDir: string;
@@ -89,5 +89,58 @@ describe('rgos-tasks import helpers', () => {
 
     await expect(importRgosTaskById(paths, '5253f733-da6a-4491-8f22-618cedb56a19', 'codex'))
       .rejects.toThrow(/assigned to dev, not codex/);
+  });
+
+  it('reconciles completed RGOS rows back to pending local bus twins', async () => {
+    const paths = makeBusPaths(tmpDir, 'codex');
+    mkdirSync(paths.taskDir, { recursive: true });
+    const busTaskId = 'task_1781197912707_47270437';
+    writeFileSync(join(paths.taskDir, `${busTaskId}.json`), JSON.stringify({
+      id: busTaskId,
+      title: 'Local twin left pending',
+      description: '',
+      type: 'agent',
+      needs_approval: false,
+      status: 'pending',
+      assigned_to: 'codex',
+      created_by: 'orchestrator',
+      org: 'revops-global',
+      priority: 'normal',
+      project: '',
+      kpi_key: null,
+      created_at: '2026-06-12T03:00:00Z',
+      updated_at: '2026-06-12T03:00:00Z',
+      completed_at: null,
+      due_date: null,
+      archived: false,
+    }), 'utf-8');
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{
+        id: 'ac3bb605-c9ba-4510-8f7e-18288f90cbd8',
+        title: 'Local twin left pending',
+        status: 'completed',
+        assigned_to: 'codex',
+        result: 'Completed from RGOS',
+        updated_at: '2026-06-12T03:30:00Z',
+        completed_at: '2026-06-12T03:30:00Z',
+        metadata: { bus_task_id: busTaskId },
+      }],
+    }));
+
+    const result = await reconcileCompletedRgosTasks(paths, { agent: 'codex' });
+
+    expect(result).toEqual({ reconciled: 1, skipped: 0, rows: 1 });
+    const task = JSON.parse(readFileSync(join(paths.taskDir, `${busTaskId}.json`), 'utf-8'));
+    expect(task.status).toBe('completed');
+    expect(task.completed_at).toBe('2026-06-12T03:30:00Z');
+    expect(task.result).toBe('Completed from RGOS');
+    expect(task.meta.rgos).toMatchObject({
+      source: 'supabase_orch_tasks',
+      supabase_status: 'completed',
+      supabase_task_id: 'ac3bb605-c9ba-4510-8f7e-18288f90cbd8',
+    });
+    expect(existsSync(join(paths.taskDir, 'ac3bb605-c9ba-4510-8f7e-18288f90cbd8.json'))).toBe(false);
   });
 });

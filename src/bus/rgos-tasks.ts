@@ -19,10 +19,18 @@ interface RgosTaskRow {
   due_date?: string | null;
   blocked_by?: string[] | null;
   goal_ancestry?: unknown;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface RgosTaskImportResult {
   imported: number;
+  skipped: number;
+  rows: number;
+  reason?: string;
+}
+
+export interface RgosTaskReconcileResult {
+  reconciled: number;
   skipped: number;
   rows: number;
   reason?: string;
@@ -52,6 +60,11 @@ function taskPath(paths: BusPaths, id: string): string {
 
 function taskExists(paths: BusPaths, id: string): boolean {
   return existsSync(taskPath(paths, id));
+}
+
+function localTwinId(row: RgosTaskRow): string {
+  const busTaskId = row.metadata?.bus_task_id;
+  return typeof busTaskId === 'string' && busTaskId.trim() ? busTaskId : row.id;
 }
 
 function materializeRow(paths: BusPaths, row: RgosTaskRow, agent?: string): boolean {
@@ -115,7 +128,7 @@ async function fetchRows(endpoint: string, config: { url: string; key: string })
   return await res.json() as RgosTaskRow[];
 }
 
-const TASK_SELECT = 'id,title,description,status,priority,assigned_to,created_by,result,created_at,updated_at,completed_at,due_date,blocked_by,goal_ancestry';
+const TASK_SELECT = 'id,title,description,status,priority,assigned_to,created_by,result,created_at,updated_at,completed_at,due_date,blocked_by,goal_ancestry,metadata';
 
 export async function importApprovedRgosTasks(paths: BusPaths, options: { agent?: string; limit?: number } = {}): Promise<RgosTaskImportResult> {
   const config = supabaseConfig();
@@ -157,6 +170,57 @@ export async function importRgosTaskById(paths: BusPaths, id: string, agent?: st
   }
   materializeRow(paths, row, agent);
   return true;
+}
+
+function reconcileCompletedRow(paths: BusPaths, row: RgosTaskRow): boolean {
+  if (row.status !== 'completed') return false;
+  const id = localTwinId(row);
+  const file = taskPath(paths, id);
+  if (!existsSync(file)) return false;
+
+  const task = JSON.parse(readFileSync(file, 'utf-8')) as Task;
+  if (task.status !== 'pending' && task.status !== 'in_progress') return false;
+
+  const completedAt = row.completed_at || row.updated_at || new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+  task.status = 'completed';
+  task.updated_at = completedAt;
+  task.completed_at = completedAt;
+  if (row.result) task.result = row.result;
+  task.meta = {
+    ...(task.meta ?? {}),
+    rgos: {
+      ...((task.meta?.rgos && typeof task.meta.rgos === 'object') ? task.meta.rgos as Record<string, unknown> : {}),
+      reconciled_at: new Date().toISOString(),
+      source: 'supabase_orch_tasks',
+      supabase_status: row.status,
+      supabase_task_id: row.id,
+    },
+  };
+  atomicWriteSync(file, JSON.stringify(task));
+  return true;
+}
+
+export async function reconcileCompletedRgosTasks(
+  paths: BusPaths,
+  options: { agent?: string; limit?: number } = {},
+): Promise<RgosTaskReconcileResult> {
+  const config = supabaseConfig();
+  if (!config) return { reconciled: 0, skipped: 0, rows: 0, reason: 'supabase_not_configured' };
+  const params = new URLSearchParams({
+    status: 'eq.completed',
+    select: TASK_SELECT,
+    order: 'updated_at.desc',
+    limit: String(options.limit ?? 200),
+  });
+  if (options.agent) params.set('assigned_to', `eq.${options.agent}`);
+  const rows = await fetchRows(`${config.url}/rest/v1/orch_tasks?${params.toString()}`, config);
+  let reconciled = 0;
+  let skipped = 0;
+  for (const row of rows) {
+    if (reconcileCompletedRow(paths, row)) reconciled++;
+    else skipped++;
+  }
+  return { reconciled, skipped, rows: rows.length };
 }
 
 export function readImportedRgosTask(paths: BusPaths, id: string): Task | null {
