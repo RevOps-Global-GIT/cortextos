@@ -64,6 +64,8 @@ DEFAULT_SINCE_HOURS = 48
 SNAPSHOT_MAX_AGE_HOURS = 12
 # Secondary alert: scanner hasn't refreshed in this many hours (cron failure signal).
 SNAPSHOT_STALE_ALERT_HOURS = 4
+# Third alert: triage-run page headline is stale relative to scanner finds.
+TRIAGE_DIVERGENCE_ALERT_HOURS = 2.5
 # Evidence cap per category to keep alert messages concise.
 EVIDENCE_CAP = 4
 
@@ -113,6 +115,11 @@ def should_alert_stale(snapshot_age_hours: float) -> bool:
     return snapshot_age_hours > SNAPSHOT_STALE_ALERT_HOURS
 
 
+def should_alert_triage_divergence(divergence_hours: float) -> bool:
+    """Triage-page headline is showing data older than what the scanner has already found."""
+    return divergence_hours > TRIAGE_DIVERGENCE_ALERT_HOURS
+
+
 # -- I/O -----------------------------------------------------------------------
 
 def read_scanner_output() -> Optional[Tuple[int, datetime]]:
@@ -132,6 +139,46 @@ def read_scanner_output() -> Optional[Tuple[int, datetime]]:
     except ValueError:
         return None
     return int(total), generated_at
+
+
+def check_triage_freshness(scanner, env: Dict[str, str]) -> Optional[Dict[str, Any]]:
+    """Return divergence info between triage-run page and scanner findings, or None on failure.
+
+    Queries:
+      supreme_triage_runs  -> newest generated_at  (what the Triage page headline shows)
+      supreme_outstanding_items -> newest scanned_at (what the scanner last wrote)
+
+    If scanned_at leads generated_at by >2.5h the Triage page is showing stale data
+    even though the scanner is finding fresh items — a display-layer blind spot.
+    Returns None on any Supabase failure so caller defers rather than false-alarming.
+    """
+    try:
+        triage_rows = scanner.sb_request(
+            env, "GET",
+            "/supreme_triage_runs?select=generated_at&order=generated_at.desc&limit=1",
+        )
+        item_rows = scanner.sb_request(
+            env, "GET",
+            "/supreme_outstanding_items?select=scanned_at&order=scanned_at.desc&limit=1",
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not triage_rows or not item_rows:
+        return None
+
+    try:
+        triage_gen = datetime.fromisoformat(str(triage_rows[0]["generated_at"]).replace("Z", "+00:00"))
+        item_scanned = datetime.fromisoformat(str(item_rows[0]["scanned_at"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError):
+        return None
+
+    divergence_hours = (item_scanned - triage_gen).total_seconds() / 3600
+    return {
+        "triage_generated_at": triage_gen.isoformat(),
+        "newest_scanned_at": item_scanned.isoformat(),
+        "divergence_hours": round(divergence_hours, 2),
+    }
 
 
 def _format_age(ts: float, now_ts: float) -> str:
@@ -227,6 +274,15 @@ def alert_orchestrator(
             f"Evidence:\n{evidence_lines if evidence_lines else '  (none captured)'}\n"
             f"Fix target: supreme-slack-scanner.py oldest_unanswered_actionable()."
         )
+    elif alert_type == "triage_divergence":
+        msg = (
+            f"Supreme-scanner correctness probe ALERT (triage divergence). "
+            f"Scanner newest scanned_at leads triage-run generated_at by "
+            f"{counts.get('divergence_hours', 0):.1f}h (threshold {TRIAGE_DIVERGENCE_ALERT_HOURS}h). "
+            f"Triage page headline is stale: items scanned at {counts.get('newest_scanned_at','')} "
+            f"but triage-run generated at {counts.get('triage_generated_at','')}. "
+            f"supreme-triage-run edge fn needs to re-run."
+        )
     else:  # stale
         msg = (
             f"Supreme-scanner correctness probe ALERT (stale snapshot). "
@@ -241,19 +297,28 @@ def alert_orchestrator(
             ["cortextos", "bus", "send-message", "orchestrator", "high", msg],
             check=False,
         )
+    meta: Dict[str, Any] = {
+        "alert_type": alert_type,
+        "items_scanned": items_scanned,
+        "snapshot_age_hours": round(snapshot_age_hours, 2),
+        "window_hours": window_hours,
+    }
+    if alert_type in ("masking",):
+        meta.update({
+            "slack_messages": counts.get("slack_messages", 0),
+            "dm_candidates": counts.get("dm_candidates", 0),
+            "mention_candidates": counts.get("mention_candidates", 0),
+        })
+    elif alert_type == "triage_divergence":
+        meta.update({
+            "divergence_hours": counts.get("divergence_hours", 0),
+            "triage_generated_at": counts.get("triage_generated_at", ""),
+            "newest_scanned_at": counts.get("newest_scanned_at", ""),
+        })
     subprocess.run(
         [
             "cortextos", "bus", "log-event", "action", "scanner_correctness_alert", "warning",
-            "--meta",
-            json.dumps({
-                "alert_type": alert_type,
-                "items_scanned": items_scanned,
-                "slack_messages": counts.get("slack_messages", 0),
-                "dm_candidates": counts.get("dm_candidates", 0),
-                "mention_candidates": counts.get("mention_candidates", 0),
-                "snapshot_age_hours": round(snapshot_age_hours, 2),
-                "window_hours": window_hours,
-            }),
+            "--meta", json.dumps(meta),
         ],
         check=False,
     )
@@ -334,24 +399,30 @@ def main() -> int:
             "masking", items_scanned, counts, age_hours, args.since_hours, args.dry_run
         )
 
-    # TODO(codex/dd30c9a4): Third divergence check — triage-run freshness.
-    # Alert when newest item scanned_at > triage-run generated_at by >2.5h,
-    # meaning the Triage page headline (supreme-triage-run edge fn artifact) is
-    # showing stale data relative to what the scanner has already found.
-    # Storage path for triage-run artifact is not yet exposed — wire once
-    # supreme-triage-run edge fn writes its generated_at to a known local path
-    # or Supabase table row. Baseline: run 117 (2026-06-12T03:44:10Z, items_scanned=6).
+    # Third check: triage-run page freshness vs scanner findings.
+    triage_info = check_triage_freshness(scanner, env)
+    triage_divergence_alert = False
+    if triage_info is not None and should_alert_triage_divergence(triage_info["divergence_hours"]):
+        triage_divergence_alert = True
+        alert_orchestrator(
+            "triage_divergence", items_scanned, triage_info, age_hours, args.since_hours, args.dry_run
+        )
 
-    emit({
-        "status": "alert" if masking_alert else "ok",
-        "alert_type": "masking" if masking_alert else None,
+    any_alert = masking_alert or triage_divergence_alert
+    alert_types = [t for t, fired in [("masking", masking_alert), ("triage_divergence", triage_divergence_alert)] if fired]
+    result: Dict[str, Any] = {
+        "status": "alert" if any_alert else "ok",
+        "alert_types": alert_types or None,
         "items_scanned": items_scanned,
         "slack_messages": counts["slack_messages"],
         "dm_candidates": counts["dm_candidates"],
         "mention_candidates": counts["mention_candidates"],
         "snapshot_age_hours": round(age_hours, 2),
-        "alerted": bool(masking_alert and not args.dry_run),
-    })
+        "alerted": bool(any_alert and not args.dry_run),
+    }
+    if triage_info is not None:
+        result["triage_divergence_hours"] = triage_info["divergence_hours"]
+    emit(result)
     return 0
 
 
