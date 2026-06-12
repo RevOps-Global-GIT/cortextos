@@ -40,9 +40,7 @@ for var in SUPABASE_RGOS_URL SUPABASE_RGOS_SERVICE_KEY; do
 done
 
 echo "[supreme-mentions] Running Slack scanner (direct API)..."
-python3 "$ANALYST_SCRIPTS/supreme-slack-scanner.py" 2>&1 || {
-  echo "[supreme-mentions] WARN: scanner exited non-zero — continuing with existing digest" >&2
-}
+python3 "$ANALYST_SCRIPTS/supreme-slack-scanner.py" 2>&1
 
 echo "[supreme-mentions] Running ingest with digest fallback..."
 python3 "$ANALYST_SCRIPTS/supreme-mentions-triage-ingest.py" \
