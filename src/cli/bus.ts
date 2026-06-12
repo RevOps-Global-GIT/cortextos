@@ -29,7 +29,7 @@ import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/kn
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
 import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos, mirrorAgentStatusToRgos, mirrorTaskToRgos } from '../bus/rgos-mirror.js';
 import { reconcileAgentOpsMirror, repairAgentOpsMirror } from '../bus/agentops-mirror-reconcile.js';
-import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
+import { importApprovedRgosTasks, importRgosTaskById, reconcileCompletedRgosTasks } from '../bus/rgos-tasks.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { enforceControlPolicy } from '../bus/orch-control-policy.js';
 import { sendTelegramVoice } from '../bus/send-telegram-voice.js';
@@ -1092,6 +1092,11 @@ busCommand
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const requestedStatus = opts.status === 'approved' ? 'pending' : opts.status;
+    try {
+      await reconcileCompletedRgosTasks(paths, { agent: opts.agent });
+    } catch (err) {
+      console.error(`[list-tasks] Supabase completed-task sync failed; showing local tasks only: ${(err as Error).message}`);
+    }
     if (opts.status === 'approved') {
       try {
         await importApprovedRgosTasks(paths, { agent: opts.agent });
