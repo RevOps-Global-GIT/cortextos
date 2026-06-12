@@ -166,6 +166,19 @@ interface CheckResult {
   evidence: string;
 }
 
+interface ContentProbe {
+  btn: number;
+  main: number;
+  mainChildren: number;
+  landmark: number;
+  card: number;
+  headings: number;
+  bodyTextLength: number;
+  loadingText: boolean;
+  readyState: string;
+  hasContent: boolean;
+}
+
 interface PageHealthIssue {
   kind: 'check_failure' | 'edge_function' | 'api_failure' | 'staleness' | 'source_off' | 'deferred';
   severity: 'warning' | 'error';
@@ -210,6 +223,10 @@ function wallClock<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> 
     promise.catch(() => fallback),
     new Promise<T>(resolve => setTimeout(() => resolve(fallback), ms)),
   ]);
+}
+
+function sleepWallClock(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 async function shot(page: Page, name: string) {
@@ -844,6 +861,63 @@ async function runTimeChecks(page: Page): Promise<CheckResult[]> {
 // Generic page check helpers
 // ---------------------------------------------------------------------------
 
+const EMPTY_CONTENT_PROBE: ContentProbe = {
+  btn: -1,
+  main: -1,
+  mainChildren: -1,
+  landmark: -1,
+  card: -1,
+  headings: -1,
+  bodyTextLength: -1,
+  loadingText: false,
+  readyState: 'unknown',
+  hasContent: false,
+};
+
+async function sampleContentProbe(page: Page, timeoutMs = 3000): Promise<ContentProbe> {
+  return wallClock(page.evaluate(() => {
+    const bodyText = document.body?.innerText?.replace(/\s+/g, ' ').trim() ?? '';
+    const btn = document.querySelectorAll('button').length;
+    const main = document.querySelectorAll('main').length;
+    const mainChildren = document.querySelectorAll('main *').length;
+    const landmark = document.querySelectorAll('[role="main"],[data-testid*="page"],[data-testid*="surface"]').length;
+    const card = document.querySelectorAll('[class*="card"],[class*="container"],[data-testid*="card"]').length;
+    const headings = document.querySelectorAll('h1,h2').length;
+    const loadingText = /\bloading\b/i.test(bodyText);
+    return {
+      btn,
+      main,
+      mainChildren,
+      landmark,
+      card,
+      headings,
+      bodyTextLength: bodyText.length,
+      loadingText,
+      readyState: document.readyState,
+      hasContent:
+        bodyText.length >= 80 ||
+        btn > 0 ||
+        headings > 0 ||
+        mainChildren > 0 ||
+        landmark > 0 ||
+        card > 0,
+    };
+  }), timeoutMs, EMPTY_CONTENT_PROBE);
+}
+
+async function waitForHydratedContent(page: Page, totalMs = 12000): Promise<ContentProbe> {
+  const deadline = Date.now() + totalMs;
+  let latest = EMPTY_CONTENT_PROBE;
+
+  while (Date.now() < deadline) {
+    latest = await sampleContentProbe(page);
+    if (latest.hasContent && !latest.loadingText) return latest;
+    await sleepWallClock(500);
+  }
+
+  return latest;
+}
+
 /** Wait for the page's main content to finish loading (Loading... spinner gone) */
 async function waitForPageLoad(page: Page) {
   // Use race — crashed pages can hang waitForSelector / waitForTimeout (page-internal timers gone)
@@ -879,31 +953,20 @@ async function checkLoad(page: Page, shotPrefix: string): Promise<CheckResult> {
         new Promise<void>(r => setTimeout(r, 5000)),
       ]);
       if (timedOut) return { check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Timed out' };
-      console.log('[checkLoad] step 3: element presence check via evaluate');
-      // Use page.evaluate() for a single CDP call — locator.count() can block Playwright's
-      // actionability polling loop on pages with continuous DOM mutations (real-time subscriptions).
-      // evaluate() is a direct JS evaluation, no actionability wait.
-      const hasContent = await Promise.race([
-        page.evaluate(() => {
-          const btn = document.querySelectorAll('button').length;
-          const main = document.querySelectorAll('main').length;
-          // Check for any element with 'card' or 'container' in class
-          const card = document.querySelectorAll('[class*="card"],[class*="container"]').length;
-          return { btn, main, card, hasContent: btn > 0 || main > 0 || card > 0 };
-        }).catch(() => ({ btn: -1, main: -1, card: -1, hasContent: false })),
-        new Promise<{ btn: number; main: number; card: number; hasContent: boolean }>(r =>
-          setTimeout(() => r({ btn: -1, main: -1, card: -1, hasContent: false }), 8000)
-        ),
-      ]);
+      console.log('[checkLoad] step 3: wait for hydrated content');
+      // Use bounded page.evaluate probes rather than locator.count(); locator polling can hang on
+      // pages with continuous real-time subscriptions. Retry briefly before declaring hydration
+      // inconclusive so transient first samples do not cascade into all-DEFERRED reports.
+      const hasContent = await waitForHydratedContent(page, 12000);
       console.log('[checkLoad] step 3 result:', hasContent);
       if (!hasContent.hasContent) {
-        // All counts are -1 (evaluate timed out) or 0 — page may still be hydrating
-        // or JS engine is busy. Treat as DEFERRED if URL is correct, FAIL if redirected.
+        // All counts are -1/0 after bounded retries. Treat as DEFERRED if URL is correct,
+        // FAIL if redirected.
         const url = page.url();
         if (url.includes('/login') || url.includes('/auth') || url.includes('/error')) {
           throw new Error(`Page redirected to error/auth page: ${url}`);
         }
-        return { check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: `DOM eval returned no elements (btn=${hasContent.btn} main=${hasContent.main} card=${hasContent.card}) — JS engine busy or React still hydrating. URL correct: ${url}` };
+        return { check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: `Hydration probe found no stable content after 12s (btn=${hasContent.btn} main=${hasContent.main} mainChildren=${hasContent.mainChildren} card=${hasContent.card} text=${hasContent.bodyTextLength} readyState=${hasContent.readyState}) — JS engine busy or React still hydrating. URL correct: ${url}` };
       }
       const h = await Promise.race([
         page.evaluate(() => { const el = document.querySelector('h1,h2'); return el?.textContent ?? ''; }).catch(() => ''),
@@ -985,7 +1048,7 @@ async function checkTimestampFreshness(page: Page, checkName: string): Promise<C
     const nowMs = Date.now();
     const THIRTY_MIN_MS = 30 * 60 * 1000;
 
-    const freshness = await Promise.race([
+    const sampleFreshness = () => Promise.race([
       page.evaluate((thirtyMinMs: number) => {
         const body = document.body.innerText ?? '';
         // Collect all text nodes across the page for timestamp scanning
@@ -1052,13 +1115,22 @@ async function checkTimestampFreshness(page: Page, checkName: string): Promise<C
       new Promise<{ fresh: boolean | null; label: string }>(r => setTimeout(() => r({ fresh: null, label: '' }), 5000)),
     ]);
 
+    const firstFreshness = await sampleFreshness();
+    if (firstFreshness.fresh) {
+      return { check: checkName, status: 'PASS', evidence: `Fresh timestamp found (< 30 min old): "${firstFreshness.label}".` };
+    }
+
+    await sleepWallClock(1500);
+    const retryFreshness = await sampleFreshness();
+    if (retryFreshness.fresh) {
+      return { check: checkName, status: 'PASS', evidence: `Fresh timestamp found on retry (< 30 min old): "${retryFreshness.label}". First sample: "${firstFreshness.label || 'none'}".` };
+    }
+
+    const freshness = retryFreshness.fresh !== null ? retryFreshness : firstFreshness;
     if (freshness.fresh === null) {
-      return { check: checkName, status: 'DEFERRED', evidence: 'No timestamps found on page (relative, ISO, or HH:MM).' };
+      return { check: checkName, status: 'DEFERRED', evidence: 'No timestamps found on page after initial sample and retry (relative, ISO, or HH:MM).' };
     }
-    if (freshness.fresh) {
-      return { check: checkName, status: 'PASS', evidence: `Fresh timestamp found (< 30 min old): "${freshness.label}".` };
-    }
-    return { check: checkName, status: 'FAIL', evidence: `Timestamps found but none < 30 min old. Oldest/first seen: "${freshness.label}". Page data may be stale.` };
+    return { check: checkName, status: 'FAIL', evidence: `Timestamps found but none < 30 min old after retry. First sample: "${firstFreshness.label || 'none'}"; retry sample: "${retryFreshness.label || 'none'}". Page data may be stale.` };
   } catch (e) {
     return { check: checkName, status: 'FAIL', evidence: `Error checking timestamps: ${(e as Error).message?.split('\n')[0]}` };
   }
