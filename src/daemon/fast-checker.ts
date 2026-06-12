@@ -6,7 +6,7 @@ import { createHash } from 'crypto';
 import { hardRestart } from '../bus/system.js';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
-import { updateApproval, listPendingApprovals, readApproval } from '../bus/approval.js';
+import { updateApproval, listPendingApprovals } from '../bus/approval.js';
 import { listTasks, recoverStaleInProgressTasks } from '../bus/task.js';
 import { mirrorTaskToRgos, drainRetryQueue, isEnabled as isMirrorEnabled } from '../bus/rgos-mirror.js';
 import { AgentProcess } from './agent-process.js';
@@ -1256,43 +1256,17 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     const auditNote = `via Telegram activity channel by ${auditWho}`;
 
     try {
-      updateApproval(this.paths, approvalId, status, auditNote);
+      // updateApproval also pushes the resolution to the linked Supabase
+      // orch_approvals row (decided_by = auditWho) — the inline PATCH that
+      // used to live here moved into the bus layer so the CLI path gets the
+      // same sync (phantom-pending fix).
+      await updateApproval(this.paths, approvalId, status, auditNote, auditWho);
     } catch (err) {
       this.log(`Approval callback: updateApproval failed for ${approvalId}: ${err}`);
       if (api) {
         try { await api.answerCallbackQuery(callbackQueryId, 'Approval not found or already resolved'); } catch { /* ignore */ }
       }
       return;
-    }
-
-    // Best-effort: if the resolved approval has a linked Supabase orch_approvals
-    // row, PATCH its status so the Hub Pending Approvals panel reflects the decision.
-    try {
-      const resolved = readApproval(this.paths, approvalId);
-      const orchId = resolved?.linked_orch_approval_id;
-      if (orchId) {
-        const supabaseUrl = process.env.SUPABASE_RGOS_URL || process.env.SUPABASE_URL || '';
-        const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-        if (supabaseUrl && serviceKey) {
-          fetch(`${supabaseUrl}/rest/v1/orch_approvals?id=eq.${encodeURIComponent(orchId)}`, {
-            method: 'PATCH',
-            headers: {
-              'apikey': serviceKey,
-              'Authorization': `Bearer ${serviceKey}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              status,
-              decided_by: auditWho,
-              decided_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            }),
-            signal: AbortSignal.timeout(10000),
-          }).catch((err) => this.log(`Approval callback: Supabase sync failed for ${orchId}: ${err}`));
-        }
-      }
-    } catch {
-      // Non-fatal — local approval already resolved
     }
 
     if (api) {

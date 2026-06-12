@@ -329,20 +329,34 @@ export async function createApproval(
 
 /**
  * Update an approval's status (approve or deny).
- * Notifies the requesting agent via inbox message.
+ * Notifies the requesting agent via inbox message, then pushes the
+ * resolution to the linked Supabase orch_approvals row so the Hub
+ * Approvals panel stops showing the row as pending (phantom-pending bug:
+ * bus-resolved approvals previously never wrote back to the mirror —
+ * only the reverse direction, reconcileOrchApprovals, existed).
+ *
+ * `decidedBy` lands in orch_approvals.decided_by for the dashboard audit
+ * trail (Telegram path passes the human who clicked; CLI passes the
+ * resolving agent). Falls back to 'cortextos-bus'.
+ *
+ * Local resolution is synchronous and unconditional; the Supabase push is
+ * best-effort (warn, never throw) — Supabase unreachable must not block
+ * the decision, matching createApproval's mirror semantics.
  */
-export function updateApproval(
+export async function updateApproval(
   paths: BusPaths,
   approvalId: string,
   status: ApprovalStatus,
   note?: string,
-): void {
+  decidedBy?: string,
+): Promise<void> {
   const pendingDir = join(paths.approvalDir, 'pending');
   const filePath = join(pendingDir, `${approvalId}.json`);
 
+  let approval: Approval;
   try {
     const content = readFileSync(filePath, 'utf-8');
-    const approval: Approval = JSON.parse(content);
+    approval = JSON.parse(content);
     approval.status = status;
     approval.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
     approval.resolved_at = approval.updated_at;
@@ -382,6 +396,79 @@ export function updateApproval(
     }
   } catch (err) {
     throw new Error(`Approval ${approvalId} not found: ${err}`);
+  }
+
+  // Local resolution is complete and durable — now sync the decision to the
+  // Hub. AWAITED so short-lived CLI callers do not exit before the PATCH
+  // completes (same rationale as the activity-channel fan-out above).
+  await pushResolutionToOrch(approval, status, decidedBy || 'cortextos-bus');
+}
+
+/**
+ * Push a bus-side approval resolution to its orch_approvals mirror row.
+ *
+ * Resolves the target row via either link direction:
+ *   - approval.linked_orch_approval_id (rows created by createApproval's
+ *     mirror, where the UUID is stored on the local file), or
+ *   - context->>bus_approval_id == approval.id (rows created externally,
+ *     e.g. the autoresearch experiment flow, where the local file may not
+ *     carry the link).
+ *
+ * Only rows still 'pending' are touched — a row already decided on the
+ * dashboard keeps its original decision/audit fields (first writer wins;
+ * reconcileOrchApprovals handles syncing that direction).
+ *
+ * PostgREST returns 200 with an empty array when the filter matches no
+ * rows (silent no-op), so the PATCH uses Prefer: return=representation and
+ * warns on zero rows — otherwise a phantom-pending row would survive
+ * undetected, which is the exact bug this push exists to fix.
+ */
+async function pushResolutionToOrch(
+  approval: Approval,
+  status: ApprovalStatus,
+  decidedBy: string,
+): Promise<void> {
+  const url = process.env.SUPABASE_RGOS_URL || process.env.SUPABASE_URL || '';
+  const key = process.env.SUPABASE_RGOS_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key) return;
+
+  const filter = approval.linked_orch_approval_id
+    ? `id=eq.${encodeURIComponent(approval.linked_orch_approval_id)}`
+    : `context->>bus_approval_id=eq.${encodeURIComponent(approval.id)}`;
+
+  try {
+    const now = new Date().toISOString();
+    const res = await fetch(
+      `${url}/rest/v1/orch_approvals?${filter}&status=eq.pending`,
+      {
+        method: 'PATCH',
+        headers: {
+          'apikey': key,
+          'Authorization': `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation',
+        },
+        // orch_approvals has no resolved_at/resolved_by columns (PGRST204
+        // on unknown columns) — the schema uses decided_by/decided_at.
+        body: JSON.stringify({
+          status,
+          decided_by: decidedBy,
+          decided_at: now,
+          updated_at: now,
+        }),
+        signal: AbortSignal.timeout(10000),
+      },
+    );
+    if (!res.ok) {
+      console.warn(`[approval] orch_approvals resolution push failed for ${approval.id}: HTTP ${res.status}`);
+      return;
+    }
+    const rows = await res.json() as unknown[];
+    if (!Array.isArray(rows) || rows.length === 0) {
+      console.warn(`[approval] orch_approvals resolution push for ${approval.id} matched no pending row (never mirrored, or already decided on the dashboard)`);
+    }
+  } catch (err) {
+    console.warn(`[approval] orch_approvals resolution push failed for ${approval.id}: ${err}`);
   }
 }
 

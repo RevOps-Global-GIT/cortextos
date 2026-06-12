@@ -3061,7 +3061,7 @@ busCommand
   .argument('<id>', 'Approval ID')
   .argument('<status>', 'Resolution: approved or denied')
   .argument('[note]', 'Resolution note')
-  .action((id: string, status: string, note?: string) => {
+  .action(async (id: string, status: string, note?: string) => {
     const validStatuses: ApprovalStatus[] = ['approved', 'rejected'];
     if (!validStatuses.includes(status as ApprovalStatus)) {
       console.error(`Invalid status '${status}'. Must be one of: approved, rejected`);
@@ -3069,7 +3069,7 @@ busCommand
     }
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    updateApproval(paths, id, status as ApprovalStatus, note);
+    await updateApproval(paths, id, status as ApprovalStatus, note, env.agentName);
     console.log(`Approval ${id} -> ${status}`);
   });
 

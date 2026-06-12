@@ -410,7 +410,7 @@ describe('updateApproval (regression guard for activity-channel callback path)',
     // shape (move + status + resolved_by note) that the rest of the
     // system expects downstream.
     const id = await createApproval(paths, 'alice', 'TestOrg', 'Test resolve', 'deployment', undefined, frameworkRoot);
-    updateApproval(paths, id, 'approved', 'via Telegram activity channel by Alice (@alice)');
+    await updateApproval(paths, id, 'approved', 'via Telegram activity channel by Alice (@alice)');
 
     const pendingFile = join(paths.approvalDir, 'pending', `${id}.json`);
     const resolvedFile = join(paths.approvalDir, 'resolved', `${id}.json`);
@@ -423,8 +423,118 @@ describe('updateApproval (regression guard for activity-channel callback path)',
     expect(approval.resolved_at).toBeTruthy();
   });
 
-  it('throws a clear error when the approval id does not exist', () => {
-    expect(() => updateApproval(paths, 'approval_999_nope', 'approved')).toThrow(/not found/);
+  it('rejects with a clear error when the approval id does not exist', async () => {
+    await expect(updateApproval(paths, 'approval_999_nope', 'approved')).rejects.toThrow(/not found/);
+  });
+});
+
+describe('updateApproval — pushes resolution to linked orch_approvals row (phantom-pending fix)', () => {
+  // Bus-resolved approvals previously never wrote back to the Supabase
+  // mirror — only the reverse direction (reconcileOrchApprovals) existed —
+  // so the Hub Approvals panel kept showing phantom "pending" rows for
+  // decisions already made and acted on.
+
+  function stubSupabaseEnv(): void {
+    process.env.SUPABASE_RGOS_URL = 'https://supabase.test';
+    process.env.SUPABASE_RGOS_SERVICE_KEY = 'test-service-key';
+  }
+
+  /** fetch stub whose FIRST call answers createApproval's mirror POST. */
+  function mirrorPostResponse(orchId: string | null) {
+    return {
+      ok: true,
+      json: async () => (orchId ? [{ id: orchId }] : []),
+    };
+  }
+
+  it('PATCHes by linked_orch_approval_id with decided_by/decided_at (no resolved_* columns)', async () => {
+    stubSupabaseEnv();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce(mirrorPostResponse('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'))
+      .mockResolvedValueOnce({ ok: true, json: async () => [{ id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }] });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Deploy gate', 'deployment', undefined, frameworkRoot);
+    await updateApproval(paths, id, 'approved', 'looks good', 'dev');
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const [reqUrl, reqInit] = fetchSpy.mock.calls[1] as [string, RequestInit];
+    expect(reqUrl).toBe('https://supabase.test/rest/v1/orch_approvals?id=eq.aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee&status=eq.pending');
+    expect(reqInit.method).toBe('PATCH');
+    expect((reqInit.headers as Record<string, string>)['Prefer']).toBe('return=representation');
+    const body = JSON.parse(String(reqInit.body));
+    expect(body.status).toBe('approved');
+    expect(body.decided_by).toBe('dev');
+    expect(body.decided_at).toBeTruthy();
+    expect(body.updated_at).toBeTruthy();
+    // orch_approvals has no resolved_at/resolved_by columns — sending them
+    // is a PGRST204 error, so they must never appear in the PATCH body.
+    expect(body.resolved_at).toBeUndefined();
+    expect(body.resolved_by).toBeUndefined();
+  });
+
+  it('falls back to context->>bus_approval_id when the local file has no linked id (autoresearch path)', async () => {
+    stubSupabaseEnv();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce(mirrorPostResponse(null)) // mirror POST returns no row → no linked id stored
+      .mockResolvedValueOnce({ ok: true, json: async () => [{ id: 'external-row' }] });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const id = await createApproval(paths, 'codex', 'TestOrg', 'Experiment gate', 'other', undefined, frameworkRoot);
+    await updateApproval(paths, id, 'rejected', undefined, 'orchestrator');
+
+    const [reqUrl, reqInit] = fetchSpy.mock.calls[1] as [string, RequestInit];
+    expect(reqUrl).toBe(`https://supabase.test/rest/v1/orch_approvals?context->>bus_approval_id=eq.${id}&status=eq.pending`);
+    const body = JSON.parse(String(reqInit.body));
+    expect(body.status).toBe('rejected');
+    expect(body.decided_by).toBe('orchestrator');
+  });
+
+  it('warns when the PATCH matches no pending row (PostgREST silent no-op)', async () => {
+    stubSupabaseEnv();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce(mirrorPostResponse('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'))
+      .mockResolvedValueOnce({ ok: true, json: async () => [] });
+    vi.stubGlobal('fetch', fetchSpy);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'No-op test', 'deployment', undefined, frameworkRoot);
+    await updateApproval(paths, id, 'approved');
+
+    const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+    expect(warnCalls.some((w) => w.includes('matched no pending row') && w.includes(id))).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it('push failure is non-fatal: local resolution still completes', async () => {
+    stubSupabaseEnv();
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce(mirrorPostResponse('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'))
+      .mockRejectedValueOnce(new Error('supabase unreachable'));
+    vi.stubGlobal('fetch', fetchSpy);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Push-down test', 'deployment', undefined, frameworkRoot);
+    await updateApproval(paths, id, 'approved');
+
+    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(false);
+    const resolved = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
+    expect(resolved.status).toBe('approved');
+    const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+    expect(warnCalls.some((w) => w.includes('resolution push failed') && w.includes(id))).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it('skips the push silently when Supabase credentials are absent', async () => {
+    // No SUPABASE_* env (cleared in beforeEach) — must not attempt fetch.
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'No-creds resolve', 'financial', undefined, frameworkRoot);
+    await updateApproval(paths, id, 'approved');
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(existsSync(join(paths.approvalDir, 'resolved', `${id}.json`))).toBe(true);
   });
 });
 
@@ -432,7 +542,7 @@ describe('listPendingApprovals', () => {
   it('returns only approvals still in pending/ (not resolved)', async () => {
     const id1 = await createApproval(paths, 'alice', 'TestOrg', 'Still pending', 'deployment', undefined, frameworkRoot);
     const id2 = await createApproval(paths, 'alice', 'TestOrg', 'Will be resolved', 'deployment', undefined, frameworkRoot);
-    updateApproval(paths, id2, 'approved');
+    await updateApproval(paths, id2, 'approved');
 
     const pending = listPendingApprovals(paths);
     expect(pending).toHaveLength(1);
@@ -484,7 +594,7 @@ describe('updateApproval — notification-before-unlink order (bug B4 regression
       return 'mock-msg-id';
     });
 
-    updateApproval(paths, approvalId, 'approved', 'test note');
+    await updateApproval(paths, approvalId, 'approved', 'test note');
 
     // sendMessage must have been called
     expect(smMock).toHaveBeenCalledTimes(1);
