@@ -45,6 +45,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -68,6 +69,41 @@ SNAPSHOT_STALE_ALERT_HOURS = 4
 TRIAGE_DIVERGENCE_ALERT_HOURS = 2.5
 # Evidence cap per category to keep alert messages concise.
 EVIDENCE_CAP = 4
+
+
+def get_scanner_version() -> Dict[str, Any]:
+    """Compare the running scanner file against fork/main to distinguish stale-deployment
+    from logic regression when a masking alert fires.
+
+    Returns: {local_sha8, remote_sha8, diverged, error}
+    Errors are non-fatal — the caller includes them in the alert for transparency.
+    """
+    def sha8(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()[:8]
+
+    try:
+        local_bytes = SCANNER_PATH.read_bytes()
+        local = sha8(local_bytes)
+    except OSError as e:
+        return {"error": f"cannot read local scanner: {e}"}
+
+    try:
+        res = subprocess.run(
+            ["git", "show", "fork/main:orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py"],
+            capture_output=True, timeout=15,
+            cwd=Path(__file__).resolve().parents[4],  # cortextos repo root
+        )
+        if res.returncode != 0:
+            return {"local_sha8": local, "error": f"git show fork/main failed: {res.stderr.decode()[:80]}"}
+        remote = sha8(res.stdout)
+    except Exception as e:  # noqa: BLE001
+        return {"local_sha8": local, "error": f"git show exception: {e}"}
+
+    return {
+        "local_sha8": local,
+        "remote_sha8": remote,
+        "diverged": local != remote,
+    }
 
 
 def _load_scanner():
@@ -265,14 +301,24 @@ def alert_orchestrator(
 ) -> None:
     if alert_type == "masking":
         evidence_lines = "\n".join(f"  * {e}" for e in counts.get("evidence", []))
+        sv = counts.get("scanner_version") or {}
+        if sv.get("error"):
+            version_line = f"scanner_version: local={sv.get('local_sha8','?')} fork/main=unknown ({sv['error']})"
+        elif "diverged" in sv:
+            tag = "DIVERGED (stale deployment)" if sv["diverged"] else "MATCH"
+            version_line = f"scanner_version: local={sv['local_sha8']} fork/main={sv['remote_sha8']} {tag}"
+        else:
+            version_line = "scanner_version: unavailable"
         msg = (
             f"Supreme-scanner correctness probe ALERT (masking). "
             f"Scanner items_scanned={items_scanned} but Slack has "
             f"{counts['slack_messages']} unanswered Greg-directed msgs "
             f"(DM={counts['dm_candidates']}, mentions={counts['mention_candidates']}) "
             f"in {window_hours}h window. PR #805 bug class.\n"
+            f"{version_line}\n"
             f"Evidence:\n{evidence_lines if evidence_lines else '  (none captured)'}\n"
-            f"Fix target: supreme-slack-scanner.py oldest_unanswered_actionable()."
+            f"If DIVERGED: repoint scanner cron to fetch fork/main before running. "
+            f"If MATCH: check oldest_unanswered_actionable() logic regression."
         )
     elif alert_type == "triage_divergence":
         msg = (
@@ -395,6 +441,7 @@ def main() -> int:
 
     masking_alert = should_alert_masking(items_scanned, counts["slack_messages"])
     if masking_alert:
+        counts["scanner_version"] = get_scanner_version()
         alert_orchestrator(
             "masking", items_scanned, counts, age_hours, args.since_hours, args.dry_run
         )
@@ -422,6 +469,11 @@ def main() -> int:
     }
     if triage_info is not None:
         result["triage_divergence_hours"] = triage_info["divergence_hours"]
+    if masking_alert and counts.get("scanner_version"):
+        sv = counts["scanner_version"]
+        result["scanner_version_diverged"] = sv.get("diverged")
+        result["scanner_local_sha8"] = sv.get("local_sha8")
+        result["scanner_remote_sha8"] = sv.get("remote_sha8")
     emit(result)
     return 0
 
