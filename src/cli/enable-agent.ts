@@ -32,6 +32,21 @@ export function discoverProjectRoot(): string {
   return process.cwd();
 }
 
+/**
+ * Headless agents (e.g. codex) run with `telegram_polling: false` in their
+ * config.json and intentionally have no BOT_TOKEN. The Becky-bug Telegram
+ * preflight must not block enabling them — without this carve-out, a
+ * disabled headless agent can never be re-enabled via the CLI.
+ */
+export function isHeadlessAgent(agentDir: string): boolean {
+  try {
+    const cfg = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8'));
+    return !!cfg && typeof cfg === 'object' && cfg.telegram_polling === false;
+  } catch {
+    return false;
+  }
+}
+
 function parseEnvFile(path: string): Record<string, string> {
   const vars: Record<string, string> = {};
   try {
@@ -205,12 +220,19 @@ export const enableAgentCommand = new Command('enable')
       process.exit(1);
     }
 
+    const agentDir = join(agentEnvPath, '..');
+    const headless = isHeadlessAgent(agentDir);
+
     const env = parseEnvFile(agentEnvPath);
     const missing = (['BOT_TOKEN', 'CHAT_ID'] as const).filter(k => !env[k]);
-    if (missing.length > 0) {
+    if (missing.length > 0 && !headless) {
       console.error(`Error: .env for agent "${agent}" is missing required values: ${missing.join(', ')}`);
       console.error(`Edit ${agentEnvPath} and set BOT_TOKEN and CHAT_ID before enabling.`);
+      console.error(`(Agents without a Telegram bot can skip this by setting "telegram_polling": false in their config.json.)`);
       process.exit(1);
+    }
+    if (headless) {
+      console.log(`Agent "${agent}" is headless (telegram_polling: false) — skipping Telegram credential preflight.`);
     }
 
     // self-chat trap preflight: validate BOT_TOKEN + CHAT_ID against the live
@@ -225,7 +247,7 @@ export const enableAgentCommand = new Command('enable')
     // bot_recipient, self_chat). Warns but does not block on transient
     // reasons (network_error, rate_limited) so offline enable and burst
     // enables during the morning cascade still succeed.
-    try {
+    if (!headless) try {
       const telegramApi = new TelegramAPI(env.BOT_TOKEN);
       const validation = await telegramApi.validateCredentials(env.CHAT_ID);
       if (validation.ok) {

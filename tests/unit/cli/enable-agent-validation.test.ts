@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { discoverProjectRoot, readEnabledAgents } from '../../../src/cli/enable-agent';
+import { discoverProjectRoot, readEnabledAgents, isHeadlessAgent } from '../../../src/cli/enable-agent';
 
 describe('BUG-035 + BUG-013: enable-agent validation', () => {
   let tmpHome: string;
@@ -135,6 +135,45 @@ describe('BUG-035 + BUG-013: enable-agent validation', () => {
       const backups = readdirSync(join(tmpHome, '.cortextos', 'default', 'config'))
         .filter(f => f.startsWith('enabled-agents.json.broken-'));
       expect(backups.length).toBe(0);
+    });
+  });
+
+  describe('isHeadlessAgent (headless enable carve-out)', () => {
+    function setupAgentDir(config?: string): string {
+      const agentDir = join(tmpHome, 'cortextos', 'orgs', 'testorg', 'agents', 'codex');
+      mkdirSync(agentDir, { recursive: true });
+      if (config !== undefined) writeFileSync(join(agentDir, 'config.json'), config);
+      return agentDir;
+    }
+
+    it('returns true when config.json has telegram_polling: false', () => {
+      const dir = setupAgentDir('{"agent_name":"codex","telegram_polling":false}');
+      expect(isHeadlessAgent(dir)).toBe(true);
+    });
+
+    it('returns false when telegram_polling is true', () => {
+      const dir = setupAgentDir('{"agent_name":"dev","telegram_polling":true}');
+      expect(isHeadlessAgent(dir)).toBe(false);
+    });
+
+    it('returns false when telegram_polling is absent (telegram agents stay protected)', () => {
+      const dir = setupAgentDir('{"agent_name":"dev"}');
+      expect(isHeadlessAgent(dir)).toBe(false);
+    });
+
+    it('returns false when config.json is missing', () => {
+      const dir = setupAgentDir(undefined);
+      expect(isHeadlessAgent(dir)).toBe(false);
+    });
+
+    it('returns false on corrupt config.json', () => {
+      const dir = setupAgentDir('not json{{{');
+      expect(isHeadlessAgent(dir)).toBe(false);
+    });
+
+    it('treats string "false" as NOT headless (strict boolean check)', () => {
+      const dir = setupAgentDir('{"telegram_polling":"false"}');
+      expect(isHeadlessAgent(dir)).toBe(false);
     });
   });
 });
