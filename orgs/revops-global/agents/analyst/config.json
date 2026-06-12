@@ -183,6 +183,12 @@
       "prompt": "python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/greg-qa-defect-rate.py"
     },
     {
+      "name": "supreme-scanner-correctness-probe",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "cd /home/cortextos/cortextos && git fetch fork main --quiet 2>/dev/null; git checkout refs/remotes/fork/main -- orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py 2>/dev/null; git restore --staged orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py 2>/dev/null; python3 orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py"
+    },
+    {
       "name": "vm-sync-push",
       "type": "recurring",
       "interval": "15m",
