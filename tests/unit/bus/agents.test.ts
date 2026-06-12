@@ -217,6 +217,57 @@ describe('Agent Discovery', () => {
       expect(agents.some(a => a.current_task === 'task_deleted: Deleted agent should not look active')).toBe(false);
     });
 
+    it('hides decommissioned registry entries even when source dirs and tasks remain', async () => {
+      const configDir = join(ctxRoot, 'config');
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(
+        join(configDir, 'enabled-agents.json'),
+        JSON.stringify({
+          'orgo-1': {
+            org: 'revops-global',
+            enabled: false,
+            decommissioned: true,
+          },
+          codex: { org: 'revops-global', enabled: true },
+        }),
+      );
+
+      const frameworkRoot = join(testDir, 'framework');
+      process.env.CTX_FRAMEWORK_ROOT = frameworkRoot;
+      mkdirSync(join(frameworkRoot, 'orgs', 'revops-global', 'agents', 'orgo-1'), { recursive: true });
+      mkdirSync(join(frameworkRoot, 'orgs', 'revops-global', 'agents', 'codex'), { recursive: true });
+
+      const taskDir = join(ctxRoot, 'orgs', 'revops-global', 'tasks');
+      mkdirSync(taskDir, { recursive: true });
+      writeFileSync(
+        join(taskDir, 'task_decommissioned.json'),
+        JSON.stringify({
+          id: 'task_decommissioned',
+          title: 'Decommissioned agent should not look active',
+          description: '',
+          type: 'agent',
+          needs_approval: false,
+          status: 'in_progress',
+          assigned_to: 'orgo-1',
+          created_by: 'orchestrator',
+          org: 'revops-global',
+          priority: 'normal',
+          project: '',
+          kpi_key: null,
+          created_at: '2026-06-12T10:00:00Z',
+          updated_at: '2026-06-12T10:05:00Z',
+          completed_at: null,
+          due_date: null,
+          archived: false,
+        }),
+      );
+
+      const agents = await listAgents(ctxRoot, 'revops-global');
+      expect(agents.map(a => a.name)).toEqual(['codex']);
+      expect(agents.find(a => a.name === 'orgo-1')).toBeUndefined();
+      expect(agents.some(a => a.current_task === 'task_decommissioned: Decommissioned agent should not look active')).toBe(false);
+    });
+
     it('filters by org when specified', async () => {
       const configDir = join(ctxRoot, 'config');
       mkdirSync(configDir, { recursive: true });

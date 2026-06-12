@@ -189,6 +189,49 @@ describe('reconcileAgentOpsMirror', () => {
     expect(writes).toEqual([]);
   });
 
+  it('does not recreate orch_agents rows for decommissioned source dirs', async () => {
+    root = mkdtempSync(join(tmpdir(), 'agentops-decommissioned-agent-'));
+    paths = makePaths(root);
+    process.env.SUPABASE_RGOS_URL = 'https://test.supabase.co';
+    process.env.SUPABASE_RGOS_SERVICE_KEY = 'test-service-key';
+    process.env.CTX_FRAMEWORK_ROOT = root;
+    process.env.CTX_ROOT = root;
+
+    mkdirSync(paths.taskDir, { recursive: true });
+    mkdirSync(join(root, 'config'), { recursive: true });
+    writeFileSync(join(root, 'config', 'enabled-agents.json'), JSON.stringify({
+      'orgo-1': {
+        org: 'revops-global',
+        enabled: false,
+        decommissioned: true,
+        status: 'deleted',
+      },
+    }), 'utf-8');
+    mkdirSync(join(root, 'orgs', 'revops-global', 'agents', 'orgo-1'), { recursive: true });
+    mkdirSync(join(root, 'state', 'orgo-1'), { recursive: true });
+    writeFileSync(join(root, 'state', 'orgo-1', '.decommissioned'), JSON.stringify({
+      agent: 'orgo-1',
+      decommissioned_at: '2026-06-12T17:13:00Z',
+      reason: 'retired',
+    }), 'utf-8');
+
+    const writes: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method && init.method !== 'GET') writes.push(`${init.method} ${url}`);
+      return { ok: true, json: async () => [] };
+    }));
+
+    const result = await repairAgentOpsMirror(paths, { org: 'revops-global' });
+
+    expect(result.ok).toBe(true);
+    expect(result.before.live_agents).toBe(0);
+    expect(result.before.drift_count).toBe(0);
+    expect(result.planned_agents).toBe(0);
+    expect(result.repaired_agents).toBe(0);
+    expect(result.after?.drift_count).toBe(0);
+    expect(writes).toEqual([]);
+  });
+
   it('repairs task and agent mirror drift then reports the after count', async () => {
     root = mkdtempSync(join(tmpdir(), 'agentops-repair-'));
     paths = makePaths(root);
