@@ -89,6 +89,20 @@ def test_action_verb_without_question_mark_flagged() -> None:
     assert flagged is not None
 
 
+def test_mentions_greg_handles_pipe_form_search_result() -> None:
+    assert scanner.mentions_greg(f"<@{GREG}|Greg>")
+
+
+def test_unanswered_candidates_include_structural_dm_activity() -> None:
+    msgs = [
+        msg(GREG, "1781134000.000050", "Can you send context?"),
+        msg(MARI, "1781134500.000100", "Yes."),
+        msg(MARI, "1781136000.000200", "HubSpot shop - company is Varanex"),
+    ]
+    candidates = scanner.unanswered_candidates_after_greg(msgs)
+    assert [m["ts"] for m in candidates] == ["1781134500.000100", "1781136000.000200"]
+
+
 def test_empty_conversation() -> None:
     assert scanner.oldest_unanswered_actionable([]) is None
 
