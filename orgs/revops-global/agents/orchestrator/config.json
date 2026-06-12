@@ -114,7 +114,7 @@
     {
       "name": "supreme-scanner-2h",
       "interval": "2h",
-      "prompt": "Run the Supreme Slack scanner. Execute: cd /home/cortextos/cortextos/orgs/revops-global && source secrets.env && python3 agents/analyst/scripts/supreme-slack-scanner.py 2>&1 | tail -5. If exit code non-zero or output contains 'timeout' or 'error', insert a failed scanner_triggers row and Telegram Greg with the error. On success, log cortextos bus log-event action supreme_scanner_run info."
+      "prompt": "Run the Supreme Slack scanner from CURRENT fork/main (never the shared working tree — it sits on feature branches and runs stale scanner code; incident 2026-06-12 04:49Z: stale-tree run wrote items_scanned=0 while 6 Greg-directed msgs were outstanding). Execute: git -C /home/cortextos/cortextos-qa fetch fork main --quiet && git -C /home/cortextos/cortextos-qa reset --hard refs/remotes/fork/main --quiet && cd /home/cortextos/cortextos/orgs/revops-global && source secrets.env && python3 /home/cortextos/cortextos-qa/orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py 2>&1 | tail -5. If exit code non-zero or output contains 'timeout' or 'error', insert a failed scanner_triggers row and Telegram Greg with the error. On success, log cortextos bus log-event action supreme_scanner_run info."
     }
   ],
   "ctx_warning_threshold": 0,

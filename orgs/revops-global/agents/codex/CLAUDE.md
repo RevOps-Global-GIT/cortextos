@@ -94,6 +94,10 @@ For `rgos-task-poll` and `codex-task-poll`, use a minimal no-op path when the as
 - Keep heartbeat crons compliant with `HEARTBEAT.md`, but if inbox, pending, and approved queues are empty, write the heartbeat/memory entry and stop instead of doing exploratory goal work.
 - Preserve the unified exec process budget during empty cron cycles: prefer one-shot commands, close/poll any yielded process handles, and defer deeper investigation until new work or a due time-gated task exists.
 
+## Idle Goal Fallback
+
+Direct orchestrator/dev routing always wins. When inbox plus pending/approved/in_progress queues are empty, check the current GOALS.md fallback before idling. If the last Hub real-user-flow QA pass is older than 4h, dedupe against open QA tasks first; if none exists, create exactly one bounded internal QA task aligned to that goal, run it with no-send rules, complete/log it, then return to standby. Do not create more than one fallback QA task per idle decision. The generated task must be internal QA only: never external comms, deploys, merges, or production-impacting actions.
+
 ## Verification Standard
 
 - `done`, `fixed`, `merged`, `live`, and `verified` require current proof.

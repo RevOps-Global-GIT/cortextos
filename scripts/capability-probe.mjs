@@ -304,6 +304,52 @@ async function probeLinkedIn(env) {
   }
 }
 
+/** ob1_app_nav: probe ob1-app nav sentinel routes with the ob1-auth session cookie.
+ *  Catches the ServiceWorker-wedge / nav regression class Greg found manually on
+ *  2026-06-11 (RGOS 2430bd53, experiment c2226a1c). Unauthenticated requests 307
+ *  to /unlock, so an auth-wall redirect means the session token died, while a
+ *  non-200 or empty body on an authed request means the app shell regressed. */
+async function probeOb1AppNav(env) {
+  const token = env['OB1_SESSION_TOKEN'];
+  if (!token) return { status: 'blocked', observed: 'OB1_SESSION_TOKEN not in secrets.env', proof: null };
+  const checked_at = new Date().toISOString();
+  const OB1 = 'https://ob1.revopsglobal.com';
+  // Real top-level nav routes (the /app/estate, /app/tasks paths from the original
+  // hypothesis do not exist on ob1-app — verified 2026-06-11, both soft-404).
+  const sentinels = ['/garden', '/insights'];
+  const MIN_BODY_BYTES = 5000; // authed pages render ~100KB+; a blank shell is far smaller
+  try {
+    const results = await Promise.all(sentinels.map(async route => {
+      try {
+        const r = await fetchWithTimeout(`${OB1}${route}`, {
+          headers: { Cookie: `ob1-auth=${token}` },
+          redirect: 'manual',
+        }, 8000);
+        const location = r.headers.get('location') ?? '';
+        const authWall = r.status >= 300 && r.status < 400 && location.includes('/unlock');
+        const body = r.status === 200 ? await r.text() : '';
+        const ok = r.status === 200 && body.length >= MIN_BODY_BYTES;
+        return { route, ok, status: r.status, bytes: body.length, authWall };
+      } catch (e) {
+        return { route, ok: false, status: 0, err: e.message };
+      }
+    }));
+    const allOk = results.every(r => r.ok);
+    const summary = results.map(r =>
+      r.authWall ? `${r.route}=AUTH-WALL(${r.status})` : `${r.route}=${r.status} ${r.bytes}b`
+    ).join(', ');
+    return {
+      status: allOk ? 'ok' : 'fail',
+      checked_at,
+      authority: 'ob1.revopsglobal.com (ob1-auth cookie)',
+      observed: summary,
+      proof: `Nav sentinels: ${summary}`,
+    };
+  } catch (e) {
+    return { status: 'warn', checked_at, observed: `ob1-app nav probe error: ${e.message}`, proof: null };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -313,6 +359,7 @@ const PROBES = {
   gmail_token: probeGmail,
   hub_qa: probeHubQa,
   linkedin_session: probeLinkedIn,
+  ob1_app_nav: probeOb1AppNav,
 };
 
 const argv = process.argv.slice(2);

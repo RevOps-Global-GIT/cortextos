@@ -121,6 +121,12 @@
       "type": "recurring",
       "cron": "3 8 * * *",
       "prompt": "Read prompts/cron-daily-hero-verify.md and execute exactly one bounded hero verification pass; check latest.json date==today, alert orchestrator if deadline breached, log result and exit."
+    },
+    {
+      "name": "signal-diff-inbox-publish",
+      "type": "recurring",
+      "cron": "7 18 * * 5",
+      "prompt": "cd /home/cortextos/cortextos && git fetch fork main --quiet; git checkout refs/remotes/fork/main -- scripts/publish-signal-diff.js; git restore --staged scripts/publish-signal-diff.js; node scripts/publish-signal-diff.js"
     }
   ],
   "ctx_autoreset_threshold": 85,

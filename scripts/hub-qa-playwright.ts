@@ -277,6 +277,71 @@ function filterFleetLiveSourceRows(tasks: FleetTaskCountRow[]): FleetTaskCountRo
   });
 }
 
+interface CreatedFleetTaskRow {
+  id?: string | null;
+  title?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+function candidateTaskDirs(): string[] {
+  const home = process.env.HOME || '/home/cortextos';
+  const roots = new Set([
+    process.env.CTX_ROOT,
+    path.join(home, '.cortextos', process.env.CTX_INSTANCE_ID || 'cortextos1'),
+    path.join(home, '.cortextos', 'cortextos1'),
+  ].filter((value): value is string => Boolean(value)));
+
+  const dirs = new Set<string>();
+  for (const root of roots) {
+    dirs.add(path.join(root, 'tasks'));
+    const orgsDir = path.join(root, 'orgs');
+    if (!fs.existsSync(orgsDir)) continue;
+    for (const entry of fs.readdirSync(orgsDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) dirs.add(path.join(orgsDir, entry.name, 'tasks'));
+    }
+  }
+  return Array.from(dirs).filter(dir => fs.existsSync(dir));
+}
+
+function readTaskJson(filePath: string): FleetTaskCountRow | null {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as FleetTaskCountRow;
+  } catch {
+    return null;
+  }
+}
+
+function deleteLocalQaPersistTask(testTitle: string, busTaskId?: string): string {
+  if (!testTitle.startsWith('qa-persist-')) return 'local cleanup refused: title prefix mismatch';
+
+  const dirs = candidateTaskDirs();
+  if (busTaskId) {
+    for (const dir of dirs) {
+      const filePath = path.join(dir, `${busTaskId}.json`);
+      if (!fs.existsSync(filePath)) continue;
+      const task = readTaskJson(filePath);
+      if (task?.id !== busTaskId || task.title !== testTitle || !String(task.title).startsWith('qa-persist-')) {
+        return `local cleanup refused: ${busTaskId} did not match expected qa-persist task`;
+      }
+      fs.rmSync(filePath, { force: true });
+      return `local task ${busTaskId} deleted`;
+    }
+  }
+
+  const matches: string[] = [];
+  for (const dir of dirs) {
+    for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.json'))) {
+      const filePath = path.join(dir, file);
+      const task = readTaskJson(filePath);
+      if (task?.title === testTitle && String(task.id ?? '').startsWith('task_')) matches.push(filePath);
+    }
+  }
+
+  if (matches.length === 0) return busTaskId ? `local task ${busTaskId} not found` : 'local task not found';
+  for (const filePath of matches) fs.rmSync(filePath, { force: true });
+  return `local task fallback deleted ${matches.length}`;
+}
+
 async function readFleetPendingHeaderCount(page: Page): Promise<{ count: number; text: string }> {
   const normalize = (value: string | null | undefined) => (value ?? '').replace(/\s+/g, ' ').trim();
   const extract = (value: string) => {
@@ -2520,16 +2585,32 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
           new Promise<boolean>(r => setTimeout(() => r(false), 9000)),
         ]);
 
-        // Cleanup: delete the test task via Supabase REST so it does not pollute the kanban.
-        // Best-effort — a cleanup failure does not change the check result.
+        // Cleanup both sides of the mirrored task. The UI create path writes a local bus task
+        // and mirrors it to orch_tasks with metadata.bus_task_id; deleting only the Supabase
+        // row leaves a pending local task file that later re-pollutes the kanban.
         let cleanupNote = '';
         if (serviceKey) {
           try {
+            const lookupRes = await fetch(
+              `${SUPA_URL}/rest/v1/orch_tasks?title=eq.${encodeURIComponent(testTitle)}&select=id,title,metadata`,
+              { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
+            );
+            const rows = lookupRes.ok ? await lookupRes.json().catch(() => []) as CreatedFleetTaskRow[] : [];
+            const createdRows = rows.filter(row => row.title === testTitle && String(row.title).startsWith('qa-persist-'));
+            const busTaskIds = Array.from(new Set(
+              createdRows
+                .map(row => typeof row.metadata?.bus_task_id === 'string' ? row.metadata.bus_task_id : '')
+                .filter(Boolean),
+            ));
+            const localNotes = busTaskIds.length > 0
+              ? busTaskIds.map(busTaskId => deleteLocalQaPersistTask(testTitle, busTaskId))
+              : createdRows.length > 0 ? [deleteLocalQaPersistTask(testTitle)] : [];
             const delRes = await fetch(
               `${SUPA_URL}/rest/v1/orch_tasks?title=eq.${encodeURIComponent(testTitle)}`,
               { method: 'DELETE', headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Prefer: 'return=minimal' } },
             );
-            cleanupNote = delRes.ok ? ' (test task deleted)' : ` (cleanup ${delRes.status} — task may linger)`;
+            const localNote = localNotes.length > 0 ? `; ${localNotes.join('; ')}` : '; local task not found';
+            cleanupNote = delRes.ok ? ` (test task deleted${localNote})` : ` (cleanup ${delRes.status}${localNote} — task may linger)`;
           } catch {
             cleanupNote = ' (cleanup error — task may linger)';
           }
