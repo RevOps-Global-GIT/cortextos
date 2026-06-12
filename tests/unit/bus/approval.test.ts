@@ -66,12 +66,23 @@ beforeEach(() => {
   telegramSendMessageSpy.mockResolvedValue({ result: { message_id: 1 } });
   telegramConstructorSpy.mockClear();
   delete process.env.CTX_FRAMEWORK_ROOT;
+  // Ensure the orch_approvals mirror is inert by default — tests that
+  // exercise it opt in by setting these and stubbing global fetch.
+  delete process.env.SUPABASE_RGOS_URL;
+  delete process.env.SUPABASE_URL;
+  delete process.env.SUPABASE_RGOS_SERVICE_KEY;
+  delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 });
 
 afterEach(() => {
   rmSync(testDir, { recursive: true, force: true });
   rmSync(frameworkRoot, { recursive: true, force: true });
   delete process.env.CTX_FRAMEWORK_ROOT;
+  delete process.env.SUPABASE_RGOS_URL;
+  delete process.env.SUPABASE_URL;
+  delete process.env.SUPABASE_RGOS_SERVICE_KEY;
+  delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  vi.unstubAllGlobals();
 });
 
 describe('createApproval', () => {
@@ -248,6 +259,90 @@ describe('createApproval', () => {
     const id = await createApprovalPromise;
     expect(createApprovalResolved).toBe(true);
     expect(id).toMatch(/^approval_\d+_[a-zA-Z0-9]+$/);
+  });
+});
+
+describe('createApproval — orch_approvals mirror (Hub Approvals page visibility)', () => {
+  // Bus approvals (external-comms, financial, deployment, data-deletion,
+  // other) were invisible on /app/work/approvals because only experiment
+  // approvals created an orch_approvals row. createApproval now mirrors
+  // every category, storing the returned UUID as linked_orch_approval_id
+  // so the existing Telegram-callback PATCH and reconcileOrchApprovals
+  // sync paths apply unchanged.
+
+  function stubSupabaseEnv(): void {
+    process.env.SUPABASE_RGOS_URL = 'https://supabase.test';
+    process.env.SUPABASE_RGOS_SERVICE_KEY = 'test-service-key';
+  }
+
+  it('POSTs to orch_approvals and stores the returned UUID as linked_orch_approval_id', async () => {
+    stubSupabaseEnv();
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{ id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }],
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Send client email', 'external-comms', 'draft attached', frameworkRoot);
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [reqUrl, reqInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(reqUrl).toBe('https://supabase.test/rest/v1/orch_approvals');
+    expect(reqInit.method).toBe('POST');
+    const body = JSON.parse(String(reqInit.body));
+    expect(body.type).toBe('external-comms');
+    expect(body.status).toBe('pending');
+    expect(body.context.task_title).toBe('Send client email');
+    expect(body.context.source).toBe('cortextos-bus');
+    expect(body.context.agent).toBe('dev');
+    expect(body.context.bus_approval_id).toBe(id);
+    expect(body.context.description).toBe('draft attached');
+    expect(body.expires_at).toBeTruthy();
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.linked_orch_approval_id).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  });
+
+  it('skips the mirror when the caller already passed linkedOrchApprovalId (experiment flow — no duplicate row)', async () => {
+    stubSupabaseEnv();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const id = await createApproval(
+      paths, 'dev', 'TestOrg', 'Experiment gate', 'other', undefined, frameworkRoot,
+      undefined, undefined, 'ffffffff-1111-2222-3333-444444444444',
+    );
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.linked_orch_approval_id).toBe('ffffffff-1111-2222-3333-444444444444');
+  });
+
+  it('mirror failure is non-fatal: approval is created local-only with a visible warn', async () => {
+    stubSupabaseEnv();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('supabase unreachable')));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Mirror-down test', 'deployment', undefined, frameworkRoot);
+
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.linked_orch_approval_id).toBeUndefined();
+    expect(approval.status).toBe('pending');
+    const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
+    expect(warnCalls.some((w) => w.includes('orch_approvals mirror failed') && w.includes(id))).toBe(true);
+    warnSpy.mockRestore();
+  });
+
+  it('skips the mirror silently when Supabase credentials are absent', async () => {
+    // No SUPABASE_* env (cleared in beforeEach) — must not attempt fetch.
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'No-creds test', 'financial', undefined, frameworkRoot);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.linked_orch_approval_id).toBeUndefined();
   });
 });
 

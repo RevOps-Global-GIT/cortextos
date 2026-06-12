@@ -174,6 +174,74 @@ function pingOrchestratorChat(
     .catch(() => undefined); // Telegram outage must not block approval creation.
 }
 
+// orch_approvals.org_id is a UUID FK to organizations.id (RevOps Global).
+// Same value used by the experiment mirror in src/bus/experiment.ts.
+const REVOPS_ORG_UUID =
+  process.env.SUPABASE_RGOS_ORG_UUID || 'a1b2c3d4-0000-0000-0000-000000000001';
+// Mirrored approvals expire if not decided within 14 days (orch_approvals.expires_at is NOT NULL).
+const ORCH_APPROVAL_TTL_MS = 14 * 24 * 3600 * 1000;
+
+/**
+ * Mirror a bus approval into the Supabase orch_approvals table so it appears
+ * on the Hub Approvals page (/app/work/approvals) alongside experiment
+ * approvals. Returns the orch_approvals UUID, or null on failure (non-fatal —
+ * Supabase unreachable must not block approval creation).
+ *
+ * The returned UUID is stored as linked_orch_approval_id on the local
+ * approval, which the existing sync paths already understand:
+ *   - Telegram decision → fast-checker routeApprovalCallback PATCHes the row
+ *   - dashboard decision → reconcileOrchApprovals resolves the local file
+ *
+ * `type` is the bus category verbatim (deployment, financial, …) — the Hub's
+ * ApprovalTypeLabel renders unknown types with a neutral badge.
+ */
+async function mirrorApprovalToOrch(
+  approvalId: string,
+  title: string,
+  category: ApprovalCategory,
+  agentName: string,
+  context: string | undefined,
+): Promise<string | null> {
+  const url = process.env.SUPABASE_RGOS_URL || process.env.SUPABASE_URL || '';
+  const key = process.env.SUPABASE_RGOS_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  if (!url || !key) return null;
+
+  try {
+    const res = await fetch(`${url}/rest/v1/orch_approvals`, {
+      method: 'POST',
+      headers: {
+        'apikey': key,
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'return=representation',
+      },
+      body: JSON.stringify({
+        org_id: REVOPS_ORG_UUID,
+        type: category,
+        status: 'pending',
+        context: {
+          task_title: title.split('\n')[0].slice(0, 120),
+          source: 'cortextos-bus',
+          agent: agentName,
+          category,
+          bus_approval_id: approvalId,
+          ...(context ? { description: context.slice(0, 2000) } : {}),
+        },
+        expires_at: new Date(Date.now() + ORCH_APPROVAL_TTL_MS).toISOString(),
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      const rows = await res.json() as Array<{ id: string }>;
+      return rows?.[0]?.id ?? null;
+    }
+    console.warn(`[approval] orch_approvals mirror failed for ${approvalId}: HTTP ${res.status}`);
+  } catch (err) {
+    console.warn(`[approval] orch_approvals mirror failed for ${approvalId}: ${err}`);
+  }
+  return null;
+}
+
 /**
  * Create an approval request.
  * Identical to bash create-approval.sh format.
@@ -209,6 +277,16 @@ export async function createApproval(
   const approvalId = `approval_${epoch}_${rand}`;
   const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 
+  // Mirror into orch_approvals BEFORE writing the local file so the linked
+  // UUID lands inside the pending JSON (same order as the experiment mirror
+  // in experiment.ts). Skipped when the caller already created a paired row
+  // (experiment flow passes linkedOrchApprovalId) — a second row would
+  // duplicate the approval on the Hub. Non-fatal: on mirror failure the
+  // approval is local-only, exactly the pre-mirror behavior.
+  const orchApprovalId = linkedOrchApprovalId
+    ?? await mirrorApprovalToOrch(approvalId, title, category, agentName, context)
+    ?? undefined;
+
   const approval: Approval = {
     id: approvalId,
     title,
@@ -222,7 +300,7 @@ export async function createApproval(
     resolved_at: null,
     resolved_by: null,
     ...(emailMeta ? { email_meta: emailMeta } : {}),
-    ...(linkedOrchApprovalId ? { linked_orch_approval_id: linkedOrchApprovalId } : {}),
+    ...(orchApprovalId ? { linked_orch_approval_id: orchApprovalId } : {}),
   };
 
   const pendingDir = join(paths.approvalDir, 'pending');
