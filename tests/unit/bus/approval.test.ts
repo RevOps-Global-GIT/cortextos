@@ -29,7 +29,7 @@ vi.mock('../../../src/telegram/api', () => ({
 import { mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { createApproval, updateApproval, listPendingApprovals } from '../../../src/bus/approval';
+import { createApproval, updateApproval, listPendingApprovals, collectAllPendingApprovals } from '../../../src/bus/approval';
 import type { BusPaths } from '../../../src/types';
 
 let testDir: string;
@@ -695,5 +695,55 @@ describe('updateApproval — notification-before-unlink order (bug B4 regression
     const resolvedFile = join(paths.approvalDir, 'resolved', `${approvalId}.json`);
     expect(existsSync(pendingFile)).toBe(false);
     expect(existsSync(resolvedFile)).toBe(true);
+  });
+});
+
+describe('collectAllPendingApprovals — count agrees with list (#193)', () => {
+  // Write a raw approval file directly into <approvalDir>/<bucket>/<id>.json,
+  // bypassing createApproval's Telegram/mirror side effects.
+  function writeApproval(approvalDir: string, bucket: 'pending' | 'resolved', id: string, status = 'pending') {
+    const dir = join(approvalDir, bucket);
+    mkdirSync(dir, { recursive: true });
+    const a = {
+      id, title: id, requesting_agent: 'dev', org: 'TestOrg', category: 'other',
+      status, description: '', created_at: new Date(2026, 0, 1).toISOString(),
+      updated_at: new Date(2026, 0, 1).toISOString(), resolved_at: null, resolved_by: null,
+    };
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify(a));
+  }
+
+  it('excludes crash-orphans and corrupt files, and the metric-style count equals the list length', () => {
+    const orgApprovalDir = paths.approvalDir; // <ctxRoot>/orgs/TestOrg/approvals
+
+    // Two genuinely-pending approvals.
+    writeApproval(orgApprovalDir, 'pending', 'appr-live-1');
+    writeApproval(orgApprovalDir, 'pending', 'appr-live-2');
+
+    // Crash-orphan: a pending file whose same-named file also sits in resolved/.
+    writeApproval(orgApprovalDir, 'pending', 'appr-orphan');
+    writeApproval(orgApprovalDir, 'resolved', 'appr-orphan', 'approved');
+
+    // Corrupt pending file — must be skipped, not counted.
+    mkdirSync(join(orgApprovalDir, 'pending'), { recursive: true });
+    writeFileSync(join(orgApprovalDir, 'pending', 'appr-corrupt.json'), '{ not valid json');
+
+    // listPendingApprovals (single org) sees only the 2 live ones.
+    const listed = listPendingApprovals(paths);
+    expect(listed.map(a => a.id).sort()).toEqual(['appr-live-1', 'appr-live-2']);
+
+    // collectAllPendingApprovals (system-wide) agrees: same 2, and the metric
+    // count derived from it matches the list length — the #193 invariant.
+    const collected = collectAllPendingApprovals(paths.ctxRoot);
+    expect(collected.map(a => a.id).sort()).toEqual(['appr-live-1', 'appr-live-2']);
+    expect(collected.length).toBe(listed.length);
+  });
+
+  it('dedups an approval surfaced under two scanned dirs (counts once)', () => {
+    // Same id present in both the root approvals dir and the per-org dir.
+    writeApproval(join(paths.ctxRoot, 'approvals'), 'pending', 'appr-dup');
+    writeApproval(paths.approvalDir, 'pending', 'appr-dup');
+
+    const collected = collectAllPendingApprovals(paths.ctxRoot);
+    expect(collected.filter(a => a.id === 'appr-dup')).toHaveLength(1);
   });
 });

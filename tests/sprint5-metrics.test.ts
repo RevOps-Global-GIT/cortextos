@@ -86,8 +86,11 @@ describe('Sprint 5: Observability & Metrics', () => {
 
     it('counts pending approvals', () => {
       writeFileSync(join(ctxRoot, 'config', 'enabled-agents.json'), '{}', 'utf-8');
-      writeFileSync(join(ctxRoot, 'approvals', 'pending', 'ap1.json'), '{}', 'utf-8');
-      writeFileSync(join(ctxRoot, 'approvals', 'pending', 'ap2.json'), '{}', 'utf-8');
+      // Realistic approvals with distinct ids — the count now reuses the
+      // canonical de-staled + deduped enumeration (collectAllPendingApprovals),
+      // which dedups by id, so fixtures must carry the id real approvals always have.
+      writeFileSync(join(ctxRoot, 'approvals', 'pending', 'ap1.json'), JSON.stringify({ id: 'ap1', status: 'pending' }), 'utf-8');
+      writeFileSync(join(ctxRoot, 'approvals', 'pending', 'ap2.json'), JSON.stringify({ id: 'ap2', status: 'pending' }), 'utf-8');
 
       const report = collectMetrics(ctxRoot);
       expect(report.system.approvals_pending).toBe(2);
