@@ -37,7 +37,7 @@
       "type": "recurring",
       "session_cron": true,
       "cron": "17 9,11,13 * * *",
-      "prompt": "OB1 daily-hero publish watchdog (self-healing). Steps: (1) PUB=$(curl -s https://ob1.revopsglobal.com/vignettes/latest.json | python3 -c 'import sys,json;print(json.load(sys.stdin).get(\"date\",\"\"))'); TODAY=$(date +%F). (2) If PUB equals TODAY: hero published \u2014 NO action, done. (3) If STALE (PUB != TODAY): SSH gregharned@100.84.86.6 (ConnectTimeout 10) and check whether a Flow run is currently active: `ps aux | grep -Ei 'generate-daily-vignette|playwright' | grep -v grep` and `pgrep -f SkyComputerUseClient | wc -l`. If a run IS active (matching proc present OR skycompute count > 0): it is still generating \u2014 NO action, let it finish. (4) If STALE and NO run active (Mac idle): re-kick via `cortextos bus send-message mac-codex normal 'Hero watchdog: today hero not published \u2014 latest.json still stale, Codex.app idle. Please re-run scripts/generate-daily-vignette-flow.mjs in /Users/gregharned/work/ob1-app \u2014 Flow ONLY (never the VM Nano-Banana generator), multi-char via Flow CHARACTER LIBRARY, publish after verify. Report when latest.json flips to today.'`. (5) Only Telegram Greg (chat 8567114601) on the LAST (13:17 PT) check IF still stale after a prior re-kick already fired this morning \u2014 surface as \"hero still not publishing after re-kick, may need your eyes.\" Otherwise stay silent. NEVER run the VM Nano-Banana generator yourself \u2014 the canonical hero is Greg's Mac Flow automation only. This is a cron-triggered turn: do NOT reschedule any loop."
+      "prompt": "OB1 daily-hero publish watchdog (self-healing). Steps: (1) PUB=$(curl -s https://ob1.revopsglobal.com/vignettes/latest.json | python3 -c 'import sys,json;print(json.load(sys.stdin).get(\"date\",\"\"))'); TODAY=$(date +%F). (2) If PUB equals TODAY: hero published — NO action, done. (3) If STALE (PUB != TODAY): SSH gregharned@100.84.86.6 (ConnectTimeout 10) and check whether a Flow run is currently active: `ps aux | grep -Ei 'generate-daily-vignette|playwright' | grep -v grep` and `pgrep -f SkyComputerUseClient | wc -l`. If a run IS active (matching proc present OR skycompute count > 0): it is still generating — NO action, let it finish. (4) If STALE and NO run active (Mac idle): re-kick via `cortextos bus send-message mac-codex normal 'Hero watchdog: today hero not published — latest.json still stale, Codex.app idle. Please re-run scripts/generate-daily-vignette-flow.mjs in /Users/gregharned/work/ob1-app — Flow ONLY (never the VM Nano-Banana generator), multi-char via Flow CHARACTER LIBRARY, publish after verify. Report when latest.json flips to today.'`. (5) Only Telegram Greg (chat 8567114601) on the LAST (13:17 PT) check IF still stale after a prior re-kick already fired this morning — surface as \"hero still not publishing after re-kick, may need your eyes.\" Otherwise stay silent. NEVER run the VM Nano-Banana generator yourself — the canonical hero is Greg's Mac Flow automation only. This is a cron-triggered turn: do NOT reschedule any loop."
     },
     {
       "name": "weekly-review",
@@ -55,13 +55,13 @@
       "name": "fleet-tick",
       "type": "recurring",
       "interval": "2h",
-      "prompt": "Fleet-tick: light coordination pass \u2014 (1) cortextos bus list-tasks; (2) check heartbeats; (3) scan inbox; (4) update heartbeat. Silent unless action needed."
+      "prompt": "Fleet-tick: light coordination pass — (1) cortextos bus list-tasks; (2) check heartbeats; (3) scan inbox; (4) update heartbeat. Silent unless action needed."
     },
     {
       "name": "kanban-sync",
       "type": "recurring",
       "cron": "0 8,17 * * *",
-      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator \u2014 compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
+      "prompt": "Kanban hygiene sweep: (1) cortextos bus list-tasks --agent orchestrator status filters; (2) mcp__rgos__cortex_list_tasks for tasks created_by orchestrator and tasks assigned_to orchestrator — compare to current dispatches in today's memory file. (3) For any RGOS task stuck in approved/in_progress that's actually done, complete it via mcp__rgos__cortex_complete_task. (4) For any in-flight work without an RGOS task, create one. (5) update-heartbeat. Silent unless something requires action."
     },
     {
       "name": "blocked-uat-escalator",
@@ -109,7 +109,7 @@
       "name": "deliverables-snapshot",
       "type": "recurring",
       "cron": "0 5,17 * * *",
-      "prompt": "Run: node /home/cortextos/cortextos/scripts/cortextos-deliverables-snapshot.js \u2014 pushes the deliverables snapshot to the agentops-deliverables-push edge function so /api/agentops/overview and the Advisor canary stay fresh (threshold 1440m). Twice daily (5am/5pm PT) keeps the canary well under the staleness window. This is a cron-triggered turn: do NOT reschedule any loop. Silent unless the script errors."
+      "prompt": "Run: node /home/cortextos/cortextos/scripts/cortextos-deliverables-snapshot.js — pushes the deliverables snapshot to the agentops-deliverables-push edge function so /api/agentops/overview and the Advisor canary stay fresh (threshold 1440m). Twice daily (5am/5pm PT) keeps the canary well under the staleness window. This is a cron-triggered turn: do NOT reschedule any loop. Silent unless the script errors."
     },
     {
       "name": "supreme-scanner-2h",
@@ -177,16 +177,22 @@
   "telegram_owner_note": "2026-05-25 recovery: orchestrator restored as sole @revops_director_bot / Orca front-door Telegram polling owner. Codex app-server runtime uses codex_account_pool with /home/cortextos/.codex-orchestrator-primary primary and labeled backups. orca-orch is voice-project-only and polling disabled.",
   "ctx_autoreset_note": "Disabled temporarily during 2026-05-25 Orca front-door recovery because Codex app-server tokenUsage reported 100% immediately after fresh start and caused restart churn. Restore after account-pool failover/context metric fix.",
   "codex_runtime_reenabled_note": "2026-05-26T23:54:33Z re-enabled Codex app-server front-door after all three CODEX_HOME lanes reported ChatGPT login status.",
-  "codex_frontdoor_restore_note": "2026-05-27T17:00:41.016Z: heartbeat recovery restored runtime=codex-app-server after config drift removed runtime and Telegram update triggered Claude crash loop.",
-  "home": "/home/cortextos",
+  "codex_frontdoor_restore_note": "2026-06-12T16:56:22.313Z: restored runtime=codex-app-server because Claude/Cowork session cap caused @revops_director_bot dead-air guard bounces; temporary Codex front-door owner until Claude reset.",
+  "home": "/home/cortextos/.codex-greg",
   "tier": "opus",
-  "model": "claude-fable-5",
+  "model": "gpt-5.5",
   "fallbackModel": [
     "claude-opus-4-7",
     "claude-sonnet-4-6"
   ],
   "model_pilot_note": "2026-06-09: Greg-approved orchestrator upgrade to Fable-5 (above Opus). Rationale: orchestrator is the fleet judgment engine; reasoning premium pays off on routing/defect-catch/ambiguous-directive work. Cost caveat: orchestrator is the highest-volume 24/7 token consumer. Revert to tier:opus (remove this model override) if cost/quality not justified.",
-  "runtime": "claude-code",
+  "runtime": "codex-app-server",
   "codex_app_server_transport": "ws",
-  "claude_handback_note": "2026-05-27T19:22Z: Claude work credits/session restored; orchestrator control plane returned to claude-code. Codex lanes remain execution-only."
+  "claude_handback_note": "2026-05-27T19:22Z: Claude work credits/session restored; orchestrator control plane returned to claude-code. Codex lanes remain execution-only.",
+  "provider_failover_last_switch": {
+    "provider": "codex",
+    "runtime": "codex-app-server",
+    "model": "gpt-5.5",
+    "switched_at": "2026-06-12T17:20:16.563Z"
+  }
 }

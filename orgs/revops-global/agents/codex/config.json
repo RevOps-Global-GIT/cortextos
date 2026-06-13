@@ -59,7 +59,7 @@
       "prompt": "Read prompts/cron-advisor-facing-page-canary.md and follow its instructions."
     }
   ],
-  "ctx_autoreset_threshold": 75,
+  "ctx_autoreset_threshold": 0,
   "ecosystem": {
     "local_version_control": {
       "enabled": true
@@ -67,5 +67,6 @@
   },
   "codex_app_server_transport": "ws",
   "telegram_polling": false,
-  "daemon_telegram_alerts": false
+  "daemon_telegram_alerts": false,
+  "ctx_autoreset_note": "Disabled 2026-06-12 during Claude/Codex provider-failover hardening because Codex app-server tokenUsage reports 100% on fresh sessions and caused daemon restart churn."
 }

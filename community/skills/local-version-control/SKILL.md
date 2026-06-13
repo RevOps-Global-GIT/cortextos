@@ -80,6 +80,8 @@ Requires `ecosystem.local_version_control.enabled: true` in config.json.
 
 **2026-05-24 — Daily manual snapshot after session-lock block.** The staged-diff review caught untracked credential-bearing verification scripts before commit, so the safety checklist still worked when `cortextos bus auto-commit` could not run under the active analyst session lock.
 
+**2026-06-13 — Daily snapshot with linked worktree excluded.** `git add -A` surfaced `workers/w-theta-placeholder` as an embedded worktree, so the review kept the commit to the outer repository and avoided a broken gitlink.
+
 ### Calibrations
 
 <!-- Subtle preferences Greg consistently nudges — pre-apply these next time. -->

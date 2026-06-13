@@ -110,6 +110,139 @@ interface SupabaseSession {
   user: Record<string, unknown>;
 }
 
+export type ActivityTimestampSource = 'relative' | 'structured' | 'absolute-text';
+
+export interface ActivityTimestampCandidate {
+  source: ActivityTimestampSource;
+  label: string;
+  epochMs?: number;
+}
+
+export interface ActivityFreshnessVerdict {
+  total: number;
+  recent: number;
+  fresh: boolean | null;
+  evidence: string;
+}
+
+const ACTIVITY_FRESH_MS = 4 * 60 * 60 * 1000;
+const ACTIVITY_UI_TIME_ZONE = 'America/Los_Angeles';
+
+export function activityRelativeAgeMs(label: string): number | null {
+  const value = label.trim();
+  if (/just now|less than a minute/i.test(value)) return 0;
+  const match = value.match(/\b(\d+)\s*(second|seconds|sec|secs|s|minute|minutes|min|mins|m|hour|hours|hr|hrs|h|day|days|d)\s+ago\b/i);
+  if (!match) return null;
+  const amount = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(amount)) return null;
+  const unit = match[2].toLowerCase();
+  if (/^(second|seconds|sec|secs|s)$/.test(unit)) return amount * 1000;
+  if (/^(minute|minutes|min|mins|m)$/.test(unit)) return amount * 60 * 1000;
+  if (/^(hour|hours|hr|hrs|h)$/.test(unit)) return amount * 60 * 60 * 1000;
+  if (/^(day|days|d)$/.test(unit)) return amount * 24 * 60 * 60 * 1000;
+  return null;
+}
+
+function timeZoneOffsetMinutes(epochMs: number, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(epochMs));
+  const get = (type: string) => Number(parts.find(part => part.type === type)?.value);
+  const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
+  return (asUtc - epochMs) / 60000;
+}
+
+export function parseActivityAbsoluteTimestamp(label: string, nowMs: number, timeZone = ACTIVITY_UI_TIME_ZONE): number | null {
+  const match = label.trim().match(/\b([A-Z][a-z]{2,8})\s+(\d{1,2}),\s*(?:(\d{4}),\s*)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?\b/);
+  if (!match) return null;
+  const monthIndex = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+    .indexOf(match[1].slice(0, 3).toLowerCase());
+  if (monthIndex < 0) return null;
+
+  const nowYearInUiZone = Number(new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+  }).format(new Date(nowMs)));
+  const year = match[3] ? Number.parseInt(match[3], 10) : nowYearInUiZone;
+  let hour = Number.parseInt(match[4], 10);
+  const minute = Number.parseInt(match[5], 10);
+  const second = match[6] ? Number.parseInt(match[6], 10) : 0;
+  const meridiem = match[7];
+  if (meridiem) {
+    if (/PM/i.test(meridiem) && hour < 12) hour += 12;
+    if (/AM/i.test(meridiem) && hour === 12) hour = 0;
+  }
+
+  const wallClockAsUtc = Date.UTC(year, monthIndex, Number.parseInt(match[2], 10), hour, minute, second);
+  const offset = timeZoneOffsetMinutes(wallClockAsUtc, timeZone);
+  return wallClockAsUtc - offset * 60 * 1000;
+}
+
+export function evaluateActivityFreshness(
+  candidates: ActivityTimestampCandidate[],
+  nowMs: number,
+  freshMs = ACTIVITY_FRESH_MS,
+): ActivityFreshnessVerdict {
+  if (candidates.length === 0) {
+    return { total: 0, recent: 0, fresh: null, evidence: 'No timestamps found on events (empty feed or rendering issue).' };
+  }
+
+  const scored = candidates.map(candidate => {
+    const relativeAge = candidate.source === 'relative' ? activityRelativeAgeMs(candidate.label) : null;
+    const epochMs = candidate.epochMs ?? (candidate.source === 'absolute-text'
+      ? parseActivityAbsoluteTimestamp(candidate.label, nowMs)
+      : undefined);
+    const ageMs = relativeAge ?? (typeof epochMs === 'number' && Number.isFinite(epochMs) ? nowMs - epochMs : null);
+    return { ...candidate, ageMs };
+  }).filter(candidate => candidate.ageMs !== null && Number.isFinite(candidate.ageMs));
+
+  if (scored.length === 0) {
+    return {
+      total: candidates.length,
+      recent: 0,
+      fresh: null,
+      evidence: `${candidates.length} timestamp candidate(s) found, but none were parseable.`,
+    };
+  }
+
+  const recent = scored.filter(candidate => candidate.ageMs! >= 0 && candidate.ageMs! < freshMs);
+  const sourceOrder: ActivityTimestampSource[] = ['relative', 'structured', 'absolute-text'];
+  const best = [...(recent.length > 0 ? recent : scored)].sort((a, b) => {
+    const sourceDelta = sourceOrder.indexOf(a.source) - sourceOrder.indexOf(b.source);
+    if (sourceDelta !== 0) return sourceDelta;
+    return a.ageMs! - b.ageMs!;
+  })[0];
+  const sourceCounts = candidates.reduce<Record<ActivityTimestampSource, number>>((acc, candidate) => {
+    acc[candidate.source] += 1;
+    return acc;
+  }, { relative: 0, structured: 0, 'absolute-text': 0 });
+  const ageMinutes = Math.round(best.ageMs! / 60000);
+  const sourceSummary = `relative:${sourceCounts.relative}, structured:${sourceCounts.structured}, absolute:${sourceCounts['absolute-text']}`;
+
+  if (recent.length > 0) {
+    return {
+      total: candidates.length,
+      recent: recent.length,
+      fresh: true,
+      evidence: `${candidates.length} timestamp(s) visible; ${recent.length} within last 4h via ${best.source} "${best.label}" (${ageMinutes}m old). Sources ${sourceSummary}.`,
+    };
+  }
+
+  return {
+    total: candidates.length,
+    recent: 0,
+    fresh: false,
+    evidence: `${candidates.length} timestamp(s) visible but none within last 4h; freshest parsed ${best.source} "${best.label}" is ${ageMinutes}m old. Sources ${sourceSummary}.`,
+  };
+}
+
 async function mintSession(serviceKey: string, email: string): Promise<SupabaseSession> {
   // Step 1: generate magic link (admin API)
   const genRes = await fetch(`${SUPA_URL}/auth/v1/admin/generate_link`, {
@@ -1561,21 +1694,66 @@ async function runFleetActivityChecks(page: Page): Promise<CheckResult[]> {
   // Now: assert at least one event has a recent timestamp (< 4h) — a live activity feed must have something fresh.
   // Threshold 4h instead of 1h to accommodate quiet hours (overnight, weekends) without false fails.
   try {
-    const allTs = await page.getByText(/\d+ (second|minute|hour|day)s? ago|less than a minute|just now|today|yesterday|\d{1,2}:\d{2}/i, { exact: false }).count();
-    const freshTs = await page.getByText(/(\d+ (second|minute)s? ago|less than a minute|just now|\d+ (minute|hour)s? ago)/i, { exact: false }).allInnerTexts().catch(() => [] as string[]);
-    // Parse fresh count: anything < 4 hours qualifies. "X seconds/minutes/just now" → fresh; "X hours ago" where X<4 → fresh.
-    const recentCount = freshTs.filter(t => {
-      if (/(second|minute)s? ago|just now|less than a minute/i.test(t)) return true;
-      const hm = t.match(/(\d+) hours? ago/i);
-      if (hm) return parseInt(hm[1], 10) < 4;
-      return false;
-    }).length;
-    if (allTs === 0) {
+    const candidates = await page.evaluate(() => {
+      const activityRoot = document.querySelector('main') ?? document.body;
+      const eventNodes = Array.from(activityRoot.querySelectorAll('[class*="event"], [class*="activity"], [class*="item"], [class*="log"], li'))
+        .filter(el => {
+          const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+          return text.length >= 8 && !/filter|search|showing|tabs/i.test(text);
+        })
+        .slice(0, 60);
+
+      const nodes = eventNodes.length > 0 ? eventNodes : [activityRoot];
+      const seen = new Set<string>();
+      const candidates: ActivityTimestampCandidate[] = [];
+      for (const node of nodes) {
+        const relativeMatches = (node.textContent ?? '').match(/\b(?:just now|less than a minute ago|\d+\s*(?:second|seconds|sec|secs|s|minute|minutes|min|mins|m|hour|hours|hr|hrs|h|day|days|d)\s+ago)\b/gi) ?? [];
+        for (const match of relativeMatches) {
+          const clean = match.replace(/\s+/g, ' ').trim();
+          const key = `relative:${clean}:`;
+          if (clean && !seen.has(key)) {
+            seen.add(key);
+            candidates.push({ source: 'relative', label: clean });
+          }
+        }
+
+        const structuredEls = Array.from(node.querySelectorAll('time[datetime], [datetime], [data-timestamp], [data-time], [data-created-at], [data-updated-at]'));
+        for (const el of structuredEls) {
+          const value = el.getAttribute('datetime')
+            ?? el.getAttribute('data-timestamp')
+            ?? el.getAttribute('data-time')
+            ?? el.getAttribute('data-created-at')
+            ?? el.getAttribute('data-updated-at')
+            ?? '';
+          const epochMs = Date.parse(value);
+          const clean = (value || (el.textContent ?? '')).replace(/\s+/g, ' ').trim();
+          const parsedEpochMs = Number.isFinite(epochMs) ? epochMs : undefined;
+          const key = `structured:${clean}:${parsedEpochMs ?? ''}`;
+          if (clean && !seen.has(key)) {
+            seen.add(key);
+            candidates.push({ source: 'structured', label: clean, epochMs: parsedEpochMs });
+          }
+        }
+
+        const absoluteMatches = (node.textContent ?? '').match(/\b[A-Z][a-z]{2,8}\s+\d{1,2},\s*(?:(?:\d{4}),\s*)?\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM)?\b/g) ?? [];
+        for (const match of absoluteMatches) {
+          const clean = match.replace(/\s+/g, ' ').trim();
+          const key = `absolute-text:${clean}:`;
+          if (clean && !seen.has(key)) {
+            seen.add(key);
+            candidates.push({ source: 'absolute-text', label: clean });
+          }
+        }
+      }
+      return candidates;
+    });
+    const verdict = evaluateActivityFreshness(candidates, Date.now());
+    if (verdict.fresh === null) {
       results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'DEFERRED', evidence: 'No timestamps found on events (empty feed or rendering issue).' });
-    } else if (recentCount > 0) {
-      results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'PASS', evidence: `${allTs} timestamp(s) visible; ${recentCount} within last 4h (live feed).` });
+    } else if (verdict.fresh) {
+      results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'PASS', evidence: verdict.evidence });
     } else {
-      results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'FAIL', evidence: `${allTs} timestamp(s) visible but none within last 4h — activity feed appears stale.` });
+      results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'FAIL', evidence: `${verdict.evidence} — activity feed appears stale.` });
     }
   } catch (e) {
     results.push({ check: '[CORRECTNESS] CHECK 3 Event timestamps + freshness', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
@@ -5122,4 +5300,10 @@ async function main() {
   }
 }
 
-main().catch(err => { console.error(err); process.exit(2); });
+const isDirectRun = process.argv[1]
+  ? path.resolve(process.argv[1]) === path.resolve(SCRIPT_DIR, path.basename(new URL(import.meta.url).pathname))
+  : false;
+
+if (isDirectRun) {
+  main().catch(err => { console.error(err); process.exit(2); });
+}

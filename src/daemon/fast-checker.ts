@@ -843,6 +843,7 @@ export class FastChecker {
       if (!errMsg.includes('No OAuth token') && !errMsg.includes('accounts.json')) {
         this.log(`Usage check failed: ${errMsg}`);
       }
+      await this.runProviderFailoverMonitor('usage-check-error');
       return;
     }
 
@@ -884,6 +885,10 @@ export class FastChecker {
 
     this.log(`Usage tier transition: ${prevTier} → ${newTier} (${pct}%)`);
 
+    if (newTier === 2) {
+      await this.runProviderFailoverMonitor('usage-tier-critical');
+    }
+
     // 1. Send Telegram alert directly (no Claude wake needed)
     if (this.telegramApi && this.chatId) {
       this.telegramApi.sendMessage(this.chatId, msg).catch(() => { /* non-critical */ });
@@ -894,6 +899,43 @@ export class FastChecker {
       sendMessage(this.paths, 'fast-checker', this.agent.name, 'urgent', msg);
     } catch (err) {
       this.log(`Usage tier inbox write failed: ${err}`);
+    }
+  }
+
+  /**
+   * Provider failover monitor is a bus/control-plane command, not a prompt.
+   * It is intentionally invoked only by orchestrator's usage checker so a
+   * Claude cap can move the Telegram front door to Codex without waiting for
+   * the capped Claude session to process instructions.
+   */
+  private async runProviderFailoverMonitor(reason: string): Promise<void> {
+    if (this.agent.name !== 'orchestrator') return;
+    try {
+      const stdout = await new Promise<string>((resolve, reject) => {
+        execFile(
+          'cortextos',
+          ['bus', 'provider-failover-monitor', this.agent.name, '--json'],
+          {
+            timeout: this.STEP_HTTP_TIMEOUT_MS,
+            env: {
+              ...process.env,
+              CTX_AGENT_NAME: '',
+              CTX_SESSION_BYPASS: '1',
+            },
+          },
+          (err, out) => {
+            if (err) { reject(err); return; }
+            resolve(out);
+          },
+        );
+      });
+      const parsed = JSON.parse(stdout) as { applied?: boolean; plan?: { selectedProviderId?: string } };
+      this.log(
+        `Provider failover monitor (${reason}): ` +
+        `${parsed.applied ? 'applied' : 'no-op'}${parsed.plan?.selectedProviderId ? ` selected=${parsed.plan.selectedProviderId}` : ''}`,
+      );
+    } catch (err) {
+      this.log(`Provider failover monitor failed (${reason}): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
