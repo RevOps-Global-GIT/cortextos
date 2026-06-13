@@ -36,7 +36,7 @@ let testDir: string;
 let frameworkRoot: string;
 let paths: BusPaths;
 
-function mkPaths(root: string): BusPaths {
+function mkPaths(root: string, org = 'TestOrg'): BusPaths {
   return {
     ctxRoot: root,
     inbox: join(root, 'inbox'),
@@ -45,9 +45,30 @@ function mkPaths(root: string): BusPaths {
     logDir: join(root, 'logs'),
     stateDir: join(root, 'state'),
     taskDir: join(root, 'tasks'),
-    approvalDir: join(root, 'orgs', 'TestOrg', 'approvals'),
+    approvalDir: join(root, 'orgs', org, 'approvals'),
     analyticsDir: join(root, 'analytics'),
     heartbeatDir: join(root, 'heartbeats'),
+  };
+}
+
+function authorizeRevopsAgent(agentName = 'dev'): { revopsPaths: BusPaths; agentDir: string } {
+  const agentDir = join(frameworkRoot, 'orgs', 'revops-global', 'agents', agentName);
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(join(agentDir, 'config.json'), JSON.stringify({ agent_name: agentName }));
+
+  const configDir = join(testDir, 'config');
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(join(configDir, 'enabled-agents.json'), JSON.stringify({
+    [agentName]: {
+      enabled: true,
+      status: 'configured',
+      org: 'revops-global',
+    },
+  }));
+
+  return {
+    revopsPaths: mkPaths(testDir, 'revops-global'),
+    agentDir,
   };
 }
 
@@ -275,15 +296,25 @@ describe('createApproval — orch_approvals mirror (Hub Approvals page visibilit
     process.env.SUPABASE_RGOS_SERVICE_KEY = 'test-service-key';
   }
 
-  it('POSTs to orch_approvals and stores the returned UUID as linked_orch_approval_id', async () => {
+  it('POSTs authorized revops-global approvals to orch_approvals and stores the returned UUID', async () => {
     stubSupabaseEnv();
+    const { revopsPaths, agentDir } = authorizeRevopsAgent('dev');
     const fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => [{ id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }],
     });
     vi.stubGlobal('fetch', fetchSpy);
 
-    const id = await createApproval(paths, 'dev', 'TestOrg', 'Send client email', 'external-comms', 'draft attached', frameworkRoot);
+    const id = await createApproval(
+      revopsPaths,
+      'dev',
+      'revops-global',
+      'Send client email',
+      'external-comms',
+      'draft attached',
+      frameworkRoot,
+      agentDir,
+    );
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [reqUrl, reqInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
@@ -295,12 +326,46 @@ describe('createApproval — orch_approvals mirror (Hub Approvals page visibilit
     expect(body.context.task_title).toBe('Send client email');
     expect(body.context.source).toBe('cortextos-bus');
     expect(body.context.agent).toBe('dev');
+    expect(body.context.org).toBe('revops-global');
     expect(body.context.bus_approval_id).toBe(id);
     expect(body.context.description).toBe('draft attached');
     expect(body.expires_at).toBeTruthy();
 
-    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    const approval = JSON.parse(readFileSync(join(revopsPaths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
     expect(approval.linked_orch_approval_id).toBe('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+  });
+
+  it('REPLAY GUARD: rejects unknown revops-global writers before local or Supabase writes', async () => {
+    stubSupabaseEnv();
+    const revopsPaths = mkPaths(testDir, 'revops-global');
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    await expect(createApproval(
+      revopsPaths,
+      'nick',
+      'revops-global',
+      'Unknown writer replay',
+      'external-comms',
+      'should not reach RevOps approvals',
+      frameworkRoot,
+      join(frameworkRoot, 'orgs', 'revops-global', 'agents', 'nick'),
+    )).rejects.toThrow(/unauthorized writer nick/);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(existsSync(join(revopsPaths.approvalDir, 'pending'))).toBe(false);
+  });
+
+  it('does not mirror non-revops org approvals into the shared RevOps orch_approvals org_id', async () => {
+    stubSupabaseEnv();
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const id = await createApproval(paths, 'dev', 'TestOrg', 'Tenant-local approval', 'external-comms', undefined, frameworkRoot);
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    expect(approval.linked_orch_approval_id).toBeUndefined();
   });
 
   it('skips the mirror when the caller already passed linkedOrchApprovalId (experiment flow — no duplicate row)', async () => {
@@ -320,12 +385,22 @@ describe('createApproval — orch_approvals mirror (Hub Approvals page visibilit
 
   it('mirror failure is non-fatal: approval is created local-only with a visible warn', async () => {
     stubSupabaseEnv();
+    const { revopsPaths, agentDir } = authorizeRevopsAgent('dev');
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('supabase unreachable')));
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const id = await createApproval(paths, 'dev', 'TestOrg', 'Mirror-down test', 'deployment', undefined, frameworkRoot);
+    const id = await createApproval(
+      revopsPaths,
+      'dev',
+      'revops-global',
+      'Mirror-down test',
+      'deployment',
+      undefined,
+      frameworkRoot,
+      agentDir,
+    );
 
-    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    const approval = JSON.parse(readFileSync(join(revopsPaths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
     expect(approval.linked_orch_approval_id).toBeUndefined();
     expect(approval.status).toBe('pending');
     const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
@@ -334,14 +409,24 @@ describe('createApproval — orch_approvals mirror (Hub Approvals page visibilit
   });
 
   it('skips the mirror silently when Supabase credentials are absent', async () => {
+    const { revopsPaths, agentDir } = authorizeRevopsAgent('dev');
     // No SUPABASE_* env (cleared in beforeEach) — must not attempt fetch.
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);
 
-    const id = await createApproval(paths, 'dev', 'TestOrg', 'No-creds test', 'financial', undefined, frameworkRoot);
+    const id = await createApproval(
+      revopsPaths,
+      'dev',
+      'revops-global',
+      'No-creds test',
+      'financial',
+      undefined,
+      frameworkRoot,
+      agentDir,
+    );
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    const approval = JSON.parse(readFileSync(join(paths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
+    const approval = JSON.parse(readFileSync(join(revopsPaths.approvalDir, 'pending', `${id}.json`), 'utf-8'));
     expect(approval.linked_orch_approval_id).toBeUndefined();
   });
 });
@@ -449,13 +534,14 @@ describe('updateApproval — pushes resolution to linked orch_approvals row (pha
 
   it('PATCHes by linked_orch_approval_id with decided_by/decided_at (no resolved_* columns)', async () => {
     stubSupabaseEnv();
+    const { revopsPaths, agentDir } = authorizeRevopsAgent('dev');
     const fetchSpy = vi.fn()
       .mockResolvedValueOnce(mirrorPostResponse('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'))
       .mockResolvedValueOnce({ ok: true, json: async () => [{ id: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }] });
     vi.stubGlobal('fetch', fetchSpy);
 
-    const id = await createApproval(paths, 'dev', 'TestOrg', 'Deploy gate', 'deployment', undefined, frameworkRoot);
-    await updateApproval(paths, id, 'approved', 'looks good', 'dev');
+    const id = await createApproval(revopsPaths, 'dev', 'revops-global', 'Deploy gate', 'deployment', undefined, frameworkRoot, agentDir);
+    await updateApproval(revopsPaths, id, 'approved', 'looks good', 'dev');
 
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     const [reqUrl, reqInit] = fetchSpy.mock.calls[1] as [string, RequestInit];
@@ -475,13 +561,14 @@ describe('updateApproval — pushes resolution to linked orch_approvals row (pha
 
   it('falls back to context->>bus_approval_id when the local file has no linked id (autoresearch path)', async () => {
     stubSupabaseEnv();
+    const { revopsPaths, agentDir } = authorizeRevopsAgent('codex');
     const fetchSpy = vi.fn()
       .mockResolvedValueOnce(mirrorPostResponse(null)) // mirror POST returns no row → no linked id stored
       .mockResolvedValueOnce({ ok: true, json: async () => [{ id: 'external-row' }] });
     vi.stubGlobal('fetch', fetchSpy);
 
-    const id = await createApproval(paths, 'codex', 'TestOrg', 'Experiment gate', 'other', undefined, frameworkRoot);
-    await updateApproval(paths, id, 'rejected', undefined, 'orchestrator');
+    const id = await createApproval(revopsPaths, 'codex', 'revops-global', 'Experiment gate', 'other', undefined, frameworkRoot, agentDir);
+    await updateApproval(revopsPaths, id, 'rejected', undefined, 'orchestrator');
 
     const [reqUrl, reqInit] = fetchSpy.mock.calls[1] as [string, RequestInit];
     expect(reqUrl).toBe(`https://supabase.test/rest/v1/orch_approvals?context->>bus_approval_id=eq.${id}&status=eq.pending`);
@@ -492,14 +579,15 @@ describe('updateApproval — pushes resolution to linked orch_approvals row (pha
 
   it('warns when the PATCH matches no pending row (PostgREST silent no-op)', async () => {
     stubSupabaseEnv();
+    const { revopsPaths, agentDir } = authorizeRevopsAgent('dev');
     const fetchSpy = vi.fn()
       .mockResolvedValueOnce(mirrorPostResponse('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'))
       .mockResolvedValueOnce({ ok: true, json: async () => [] });
     vi.stubGlobal('fetch', fetchSpy);
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const id = await createApproval(paths, 'dev', 'TestOrg', 'No-op test', 'deployment', undefined, frameworkRoot);
-    await updateApproval(paths, id, 'approved');
+    const id = await createApproval(revopsPaths, 'dev', 'revops-global', 'No-op test', 'deployment', undefined, frameworkRoot, agentDir);
+    await updateApproval(revopsPaths, id, 'approved');
 
     const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
     expect(warnCalls.some((w) => w.includes('matched no pending row') && w.includes(id))).toBe(true);
@@ -508,17 +596,18 @@ describe('updateApproval — pushes resolution to linked orch_approvals row (pha
 
   it('push failure is non-fatal: local resolution still completes', async () => {
     stubSupabaseEnv();
+    const { revopsPaths, agentDir } = authorizeRevopsAgent('dev');
     const fetchSpy = vi.fn()
       .mockResolvedValueOnce(mirrorPostResponse('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'))
       .mockRejectedValueOnce(new Error('supabase unreachable'));
     vi.stubGlobal('fetch', fetchSpy);
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const id = await createApproval(paths, 'dev', 'TestOrg', 'Push-down test', 'deployment', undefined, frameworkRoot);
-    await updateApproval(paths, id, 'approved');
+    const id = await createApproval(revopsPaths, 'dev', 'revops-global', 'Push-down test', 'deployment', undefined, frameworkRoot, agentDir);
+    await updateApproval(revopsPaths, id, 'approved');
 
-    expect(existsSync(join(paths.approvalDir, 'pending', `${id}.json`))).toBe(false);
-    const resolved = JSON.parse(readFileSync(join(paths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
+    expect(existsSync(join(revopsPaths.approvalDir, 'pending', `${id}.json`))).toBe(false);
+    const resolved = JSON.parse(readFileSync(join(revopsPaths.approvalDir, 'resolved', `${id}.json`), 'utf-8'));
     expect(resolved.status).toBe('approved');
     const warnCalls = warnSpy.mock.calls.map((c) => c.join(' '));
     expect(warnCalls.some((w) => w.includes('resolution push failed') && w.includes(id))).toBe(true);
