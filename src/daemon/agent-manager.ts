@@ -1533,6 +1533,13 @@ export class AgentManager {
 
   private static readonly PROBE_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
   private static readonly PROBE_ACK_TIMEOUT_MS = 30 * 1000;  // 30 seconds
+  /**
+   * If the agent missed the probe ack but its heartbeat.json is fresher than
+   * this, it is busy (mid-turn, can't run ack-health-probe), not dead — skip
+   * the restart. The stale-heartbeat watcher (45 min) remains the backstop
+   * for truly dead agents.
+   */
+  private static readonly PROBE_HEARTBEAT_FRESH_MS = 10 * 60 * 1000; // 10 minutes
 
   /**
    * Start the health probe loop for `agentName`.
@@ -1734,8 +1741,34 @@ export class AgentManager {
       return;
     }
 
-    // No ack within timeout — mark degraded and restart.
     const failedAt = new Date().toISOString();
+
+    // Missed ack, but a fresh local heartbeat means the agent is alive and
+    // busy (a mid-turn session cannot run ack-health-probe within 30s).
+    // Restarting it would kill in-flight work, so record the miss and skip.
+    const heartbeatPath = join(this.ctxRoot, 'state', agentName, 'heartbeat.json');
+    try {
+      const hb = JSON.parse(readFileSync(heartbeatPath, 'utf-8')) as { last_heartbeat?: string };
+      if (hb.last_heartbeat) {
+        const ageMs = Date.now() - new Date(hb.last_heartbeat).getTime();
+        if (ageMs >= 0 && ageMs < AgentManager.PROBE_HEARTBEAT_FRESH_MS) {
+          console.log(`[health-probe] ${agentName} missed ack but heartbeat is ${Math.round(ageMs / 60000)}min fresh — busy not dead, skipping restart`);
+          try {
+            writeFileSync(
+              probeFile,
+              JSON.stringify({ status: 'missed_busy', probe_id: probeId, sent_at: state.sent_at, failed_at: failedAt }),
+            );
+          } catch (err) {
+            console.error(`[health-probe] Failed to write missed_busy state for ${agentName}: ${err}`);
+          }
+          return;
+        }
+      }
+    } catch {
+      // heartbeat.json missing or malformed — fall through to degraded/restart.
+    }
+
+    // No ack within timeout and no fresh heartbeat — mark degraded and restart.
     console.warn(`[health-probe] ${agentName} did NOT ack probe ${probeId} within ${AgentManager.PROBE_ACK_TIMEOUT_MS / 1000}s — marking degraded and restarting`);
 
     try {
