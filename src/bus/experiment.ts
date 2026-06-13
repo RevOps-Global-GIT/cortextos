@@ -4,6 +4,14 @@ import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { withRetry, isTransientError } from '../utils/retry.js';
 import { randomString } from '../utils/random.js';
 import { emitExperimentSpan, patchExperimentTraceId } from './otel-tracer.js';
+import {
+  REVOPS_ORG_UUID,
+  isRevopsOrg,
+  authorizeRevopsWriter,
+  deriveOrgFromAgentDir,
+  deriveAgentNameFromAgentDir,
+  deriveFrameworkRootFromAgentDir,
+} from '../utils/revops-authz.js';
 
 // --- Types ---
 
@@ -715,9 +723,8 @@ function backfillLocalApproval(agentDir: string, hypothesis: string, orchApprova
   }
 }
 
-// orch_approvals.org_id is a UUID FK to organizations.id (RevOps Global).
-const REVOPS_ORG_UUID =
-  process.env.SUPABASE_RGOS_ORG_UUID || 'a1b2c3d4-0000-0000-0000-000000000001';
+// REVOPS_ORG_UUID (orch_approvals/orch_experiments.org_id FK) is imported from
+// src/utils/revops-authz.ts — the same module that gates who may write it.
 // Approvals expire if not decided within 14 days.
 const APPROVAL_TTL_MS = 14 * 24 * 3600 * 1000;
 
@@ -799,6 +806,37 @@ export async function syncExperimentToSupabase(
   const url = process.env.SUPABASE_RGOS_URL || process.env.SUPABASE_URL || '';
   const key = process.env.SUPABASE_RGOS_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
   if (!url || !key) return; // no credentials — silently skip
+
+  // ORG-WRITE GUARD: this path hardcodes the RevOps org_id on both
+  // orch_experiments AND the paired orch_approvals row (createApprovalRow).
+  // With shared Supabase service creds, any cortextOS instance could otherwise
+  // bleed rows into the RevOps approval queue. Only a provisioned, enabled
+  // revops-global agent (verified via enabled-agents.json + framework agent
+  // dir realpath) may proceed. The writer identity is recovered from agentDir.
+  const org = deriveOrgFromAgentDir(agentDir);
+  const agentName = deriveAgentNameFromAgentDir(agentDir);
+  const frameworkRoot = deriveFrameworkRootFromAgentDir(agentDir) ?? undefined;
+  const ctxRoot = process.env.CTX_ROOT || '';
+
+  if (!org || !isRevopsOrg(org)) {
+    console.warn(
+      `[experiment] skipping RevOps orch sync: writer org '${org ?? 'unknown'}' is not revops-global (agentDir=${agentDir})`,
+    );
+    return;
+  }
+  const writerAuth = authorizeRevopsWriter({
+    ctxRoot,
+    agentName: agentName ?? '',
+    org,
+    frameworkRoot,
+    agentDir,
+  });
+  if (!writerAuth.authorized) {
+    console.warn(
+      `[experiment] refusing RevOps orch sync for unauthorized writer ${agentName ?? 'unknown'}: ${writerAuth.reason}`,
+    );
+    return;
+  }
 
   const base = `${url}/rest/v1/orch_experiments`;
   const headers: Record<string, string> = {

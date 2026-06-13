@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { execFileSync } from 'child_process';
 import { join } from 'path';
 import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths, EmailMeta } from '../types/index.js';
@@ -9,6 +9,7 @@ import { validateApprovalCategory } from '../utils/validate.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { sendMessage } from './message.js';
 import { postActivity } from './system.js';
+import { REVOPS_ORG_UUID, REVOPS_ORG_SLUG, isRevopsOrg, authorizeRevopsWriter } from '../utils/revops-authz.js';
 
 /**
  * Build the inline keyboard posted to the activity channel alongside a
@@ -174,108 +175,20 @@ function pingOrchestratorChat(
     .catch(() => undefined); // Telegram outage must not block approval creation.
 }
 
-// orch_approvals.org_id is a UUID FK to organizations.id (RevOps Global).
-// Same value used by the experiment mirror in src/bus/experiment.ts.
-const REVOPS_ORG_UUID =
-  process.env.SUPABASE_RGOS_ORG_UUID || 'a1b2c3d4-0000-0000-0000-000000000001';
-const REVOPS_ORG_SLUG = 'revops-global';
 // Mirrored approvals expire if not decided within 14 days (orch_approvals.expires_at is NOT NULL).
 const ORCH_APPROVAL_TTL_MS = 14 * 24 * 3600 * 1000;
 
-type RevopsApprovalWriterAuth = {
-  authorized: boolean;
-  reason?: string;
-};
-
-function isRevopsOrg(org: string): boolean {
-  return org.trim().toLowerCase() === REVOPS_ORG_SLUG;
-}
-
-function readJsonFile(filePath: string): unknown {
-  return JSON.parse(readFileSync(filePath, 'utf-8'));
-}
-
-function realPathIfExists(filePath: string): string | null {
-  try {
-    return realpathSync(filePath);
-  } catch {
-    return null;
-  }
-}
-
-function enabledRegistryAuthorizes(paths: BusPaths, agentName: string, org: string): boolean {
-  const registryPath = join(paths.ctxRoot, 'config', 'enabled-agents.json');
-  if (!existsSync(registryPath)) return false;
-
-  let registry: unknown;
-  try {
-    registry = readJsonFile(registryPath);
-  } catch {
-    return false;
-  }
-
-  let record: Record<string, unknown> | undefined;
-  if (Array.isArray(registry)) {
-    const found = registry.find((entry) => {
-      if (!entry || typeof entry !== 'object') return false;
-      const item = entry as Record<string, unknown>;
-      return item.name === agentName || item.agent_name === agentName;
-    });
-    record = found && typeof found === 'object' ? found as Record<string, unknown> : undefined;
-  } else if (registry && typeof registry === 'object') {
-    const value = (registry as Record<string, unknown>)[agentName];
-    record = value && typeof value === 'object' ? value as Record<string, unknown> : undefined;
-  }
-
-  if (!record) return false;
-  if (record.org !== org) return false;
-  if (record.enabled !== true) return false;
-  if (record.status === 'deleted' || record.decommissioned === true) return false;
-  return true;
-}
-
-function frameworkAgentDirAuthorizes(
-  agentName: string,
-  org: string,
-  frameworkRoot: string | undefined,
-  agentDir: string | undefined,
-): boolean {
-  if (!frameworkRoot) return false;
-
-  const expectedAgentDir = join(frameworkRoot, 'orgs', org, 'agents', agentName);
-  if (!existsSync(join(expectedAgentDir, 'config.json'))) return false;
-
-  if (!agentDir) return false;
-  const expectedReal = realPathIfExists(expectedAgentDir);
-  const agentDirReal = realPathIfExists(agentDir);
-  if (!expectedReal || !agentDirReal) return false;
-  return agentDirReal === expectedReal;
-}
-
+// RevOps org-write authorization lives in src/utils/revops-authz.ts so the
+// experiment Supabase sync (src/bus/experiment.ts) enforces the identical
+// gate — see PR #836. This wrapper adapts the BusPaths signature used here.
 function authorizeRevopsApprovalWriter(
   paths: BusPaths,
   agentName: string,
   org: string,
   frameworkRoot: string | undefined,
   agentDir: string | undefined,
-): RevopsApprovalWriterAuth {
-  if (!isRevopsOrg(org)) return { authorized: true };
-
-  if (!enabledRegistryAuthorizes(paths, agentName, org)) {
-    return {
-      authorized: false,
-      reason: `${agentName} is not enabled for ${org} in ${join(paths.ctxRoot, 'config', 'enabled-agents.json')}`,
-    };
-  }
-
-  if (!frameworkAgentDirAuthorizes(agentName, org, frameworkRoot, agentDir)) {
-    return {
-      authorized: false,
-      reason: `${agentName} does not resolve to a provisioned ${org} agent directory`,
-    };
-  }
-
-  return { authorized: true };
+) {
+  return authorizeRevopsWriter({ ctxRoot: paths.ctxRoot, agentName, org, frameworkRoot, agentDir });
 }
 
 /**
