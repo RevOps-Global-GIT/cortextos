@@ -1668,7 +1668,7 @@ export class AgentManager {
    *   1. Write a "pending" probe state file.
    *   2. Send a "ping" message to the agent's inbox.
    *   3. After PROBE_ACK_TIMEOUT_MS, read the probe state file.
-   *   4. If status !== "acked" → mark degraded and restart.
+   *   4. If status !== "acked" → mark degraded for telemetry only.
    */
   private async runHealthProbe(agentName: string): Promise<void> {
     // Skip if the agent is no longer running.
@@ -1734,9 +1734,14 @@ export class AgentManager {
       return;
     }
 
-    // No ack within timeout — mark degraded and restart.
+    // No ack within timeout — mark degraded, but do not restart a running
+    // agent. Probe pings are delivered through the same agent session that may
+    // be busy, blocked, or unable to auto-ack; treating one missed ack as a
+    // restart signal can interrupt the boot/heartbeat path and freeze recovery.
+    // Actual recovery still happens above through restartDeadRegisteredAgent()
+    // when the registry says running but the process is gone.
     const failedAt = new Date().toISOString();
-    console.warn(`[health-probe] ${agentName} did NOT ack probe ${probeId} within ${AgentManager.PROBE_ACK_TIMEOUT_MS / 1000}s — marking degraded and restarting`);
+    console.warn(`[health-probe] ${agentName} did NOT ack probe ${probeId} within ${AgentManager.PROBE_ACK_TIMEOUT_MS / 1000}s — marking degraded (no restart)`);
 
     try {
       writeFileSync(
@@ -1747,12 +1752,7 @@ export class AgentManager {
       console.error(`[health-probe] Failed to write degraded state for ${agentName}: ${err}`);
     }
 
-    try {
-      await this.restartAgent(agentName);
-    } catch (err) {
-      console.error(`[health-probe] restartAgent failed for degraded agent ${agentName}: ${err}`);
-      // Best-effort — probe is non-fatal.
-    }
+    return;
   }
 
   /**
