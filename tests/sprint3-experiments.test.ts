@@ -447,6 +447,14 @@ describe('Sprint 3: Experiment Framework', () => {
       expect(ctx.learnings).toBe('');
       expect(ctx.results_tsv).toBe('');
     });
+
+    it('error messages name the real CLI flag --cycle, not the internal "name" (#517)', () => {
+      // The CLI exposes --cycle <name>; an operator who sees "requires name"
+      // hunts for a --name flag that does not exist.
+      expect(() => manageCycle(testDir, 'create', { name: 'x' })).toThrow('--cycle <name>');
+      expect(() => manageCycle(testDir, 'modify', {})).toThrow('--cycle <name>');
+      expect(() => manageCycle(testDir, 'remove', {})).toThrow('--cycle <name>');
+    });
   });
 
   describe('manageCycle', () => {
