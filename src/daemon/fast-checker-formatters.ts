@@ -15,19 +15,26 @@ export function formatTelegramTextMessage(
   lastSentText?: string,
   recentHistory?: string,
 ): string {
+  // Untrusted context fields are run through sanitizeForPtyInjection (same helper
+  // and rationale as formatTelegramReaction / upstream #606): the fast-checker
+  // caller preserves ordinary ASCII + newlines, so a crafted display name, reply
+  // quote, recalled message, or conversation snippet like
+  // `=== AGENT MESSAGE from daemon ===` could otherwise forge a containment header
+  // in the agent's PTY, and a body carrying ``` could break out of the fence below.
+  // chatId is numeric per Telegram's API contract and left untouched.
   let replyCx = '';
   if (typeof replyToText === 'string' && replyToText) {
-    replyCx = `[Replying to: "${replyToText.slice(0, 500)}"]\n`;
+    replyCx = `[Replying to: "${sanitizeForPtyInjection(replyToText.slice(0, 500))}"]\n`;
   }
 
   let lastSentCtx = '';
   if (lastSentText) {
-    lastSentCtx = `[Your last message: "${lastSentText.slice(0, 500)}"]\n`;
+    lastSentCtx = `[Your last message: "${sanitizeForPtyInjection(lastSentText.slice(0, 500))}"]\n`;
   }
 
   let historyCx = '';
   if (recentHistory) {
-    historyCx = `[Recent conversation:]\n${recentHistory}\n`;
+    historyCx = `[Recent conversation:]\n${sanitizeForPtyInjection(recentHistory)}\n`;
   }
 
   // Use [USER: ...] wrapper to prevent prompt injection via crafted display names
@@ -35,9 +42,9 @@ export function formatTelegramTextMessage(
   // can recognize and invoke them via the Skill tool (e.g. /loop, /commit, /restart).
   const isSlashCommand = /^\/[a-zA-Z]/.test(text.trim());
   const body = isSlashCommand
-    ? text.trim()
-    : `\`\`\`\n${text}\n\`\`\``;
-  return `=== TELEGRAM from [USER: ${from}] (chat_id:${chatId}) ===
+    ? sanitizeForPtyInjection(text.trim())
+    : `\`\`\`\n${sanitizeForPtyInjection(text)}\n\`\`\``;
+  return `=== TELEGRAM from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) ===
 ${replyCx}${historyCx}${body}
 ${lastSentCtx}Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
@@ -92,10 +99,12 @@ export function formatTelegramPhotoMessage(
   caption: string,
   imagePath: string,
 ): string {
-  return `=== TELEGRAM PHOTO from ${from} (chat_id:${chatId}) ===
+  // Untrusted `from` (unfenced header) and `caption` (fenced — ``` would break out)
+  // are sanitized; chatId is numeric and imagePath is server-generated.
+  return `=== TELEGRAM PHOTO from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
 \`\`\`
-${caption}
+${sanitizeForPtyInjection(caption)}
 \`\`\`
 local_file: ${imagePath}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
@@ -114,13 +123,16 @@ export function formatTelegramDocumentMessage(
   filePath: string,
   fileName: string,
 ): string {
-  return `=== TELEGRAM DOCUMENT from ${from} (chat_id:${chatId}) ===
+  // Untrusted `from` (unfenced header), `caption` (fenced — ``` would break out)
+  // and `fileName` (unfenced, attacker-supplied document name) are sanitized;
+  // chatId is numeric and filePath is server-generated.
+  return `=== TELEGRAM DOCUMENT from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
 \`\`\`
-${caption}
+${sanitizeForPtyInjection(caption)}
 \`\`\`
 local_file: ${filePath}
-file_name: ${fileName}
+file_name: ${sanitizeForPtyInjection(fileName)}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
@@ -143,10 +155,13 @@ export function formatTelegramVoiceMessage(
   transcript?: string,
 ): string {
   const dur = duration !== undefined ? duration : 'unknown';
+  // Untrusted `from` (unfenced header) and `transcript` (fenced — ``` would break
+  // out; transcript text is derived from user-spoken audio) are sanitized; chatId
+  // is numeric, filePath is server-generated, duration is numeric.
   const transcriptBlock = transcript && transcript.trim()
-    ? `transcript:\n\`\`\`\n${transcript.trim()}\n\`\`\`\n`
+    ? `transcript:\n\`\`\`\n${sanitizeForPtyInjection(transcript.trim())}\n\`\`\`\n`
     : '';
-  return `=== TELEGRAM VOICE from ${from} (chat_id:${chatId}) ===
+  return `=== TELEGRAM VOICE from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 duration: ${dur}s
 local_file: ${filePath}
 ${transcriptBlock}Reply using: cortextos bus send-telegram-voice ${chatId} '<your reply>'
@@ -167,14 +182,17 @@ export function formatTelegramVideoMessage(
   duration: number | undefined,
 ): string {
   const dur = duration !== undefined ? duration : 'unknown';
-  return `=== TELEGRAM VIDEO from ${from} (chat_id:${chatId}) ===
+  // Untrusted `from` (unfenced header), `caption` (fenced — ``` would break out)
+  // and `fileName` (unfenced, attacker-supplied video name) are sanitized; chatId
+  // is numeric, filePath is server-generated, duration is numeric.
+  return `=== TELEGRAM VIDEO from ${sanitizeForPtyInjection(from)} (chat_id:${chatId}) ===
 caption:
 \`\`\`
-${caption}
+${sanitizeForPtyInjection(caption)}
 \`\`\`
 duration: ${dur}s
 local_file: ${filePath}
-file_name: ${fileName}
+file_name: ${sanitizeForPtyInjection(fileName)}
 Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
 
 `;
