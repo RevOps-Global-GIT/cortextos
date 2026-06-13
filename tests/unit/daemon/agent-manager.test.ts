@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { buildReplyContext } from '../../../src/daemon/agent-manager.js';
@@ -395,6 +395,31 @@ describe('AgentManager.restartAgent - BUG-007 fix (rebuild Telegram poller)', ()
 
     expect(stopSpy).not.toHaveBeenCalled();
     expect(startSpy).not.toHaveBeenCalled();
+  });
+
+  it('marks missed health probe acks degraded without restarting a running agent', async () => {
+    const probeFile = join(ctxRoot, 'state', 'alice', 'health-probe.json');
+    mkdirSync(join(ctxRoot, 'state', 'alice'), { recursive: true });
+    writeFileSync(probeFile, JSON.stringify({
+      probe_id: 'probe-1',
+      sent_at: '2026-06-10T18:39:54Z',
+      status: 'pending',
+    }));
+
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    (am as any).agents.set('alice', { process: { getStatus: () => ({ name: 'alice', status: 'running' }) } });
+    const restartSpy = vi.spyOn(am, 'restartAgent').mockResolvedValue();
+
+    await (am as any).checkProbeAck('alice', 'probe-1', probeFile);
+
+    expect(restartSpy).not.toHaveBeenCalled();
+    const state = JSON.parse(readFileSync(probeFile, 'utf-8'));
+    expect(state).toMatchObject({
+      probe_id: 'probe-1',
+      sent_at: '2026-06-10T18:39:54Z',
+      status: 'degraded',
+    });
+    expect(state.failed_at).toEqual(expect.any(String));
   });
 });
 
