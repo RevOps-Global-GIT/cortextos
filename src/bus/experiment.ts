@@ -83,6 +83,7 @@ export interface ExperimentCycle {
   enabled: boolean;
   created_by: string;
   created_at: string;
+  approval_required?: boolean;
 }
 
 export interface ExperimentConfig {
@@ -249,6 +250,32 @@ function findCycleDefaults(
     };
   } catch {
     return {};
+  }
+}
+
+/**
+ * Resolve whether a new experiment on the given metric needs an approval
+ * gate. A matching cycle's approval_required (same metric + agent match as
+ * findCycleDefaults) overrides the global flag in experiments/config.json.
+ * Best-effort: config-read errors resolve to false so create-experiment does
+ * not break on absent or malformed config.
+ */
+export function isApprovalRequired(
+  agentDir: string,
+  agentName: string,
+  metric: string,
+): boolean {
+  try {
+    const config = loadConfig(agentDir);
+    const cycle = config.cycles?.find(
+      (c) => c.metric === metric && c.agent === agentName,
+    );
+    if (cycle?.approval_required !== undefined) {
+      return cycle.approval_required;
+    }
+    return config.approval_required ?? false;
+  } catch {
+    return false;
   }
 }
 

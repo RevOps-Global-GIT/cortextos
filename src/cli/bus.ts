@@ -18,7 +18,7 @@ import { runHeartbeatHealthWatch, inferRunningFromHeartbeats } from '../bus/hear
 import { computeUvd, writeUvdResult } from '../bus/compute-uvd.js';
 import { runSecurityAudit } from '../bus/security-audit.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
-import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
+import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, isApprovalRequired, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { createApproval, updateApproval, sendApprovedEmail } from '../bus/approval.js';
@@ -2158,9 +2158,8 @@ busCommand
     });
     console.log(id);
 
-    // If approval_required is configured, auto-create an approval
-    const config = loadExperimentConfig(agentDir);
-    if (config.approval_required) {
+    // If approval is required (cycle-level setting overrides global), auto-create an approval
+    if (isApprovalRequired(agentDir, env.agentName, metric)) {
       const paths = resolvePaths(env.agentName, env.instanceId, env.org);
       const approvalId = await createApproval(
         paths,
