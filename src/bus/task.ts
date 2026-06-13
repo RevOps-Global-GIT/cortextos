@@ -5,7 +5,7 @@ import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveRepo
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomDigits } from '../utils/random.js';
-import { validatePriority } from '../utils/validate.js';
+import { validateAgentName, validatePriority } from '../utils/validate.js';
 import { mirrorTaskToRgos, mirrorTaskRunToRgos, uuidv5, isUuid } from './rgos-mirror.js';
 import { logEvent } from './event.js';
 import { snapshotSessionCost } from './task-cost.js';
@@ -190,6 +190,10 @@ export function createTask(
   }
 
   validatePriority(priority);
+  // Issue #600: reject traversal/garbage assignees at creation — downstream
+  // consumers (sendMessage, saveOutput, notifyAgent) already gate, this closes
+  // the stored-raw gap at the source.
+  validateAgentName(assignee);
 
   const epoch = Date.now();
   // 8 digits: same-millisecond collision probability is ~1e-8 instead of ~1e-3.
