@@ -422,7 +422,7 @@ export function listBlockedBy(paths: BusPaths, blockerId: string): Task[] {
  *      root rather than under an org subdirectory). This prevents
  *      complete-task from throwing "not found in any org" for system tasks.
  *
- * Task IDs are generated as `task_<epoch_ms>_<3digit_random>` so real
+ * Task IDs are generated as `task_<epoch_ms>_<8digit_random>` so real
  * collisions are effectively impossible — but if the scan ever finds the
  * same ID in multiple orgs (e.g. due to a bug in ID generation or a manual
  * file copy), we warn loudly naming the task ID, the match count, AND the
