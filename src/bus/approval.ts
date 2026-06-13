@@ -503,9 +503,18 @@ async function pushResolutionToOrch(
  * on the next updateApproval call for that id (unlinkSync is now wrapped in
  * try/catch for this case).
  */
-export function listPendingApprovals(paths: BusPaths): Approval[] {
-  const pendingDir = join(paths.approvalDir, 'pending');
-  const resolvedDir = join(paths.approvalDir, 'resolved');
+/**
+ * Read every non-stale, non-corrupt pending approval from a single approvals
+ * dir (the dir that contains `pending/` and `resolved/`). A pending file whose
+ * same-named counterpart exists in the sibling `resolved/` dir is a
+ * crash-recovery orphan (updateApproval writes resolved/ + notifies inbox
+ * before unlinking pending/, so a crash in between leaves a stale pending
+ * file) and is skipped. Corrupt files are skipped. Returns [] if pending/ is
+ * absent. No sort (caller decides).
+ */
+function readPendingDirDestaled(approvalDir: string): Approval[] {
+  const pendingDir = join(approvalDir, 'pending');
+  const resolvedDir = join(approvalDir, 'resolved');
   let files: string[];
   try {
     files = readdirSync(pendingDir).filter(f => f.endsWith('.json'));
@@ -525,10 +534,45 @@ export function listPendingApprovals(paths: BusPaths): Approval[] {
       // Skip corrupt
     }
   }
+  return approvals;
+}
 
-  return approvals.sort(
+export function listPendingApprovals(paths: BusPaths): Approval[] {
+  return readPendingDirDestaled(paths.approvalDir).sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   );
+}
+
+/**
+ * Collect every genuinely-pending approval system-wide: the root
+ * `<ctxRoot>/approvals` plus each `<ctxRoot>/orgs/<org>/approvals`.
+ *
+ * Single source of truth for the `approvals_pending` metric (collect-metrics)
+ * and `list-approvals --all-orgs`, so the count can never drift from the list
+ * (#193). Applies the same crash-orphan + corrupt skip as listPendingApprovals
+ * (via readPendingDirDestaled) and dedups by id (an approval surfaced under two
+ * scanned dirs counts once). Unsorted — callers that display sort themselves.
+ */
+export function collectAllPendingApprovals(ctxRoot: string): Approval[] {
+  const approvalDirs = [join(ctxRoot, 'approvals')];
+  const orgsDir = join(ctxRoot, 'orgs');
+  try {
+    for (const entry of readdirSync(orgsDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        approvalDirs.push(join(orgsDir, entry.name, 'approvals'));
+      }
+    }
+  } catch {
+    // no orgs/ dir — root-only deployment
+  }
+
+  const byId = new Map<string, Approval>();
+  for (const approvalDir of approvalDirs) {
+    for (const a of readPendingDirDestaled(approvalDir)) {
+      if (!byId.has(a.id)) byId.set(a.id, a);
+    }
+  }
+  return Array.from(byId.values());
 }
 
 /**

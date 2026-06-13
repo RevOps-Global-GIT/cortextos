@@ -7,6 +7,7 @@ import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, m
 import { join, basename, dirname } from 'path';
 import { execSync } from 'child_process';
 import { ensureDir } from '../utils/atomic.js';
+import { collectAllPendingApprovals } from './approval.js';
 
 // --- Types ---
 
@@ -203,26 +204,11 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
     };
   }
 
-  // Count pending approvals
-  let approvalsPending = 0;
-  const approvalPaths = [join(ctxRoot, 'approvals', 'pending')];
-  if (existsSync(orgsDir)) {
-    try {
-      for (const orgEntry of readdirSync(orgsDir, { withFileTypes: true })) {
-        if (orgEntry.isDirectory()) {
-          const p = join(orgsDir, orgEntry.name, 'approvals', 'pending');
-          if (existsSync(p)) approvalPaths.push(p);
-        }
-      }
-    } catch { /* ignore */ }
-  }
-  for (const apDir of approvalPaths) {
-    if (existsSync(apDir)) {
-      try {
-        approvalsPending += readdirSync(apDir).filter(f => f.endsWith('.json')).length;
-      } catch { /* ignore */ }
-    }
-  }
+  // Count pending approvals — reuse the canonical de-staled + deduped
+  // enumeration (root + per-org approvals) so the metric can never drift from
+  // `list-approvals`. A naive readdir count over pending/ double-counted
+  // crash-orphan files that listPendingApprovals already filters (#193).
+  const approvalsPending = collectAllPendingApprovals(ctxRoot).length;
 
   const report: MetricsReport = {
     timestamp,
