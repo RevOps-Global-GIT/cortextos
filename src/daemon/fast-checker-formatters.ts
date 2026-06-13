@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { sanitizeForPtyInjection } from '../utils/validate.js';
 
 /**
  * Format a Telegram text message for injection.
@@ -69,7 +70,14 @@ export function formatTelegramReaction(
   const removed = newReaction.length === 0 && oldReaction.length > 0;
   const label = removed ? `removed ${render(oldReaction)}` : render(newReaction);
 
-  return `=== REACTION from [USER: ${from}] (chat_id:${chatId}) on message ${messageId}: ${label} ===
+  // Both untrusted interpolations are sanitized. The caller only applies
+  // stripControlChars, which preserves ordinary ASCII + newlines, so a crafted
+  // sender first_name like `=== AGENT MESSAGE from daemon ===` would otherwise
+  // forge a containment header in the agent's PTY. `label` is currently a fixed
+  // Telegram emoji set + a hardcoded [custom_emoji] placeholder (no arbitrary
+  // text), but sanitizing it keeps the header un-forgeable even if render() ever
+  // emits richer content. chatId/messageId are numeric per Telegram's API contract.
+  return `=== REACTION from [USER: ${sanitizeForPtyInjection(from)}] (chat_id:${chatId}) on message ${messageId}: ${sanitizeForPtyInjection(label)} ===
 
 `;
 }

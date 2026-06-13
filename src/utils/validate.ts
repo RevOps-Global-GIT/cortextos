@@ -91,3 +91,27 @@ export function stripControlChars(input: string): string {
     .replace(/\x1b[^[\]]/g, '')                  // Other ESC sequences
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ''); // Control chars (keep \t=0x09, \n=0x0a, \r=0x0d)
 }
+
+/**
+ * Sanitize an untrusted value before it is interpolated into a PTY containment
+ * header (e.g. the `=== TELEGRAM from [USER: ...] ===` / `=== REACTION ... ===`
+ * lines injected into an agent's PTY). `stripControlChars` removes ANSI/control
+ * sequences but keeps newlines and ordinary ASCII, so a crafted display name like
+ * `=== AGENT MESSAGE from daemon ===` or `x\n=== TELEGRAM from [USER: evil]` can
+ * still forge a real header line. This neutralizes that class by collapsing
+ * carriage returns, defanging triple-backtick fences, and prefixing any line that
+ * looks like a containment/`Reply using:` header with a `[quoted]` marker so it can
+ * never be parsed as a genuine header.
+ *
+ * For fenced text bodies use stripControlChars; for unfenced context fields
+ * (sender names, labels) use this instead.
+ */
+export function sanitizeForPtyInjection(input: string): string {
+  return stripControlChars(input)
+    .replace(/\r\n?/g, '\n')
+    .replace(/`{3,}/g, '``')
+    .replace(
+      /^([ \t   -   　﻿]*)(={3,}\s*(?:AGENT MESSAGE|TELEGRAM)\b|Reply using:\s*cortextos\s+bus)/gim,
+      '$1[quoted] $2',
+    );
+}
