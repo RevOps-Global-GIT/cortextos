@@ -30,7 +30,7 @@ export async function listAgents(ctxRoot: string, org?: string): Promise<AgentIn
   // 1. Read enabled-agents.json for explicit enable/disable state.
   // This is treated as metadata, not as the list of agents to display.
   const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
-  let enabledAgents: Record<string, { org?: string; enabled?: boolean; status?: string }> = {};
+  let enabledAgents: Record<string, { org?: string; enabled?: boolean; status?: string; decommissioned?: boolean }> = {};
   if (existsSync(enabledFile)) {
     try {
       enabledAgents = JSON.parse(readFileSync(enabledFile, 'utf-8'));
@@ -92,7 +92,7 @@ export async function listAgents(ctxRoot: string, org?: string): Promise<AgentIn
         // otherwise default to enabled (matches the daemon's discoverAndStart
         // default-on behavior).
         const explicitEntry = enabledAgents[agentName];
-        if (isDeletedRegistryEntry(agentName, explicitEntry)) continue;
+        if (isRetiredAgent(ctxRoot, agentName, explicitEntry)) continue;
         const isEnabled = explicitEntry ? explicitEntry.enabled !== false : true;
 
         agents.push(buildAgentInfo(agentName, orgName, isEnabled, ctxRoot));
@@ -105,7 +105,7 @@ export async function listAgents(ctxRoot: string, org?: string): Promise<AgentIn
   // or never existed). These are surfaced so users can clean them up.
   for (const [name, cfg] of Object.entries(enabledAgents)) {
     if (!/^[a-z0-9_-]+$/.test(name)) continue;
-    if (isDeletedRegistryEntry(name, cfg)) continue;
+    if (isRetiredAgent(ctxRoot, name, cfg)) continue;
     if (seen.has(name)) continue;
     const agentOrg = cfg.org || '';
     if (org && agentOrg !== org) continue;
@@ -121,6 +121,7 @@ export async function listAgents(ctxRoot: string, org?: string): Promise<AgentIn
     const remoteRows = await fetchRemoteHeartbeats();
     for (const row of remoteRows) {
       if (seen.has(row.agent_name)) continue; // local agent wins
+      if (isRetiredAgent(ctxRoot, row.agent_name, enabledAgents[row.agent_name])) continue;
       if (org && row.org !== org) continue;
       seen.add(row.agent_name);
 
@@ -148,11 +149,17 @@ export async function listAgents(ctxRoot: string, org?: string): Promise<AgentIn
   return agents;
 }
 
-function isDeletedRegistryEntry(
+function isRetiredAgent(
+  ctxRoot: string,
   name: string,
-  cfg?: { status?: string },
+  cfg?: { status?: string; decommissioned?: boolean },
 ): boolean {
-  return name === 'deleted_agents' || cfg?.status === 'deleted';
+  return (
+    name === 'deleted_agents'
+    || cfg?.status === 'deleted'
+    || cfg?.decommissioned === true
+    || existsSync(join(ctxRoot, 'state', name, '.decommissioned'))
+  );
 }
 
 /**

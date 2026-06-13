@@ -204,6 +204,7 @@ interface EnabledAgentRegistryEntry {
   enabled?: boolean;
   org?: string;
   status?: string;
+  decommissioned?: boolean;
 }
 
 function readEnabledAgentRegistry(): Record<string, EnabledAgentRegistryEntry> {
@@ -258,7 +259,12 @@ export function getAllAgents(): Array<{ name: string; org: string }> {
 }
 
 function isDeletedRegistryEntry(name: string, config?: EnabledAgentRegistryEntry): boolean {
-  return name === 'deleted_agents' || config?.status === 'deleted';
+  return (
+    name === 'deleted_agents'
+    || config?.status === 'deleted'
+    || config?.decommissioned === true
+    || fs.existsSync(path.join(CTX_ROOT, 'state', name, '.decommissioned'))
+  );
 }
 
 export function getAllowedRootsConfigPath(): string {

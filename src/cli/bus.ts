@@ -4994,7 +4994,24 @@ busCommand
     if (existsSync(enabledFile)) {
       try { agents = JSON.parse(readFileSync(enabledFile, 'utf-8')); } catch { /* corrupt — start fresh */ }
     }
-    agents[agent] = { ...(agents[agent] ?? {}), enabled: false, decommissioned: true };
+    const decommissionedAt = new Date().toISOString();
+    agents[agent] = {
+      ...(agents[agent] ?? {}),
+      enabled: false,
+      decommissioned: true,
+      status: 'deleted',
+      decommissioned_at: decommissionedAt,
+      deleted_at: (agents[agent] as { deleted_at?: string } | undefined)?.deleted_at ?? decommissionedAt,
+      reason: opts.reason,
+    };
+    agents.deleted_agents = {
+      ...((agents.deleted_agents && typeof agents.deleted_agents === 'object') ? agents.deleted_agents : {}),
+      [agent]: {
+        deleted_at: decommissionedAt,
+        reason: opts.reason,
+        source: 'cortextos bus decommission-agent',
+      },
+    };
     mkdirSync(join(ctxRoot, 'config'), { recursive: true });
     atomicWriteSync(enabledFile, JSON.stringify(agents, null, 2));
 

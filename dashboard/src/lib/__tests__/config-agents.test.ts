@@ -43,4 +43,21 @@ describe('dashboard agent registry config', () => {
     expect(agents).not.toContain('deleted-agent');
     expect(agents).not.toContain('deleted_agents');
   });
+
+  it('hides decommissioned registry rows even when source dirs remain', async () => {
+    writeJson(path.join(tmpRoot, 'config/enabled-agents.json'), {
+      active: { enabled: true, org: 'revops-global' },
+      'orgo-1': { enabled: false, decommissioned: true, org: 'revops-global' },
+    });
+
+    for (const name of ['active', 'orgo-1']) {
+      fs.mkdirSync(path.join(tmpFramework, 'orgs/revops-global/agents', name), { recursive: true });
+    }
+
+    const { getAllAgents } = await import('../config');
+    const agents = getAllAgents().map((agent) => agent.name);
+
+    expect(agents).toEqual(['active']);
+    expect(agents).not.toContain('orgo-1');
+  });
 });
