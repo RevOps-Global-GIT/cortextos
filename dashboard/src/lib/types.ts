@@ -47,7 +47,14 @@ export interface Heartbeat {
 
 // -- Task Types --
 
-export type TaskStatus = 'pending' | 'in_progress' | 'blocked' | 'completed';
+export type TaskStatus =
+  | 'proposed'
+  | 'pending'
+  | 'approved'
+  | 'in_progress'
+  | 'blocked'
+  | 'completed'
+  | 'cancelled';
 export type TaskPriority = 'critical' | 'urgent' | 'high' | 'normal' | 'low';
 
 export interface TaskOutput {

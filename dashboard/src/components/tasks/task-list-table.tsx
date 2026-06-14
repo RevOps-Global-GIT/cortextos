@@ -17,23 +17,36 @@ import type { AgentPresencePayload } from '@/lib/agent-presence';
 import type { Task, TaskStatus } from '@/lib/types';
 
 const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatus }>> = {
+  proposed:    { label: 'Approve',  next: 'approved' },
   pending:     { label: 'Start',    next: 'in_progress' },
+  approved:    { label: 'Start',    next: 'in_progress' },
   in_progress: { label: 'Complete', next: 'completed' },
   blocked:     { label: 'Unblock',  next: 'in_progress' },
 };
 
 const BATCH_DOT_COLOR: Record<TaskStatus, string> = {
+  proposed: 'bg-slate-400',
   pending: 'bg-muted-foreground/40',
+  approved: 'bg-blue-400',
   in_progress: 'bg-blue-500',
   completed: 'bg-green-500',
   blocked: 'bg-red-500',
+  cancelled: 'bg-muted-foreground/30',
 };
 
 type SortField = 'title' | 'status' | 'priority' | 'assignee' | 'org' | 'created_at';
 type SortDir = 'asc' | 'desc';
 
 const PRIORITY_ORDER: Record<string, number> = { critical: 0, urgent: 0, high: 1, normal: 2, low: 3 };
-const STATUS_ORDER = { blocked: 0, in_progress: 1, pending: 2, completed: 3 };
+const STATUS_ORDER: Record<TaskStatus, number> = {
+  blocked: 0,
+  in_progress: 1,
+  approved: 2,
+  proposed: 3,
+  pending: 4,
+  completed: 5,
+  cancelled: 6,
+};
 
 interface TaskListTableProps {
   tasks: Task[];
