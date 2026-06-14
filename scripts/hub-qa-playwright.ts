@@ -427,8 +427,15 @@ export function mapsToFleetPendingLane(task: FleetTaskCountRow, source: FleetTas
   // Supabase mirror proposed rows are approval/proposal queue items, not Pending
   // cards. Counting them as Pending caused CHECK 6 to fail when the page was
   // correct and only proposed user proposals existed.
+  //
+  // orch_tasks never uses the literal status 'pending' — its active vocabulary is
+  // approved/proposed/in_progress/blocked. Bus "pending" tasks mirror into
+  // orch_tasks as 'approved', so the Pending-equivalent count must key off
+  // 'approved'. Matching 'pending' here made the mirror sub-check structurally
+  // always 0 and falsely fail whenever the board legitimately showed Pending items.
+  // 'proposed' stays EXCLUDED (preserves PR #835) — it belongs to the proposal queue.
   if (source === 'mirror') {
-    return rawStatus === 'pending' && !hasFutureSchedule(task, now);
+    return rawStatus === 'approved' && !hasFutureSchedule(task, now);
   }
 
   const boardStatus = source === 'live' && rawStatus === 'pending' ? 'proposed' : rawStatus;
@@ -3105,7 +3112,7 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
 
       await setFleetTaskSource(page, 'mirror');
       const mirrorRowsResp = await fetch(
-        `${SUPA_URL}/rest/v1/orch_tasks?select=id,title,status,source,metadata,scheduled_for,updated_at,created_at&status=in.(pending,proposed)&limit=10000`,
+        `${SUPA_URL}/rest/v1/orch_tasks?select=id,title,status,source,metadata,scheduled_for,updated_at,created_at&status=in.(approved,proposed)&limit=10000`,
         { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
       );
       if (!mirrorRowsResp.ok) {
@@ -3118,11 +3125,11 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
         const mirrorRendered = await readFleetPendingHeaderCount(page);
         await shot(page, `${sp}-6-pending-counter-mirror`);
         if (mirrorRendered.count < 0) {
-          deferred.push(`mirror header unreadable; expected orch_tasks pending=${mirrorExpected}; proposed=${mirrorProposed}; header="${mirrorRendered.text}"`);
+          deferred.push(`mirror header unreadable; expected orch_tasks pending-equivalent(approved)=${mirrorExpected}; proposed=${mirrorProposed}; header="${mirrorRendered.text}"`);
         } else {
           const delta = Math.abs(mirrorRendered.count - mirrorExpected);
-          evidence.push(`mirror: rendered=${mirrorRendered.count}, orch_tasks pending=${mirrorExpected}, proposed=${mirrorProposed} ignored for Pending, delta=${delta}, source rows ${mirrorRows.length}->${mirrorSourceRows.length}`);
-          if (delta > TOLERANCE) failures.push(`mirror rendered=${mirrorRendered.count} vs orch_tasks pending=${mirrorExpected}`);
+          evidence.push(`mirror: rendered=${mirrorRendered.count}, orch_tasks pending-equivalent(approved)=${mirrorExpected}, proposed=${mirrorProposed} ignored for Pending, delta=${delta}, source rows ${mirrorRows.length}->${mirrorSourceRows.length}`);
+          if (delta > TOLERANCE) failures.push(`mirror rendered=${mirrorRendered.count} vs orch_tasks pending-equivalent(approved)=${mirrorExpected}`);
         }
       }
 
