@@ -60,14 +60,19 @@ function buildLaunchRemoteCmd(jobId, command) {
     throw new Error(`unsafe jobId: ${jobId}`);
   }
   const b64 = Buffer.from(String(command), 'utf8').toString('base64');
-  return [
+  const setup = [
     `export JOB_DIR="${JOB_ROOT}/${jobId}"`,
     `mkdir -p "$JOB_DIR"`,
     `printf '%s' '${b64}' | base64 --decode > "$JOB_DIR/cmd.sh"`,
-    `nohup bash -lc 'bash "$JOB_DIR/cmd.sh"; echo $? > "$JOB_DIR/exit_code"' > "$JOB_DIR/log" 2>&1 &`,
-    `echo $! > "$JOB_DIR/pid"`,
-    `echo "JOBID=${jobId} PID=$(cat "$JOB_DIR/pid")"`,
   ].join(' && ');
+  // The launch line backgrounds with "&" — it must NOT be chained with "&&"
+  // afterward, because a trailing "... & && ..." is a shell parse error in zsh
+  // (Greg's Mac login shell) and bash alike. Wrap the background launch + pid
+  // capture in a { ...; } group so the surrounding && chain stays valid; $!
+  // inside the group still resolves to the nohup pid we just backgrounded.
+  const launch =
+    `{ nohup bash -lc 'bash "$JOB_DIR/cmd.sh"; echo $? > "$JOB_DIR/exit_code"' > "$JOB_DIR/log" 2>&1 & echo $! > "$JOB_DIR/pid"; }`;
+  return `${setup} && ${launch} && echo "JOBID=${jobId} PID=$(cat "$JOB_DIR/pid")"`;
 }
 
 /** Remote command that reports the job's current state. */
