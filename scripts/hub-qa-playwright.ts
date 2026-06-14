@@ -323,9 +323,9 @@ interface ObservedPageSignal {
   detail: string;
 }
 
-type FleetTaskCountSource = 'mirror' | 'live';
+export type FleetTaskCountSource = 'mirror' | 'live';
 
-interface FleetTaskCountRow {
+export interface FleetTaskCountRow {
   id?: string | null;
   title?: string | null;
   status?: string | null;
@@ -385,8 +385,52 @@ function timestampMs(task: Pick<FleetTaskCountRow, 'updated_at' | 'created_at'>)
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function mapsToFleetPendingLane(task: FleetTaskCountRow, source: FleetTaskCountSource, now = Date.now()): boolean {
+function metadataString(task: FleetTaskCountRow, ...keys: string[]): string | null {
+  for (const key of keys) {
+    const value = task.metadata?.[key] ?? task.meta?.[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function fleetTaskCountIdentity(task: FleetTaskCountRow): string {
+  const busTaskId = metadataString(task, 'bus_task_id', 'busTaskId');
+  if (busTaskId) return `bus:${busTaskId}`;
+
+  const cortexTaskId = metadataString(task, 'cortex_task_id', 'cortexTaskId', 'cortex_id', 'task_id');
+  if (cortexTaskId) return `cortex:${cortexTaskId}`;
+
+  const title = (task.title ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const createdAt = (task.created_at ?? '').slice(0, 19);
+  const status = (task.status ?? '').toLowerCase();
+  if (title && createdAt) return `logical:${title}|${status}|${createdAt}`;
+
+  return `id:${task.id ?? title ?? ''}`;
+}
+
+export function dedupeFleetTaskCountRows(tasks: FleetTaskCountRow[]): FleetTaskCountRow[] {
+  const byIdentity = new Map<string, FleetTaskCountRow>();
+  for (const task of tasks) {
+    const identity = fleetTaskCountIdentity(task);
+    if (!identity) continue;
+    const existing = byIdentity.get(identity);
+    if (!existing || timestampMs(task) >= timestampMs(existing)) {
+      byIdentity.set(identity, task);
+    }
+  }
+  return [...byIdentity.values()];
+}
+
+export function mapsToFleetPendingLane(task: FleetTaskCountRow, source: FleetTaskCountSource, now = Date.now()): boolean {
   const rawStatus = (task.status ?? '').toString().toLowerCase();
+
+  // Supabase mirror proposed rows are approval/proposal queue items, not Pending
+  // cards. Counting them as Pending caused CHECK 6 to fail when the page was
+  // correct and only proposed user proposals existed.
+  if (source === 'mirror') {
+    return rawStatus === 'pending' && !hasFutureSchedule(task, now);
+  }
+
   const boardStatus = source === 'live' && rawStatus === 'pending' ? 'proposed' : rawStatus;
   if (boardStatus !== 'proposed') return false;
   if (hasFutureSchedule(task, now)) return false;
@@ -400,12 +444,17 @@ function mapsToFleetPendingLane(task: FleetTaskCountRow, source: FleetTaskCountS
   return true;
 }
 
-function isFleetTasksMirrorSource(task: Pick<FleetTaskCountRow, 'source' | 'metadata'>): boolean {
+export function mapsToFleetProposalQueue(task: FleetTaskCountRow, now = Date.now()): boolean {
+  const rawStatus = (task.status ?? '').toString().toLowerCase();
+  return rawStatus === 'proposed' && !hasFutureSchedule(task, now);
+}
+
+export function isFleetTasksMirrorSource(task: Pick<FleetTaskCountRow, 'source' | 'metadata'>): boolean {
   const metadataSource = typeof task.metadata?.source === 'string' ? task.metadata.source : '';
   return task.source === 'cortextos_bus_mirror' || task.source === 'hub_ui' || metadataSource === 'cortex';
 }
 
-function filterFleetLiveSourceRows(tasks: FleetTaskCountRow[]): FleetTaskCountRow[] {
+export function filterFleetLiveSourceRows(tasks: FleetTaskCountRow[]): FleetTaskCountRow[] {
   const taskIdTitles = new Set(
     tasks
       .filter((task) => (task.id ?? '').startsWith('task_'))
@@ -3056,22 +3105,24 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
 
       await setFleetTaskSource(page, 'mirror');
       const mirrorRowsResp = await fetch(
-        `${SUPA_URL}/rest/v1/orch_tasks?select=id,status,source,metadata,scheduled_for,updated_at,created_at&status=eq.proposed&limit=10000`,
+        `${SUPA_URL}/rest/v1/orch_tasks?select=id,title,status,source,metadata,scheduled_for,updated_at,created_at&status=in.(pending,proposed)&limit=10000`,
         { headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` } },
       );
       if (!mirrorRowsResp.ok) {
         deferred.push(`mirror orch_tasks query HTTP ${mirrorRowsResp.status}`);
       } else {
         const mirrorRows = await mirrorRowsResp.json() as FleetTaskCountRow[];
-        const mirrorExpected = mirrorRows.filter((task) => isFleetTasksMirrorSource(task) && mapsToFleetPendingLane(task, 'mirror')).length;
+        const mirrorSourceRows = dedupeFleetTaskCountRows(mirrorRows.filter((task) => isFleetTasksMirrorSource(task)));
+        const mirrorExpected = mirrorSourceRows.filter((task) => mapsToFleetPendingLane(task, 'mirror')).length;
+        const mirrorProposed = mirrorSourceRows.filter((task) => mapsToFleetProposalQueue(task)).length;
         const mirrorRendered = await readFleetPendingHeaderCount(page);
         await shot(page, `${sp}-6-pending-counter-mirror`);
         if (mirrorRendered.count < 0) {
-          deferred.push(`mirror header unreadable; expected orch_tasks proposed=${mirrorExpected}; header="${mirrorRendered.text}"`);
+          deferred.push(`mirror header unreadable; expected orch_tasks pending=${mirrorExpected}; proposed=${mirrorProposed}; header="${mirrorRendered.text}"`);
         } else {
           const delta = Math.abs(mirrorRendered.count - mirrorExpected);
-          evidence.push(`mirror: rendered=${mirrorRendered.count}, orch_tasks proposed=${mirrorExpected}, delta=${delta}`);
-          if (delta > TOLERANCE) failures.push(`mirror rendered=${mirrorRendered.count} vs orch_tasks proposed=${mirrorExpected}`);
+          evidence.push(`mirror: rendered=${mirrorRendered.count}, orch_tasks pending=${mirrorExpected}, proposed=${mirrorProposed} ignored for Pending, delta=${delta}, source rows ${mirrorRows.length}->${mirrorSourceRows.length}`);
+          if (delta > TOLERANCE) failures.push(`mirror rendered=${mirrorRendered.count} vs orch_tasks pending=${mirrorExpected}`);
         }
       }
 
@@ -3088,7 +3139,7 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
         deferred.push(`live bus list-tasks failed: ${(shellErr as Error).message?.split('\n')[0]}`);
       }
       if (busRows) {
-        const liveVisibleRows = filterFleetLiveSourceRows(busRows);
+        const liveVisibleRows = dedupeFleetTaskCountRows(filterFleetLiveSourceRows(busRows));
         const liveExpected = liveVisibleRows.filter((task) => mapsToFleetPendingLane(task, 'live')).length;
         const liveRendered = await readFleetPendingHeaderCount(page);
         await shot(page, `${sp}-6-pending-counter-live`);
