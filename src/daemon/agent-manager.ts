@@ -1,8 +1,15 @@
 import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync, unlinkSync, rmSync, copyFileSync, chmodSync, statSync } from 'fs';
 import { spawn as spawnChild } from 'child_process';
 import { join, relative } from 'path';
-import { sendMessage } from '../bus/message.js';
+import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { AGENT_LIFECYCLE_MARKERS } from '../bus/heartbeat.js';
+import { refreshOAuthToken } from '../bus/oauth.js';
+import {
+  classifyClaudeAgentHealth,
+  readHeartbeatIso,
+  readStdoutTail,
+  type ClaudeAgentUnhealthyReason,
+} from './oauth-self-heal.js';
 import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, TelegramMessage } from '../types/index.js';
 import { AgentProcess } from './agent-process.js';
 import { WorkerProcess } from './worker-process.js';
@@ -42,7 +49,7 @@ const STALE_MARKER_SWEEP_MS = 300_000; // 5 minutes — matches the hook TTL
  */
 export class AgentManager {
   private static readonly HEALTH_RESTART_COOLDOWN_MS = 5 * 60 * 1000;
-  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; slackPoller?: SlackPoller; pollerToken?: string; activityPollerToken?: string; telegramRejectCount?: number; telegramLastRejectAlertAt?: number }> = new Map();
+  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; slackPoller?: SlackPoller; pollerToken?: string; activityPollerToken?: string; telegramApi?: TelegramAPI; chatId?: string; telegramRejectCount?: number; telegramLastRejectAlertAt?: number }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
   /** Daemon-level cron scheduler registry: one CronScheduler per enabled agent. */
   private cronSchedulers: Map<string, CronScheduler> = new Map();
@@ -87,6 +94,17 @@ export class AgentManager {
    * telegramApi was already configured before the restart.
    */
   private healthRestartInProgress: Set<string> = new Set();
+  /**
+   * OAuth self-heal watchdog (upstream #643). A single daemon-level timer that
+   * classifies every registered Claude-runtime agent as healthy/unhealthy via
+   * heartbeat age + recent OAuth/login failure signatures in stdout, then
+   * refreshes the claude-profile token and restarts only the affected agent.
+   * oauthRecoveryInProgress guards against re-entrant recovery on the same
+   * agent; oauthLastRecoveryAt enforces a per-agent cooldown against loops.
+   */
+  private oauthSelfHealTimer: NodeJS.Timeout | null = null;
+  private oauthRecoveryInProgress: Set<string> = new Set();
+  private oauthLastRecoveryAt: Map<string, number> = new Map();
   private instanceId: string;
   private ctxRoot: string;
   private frameworkRoot: string;
@@ -110,6 +128,7 @@ export class AgentManager {
     if (this.daemonJustCrashed) {
       console.log('[agent-manager] Detected .daemon-crashed marker(s) — previous daemon exited abnormally. Will quiet BUG-011 alarm for this startup cycle.');
     }
+    this.startOAuthSelfHealWatchdog();
   }
 
   /**
@@ -577,7 +596,7 @@ export class AgentManager {
       });
     }
 
-    this.agents.set(name, { process: agentProcess, checker });
+    this.agents.set(name, { process: agentProcess, checker, telegramApi, chatId });
 
     // Start agent
     await agentProcess.start();
@@ -1301,6 +1320,11 @@ export class AgentManager {
    * this loop is belt-and-suspenders for any future direct caller.
    */
   async stopAll(): Promise<void> {
+    if (this.oauthSelfHealTimer) {
+      clearInterval(this.oauthSelfHealTimer);
+      this.oauthSelfHealTimer = null;
+    }
+
     const names = [...this.agents.keys()];
 
     for (const name of names) {
@@ -1364,6 +1388,125 @@ export class AgentManager {
    */
   getCronScheduler(agentName: string): CronScheduler | undefined {
     return this.cronSchedulers.get(agentName);
+  }
+
+  // --- OAuth self-heal watchdog (upstream #643) ---
+
+  /**
+   * Start the daemon-level OAuth self-heal watchdog. Disabled with
+   * CORTEXTOS_OAUTH_SELF_HEAL=0; interval is env-tunable. A single unref'd
+   * timer covers every registered Claude-runtime agent.
+   */
+  private startOAuthSelfHealWatchdog(): void {
+    if (process.env.CORTEXTOS_OAUTH_SELF_HEAL === '0') return;
+    const intervalMs = parsePositiveInt(process.env.CORTEXTOS_OAUTH_SELF_HEAL_INTERVAL_MS, 60 * 1000);
+    this.oauthSelfHealTimer = setInterval(() => {
+      this.runOAuthSelfHealCheck().catch((err) => {
+        console.error(`[oauth-self-heal] check failed: ${err}`);
+      });
+    }, intervalMs);
+    this.oauthSelfHealTimer.unref?.();
+  }
+
+  private async runOAuthSelfHealCheck(): Promise<void> {
+    const nowMs = Date.now();
+    const heartbeatStaleMs = parsePositiveInt(process.env.CORTEXTOS_OAUTH_HEARTBEAT_STALE_MS, 15 * 60 * 1000);
+    const oauthLogRecentMs = parsePositiveInt(process.env.CORTEXTOS_OAUTH_LOG_RECENT_MS, 30 * 60 * 1000);
+    const cooldownMs = parsePositiveInt(process.env.CORTEXTOS_OAUTH_RECOVERY_COOLDOWN_MS, AgentManager.HEALTH_RESTART_COOLDOWN_MS);
+
+    // Check every registered agent; classifyClaudeAgentHealth filters to
+    // runtime=claude-code so coordinator/analyst/reviewer are all covered
+    // while Codex/Hermes/script agents are ignored.
+    for (const [name, entry] of this.agents) {
+      if (this.oauthRecoveryInProgress.has(name)) continue;
+
+      const status = entry.process.getStatus();
+      const stdout = readStdoutTail(this.ctxRoot, name);
+      const result = classifyClaudeAgentHealth({
+        runtime: entry.process.getConfig().runtime,
+        processStatus: status.status,
+        heartbeatIso: readHeartbeatIso(this.ctxRoot, name),
+        stdoutTail: stdout.text,
+        stdoutMtimeMs: stdout.mtimeMs,
+        nowMs,
+        heartbeatStaleMs,
+        oauthLogRecentMs,
+      });
+
+      if (result.healthy) continue;
+      if (result.reason !== 'heartbeat-stale' && result.reason !== 'oauth-401-log') continue;
+
+      const lastRecoveryAt = this.oauthLastRecoveryAt.get(name) ?? 0;
+      if (nowMs - lastRecoveryAt < cooldownMs) {
+        console.warn(`[oauth-self-heal] ${name} unhealthy (${result.reason}) but recovery is cooling down`);
+        continue;
+      }
+
+      await this.recoverClaudeOAuthStall(name, result.reason);
+    }
+  }
+
+  private async recoverClaudeOAuthStall(name: string, reason: ClaudeAgentUnhealthyReason): Promise<void> {
+    this.oauthRecoveryInProgress.add(name);
+    this.oauthLastRecoveryAt.set(name, Date.now());
+    // Share the manager-wide restart cooldown so the OAuth watchdog and any
+    // other health-restart path do not double-restart the same agent.
+    this.lastRestartAt.set(name, Date.now());
+    console.warn(`[oauth-self-heal] ${name} unhealthy (${reason}); refreshing OAuth token and restarting`);
+
+    try {
+      await refreshOAuthToken(this.ctxRoot, 'claude-profile');
+      await this.restartAgent(name);
+
+      const watchdogPaths = resolvePaths('watchdog', this.instanceId, this.resolveAgentOrg(name));
+      const pingId = sendMessage(
+        watchdogPaths,
+        'watchdog',
+        name,
+        'normal',
+        `OAuth self-heal restarted this Claude session after ${reason}. Reply to this health check and run: cortextos bus update-heartbeat "online after OAuth self-heal"`,
+      );
+
+      const verifyMs = parsePositiveInt(process.env.CORTEXTOS_OAUTH_VERIFY_MS, 60 * 1000);
+      await sleep(verifyMs);
+
+      const replies = checkInbox(watchdogPaths);
+      const matchingReplies = replies.filter((msg) => msg.from === name && msg.reply_to === pingId);
+      for (const msg of replies) ackInbox(watchdogPaths, msg.id);
+
+      const heartbeatIso = readHeartbeatIso(this.ctxRoot, name);
+      const heartbeatAgeMs = heartbeatIso ? Date.now() - Date.parse(heartbeatIso) : Number.POSITIVE_INFINITY;
+      if (matchingReplies.length === 0) {
+        await this.alertOperators(
+          `⚠️ WATCHDOG: ${name} OAuth self-heal attempted (${reason}) but no bus reply arrived within ${Math.round(verifyMs / 1000)}s. Manual check needed.`,
+        );
+      } else {
+        const heartbeatNote = Number.isFinite(heartbeatAgeMs)
+          ? `; heartbeat age ${Math.round(heartbeatAgeMs / 1000)}s`
+          : '';
+        console.log(`[oauth-self-heal] ${name} recovered; bus reply received${heartbeatNote}`);
+      }
+    } catch (err) {
+      await this.alertOperators(
+        `⚠️ WATCHDOG: ${name} OAuth self-heal failed after ${reason}: ${String(err).slice(0, 500)}`,
+      );
+    } finally {
+      this.oauthRecoveryInProgress.delete(name);
+    }
+  }
+
+  private async alertOperators(text: string): Promise<void> {
+    const sent = new Set<string>();
+    for (const [, entry] of this.agents) {
+      if (!entry.telegramApi || !entry.chatId || sent.has(entry.chatId)) continue;
+      sent.add(entry.chatId);
+      try {
+        await entry.telegramApi.sendMessage(entry.chatId, text, undefined, { parseMode: null });
+      } catch {
+        // Best effort. A failed alert must not crash the daemon watchdog.
+      }
+    }
+    console.warn(`[oauth-self-heal] ${text}`);
   }
 
   // --- Worker management ---
@@ -1913,6 +2056,16 @@ export class AgentManager {
       return {};
     }
   }
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
