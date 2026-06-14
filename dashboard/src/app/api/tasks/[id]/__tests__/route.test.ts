@@ -1,9 +1,8 @@
 /**
  * Regression test for PATCH /api/tasks/[id] status vocabulary.
  *
- * VALID_STATUSES must mirror the bus TaskStatus enum. 'cancelled' is a valid
- * bus status but was missing, so reverse-sync callers (rgos hub→bus mirror)
- * got 400s when cancelling tasks.
+ * The dashboard accepts the local bus status vocabulary plus RGOS-native
+ * proposed/approved statuses surfaced by Fleet.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -17,6 +16,19 @@ vi.mock('fs', () => ({
   default: { existsSync: vi.fn(() => false) },
 }));
 
+vi.mock('fs/promises', () => ({
+  default: {
+    readFile: vi.fn(() => JSON.stringify({
+      id: 'task_1',
+      title: 't',
+      status: 'proposed',
+      org: 'revops-global',
+    })),
+    writeFile: vi.fn(),
+    rename: vi.fn(),
+  },
+}));
+
 vi.mock('@/lib/config', () => ({
   getFrameworkRoot: vi.fn(() => '/srv/cortextos'),
   getCTXRoot: vi.fn(() => '/srv/ctx-root'),
@@ -28,11 +40,26 @@ vi.mock('@/lib/sync', () => ({
   syncAll: vi.fn(),
 }));
 
+vi.mock('@/lib/db', () => ({
+  db: {
+    prepare: vi.fn(() => ({
+      run: vi.fn(),
+    })),
+  },
+}));
+
 vi.mock('@/lib/data/tasks', () => ({
-  getTaskById: vi.fn(() => ({ id: 'task_1', title: 't', org: 'revops-global' })),
+  getTaskById: vi.fn(() => ({
+    id: 'task_1',
+    title: 't',
+    org: 'revops-global',
+    status: 'pending',
+    source_file: '/srv/ctx-root/orgs/revops-global/tasks/task_1.json',
+  })),
 }));
 
 import { spawnSync } from 'child_process';
+import fsPromises from 'fs/promises';
 import { PATCH } from '../route';
 
 function patchRequest(status: string) {
@@ -54,13 +81,40 @@ describe('PATCH /api/tasks/[id] — status vocabulary', () => {
   });
 
   it.each(['pending', 'in_progress', 'blocked', 'completed', 'cancelled'])(
-    'accepts bus status %s',
+    'accepts bus status %s through bus scripts',
     async (status) => {
       const res = await patchRequest(status);
       expect(res.status).toBe(200);
       expect(spawnSync).toHaveBeenCalledTimes(1);
     },
   );
+
+  it.each(['proposed', 'approved'])(
+    'accepts RGOS dashboard status %s by updating the task JSON directly',
+    async (status) => {
+      const res = await patchRequest(status);
+      expect(res.status).toBe(200);
+      expect(spawnSync).not.toHaveBeenCalled();
+      expect(fsPromises.writeFile).toHaveBeenCalledTimes(1);
+      const [, written] = vi.mocked(fsPromises.writeFile).mock.calls[0];
+      expect(JSON.parse(String(written)).status).toBe(status);
+    },
+  );
+
+  it('accepts proposed to approved lifecycle transition', async () => {
+    vi.mocked(fsPromises.readFile).mockResolvedValueOnce(JSON.stringify({
+      id: 'task_1',
+      title: 't',
+      status: 'proposed',
+      org: 'revops-global',
+    }));
+
+    const res = await patchRequest('approved');
+
+    expect(res.status).toBe(200);
+    const [, written] = vi.mocked(fsPromises.writeFile).mock.calls[0];
+    expect(JSON.parse(String(written)).status).toBe('approved');
+  });
 
   it('routes cancelled through update-task.sh, not complete-task.sh', async () => {
     await patchRequest('cancelled');

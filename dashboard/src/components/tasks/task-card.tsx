@@ -25,7 +25,9 @@ import type { AgentPresencePayload } from '@/lib/agent-presence';
 import type { Task, TaskStatus } from '@/lib/types';
 
 const QUICK_ACTIONS: Partial<Record<TaskStatus, { label: string; next: TaskStatus; icon: typeof IconPlayerPlay }>> = {
+  proposed:    { label: 'Approve',  next: 'approved',    icon: IconCircleCheck },
   pending:     { label: 'Start',    next: 'in_progress', icon: IconPlayerPlay },
+  approved:    { label: 'Start',    next: 'in_progress', icon: IconPlayerPlay },
   in_progress: { label: 'Complete', next: 'completed',   icon: IconCircleCheck },
   blocked:     { label: 'Unblock',  next: 'in_progress', icon: IconLockOpen },
 };

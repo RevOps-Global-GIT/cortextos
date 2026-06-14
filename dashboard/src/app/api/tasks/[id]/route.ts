@@ -3,8 +3,10 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { getTaskById } from '@/lib/data/tasks';
+import { db } from '@/lib/db';
 import { getFrameworkRoot, getCTXRoot, CTX_INSTANCE_ID, CTX_ROOT_REAL } from '@/lib/config';
 import { syncAll } from '@/lib/sync';
+import type { TaskStatus } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,9 +14,25 @@ export const dynamic = 'force-dynamic';
 // Validation
 // ---------------------------------------------------------------------------
 
-// Must mirror the bus TaskStatus enum (src/types/index.ts) — omitting a bus
-// status here silently 400s callers like the rgos hub→bus reverse-sync.
-const VALID_STATUSES = ['pending', 'in_progress', 'blocked', 'completed', 'cancelled'];
+// Dashboard reads both local bus tasks and RGOS-native task rows. The local
+// bus status enum uses pending, while RGOS exposes proposed/approved.
+const VALID_STATUSES: TaskStatus[] = [
+  'proposed',
+  'pending',
+  'approved',
+  'in_progress',
+  'blocked',
+  'completed',
+  'cancelled',
+];
+const BUS_SCRIPT_STATUSES = new Set<TaskStatus>([
+  'pending',
+  'in_progress',
+  'blocked',
+  'completed',
+  'cancelled',
+]);
+const DASHBOARD_DIRECT_STATUSES = new Set<TaskStatus>(['proposed', 'approved']);
 const VALID_PRIORITIES = ['urgent', 'high', 'normal', 'low'];
 
 // Reject IDs that look like path traversal attempts
@@ -34,6 +52,93 @@ function isValidAgentName(name: string): boolean {
 const MAX_FREE_TEXT_LEN = 2000;
 function capText(value: unknown, max = MAX_FREE_TEXT_LEN): string {
   return String(value ?? '').slice(0, max);
+}
+
+function nowIsoSeconds(): string {
+  return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+async function updateTaskJsonStatus(sourceFile: string, status: TaskStatus, note?: string): Promise<void> {
+  const fsPromises = await import('fs/promises');
+  const raw = await fsPromises.default.readFile(sourceFile, 'utf-8');
+  const taskData = JSON.parse(raw) as Record<string, unknown>;
+  taskData.status = status;
+  const now = nowIsoSeconds();
+  taskData.updated_at = now;
+  if (status === 'completed') taskData.completed_at = now;
+  if (status !== 'completed' && taskData.completed_at) taskData.completed_at = null;
+  if (note) taskData.notes = taskData.notes ? `${taskData.notes}\n${note}` : note;
+
+  const tmp = `${sourceFile}.tmp`;
+  await fsPromises.default.writeFile(tmp, JSON.stringify(taskData, null, 2) + '\n');
+  await fsPromises.default.rename(tmp, sourceFile);
+}
+
+function patchCachedTaskStatus(id: string, status: TaskStatus, note?: string): void {
+  const now = nowIsoSeconds();
+  try {
+    db.prepare(
+      `UPDATE tasks
+       SET status = ?, updated_at = ?, completed_at = CASE WHEN ? = 'completed' THEN ? WHEN completed_at IS NOT NULL THEN NULL ELSE completed_at END,
+           notes = CASE WHEN ? IS NOT NULL AND ? != '' THEN COALESCE(notes || char(10) || ?, ?) ELSE notes END
+       WHERE id = ?`,
+    ).run(status, now, status, now, note ?? null, note ?? '', note ?? '', note ?? '', id);
+  } catch {
+    // The SQLite cache is best-effort; the source file or RGOS row remains authoritative.
+  }
+}
+
+function rgosConfig(): { url: string; key: string } | null {
+  const url = (process.env.SUPABASE_RGOS_URL || process.env.RGOS_SUPABASE_URL || process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key =
+    process.env.SUPABASE_RGOS_SERVICE_KEY ||
+    process.env.RGOS_SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    '';
+  if (!url || !key || process.env.BUS_RGOS_MIRROR_DISABLED === '1') return null;
+  return { url, key };
+}
+
+async function patchRgosTaskStatus(id: string, status: TaskStatus, outputSummary?: string, blockedBy?: string): Promise<boolean> {
+  const config = rgosConfig();
+  if (!config) return false;
+  const now = nowIsoSeconds();
+  const patch: Record<string, unknown> = {
+    status,
+    updated_at: now,
+  };
+  if (status === 'completed') {
+    patch.completed_at = now;
+    if (outputSummary) patch.result = capText(outputSummary);
+  } else {
+    patch.completed_at = null;
+  }
+  if (blockedBy) patch.blocked_by = [blockedBy];
+
+  const patchBy = async (field: 'id' | 'metadata->>bus_task_id') => {
+    const endpoint = new URL(`${config.url}/rest/v1/orch_tasks`);
+    endpoint.searchParams.set('select', 'id');
+    endpoint.searchParams.set(field, `eq.${id}`);
+    const res = await fetch(endpoint.toString(), {
+      method: 'PATCH',
+      headers: {
+        apikey: config.key,
+        Authorization: `Bearer ${config.key}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation',
+      },
+      body: JSON.stringify(patch),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      throw new Error(`RGOS task patch failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+    }
+    const rows = await res.json().catch(() => []) as Array<{ id?: string }>;
+    return rows.length > 0;
+  };
+
+  if (await patchBy('id')) return true;
+  return await patchBy('metadata->>bus_task_id');
 }
 
 // ---------------------------------------------------------------------------
@@ -241,12 +346,13 @@ export async function PATCH(
     outputSummary?: string;
   };
 
-  if (!status || !VALID_STATUSES.includes(status)) {
+  if (!status || !VALID_STATUSES.includes(status as TaskStatus)) {
     return Response.json(
       { error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` },
       { status: 400 },
     );
   }
+  const nextStatus = status as TaskStatus;
 
   // blockedBy is forwarded as a positional arg to update-task.sh. It should
   // either be absent or match the agent-name / task-id shape. Reject anything
@@ -272,7 +378,22 @@ export async function PATCH(
 
   try {
     let spawnResult;
-    if (status === 'completed') {
+    if (!task?.source_file) {
+      const patched = await patchRgosTaskStatus(id, nextStatus, outputSummary, blockedBy);
+      if (!patched) {
+        throw new Error('Task has no local source file and RGOS is not configured or row was not found');
+      }
+      patchCachedTaskStatus(id, nextStatus, note);
+      spawnResult = { status: 0, stdout: 'ok', stderr: '' };
+    } else if (DASHBOARD_DIRECT_STATUSES.has(nextStatus)) {
+      await updateTaskJsonStatus(task.source_file, nextStatus, note);
+      try {
+        await patchRgosTaskStatus(id, nextStatus, outputSummary, blockedBy);
+      } catch {
+        // Best-effort: local JSON remains authoritative for local bus tasks.
+      }
+      spawnResult = { status: 0, stdout: 'ok', stderr: '' };
+    } else if (status === 'completed') {
       // Use complete-task.sh for completion (handles additional side effects).
       // summaryArg is capped and passed as a positional arg; the bus script
       // quotes "$2" and exec's node directly, so no shell interpolation occurs.
@@ -282,10 +403,10 @@ export async function PATCH(
         [path.join(frameworkRoot, 'bus', 'complete-task.sh'), id, summaryArg],
         { encoding: 'utf-8', timeout: 10000, env, stdio: 'pipe' },
       );
-    } else {
+    } else if (BUS_SCRIPT_STATUSES.has(nextStatus)) {
       // Use update-task.sh for other status changes. All args are positional
       // and bounded; blockedBy was validated above, id/status are whitelisted.
-      const args: string[] = [id, status];
+      const args: string[] = [id, nextStatus];
       if (note) args.push(capText(note));
       if (blockedBy) args.push(String(blockedBy));
 
@@ -294,6 +415,8 @@ export async function PATCH(
         [path.join(frameworkRoot, 'bus', 'update-task.sh'), ...args],
         { encoding: 'utf-8', timeout: 10000, env, stdio: 'pipe' },
       );
+    } else {
+      throw new Error(`Unsupported status transition: ${nextStatus}`);
     }
     if (spawnResult.status !== 0) {
       throw new Error(spawnResult.stderr || spawnResult.stdout || 'Script failed');
@@ -314,7 +437,7 @@ export async function PATCH(
         if (createdBy && !agentNames.has(createdBy) && isValidAgentName(createdBy)) {
           const rawMsg = status === 'completed'
             ? `Human task completed by user: [${id}] ${task.title} - you can now unblock your work`
-            : `Task status updated to ${status}: [${id}] ${task.title}`;
+            : `Task status updated to ${nextStatus}: [${id}] ${task.title}`;
           const msg = capText(rawMsg);
           spawnSync(
             'node',

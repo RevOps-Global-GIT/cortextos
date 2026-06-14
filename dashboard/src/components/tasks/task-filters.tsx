@@ -67,10 +67,13 @@ export function TaskFilters({
       onChange: (v) => onChange('status', v),
       options: [
         { value: 'all', label: 'All Statuses' },
+        { value: 'proposed', label: 'Proposed' },
         { value: 'pending', label: 'Pending' },
+        { value: 'approved', label: 'Approved' },
         { value: 'in_progress', label: 'In Progress' },
         { value: 'blocked', label: 'Blocked' },
         { value: 'completed', label: 'Completed' },
+        { value: 'cancelled', label: 'Cancelled' },
       ],
     },
   ];

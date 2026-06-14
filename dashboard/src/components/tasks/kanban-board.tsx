@@ -32,9 +32,19 @@ export function KanbanBoard({
 }: KanbanBoardProps) {
   const columns: KanbanColumn[] = [
     {
+      status: 'proposed',
+      label: 'Proposed',
+      tasks: tasks.filter((t) => t.status === 'proposed'),
+    },
+    {
       status: 'pending',
       label: 'Pending',
       tasks: tasks.filter((t) => t.status === 'pending'),
+    },
+    {
+      status: 'approved',
+      label: 'Approved',
+      tasks: tasks.filter((t) => t.status === 'approved'),
     },
     {
       status: 'in_progress',
@@ -50,6 +60,11 @@ export function KanbanBoard({
       status: 'completed',
       label: 'Completed (today)',
       tasks: completedTodayTasks,
+    },
+    {
+      status: 'cancelled',
+      label: 'Cancelled',
+      tasks: tasks.filter((t) => t.status === 'cancelled'),
     },
   ];
 
@@ -90,7 +105,7 @@ export function KanbanBoard({
 
       <div className="hidden space-y-3 md:block">
         <ParkedAgentDock presence={parkedPresence} />
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5 xl:grid-cols-7">
         {columns.map((col) => (
           <div key={col.status} className="flex flex-col gap-2">
             <div className="flex items-center justify-between px-1">

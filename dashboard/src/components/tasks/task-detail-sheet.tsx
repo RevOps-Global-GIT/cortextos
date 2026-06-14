@@ -42,9 +42,17 @@ export interface TaskDetailSheetProps {
 }
 
 const STATUS_TRANSITIONS: Record<TaskStatus, { label: string; status: TaskStatus; variant: 'default' | 'outline' | 'destructive' | 'secondary' }[]> = {
+  proposed: [
+    { label: 'Approve', status: 'approved', variant: 'default' },
+    { label: 'Start', status: 'in_progress', variant: 'secondary' },
+    { label: 'Reject', status: 'cancelled', variant: 'destructive' },
+  ],
   pending: [
     { label: 'Start', status: 'in_progress', variant: 'default' },
     { label: 'Block', status: 'blocked', variant: 'destructive' },
+  ],
+  approved: [
+    { label: 'Start', status: 'in_progress', variant: 'default' },
   ],
   in_progress: [
     { label: 'Complete', status: 'completed', variant: 'default' },
@@ -57,6 +65,9 @@ const STATUS_TRANSITIONS: Record<TaskStatus, { label: string; status: TaskStatus
   ],
   completed: [
     { label: 'Reopen', status: 'pending', variant: 'outline' },
+  ],
+  cancelled: [
+    { label: 'Reopen', status: 'proposed', variant: 'outline' },
   ],
 };
 
