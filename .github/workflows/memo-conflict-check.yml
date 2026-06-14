@@ -4,6 +4,13 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Cancel superseded scans on the same PR — only the latest commit's added-line
+# scan is authoritative. Not path-filtered: this is a policy/security gate that
+# must scan ALL added lines (incl. docs/memos) for conflict terms.
+concurrency:
+  group: memo-conflict-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   pull-requests: write
   contents: read

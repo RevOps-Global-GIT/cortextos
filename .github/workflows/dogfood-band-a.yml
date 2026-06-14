@@ -3,6 +3,19 @@ name: Dogfood Band A
 on:
   pull_request:
     branches: [main, master]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'dogfood-evidence/**'
+      - '**/evidence/**'
+      - 'orgs/**/memory/**'
+      - 'orgs/**/memo/**'
+      - 'orgs/**/prompts/**'
+      - '.github/memo-conflicts.json'
+
+concurrency:
+  group: dogfood-band-a-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   band-a:
