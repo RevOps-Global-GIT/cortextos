@@ -49,6 +49,7 @@ import {
   migrateRetryQueueReplyToId,
   resolveExistingTaskMirrorId,
   mirrorAgentStatusToRgos,
+  mirrorTaskCompletionToRgos,
   PostgRESTError,
   _resetDrainLock,
 } from '../../../src/bus/rgos-mirror.js';
@@ -2124,5 +2125,128 @@ describe('rgos-mirror — drainRetryQueue handles orch_events entries', () => {
     const [url] = fetchMock.mock.calls[0];
     expect(url).toContain('/rest/v1/orch_events');
     expect(url).not.toContain('/rest/v1/orch_tasks');
+  });
+});
+
+// ── Lifecycle-drift fix: mirrorTaskCompletionToRgos ─────────────────────────
+//
+// Proves bus complete-task transitions the LINKED orch_tasks mirror row to
+// completed (closing the approved/proposed → completed drift gap), touches
+// only the linked row, and is a safe no-op when there is no linked row / no
+// creds. All HTTP is stubbed — no live Supabase.
+
+describe('rgos-mirror — mirrorTaskCompletionToRgos (lifecycle-drift fix)', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'rgos-mirror-complete-'));
+    setMirrorEnv(tmpDir);
+    _resetDrainLock();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearMirrorEnv();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('transitions an APPROVED linked mirror row to completed', async () => {
+    const approvedRowId = 'aaaaaaaa-bbbb-5ccc-8ddd-eeeeeeeeeeee';
+    const fetchMock = vi.fn()
+      // Lookup by metadata.bus_task_id (excludes terminal statuses) — finds the approved row
+      .mockResolvedValueOnce({ ok: true, json: async () => [{ id: approvedRowId, status: 'approved' }], text: async () => '' })
+      // PATCH the linked row
+      .mockResolvedValueOnce({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorTaskCompletionToRgos('task_1234567890_001', {
+      result: 'Merged PR #999',
+      completedAt: '2026-06-15T12:00:00Z',
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Lookup correlates by metadata.bus_task_id and filters out terminal rows.
+    const lookupUrl = String(fetchMock.mock.calls[0][0]);
+    expect(lookupUrl).toContain('metadata-%3E%3Ebus_task_id=eq.task_1234567890_001');
+    expect(lookupUrl).toContain('status=not.in.%28completed%2Ccancelled%29');
+    // PATCH targets exactly the linked row and sets status=completed.
+    const [patchUrl, patchOpts] = fetchMock.mock.calls[1];
+    expect(patchOpts?.method).toBe('PATCH');
+    expect(String(patchUrl)).toContain(`id=eq.${approvedRowId}`);
+    const body = JSON.parse(patchOpts?.body as string);
+    expect(body.status).toBe('completed');
+    expect(body.result).toBe('Merged PR #999');
+    expect(body.completed_at).toBe('2026-06-15T12:00:00Z');
+  });
+
+  it('transitions a PROPOSED linked mirror row to completed', async () => {
+    const proposedRowId = '11111111-2222-5333-8444-555555555555';
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [{ id: proposedRowId, status: 'proposed' }], text: async () => '' })
+      .mockResolvedValueOnce({ ok: true, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorTaskCompletionToRgos('task_proposed_001');
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [patchUrl, patchOpts] = fetchMock.mock.calls[1];
+    expect(String(patchUrl)).toContain(`id=eq.${proposedRowId}`);
+    const body = JSON.parse(patchOpts?.body as string);
+    expect(body.status).toBe('completed');
+    // No result/completedAt provided → only status is patched, nothing else touched.
+    expect(body).toEqual({ status: 'completed' });
+  });
+
+  it('does NOT touch unrelated rows / terminal statuses (lookup excludes them, PATCH is row-scoped)', async () => {
+    // Lookup returns nothing because the only matching row is already terminal
+    // (the not.in.(completed,cancelled) filter excludes it server-side).
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorTaskCompletionToRgos('task_already_done_001');
+
+    // Only the lookup fired — no PATCH, so no row (terminal or unrelated) is mutated.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][1]?.method).toBe('GET');
+    // The filter that protects terminal/unrelated rows is present on the lookup.
+    expect(String(fetchMock.mock.calls[0][0])).toContain('status=not.in.%28completed%2Ccancelled%29');
+  });
+
+  it('is a safe no-op when no linked mirror row exists', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => [], text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(mirrorTaskCompletionToRgos('task_no_mirror_001')).resolves.toBeUndefined();
+    // Lookup ran, but no PATCH was issued.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('is a safe no-op when the lookup request fails (never throws)', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('network down'));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(mirrorTaskCompletionToRgos('task_lookup_fail_001')).resolves.toBeUndefined();
+    // Lookup threw → swallowed, no PATCH attempted.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('is a safe no-op when creds are absent (mirror disabled) — no fetch at all', async () => {
+    delete process.env.SUPABASE_RGOS_SERVICE_KEY;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(mirrorTaskCompletionToRgos('task_no_creds_001')).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('is a safe no-op when the kill switch is on', async () => {
+    process.env.BUS_RGOS_MIRROR_DISABLED = '1';
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await mirrorTaskCompletionToRgos('task_killswitch_001');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
