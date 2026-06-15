@@ -477,6 +477,72 @@ export function filterFleetLiveSourceRows(tasks: FleetTaskCountRow[]): FleetTask
   });
 }
 
+// CHECK 6 pending-count severity classifier.
+//
+// CHECK 6 has two sub-checks against the rendered Pending header:
+//  - LIVE: rendered vs bus pending-mapped — the AUTHORITATIVE page-correctness gate.
+//  - MIRROR: rendered vs orch_tasks pending-equivalent (approved; proposed excluded, per #847).
+//
+// orch_tasks is a lagging mirror that drifts in both directions, so a MIRROR-only delta does
+// NOT mean the live board is wrong. When the LIVE sub-check confirms correctness (it ran AND its
+// delta is within tolerance) and nothing else failed, a MIRROR-only delta is demoted to a
+// non-failing finding (DEFERRED => severity 'warning' in collectPageHealthIssues), which does NOT
+// flip the page-health row to 'error' and therefore does NOT trigger a flip-clock/reset.
+//
+// CHECK 6 stays an ERROR (FAIL => severity 'error') only when the LIVE delta exceeds tolerance
+// (genuine board/source divergence) or another sub-check hard-fails. LIVE remains the
+// authoritative correctness gate; #847 vocabulary (approved counted, proposed ignored) is
+// preserved by the callers that build these inputs.
+export interface Check6PendingClassifierInput {
+  // Hard failures that always make CHECK 6 an error (e.g. live delta > tolerance).
+  failures: string[];
+  // Mirror-only deltas: a warning when LIVE confirms correctness, an error otherwise.
+  mirrorOnlyWarnings: string[];
+  // Whether the LIVE sub-check actually ran and confirmed correctness (delta within tolerance).
+  liveConfirmedCorrect: boolean;
+  deferred: string[];
+  evidence: string[];
+  tolerance: number;
+}
+
+export interface Check6PendingClassification {
+  status: 'PASS' | 'FAIL' | 'DEFERRED';
+  evidence: string;
+}
+
+export function classifyCheck6PendingStatus(input: Check6PendingClassifierInput): Check6PendingClassification {
+  const { failures, mirrorOnlyWarnings, liveConfirmedCorrect, deferred, evidence, tolerance } = input;
+
+  // A mirror-only delta is a real ERROR unless the authoritative LIVE sub-check confirmed the
+  // board is correct. If LIVE did not run or did not pass, we cannot trust the live board, so the
+  // mirror delta must surface as a failure (preserves the pre-#847 safety net for mirror).
+  const hardFailures = liveConfirmedCorrect ? [...failures] : [...failures, ...mirrorOnlyWarnings];
+  const warnings = liveConfirmedCorrect ? [...mirrorOnlyWarnings] : [];
+
+  if (hardFailures.length > 0) {
+    return {
+      status: 'FAIL',
+      evidence: `${hardFailures.join('; ')}. ${evidence.join('; ')}. Tolerance=${tolerance}.`,
+    };
+  }
+
+  if (warnings.length > 0 || deferred.length > 0) {
+    const notes = [
+      ...warnings.map((w) => `MIRROR-ONLY drift (LIVE authoritative check passed, not a page error): ${w}`),
+      ...deferred,
+    ];
+    return {
+      status: 'DEFERRED',
+      evidence: `${notes.join('; ')}. Completed source checks: ${evidence.join('; ') || 'none'}.`,
+    };
+  }
+
+  return {
+    status: 'PASS',
+    evidence: `${evidence.join('; ')}. Dogfood fixtures disabled for source-specific checks.`,
+  };
+}
+
 interface CreatedFleetTaskRow {
   id?: string | null;
   title?: string | null;
@@ -3107,7 +3173,12 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
 
       const evidence: string[] = [];
       const failures: string[] = [];
+      const mirrorOnlyWarnings: string[] = [];
       const deferred: string[] = [];
+      // The LIVE sub-check is the authoritative correctness gate. Only when it runs AND confirms
+      // the rendered count matches the bus pending-mapped count (delta within tolerance) is a
+      // MIRROR-only delta safe to demote from a page error to a warning.
+      let liveConfirmedCorrect = false;
       const TOLERANCE = 1;
 
       await setFleetTaskSource(page, 'mirror');
@@ -3129,7 +3200,9 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
         } else {
           const delta = Math.abs(mirrorRendered.count - mirrorExpected);
           evidence.push(`mirror: rendered=${mirrorRendered.count}, orch_tasks pending-equivalent(approved)=${mirrorExpected}, proposed=${mirrorProposed} ignored for Pending, delta=${delta}, source rows ${mirrorRows.length}->${mirrorSourceRows.length}`);
-          if (delta > TOLERANCE) failures.push(`mirror rendered=${mirrorRendered.count} vs orch_tasks pending-equivalent(approved)=${mirrorExpected}`);
+          // orch_tasks is a lagging mirror; classify the mirror delta as a warning-or-error in the
+          // final rollup based on whether the authoritative LIVE sub-check confirms correctness.
+          if (delta > TOLERANCE) mirrorOnlyWarnings.push(`mirror rendered=${mirrorRendered.count} vs orch_tasks pending-equivalent(approved)=${mirrorExpected}`);
         }
       }
 
@@ -3156,6 +3229,7 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
           const delta = Math.abs(liveRendered.count - liveExpected);
           evidence.push(`live: rendered=${liveRendered.count}, bus pending-mapped=${liveExpected}, delta=${delta}, source rows ${busRows.length}->${liveVisibleRows.length}`);
           if (delta > TOLERANCE) failures.push(`live rendered=${liveRendered.count} vs bus pending-mapped=${liveExpected}`);
+          else liveConfirmedCorrect = true;
         }
       }
 
@@ -3168,25 +3242,19 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
         } catch {}
       }, originalState).catch(() => {});
 
-      if (failures.length > 0) {
-        results.push({
-          check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
-          status: 'FAIL',
-          evidence: `${failures.join('; ')}. ${evidence.join('; ')}. Tolerance=${TOLERANCE}.`,
-        });
-      } else if (deferred.length > 0) {
-        results.push({
-          check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
-          status: 'DEFERRED',
-          evidence: `${deferred.join('; ')}. Completed source checks: ${evidence.join('; ') || 'none'}.`,
-        });
-      } else {
-        results.push({
-          check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
-          status: 'PASS',
-          evidence: `${evidence.join('; ')}. Dogfood fixtures disabled for source-specific checks.`,
-        });
-      }
+      const classification = classifyCheck6PendingStatus({
+        failures,
+        mirrorOnlyWarnings,
+        liveConfirmedCorrect,
+        deferred,
+        evidence,
+        tolerance: TOLERANCE,
+      });
+      results.push({
+        check: '[CORRECTNESS] CHECK 6 Pending column count matches task source',
+        status: classification.status,
+        evidence: classification.evidence,
+      });
     }
   } catch (e) {
     results.push({ check: '[CORRECTNESS] CHECK 6 Pending column count matches task source', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
