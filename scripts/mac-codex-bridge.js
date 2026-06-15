@@ -104,12 +104,18 @@ function isStatusCheck(text) {
   return t === 'status' || t === 'ping' || t === 'health' || t === 'status?' || t === 'status check';
 }
 
+// Codex.app build 149+ migrated its SQLite state into ~/.codex/sqlite/. Prefer that
+// location, fall back to the legacy ~/.codex/ path. Resolved at runtime on the Mac so
+// the bridge survives the migration (and any revert) without code changes.
+// Expands to the active state_5.sqlite path when evaluated by the remote shell.
+const CODEX_DB_SH = '$(d="$HOME/.codex/sqlite/state_5.sqlite"; [ -f "$d" ] || d="$HOME/.codex/state_5.sqlite"; printf %s "$d")';
+
 // Liveness probe: returns thread count from Mac SQLite, or null on error (fix c)
 async function probeDbThreadCount() {
   try {
     const out = await spawnAsync('ssh', [
       '-n', '-o', 'ConnectTimeout=5', '-o', 'StrictHostKeyChecking=accept-new', SSH_HOST,
-      "sqlite3 /Users/gregharned/.codex/state_5.sqlite 'SELECT COUNT(*) FROM threads;'",
+      `sqlite3 "${CODEX_DB_SH}" 'SELECT COUNT(*) FROM threads;'`,
     ], { timeout: 10_000 });
     return parseInt(out.trim(), 10);
   } catch {
@@ -186,7 +192,9 @@ function execOnMac(prompt) {
     `do shell script "pbcopy < ${tmpPrompt}"`,
     // Snapshot MAX(created_at) BEFORE triggering new chat — race-fix anchor (fix a).
     // Any thread with created_at strictly greater is guaranteed to be the new one.
-    `set snapshotTs to do shell script "sqlite3 /Users/gregharned/.codex/state_5.sqlite \\"SELECT COALESCE(MAX(created_at), '1970-01-01 00:00:00') FROM threads;\\""`,
+    // Resolve the active Codex state DB on the Mac (build 149+ moved it to ~/.codex/sqlite/).
+    `set codexDb to do shell script "d=\\"$HOME/.codex/sqlite/state_5.sqlite\\"; [ -f \\"$d\\" ] || d=\\"$HOME/.codex/state_5.sqlite\\"; printf %s \\"$d\\""`,
+    `set snapshotTs to do shell script "sqlite3 " & quoted form of codexDb & " \\"SELECT COALESCE(MAX(created_at), '1970-01-01 00:00:00') FROM threads;\\""`,
     'tell application "Codex" to activate',
     'delay 1.5',
     'tell application "System Events"',
@@ -213,7 +221,7 @@ function execOnMac(prompt) {
     // Replaces the old fixed delay-2 + DESC LIMIT 1 that raced against Codex.app writes.
     'set threadId to ""',
     'repeat 60 times',
-    `  set threadId to do shell script "sqlite3 /Users/gregharned/.codex/state_5.sqlite \\"SELECT id FROM threads WHERE created_at > '" & snapshotTs & "' ORDER BY created_at ASC LIMIT 1;\\""`,
+    `  set threadId to do shell script "sqlite3 " & quoted form of codexDb & " \\"SELECT id FROM threads WHERE created_at > '" & snapshotTs & "' ORDER BY created_at ASC LIMIT 1;\\""`,
     '  if threadId is not "" then exit repeat',
     '  delay 0.5',
     'end repeat',

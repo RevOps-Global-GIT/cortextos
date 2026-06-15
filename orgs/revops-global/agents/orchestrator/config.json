@@ -185,14 +185,14 @@
     "claude-opus-4-7",
     "claude-sonnet-4-6"
   ],
-  "model_pilot_note": "2026-06-09: Greg-approved orchestrator upgrade to Fable-5 (above Opus). Rationale: orchestrator is the fleet judgment engine; reasoning premium pays off on routing/defect-catch/ambiguous-directive work. Cost caveat: orchestrator is the highest-volume 24/7 token consumer. Revert to tier:opus (remove this model override) if cost/quality not justified.",
+  "model_pilot_note": "2026-06-13: reverted orchestrator from Codex app-server to Claude Code on Opus 4.8 at Greg's request after Claude capacity returned.",
   "runtime": "codex-app-server",
   "codex_app_server_transport": "ws",
-  "claude_handback_note": "2026-05-27T19:22Z: Claude work credits/session restored; orchestrator control plane returned to claude-code. Codex lanes remain execution-only.",
+  "claude_handback_note": "2026-06-13T14:05Z: Greg requested orchestrator handback from Codex app-server to Claude Code; model set to claude-opus-4-8. Codex lanes remain execution-only.",
   "provider_failover_last_switch": {
     "provider": "codex",
     "runtime": "codex-app-server",
     "model": "gpt-5.5",
-    "switched_at": "2026-06-12T17:20:16.563Z"
+    "switched_at": "2026-06-13T14:11:16.496Z"
   }
 }

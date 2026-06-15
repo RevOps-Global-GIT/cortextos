@@ -295,6 +295,10 @@ The table's `session_id` has a unique index, so if you retry after a partial fai
 
 <!-- Dated entries: **YYYY-MM-DD — <one-line context>** followed by what worked + why. Keep additive; don't delete prior entries unless they were proven wrong. -->
 
+**2026-06-14 — Placeholder row 409 on POST requires PATCH for update; use PATCH with session_id filter to update the running placeholder.**
+
+When the Phase 1 placeholder row is written with POST and merge-duplicates, a later POST to complete it still returns 409 because the unique constraint fires before the resolution header is honored. The correct path: write placeholder via POST, then at Phase 9 PATCH with `?session_id=eq.theta-YYYY-MM-DD`. HTTP 204 on PATCH = success. Verify with a direct GET after PATCH rather than trusting the watchdog (watchdog 401s under daemon key cache conditions).
+
 **2026-06-06 — Greg-qa-defect-rate instrument was reading analyst inbox only; expanded to multi-agent scan.**
 
 The instrument showed 0 defects while Greg fired 8 trust-class messages to orchestrator. Root cause: INBOUND_LOG pointed only to analyst's logs, but Greg's messages funnel through orchestrator (external-comms rule). Fix: expanded SCAN_AGENTS to orchestrator+dev+dev-2+mac-codex+analyst, added missing QA patterns (failing, where is, isn't, missing, none of these, all wrong, did not). Retroactive verification: 8/8 Jun 5 trust-class messages now detected. Lesson: any instrument that measures Greg-as-QA must read from where Greg actually sends messages — the external-comms funnel means those land in orchestrator's inbox, not analyst's.
@@ -324,6 +328,10 @@ Writing the `theta_sessions` row before deep work worked as a failure detector: 
 ### Lessons Learned
 
 <!-- What went wrong and what to do instead. Anchor each to a concrete incident with date. -->
+
+**2026-06-15 — trust-class scan must be done before proposing any score; score is a ceiling not a floor.** Phase 2 Greg-as-QA inbox scan (5 messages including "18th time regressed") drove the entire score for this cycle. Without reading that scan first, a static fleet-health pass would have suggested 7+. Pattern: always run trust-class inbox grep across all agents before touching the compound metric. The scan is the score.
+
+**2026-06-15 — detection-shadow returning nulls is a blind instrument; flag it as a hypothesis, not a data gap.** When detection-shadow-monitor.py --json returns {"detection_rate":"?","incidents":"?"} it means the instrument is broken, not that detection was 100%. Do not interpret null as clean. Create an orch_experiments hypothesis to fix it in the same cycle.
 
 **2026-05-22 — do not credit "autonomous recovery" as a win when the system failed to self-detect.** Analyst opened theta scoring with "incidents were provider-side, system recovered autonomously = autonomy thesis working." Orchestrator correctly reframed: the system self-detected NONE of its broken surfaces this cycle (cockpit 48h, LinkedIn zombie 10d, stale intake 6d, PR #1078 regression — all caught by Greg manually). Fast detection-to-fix latency is real credit; "recovered without Greg firefighting" is NOT credit if Greg was the one who found the breakage. Frame recovery speed and self-detection as separate axes.
 
