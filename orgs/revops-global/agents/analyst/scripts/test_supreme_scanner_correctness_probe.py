@@ -87,17 +87,17 @@ def test_greg_own_and_subtype_excluded() -> None:
 
 def test_should_alert_masking_signature() -> None:
     check("alert when scanner=0 and slack activity>0",
-          probe.should_alert(0, 2) is True)
+          probe.should_alert_masking(0, 2) is True)
 
 
 def test_no_alert_when_scanner_found_items() -> None:
     check("no alert when scanner surfaced >=1 item (fixed scanner)",
-          probe.should_alert(1, 2) is False)
+          probe.should_alert_masking(1, 2) is False)
 
 
 def test_no_alert_when_no_activity() -> None:
     check("no alert when there is no Slack activity",
-          probe.should_alert(0, 0) is False)
+          probe.should_alert_masking(0, 0) is False)
 
 
 # --- end-to-end replay of the historical masking bug --------------------------
@@ -132,11 +132,37 @@ def test_replay_mari_masking_bug() -> None:
     check("replay: OLD buggy scanner reported 0 outstanding (the masking bug)",
           old_outstanding == 0, f"got {old_outstanding}")
     check("replay: probe ALERTS on the buggy scanner output (bug caught)",
-          probe.should_alert(old_outstanding, slack_messages) is True)
+          probe.should_alert_masking(old_outstanding, slack_messages) is True)
     check("replay: FIXED scanner reports 1 outstanding",
           fixed_outstanding == 1, f"got {fixed_outstanding}")
     check("replay: probe stays quiet once scanner is fixed (no false alarm)",
-          probe.should_alert(fixed_outstanding, slack_messages) is False)
+          probe.should_alert_masking(fixed_outstanding, slack_messages) is False)
+
+
+# --- timing-gap regression: messages newer than the snapshot must not alert ---
+
+def test_max_ts_gates_post_snapshot_messages() -> None:
+    """A Greg-directed message that arrives AFTER the scanner snapshot must not be
+    counted — the scan could not have seen it, so counting it is a timing
+    false-positive (the next scan will catch it). Regression for the 2026-06-15
+    #bmp-medical false alarm: snapshot was 2.7h old, the mention 1.4h old.
+    """
+    # Snapshot at ts=200; a Greg-directed msg arrives at ts=300 (after the scan).
+    conv = [
+        msg(GREG, "100.0", "ok"),
+        msg(MARI, "300.0", "did you see the BMP results?"),
+    ]
+    ungated = probe.count_unanswered_candidates(conv, GREG)
+    check("without max_ts the post-snapshot message counts (would false-alarm)",
+          ungated == 1, f"got {ungated}")
+    gated = probe.count_unanswered_candidates(conv, GREG, max_ts=200.0)
+    check("max_ts gates out messages newer than the snapshot (no timing false-positive)",
+          gated == 0, f"got {gated}")
+    # A message at/before the snapshot still counts — genuine masking still caught.
+    conv2 = [msg(GREG, "100.0", "ok"), msg(MARI, "150.0", "still waiting on you?")]
+    still = probe.count_unanswered_candidates(conv2, GREG, max_ts=200.0)
+    check("max_ts still counts messages the scan should have seen (real masking caught)",
+          still == 1, f"got {still}")
 
 
 def main() -> int:
@@ -147,6 +173,7 @@ def main() -> int:
     test_no_alert_when_scanner_found_items()
     test_no_alert_when_no_activity()
     test_replay_mari_masking_bug()
+    test_max_ts_gates_post_snapshot_messages()
     print()
     if _failures:
         print(f"{_failures} test(s) FAILED")

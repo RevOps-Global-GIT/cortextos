@@ -138,7 +138,9 @@ def _load_scanner():
 
 # -- pure helpers (no I/O — unit-testable) ------------------------------------
 
-def count_unanswered_candidates(messages: List[Dict[str, Any]], greg_user_id: str) -> int:
+def count_unanswered_candidates(
+    messages: List[Dict[str, Any]], greg_user_id: str, max_ts: Optional[float] = None
+) -> int:
     """Count non-Greg, non-subtype messages in one conversation that were sent after
     Greg's last message — WITHOUT the actionable/question gate.
 
@@ -146,6 +148,11 @@ def count_unanswered_candidates(messages: List[Dict[str, Any]], greg_user_id: st
     (run only on the newest message) dropped a real question when a non-actionable
     follow-up arrived after it. By counting every post-reply candidate regardless of
     phrasing, this oracle still sees the activity the scanner's filter discarded.
+
+    max_ts gates out messages NEWER than the scanner snapshot's generated_at: the
+    scan physically could not have seen them, so counting them is a TIMING
+    false-positive (a message arriving in the scan→probe gap looks like masking
+    when the next scan will catch it). Only count what the last scan should have.
     """
     greg_last_ts = max(
         (float(m.get("ts") or 0) for m in messages if m.get("user") == greg_user_id),
@@ -158,6 +165,7 @@ def count_unanswered_candidates(messages: List[Dict[str, Any]], greg_user_id: st
         and m.get("user") != greg_user_id
         and not m.get("subtype")
         and float(m.get("ts") or 0) > greg_last_ts
+        and (max_ts is None or float(m.get("ts") or 0) <= max_ts)
     )
 
 
@@ -248,15 +256,22 @@ def _format_age(ts: float, now_ts: float) -> str:
 
 
 def collect_slack_candidates(
-    scanner, token: str, since_seconds: int
+    scanner, token: str, since_seconds: int, snapshot_ts: Optional[float] = None
 ) -> Optional[Dict[str, Any]]:
     """Count and collect Greg-directed unanswered Slack activity.
     Returns None on Slack failure (caller defers — never alerts on infra noise).
     Includes evidence list: up to EVIDENCE_CAP items per category for alert body.
+
+    snapshot_ts (the scanner snapshot's generated_at, epoch secs) gates out
+    messages newer than the last scan — the scan could not have seen them, so
+    counting them is a timing false-positive. None = count the whole window.
     """
     greg = scanner.GREG_USER_ID
     now_ts = datetime.now(timezone.utc).timestamp()
     user_name = getattr(scanner, "user_name", lambda u: u)
+
+    def in_scan_window(m: Dict[str, Any]) -> bool:
+        return snapshot_ts is None or float(m.get("ts") or 0) <= snapshot_ts
 
     # DM path
     dm_msgs = scanner.slack_search_dms(token, since_seconds)
@@ -279,6 +294,7 @@ def collect_slack_candidates(
             if m.get("user") and m.get("user") != greg
             and not m.get("subtype")
             and float(m.get("ts") or 0) > greg_last_ts
+            and in_scan_window(m)
         ]
         dm_candidates += len(candidates)
         if candidates and len(dm_evidence) < EVIDENCE_CAP:
@@ -295,7 +311,7 @@ def collect_slack_candidates(
     mention_evidence: List[str] = []
     seen_keys: set = set()
     for m in mention_msgs:
-        if m.get("user") and m.get("user") != greg and not m.get("subtype"):
+        if m.get("user") and m.get("user") != greg and not m.get("subtype") and in_scan_window(m):
             ch_obj = m.get("channel") or {}
             ch_name = ch_obj.get("name", "?") if isinstance(ch_obj, dict) else str(ch_obj)
             sender = user_name(m.get("user") or "?")
@@ -456,7 +472,9 @@ def main() -> int:
         return 0
 
     try:
-        counts = collect_slack_candidates(scanner, token, args.since_hours * 3600)
+        counts = collect_slack_candidates(
+            scanner, token, args.since_hours * 3600, snapshot_ts=generated_at.timestamp()
+        )
     except scanner.ScanRateLimited as e:
         emit({"status": "deferred", "reason": f"slack rate limited: {e}"})
         return 0
