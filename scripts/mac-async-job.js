@@ -14,8 +14,12 @@
  * interpolated into the remote command unescaped.
  *
  * Usage:
- *   node scripts/mac-async-job.js launch "<shell command>" [--prefix <slug>]
- *   node scripts/mac-async-job.js status <jobId>
+ *   node scripts/mac-async-job.js launch "<shell command>" [--prefix <slug>] [--proof-dir <dir>]
+ *   node scripts/mac-async-job.js status <jobId> [--proof-dir <dir>]
+ *
+ * Both commands write <proof-dir>/latest.json plus a per-job JSON proof file
+ * (default: output/mac-async-jobs). Status proof includes failureReason for
+ * nonzero, missing, or unknown completion states.
  *
  * Pure helpers (no I/O) are exported for unit testing via createRequire.
  */
@@ -24,9 +28,12 @@
 
 const { spawn } = require('child_process');
 const crypto = require('crypto');
+const { mkdirSync, writeFileSync } = require('fs');
+const { join } = require('path');
 
 const SSH_HOST = process.env.MAC_SSH_HOST || 'gregs-mac';
 const JOB_ROOT = '$HOME/.mac-async-jobs';
+const DEFAULT_PROOF_DIR = process.env.MAC_ASYNC_PROOF_DIR || 'output/mac-async-jobs';
 
 // ---------------------------------------------------------------------------
 // Pure helpers (exported, unit-tested)
@@ -111,6 +118,73 @@ function parseStatusOutput(stdout) {
   };
 }
 
+function remoteJobPath(jobId, fileName) {
+  if (!/^mac-[a-z0-9-]+$/.test(jobId)) {
+    throw new Error(`unsafe jobId: ${jobId}`);
+  }
+  return `~/.mac-async-jobs/${jobId}/${fileName}`;
+}
+
+function failureReasonForStatus(status) {
+  if (status.state === 'done' && status.exitCode !== 0) {
+    return `remote command exited ${status.exitCode}`;
+  }
+  if (status.state === 'missing') {
+    return 'remote job directory missing';
+  }
+  if (status.state === 'unknown') {
+    return 'remote job state unknown; pid is absent or no longer running and exit_code is missing';
+  }
+  return null;
+}
+
+function buildProofRecord(action, result, extra = {}) {
+  const jobId = result.jobId;
+  const status = {
+    state: result.state || (action === 'launch' ? 'launched' : 'unknown'),
+    exitCode: result.exitCode ?? null,
+    pid: result.pid ?? null,
+  };
+  return {
+    generatedAt: new Date().toISOString(),
+    action,
+    sshHost: SSH_HOST,
+    jobRoot: '~/.mac-async-jobs',
+    jobId,
+    pid: status.pid,
+    state: status.state,
+    exitCode: status.exitCode,
+    failureReason: failureReasonForStatus(status),
+    remote: jobId ? {
+      commandPath: remoteJobPath(jobId, 'cmd.sh'),
+      logPath: remoteJobPath(jobId, 'log'),
+      pidPath: remoteJobPath(jobId, 'pid'),
+      exitCodePath: remoteJobPath(jobId, 'exit_code'),
+    } : null,
+    ...extra,
+  };
+}
+
+function writeProofRecord(record, proofDir = DEFAULT_PROOF_DIR) {
+  mkdirSync(proofDir, { recursive: true });
+  const latestPath = join(proofDir, 'latest.json');
+  const jobPath = record.jobId ? join(proofDir, `${record.jobId}.json`) : null;
+  const payload = `${JSON.stringify(record, null, 2)}\n`;
+  writeFileSync(latestPath, payload);
+  if (jobPath) writeFileSync(jobPath, payload);
+  return { latestPath, jobPath };
+}
+
+function parseOption(rest, flag, fallback) {
+  const idx = rest.indexOf(flag);
+  if (idx === -1) return { value: fallback, args: rest };
+  const value = rest[idx + 1] || fallback;
+  return {
+    value,
+    args: rest.filter((_, i) => i !== idx && i !== idx + 1),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Impure SSH layer
 // ---------------------------------------------------------------------------
@@ -162,24 +236,27 @@ async function getJobStatus(jobId) {
 async function main(argv) {
   const [sub, ...rest] = argv;
   if (sub === 'launch') {
-    const prefixIdx = rest.indexOf('--prefix');
-    let prefix = 'job';
-    let args = rest;
-    if (prefixIdx !== -1) {
-      prefix = rest[prefixIdx + 1] || 'job';
-      args = rest.filter((_, i) => i !== prefixIdx && i !== prefixIdx + 1);
-    }
+    const parsedPrefix = parseOption(rest, '--prefix', 'job');
+    const parsedProof = parseOption(parsedPrefix.args, '--proof-dir', DEFAULT_PROOF_DIR);
+    const prefix = parsedPrefix.value;
+    const args = parsedProof.args;
     const command = args.join(' ');
     if (!command) throw new Error('launch requires a command');
     const res = await launchJob(command, { prefix });
-    console.log(JSON.stringify(res));
+    const proof = buildProofRecord('launch', res, { commandPreview: command.slice(0, 500) });
+    const proofPaths = writeProofRecord(proof, parsedProof.value);
+    console.log(JSON.stringify({ ...res, proof: proofPaths }));
     return;
   }
   if (sub === 'status') {
-    const jobId = rest[0];
+    const parsedProof = parseOption(rest, '--proof-dir', DEFAULT_PROOF_DIR);
+    const jobId = parsedProof.args[0];
     if (!jobId) throw new Error('status requires a jobId');
     const res = await getJobStatus(jobId);
-    console.log(JSON.stringify({ jobId, ...res }));
+    const withJob = { jobId, ...res };
+    const proof = buildProofRecord('status', withJob);
+    const proofPaths = writeProofRecord(proof, parsedProof.value);
+    console.log(JSON.stringify({ ...withJob, failureReason: proof.failureReason, proof: proofPaths }));
     return;
   }
   throw new Error(`unknown subcommand: ${sub || '(none)'} — use launch|status`);
@@ -199,6 +276,10 @@ module.exports = {
   buildStatusRemoteCmd,
   parseLaunchOutput,
   parseStatusOutput,
+  failureReasonForStatus,
+  buildProofRecord,
+  writeProofRecord,
   SSH_HOST,
   JOB_ROOT,
+  DEFAULT_PROOF_DIR,
 };
