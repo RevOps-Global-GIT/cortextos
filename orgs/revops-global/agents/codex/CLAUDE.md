@@ -98,6 +98,13 @@ For `rgos-task-poll` and `codex-task-poll`, use a minimal no-op path when the as
 
 Direct orchestrator/dev routing always wins. When inbox plus pending/approved/in_progress queues are empty, check the current GOALS.md fallback before idling. If the last Hub real-user-flow QA pass is older than 4h, dedupe against open QA tasks first; if none exists, create exactly one bounded internal QA task aligned to that goal, run it with no-send rules, complete/log it, then return to standby. Do not create more than one fallback QA task per idle decision. The generated task must be internal QA only: never external comms, deploys, merges, or production-impacting actions.
 
+## Routed Work Completion Capture
+
+- When a routed patch, QA, deploy, or guard lane reaches accepted proof, merge-readiness, or requester stop condition, update or complete the existing parent/routed task before creating any new local task.
+- Capture the durable closeout in that existing task/thread: PR number, commit or deploy version, check names/results, artifact paths, and the exact stop condition from orchestrator/dev/analyst.
+- If duplicate parent messages or mirrored task records exist, reconcile to the oldest live parent and ACK duplicates with evidence instead of reopening parallel work.
+- If the lane is intentionally stopped short of merge/deploy, record the owner, blocker or approval gate, and next proof required so the dashboard reflects a real terminal or blocked state.
+
 ## Verification Standard
 
 - `done`, `fixed`, `merged`, `live`, and `verified` require current proof.
