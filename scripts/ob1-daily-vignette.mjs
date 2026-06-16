@@ -20,6 +20,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const OB1_APP = "/home/cortextos/ob1-app";
 const SECRETS_ENV = path.join(__dirname, "../orgs/revops-global/secrets.env");
+const DEFAULT_ALERT_ENV = path.join(__dirname, "../orgs/revops-global/agents/orchestrator/.env");
 const OB1_ENV = path.join(OB1_APP, ".env.local");
 
 function log(msg) {
@@ -46,6 +47,71 @@ function parseEnvFile(filePath) {
   return result;
 }
 
+function findAlertEnv() {
+  const override = process.env.CORTEXTOS_ALERT_BOT_ENV;
+  if (override && existsSync(override)) return override;
+
+  const contextPath = path.join(__dirname, "../orgs/revops-global/context.json");
+  if (existsSync(contextPath)) {
+    try {
+      const context = JSON.parse(readFileSync(contextPath, "utf8"));
+      const orchestrator = context.orchestrator;
+      if (orchestrator) {
+        const candidate = path.join(__dirname, "../orgs/revops-global/agents", orchestrator, ".env");
+        if (existsSync(candidate)) return candidate;
+      }
+    } catch (err) {
+      log(`WARN: could not parse alert context: ${err.message}`);
+    }
+  }
+
+  return existsSync(DEFAULT_ALERT_ENV) ? DEFAULT_ALERT_ENV : null;
+}
+
+function firstNonEmpty(...values) {
+  return values.find((value) => typeof value === "string" && value.trim().length > 0);
+}
+
+function sendFailureAlert(detail) {
+  const alertEnvPath = findAlertEnv();
+  const alertEnv = alertEnvPath ? parseEnvFile(alertEnvPath) : {};
+  const token = firstNonEmpty(env.OB1_DAILY_VIGNETTE_ALERT_BOT_TOKEN, env.BOT_TOKEN, alertEnv.BOT_TOKEN);
+  const chatId = firstNonEmpty(env.OB1_DAILY_VIGNETTE_ALERT_CHAT_ID, env.CHAT_ID, alertEnv.CHAT_ID);
+
+  if (!token || !chatId) {
+    log("WARN: vignette failed, but no Telegram alert token/chat id was found.");
+    return;
+  }
+
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+  const text = [
+    "OB1 Daily Vignette failed on VM.",
+    `Date: ${today}`,
+    `Host: ${process.env.HOSTNAME ?? "unknown"}`,
+    detail,
+  ].join("\n");
+
+  if (env.OB1_DAILY_VIGNETTE_ALERT_DRY_RUN === "1") {
+    log(`DRY RUN alert: ${text.replaceAll("\n", " | ")}`);
+    return;
+  }
+
+  const result = spawnSync("curl", [
+    "-sS",
+    "--max-time",
+    "10",
+    `https://api.telegram.org/bot${token}/sendMessage`,
+    "-H",
+    "Content-Type: application/json",
+    "-d",
+    JSON.stringify({ chat_id: chatId, text }),
+  ], { stdio: "pipe", env });
+
+  if (result.status !== 0) {
+    log(`WARN: Telegram alert failed with status ${result.status ?? "unknown"}.`);
+  }
+}
+
 function run(cmd, args, opts = {}) {
   log(`${cmd} ${args.join(" ")}`);
   const result = spawnSync(cmd, args, {
@@ -56,7 +122,10 @@ function run(cmd, args, opts = {}) {
   });
   if (result.status !== 0) {
     log(`ERROR: ${cmd} exited with status ${result.status}`);
-    process.exit(result.status ?? 1);
+    const status = result.status ?? 1;
+    const reason = result.error ? result.error.message : `exit status ${status}`;
+    sendFailureAlert(`Failed command: ${cmd} ${args.join(" ")} (${reason})`);
+    process.exit(status);
   }
 }
 
