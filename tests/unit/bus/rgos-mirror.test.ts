@@ -1265,6 +1265,19 @@ describe('rgos-mirror — buildTaskRow() constraint smoke tests', () => {
     }));
     expect(dependencyBlocked.status).toBe('blocked');
   });
+
+  it('buildTaskRow preserves claimed human-gated tasks as in_progress', () => {
+    const humanTask = buildTaskRow(makeTask({
+      title: '[HUMAN] Verify OB1 nav/estate-map batch on real iPhone',
+      project: 'human-tasks',
+      status: 'in_progress',
+      assigned_to: 'orchestrator',
+      blocked_by: [],
+    }));
+
+    expect(humanTask.status).toBe('in_progress');
+    expect(humanTask.blocked_by).toBeNull();
+  });
 });
 
 // ── Retry queue constraint migration (scenario 15) ───────────────────────────
@@ -1324,6 +1337,31 @@ describe('rgos-mirror — migrateRetryQueueConstraints()', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].row.priority).toBe('medium');
     expect(entries[0].row.status).toBe('blocked');
+  });
+
+  it('does not re-block queued human/provider rows that are already in progress', () => {
+    const qPath = join(tmpDir, 'state', 'dev', 'mirror-retry.jsonl');
+    const entry = {
+      table: 'orch_tasks' as const,
+      row: {
+        id: uuidv5('task_human_in_progress'),
+        priority: 'normal',
+        status: 'in_progress',
+        title: '[HUMAN] Verify OB1 nav/estate-map batch on real iPhone',
+        assigned_to: 'orchestrator',
+        blocked_by: null,
+        metadata: { project: 'human-tasks', blocked_by: [], bus_task_id: 'task_1781359759295_10742939' },
+      },
+      ts: '2026-06-16T00:51:55.000Z',
+    };
+    writeFileSync(qPath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    migrateRetryQueueConstraints();
+
+    const entries = readRetryQueue(qPath);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].row.priority).toBe('medium');
+    expect(entries[0].row.status).toBe('in_progress');
   });
 
   it('remaps priority=urgent to high', () => {
