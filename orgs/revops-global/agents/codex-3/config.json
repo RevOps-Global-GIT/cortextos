@@ -1,12 +1,12 @@
 {
   "agent_name": "codex-3",
-  "enabled": false,
+  "enabled": true,
   "runtime": "codex-app-server",
   "model": "gpt-5.5",
   "startup_delay": 0,
   "max_session_seconds": 255600,
   "max_crashes_per_day": 10,
-  "working_directory": "",
+  "working_directory": "/home/cortextos/cortextos/orgs/revops-global/agents/codex-3",
   "timezone": "America/Los_Angeles",
   "crons": [
     {
