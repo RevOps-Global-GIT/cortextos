@@ -456,7 +456,7 @@ export function migrateRetryQueueConstraints(): void {
 
     const needsPriority = priority !== undefined && !RGOS_VALID_PRIORITIES.has(priority);
     const needsStatus = status !== undefined && !RGOS_VALID_STATUSES.has(status);
-    const needsBlockerStatus = status !== 'blocked' && status !== 'completed' && status !== 'cancelled' && isRowBlockerLike(entry.row);
+    const needsBlockerStatus = shouldForceBlockerStatus(status) && isRowBlockerLike(entry.row);
 
     if (!needsPriority && !needsStatus && !needsBlockerStatus) return entry;
 
@@ -621,11 +621,18 @@ function isRowBlockerLike(row: Record<string, unknown>): boolean {
     || (Array.isArray(blockedBy) && blockedBy.length > 0);
 }
 
+function shouldForceBlockerStatus(status: string | undefined): boolean {
+  return status === undefined
+    || status === 'pending'
+    || status === 'proposed'
+    || status === 'approved'
+    || status === 'blocked';
+}
+
 function mapTaskStatus(task: Task): string {
   if (
     isTaskBlockerLike(task)
-    && task.status !== 'completed'
-    && task.status !== 'cancelled'
+    && shouldForceBlockerStatus(task.status)
   ) {
     return 'blocked';
   }
