@@ -13,6 +13,7 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync } from "node:fs";
+import { hostname } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -87,7 +88,7 @@ function sendFailureAlert(detail) {
   const text = [
     "OB1 Daily Vignette failed on VM.",
     `Date: ${today}`,
-    `Host: ${process.env.HOSTNAME ?? "unknown"}`,
+    `Host: ${hostname()}`,
     detail,
   ].join("\n");
 
@@ -107,8 +108,13 @@ function sendFailureAlert(detail) {
     JSON.stringify({ chat_id: chatId, text }),
   ], { stdio: "pipe", env });
 
+  const body = result.stdout?.toString("utf8") ?? "";
   if (result.status !== 0) {
     log(`WARN: Telegram alert failed with status ${result.status ?? "unknown"}.`);
+  } else if (!body.includes('"ok":true')) {
+    log("WARN: Telegram alert request completed, but Telegram did not return ok=true.");
+  } else {
+    log("Telegram failure alert sent.");
   }
 }
 
