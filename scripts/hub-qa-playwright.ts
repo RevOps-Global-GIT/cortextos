@@ -32,6 +32,13 @@ const getArg = (flag: string, def = '') => {
 };
 
 const targetPage   = getArg('--page', '/time');
+
+// Operator-console routes intentionally render item-level Stale badges (per-agent
+// heartbeat chips, Voice Bridge idle, task work-state) as operator state — not surface
+// staleness. The page-health DOM stale-badge heuristic is route-scoped off for these
+// (see detectStaleness `operatorConsole`); fleet heartbeat health is monitored separately
+// via orch_agents and surface freshness by carded CHECK 5 Timestamp freshness.
+const OPERATOR_CONSOLE_ROUTES = new Set<string>(['/app/orchestrator']);
 const userEmail    = getArg('--user', 'greg@revopsglobal.com');
 const noSend       = argv.includes('--no-send');
 const sessionFile  = getArg('--session-file', '');
@@ -5135,7 +5142,14 @@ async function collectPageHealthIssues(
     5000,
     [] as string[],
   );
-  const staleness = detectStaleness(statusLabels, bodyText);
+  // Operator-console routes (e.g. /app/orchestrator) render by-design item-level Stale
+  // badges (Voice Bridge idle, task work-state, per-agent heartbeat chips). On those
+  // routes the per-entity badge heuristic is suppressed — fleet heartbeat staleness is
+  // monitored separately via orch_agents and surface freshness by carded CHECK 5 — while
+  // a genuine surface-wide "Last synced N ago" data banner still flags.
+  const staleness = detectStaleness(statusLabels, bodyText, {
+    operatorConsole: OPERATOR_CONSOLE_ROUTES.has(targetPage),
+  });
   if (staleness.stale) {
     issues.push({ kind: 'staleness', severity: 'warning', detail: staleness.detail ?? 'stale status label detected' });
   }
