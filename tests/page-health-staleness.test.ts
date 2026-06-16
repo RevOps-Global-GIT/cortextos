@@ -71,4 +71,38 @@ describe('page-health staleness detection', () => {
       expect(detectStaleness([], 'Companies Acme acme.com 120 contacts').stale).toBe(false);
     });
   });
+
+  // ---- Operator-console route policy (/app/orchestrator) ----
+  // These surfaces render by-design item-level Stale badges (per-agent heartbeat chips,
+  // Voice Bridge idle, task work-state). The DOM stale-badge heuristic is suppressed there
+  // (opts.operatorConsole), while a genuine surface-wide "Last synced N ago" data banner
+  // still flags. Fleet heartbeat staleness is monitored separately (orch_agents) and surface
+  // freshness by the carded CHECK 5 Timestamp freshness — so suppression loses no coverage.
+  describe('operator-console route policy (false-positive guard for by-design item badges)', () => {
+    const OPS = { operatorConsole: true } as const;
+
+    it('does NOT flag a bare "Stale" badge (Voice Bridge idle / task work-state)', () => {
+      // Same input that DOES flag on a data-list route (asserted above) must NOT flag here.
+      expect(detectStaleness(['Stale'], FLEET_TASKS_BODY).stale).toBe(true); // data-list (default)
+      expect(detectStaleness(['Stale'], FLEET_TASKS_BODY, OPS).stale).toBe(false); // operator-console
+    });
+
+    it('does NOT flag a per-agent "Stale heartbeat" chip (fleet health monitored separately)', () => {
+      expect(detectStaleness(['Stale heartbeat'], '', OPS).stale).toBe(false);
+    });
+
+    it('does NOT flag a "Stale agents (no heartbeat 30m+)" status label', () => {
+      expect(detectStaleness(['Stale agents (no heartbeat 30m+)'], '', OPS).stale).toBe(false);
+    });
+
+    it('does NOT flag an explicit "Nd stale" per-agent heartbeat badge in body', () => {
+      expect(detectStaleness([], 'cortexOS 6d stale 8 active', OPS).stale).toBe(false);
+    });
+
+    it('STILL flags a genuine surface-wide "Last synced N ago" data-source banner', () => {
+      const r = detectStaleness(['Last synced 6 days ago'], '', OPS);
+      expect(r.stale).toBe(true);
+      expect(r.detail).toMatch(/last synced 6 days ago/i);
+    });
+  });
 });
