@@ -3139,7 +3139,11 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'DEFERRED', evidence: 'No tasks in orch_tasks — nothing to assert' });
         } else {
-          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed', 'blocked']);
+          // Source of truth: TaskStatus union in rgos orchestrator.ts (proposed, awaiting_approval,
+          // approved, scheduled, in_progress, review, completed, rejected, cancelled, blocked,
+          // needs_person, waiting_approval) plus bus-side mirror values (pending, failed) that also
+          // land in orch_tasks. Keep this superset aligned with orchestrator.ts when statuses change.
+          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed', 'blocked', 'needs_person', 'awaiting_approval', 'scheduled', 'rejected', 'waiting_approval']);
           const invalid = rows.filter(r => !r.status || !VALID_STATUSES.has(r.status));
           if (invalid.length > 0) {
             const sample = invalid.slice(0, 5).map(r => `${r.id}:${r.status}`).join(', ');
