@@ -18,6 +18,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { detectStaleness, STATUS_LABEL_SELECTORS } from './page-health-staleness';
+import { VALID_TASK_STATUSES } from './page-health-task-statuses';
 
 // ---------------------------------------------------------------------------
 // Args
@@ -3139,8 +3140,7 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
         if (!rows || rows.length === 0) {
           results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'DEFERRED', evidence: 'No tasks in orch_tasks — nothing to assert' });
         } else {
-          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed', 'blocked']);
-          const invalid = rows.filter(r => !r.status || !VALID_STATUSES.has(r.status));
+          const invalid = rows.filter(r => !r.status || !VALID_TASK_STATUSES.has(r.status));
           if (invalid.length > 0) {
             const sample = invalid.slice(0, 5).map(r => `${r.id}:${r.status}`).join(', ');
             results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'FAIL', evidence: `${invalid.length}/${rows.length} tasks have invalid/null status. Sample: ${sample}` });
