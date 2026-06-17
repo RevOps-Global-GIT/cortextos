@@ -15,6 +15,7 @@ Self-hosted LinkedIn engagement service running on the Linux server. Uses Playwr
 |---|---|---|---|
 | `SUPABASE_URL` | yes | — | Supabase project URL |
 | `SUPABASE_KEY` | yes | — | Supabase service-role key |
+| `POSTER_LINKEDIN_MODE` | no | `manual` | `manual` starts health/heartbeat only and never opens LinkedIn. `browser` explicitly enables the legacy Playwright browser path. |
 | `PROFILE_DIR` | no | `/var/lib/linkedin-poster/profiles/default` | Chromium profile directory |
 | `USER_ID` | no | `default` | Logical user identifier (used in heartbeat agent_name) |
 | `SENDER_NAME` | no | `LinkedIn Poster` | Display name for logs |
@@ -27,7 +28,7 @@ Self-hosted LinkedIn engagement service running on the Linux server. Uses Playwr
 npm install
 npm run build
 
-# Per-user instance
+# Safe default: health/heartbeat only, no LinkedIn browser automation
 SUPABASE_URL=... SUPABASE_KEY=... \
 PROFILE_DIR=/var/lib/linkedin-poster/profiles/greg \
 USER_ID=greg \
@@ -35,7 +36,11 @@ SENDER_NAME="Greg Harned" \
 npm start
 ```
 
-## Seeding a Login Profile (P2 - login CLI)
+To run the legacy automated browser path, `POSTER_LINKEDIN_MODE=browser` must be set explicitly. Do not enable it for Greg's LinkedIn account while the account has any restriction/checkpoint history.
+
+## Seeding a Login Profile (deprecated for LinkedIn recovery)
+
+Do not use the Playwright login CLI to recover LinkedIn sessions. LinkedIn can flag browser automation during login or checkpoint flows. Safe recovery must be user-controlled in regular Chrome, with automation disabled until a reviewed manual export/import path exists.
 
 Run on an approved Orgo/Codex-CU browser lane to seed a fresh profile, validate it, and rsync to the server. macOS execution is blocked unless an explicit approved Mac fallback sets `ALLOW_MAC_BROWSER_AUTOMATION=1` and `ORGO_FAILURE_ARTIFACT`.
 

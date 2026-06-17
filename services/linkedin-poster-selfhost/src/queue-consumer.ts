@@ -58,6 +58,11 @@ export class QueueConsumer {
   }
 
   start(): void {
+    if (process.env['POSTER_LINKEDIN_MODE'] !== 'browser') {
+      console.error('[queue] POSTER_LINKEDIN_MODE is not browser — consumers disabled');
+      return;
+    }
+
     // Fix 3: Kill-switch — set POSTER_KILL_SWITCH=true (or 1) to halt the consumer immediately.
     // Can be applied via systemd override without restarting the full service.
     const killSwitch = process.env['POSTER_KILL_SWITCH'];
@@ -238,9 +243,8 @@ export class QueueConsumer {
             }
 
             // Fix 2: Idempotency pre-check — abort if this draft was already published.
-            // The jobs table claim is the durable in-flight marker here. content_drafts.status
-            // only allows pending/approved/published/rejected in production, so do not invent
-            // an intermediate draft status that the DB rejects.
+            // Atomically flip to 'publishing' (WHERE status='approved') so a concurrent claimer
+            // will also abort. On publish failure the finally block flips back to 'approved'.
             const contentDraftId = payload['content_draft_id'] as string | undefined;
             if (contentDraftId) {
               const { data: draft, error: draftErr } = await this.supabase
@@ -255,7 +259,23 @@ export class QueueConsumer {
               if (draft?.status !== 'approved') {
                 throw new Error(`idempotency_guard: draft ${contentDraftId.slice(0, 8)} is '${draft?.status}', not 'approved' — skipping`);
               }
-              console.log(`[queue/jobs] draft ${contentDraftId.slice(0, 8)} approved; job claim is publish lock`);
+
+              // Atomically claim the draft by flipping to 'publishing'.
+              // If another process already flipped it, the WHERE status='approved' matches 0 rows.
+              const { data: flippedRows, error: flipErr } = await this.supabase
+                .from('content_drafts')
+                .update({ status: 'publishing' })
+                .eq('id', contentDraftId)
+                .eq('status', 'approved')
+                .select('id');
+
+              if (flipErr) {
+                throw new Error(`idempotency_guard: 'publishing' flip failed for ${contentDraftId.slice(0, 8)}: ${flipErr.message}`);
+              }
+              if (!flippedRows || flippedRows.length === 0) {
+                throw new Error(`idempotency_guard: draft ${contentDraftId.slice(0, 8)} claimed by another process — skipping`);
+              }
+              console.log(`[queue/jobs] draft ${contentDraftId.slice(0, 8)} → publishing`);
             }
 
             let imagePaths: string[] | undefined;
@@ -271,7 +291,15 @@ export class QueueConsumer {
 
             const res = await this.dispatch('/post', { postText, imagePaths });
             if (!res['success']) {
-              if (contentDraftId) console.log(`[queue/jobs] publish failed — draft ${contentDraftId.slice(0, 8)} remains approved (retryable)`);
+              // Flip draft back to 'approved' so it can be retried
+              if (contentDraftId) {
+                await this.supabase
+                  .from('content_drafts')
+                  .update({ status: 'approved' })
+                  .eq('id', contentDraftId)
+                  .eq('status', 'publishing');
+                console.log(`[queue/jobs] publish failed — draft ${contentDraftId.slice(0, 8)} → approved (retryable)`);
+              }
               throw new Error((res['error'] as string | undefined) ?? 'publish_post failed');
             }
 

@@ -17,6 +17,7 @@ import {
 } from './actions.js';
 import { sendHeartbeat } from './heartbeat.js';
 import { QueueConsumer } from './queue-consumer.js';
+import { getLinkedInRuntimePolicy, manualModeResponse } from './policy.js';
 
 // ---------------------------------------------------------------------------
 // Config from environment
@@ -39,14 +40,15 @@ const config: PosterConfig = {
   port: parseInt(process.env['PORT'] ?? '3100', 10),
 };
 
+const runtimePolicy = getLinkedInRuntimePolicy();
+
 // ---------------------------------------------------------------------------
 // Runtime state
 // ---------------------------------------------------------------------------
 
-const browser = new BrowserManager(config);
+const browser = runtimePolicy.browserEnabled ? new BrowserManager(config) : null;
 let inFlight = false;
 let lastActionAt = 0;
-let lastBrowserHealthy = true;
 const MIN_GAP_MS = 30_000;
 
 // ---------------------------------------------------------------------------
@@ -117,24 +119,27 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
   // Health / readiness
   if (url === '/health' && method === 'GET') {
-    if (inFlight || batchRunning) {
-      send(res, 200, {
-        ok: true,
-        userId: config.userId,
-        busy: true,
-        browserHealthy: lastBrowserHealthy,
-        healthCheckSkipped: 'browser_action_in_flight',
-      });
+    if (!browser) {
+      send(res, 503, manualModeResponse(runtimePolicy, config.userId));
       return;
     }
     const healthy = await browser.checkHealth();
-    lastBrowserHealthy = healthy;
-    send(res, healthy ? 200 : 503, { ok: healthy, userId: config.userId });
+    send(res, healthy ? 200 : 503, {
+      ok: healthy,
+      userId: config.userId,
+      mode: runtimePolicy.mode,
+      browser: browser.getLastHealth(),
+    });
     return;
   }
 
   if (method !== 'POST') {
     send(res, 405, { error: 'Method not allowed' });
+    return;
+  }
+
+  if (!browser) {
+    send(res, 423, manualModeResponse(runtimePolicy, config.userId));
     return;
   }
 
@@ -146,7 +151,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     return;
   }
 
-  const page = browser.getPage();
+  let page;
+  try {
+    page = browser.getPage();
+  } catch (err) {
+    send(res, 423, { success: false, error: (err as Error).message });
+    return;
+  }
 
   switch (url) {
     case '/comment': {
@@ -179,15 +190,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
         send(res, 429, { error: 'Another action is in flight — retry in a moment' });
         break;
       }
-      inFlight = true;
       try {
         const posts = await discoverLinkedInPosts(page, keywords, limit ?? 10);
-        lastActionAt = Date.now();
         send(res, 200, { posts, count: posts.length });
       } catch (err) {
         send(res, 500, { error: (err as Error).message });
-      } finally {
-        inFlight = false;
       }
       break;
     }
@@ -271,6 +278,11 @@ function startEngageBatchScheduler(): void {
     lastBatchWindow = windowKey;
 
     try {
+      if (!browser) {
+        console.error('[engage-batch-sched] Browser unavailable — scheduler disabled');
+        return;
+      }
+
       const keywords = await pickBatchKeywords(config.supabaseUrl, config.supabaseKey, 4);
       console.log(`[engage-batch-sched] Keywords: ${keywords.join(', ')}`);
 
@@ -358,18 +370,18 @@ async function runHeartbeatLoop(): Promise<void> {
 
   const tick = async () => {
     try {
-      const busy = inFlight || batchRunning;
-      const healthy = busy ? lastBrowserHealthy : await browser.checkHealth();
-      lastBrowserHealthy = healthy;
+      const healthy = browser ? await browser.checkHealth() : false;
       await sendHeartbeat(config, {
         agentName: `linkedin-poster-selfhost-${config.userId}`,
         browserHealthy: healthy,
-        status: busy ? 'busy' : 'idle',
+        status: !runtimePolicy.browserEnabled ? 'error' : inFlight ? 'busy' : 'idle',
         profilePath: config.profileDir,
         metadata: {
           senderName: config.senderName,
           lastActionAt,
-          ...(busy ? { healthCheckSkipped: 'browser_action_in_flight' } : {}),
+          ...runtimePolicy.metadata,
+          ...(!runtimePolicy.browserEnabled ? { reason: runtimePolicy.reason } : {}),
+          ...(browser ? { browserHealth: browser.getLastHealth() } : {}),
         },
       });
     } catch (err) {
@@ -386,9 +398,13 @@ async function runHeartbeatLoop(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
-  await browser.init();
+  if (runtimePolicy.browserEnabled && browser) {
+    await browser.init();
+  } else {
+    console.error(`[main] ${runtimePolicy.reason} — starting health/heartbeat server without browser, queue consumers, or discovery scheduler`);
+  }
 
-  const queue = startQueueConsumer();
+  const queue = runtimePolicy.browserEnabled ? startQueueConsumer() : null;
 
   const server = createServer((req, res) => {
     handleRequest(req, res).catch((err) => {
@@ -405,14 +421,16 @@ async function main(): Promise<void> {
   await runHeartbeatLoop();
 
   // Engagement batch scheduler — replaces engage-batch-local.mjs on Mac
-  startEngageBatchScheduler();
+  if (runtimePolicy.browserEnabled) {
+    startEngageBatchScheduler();
+  }
 
   // Graceful shutdown
   const shutdown = async () => {
     console.log('[server] Shutting down...');
-    queue.stop();
+    queue?.stop();
     server.close();
-    await browser.close();
+    await browser?.close();
     process.exit(0);
   };
 

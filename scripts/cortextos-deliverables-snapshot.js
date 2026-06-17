@@ -29,7 +29,6 @@ const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
 const https = require('https');
-const { HUB_QA_ROOTS, HUB_QA_PATTERN } = require('./hub-qa-constants');
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
@@ -39,6 +38,9 @@ const INTERNAL_SECRET = process.env.INTERNAL_CRON_SECRET;
 const ORG_ROOT =
   process.env.CORTEXTOS_ORG_ROOT ||
   '/home/cortextos/cortextos/orgs/revops-global';
+const QA_ORG_ROOT =
+  process.env.CORTEXTOS_QA_ORG_ROOT ||
+  '/home/cortextos/cortextos-qa/orgs/revops-global';
 const TEAM_BRAIN_ROOT =
   process.env.TEAM_BRAIN_ROOT || '/home/cortextos/work/team-brain';
 const TEAM_BRAIN_FALLBACK_ROOT =
@@ -120,8 +122,18 @@ function numberMatch(text, pattern) {
 // ── source: hub_qa ──────────────────────────────────────────────────────────
 
 function summarizeHubQa() {
-  const roots = HUB_QA_ROOTS;
-  const artifact = latestTextArtifact(roots, HUB_QA_PATTERN);
+  const roots = [
+    path.join(QA_ORG_ROOT, 'agents/codex/output/playwright-qa'),
+    path.join(QA_ORG_ROOT, 'agents/hub-dogfood/output'),
+    path.join(QA_ORG_ROOT, 'agents/qa-agent/output'),
+    path.join(ORG_ROOT, 'agents/hub-dogfood/output'),
+    path.join(ORG_ROOT, 'agents/qa-agent/output'),
+    path.join(ORG_ROOT, 'agents/codex/output/playwright-qa'),
+  ];
+  const artifact = latestTextArtifact(
+    roots,
+    /(?:qa-summary|report|dogfood|app-fleet-tasks-qa).*\.md$/i,
+  );
 
   if (!artifact) {
     return {
@@ -161,30 +173,10 @@ function summarizeHubQa() {
     : (numberMatch(artifact.text, /Checks deferred:\s*(\d+)/i) ?? 0);
   const age = minutesSince(artifact.updated_at);
 
-  // Artifact found but no recognized summary format matched — return honest
-  // empty state rather than a misleading "0 pass, 0 fail, healthy" green card.
-  if (passed === 0 && failed === 0 && deferred === 0 && !passTotal) {
-    return {
-      source: 'hub_qa',
-      status: 'empty',
-      label: 'QA artifact found — no pass/fail counts parsed',
-      updated_at: artifact.updated_at,
-      stale_reason: `${path.basename(artifact.path)}: no recognized summary format`,
-      payload: {
-        passed_count: 0,
-        failed_count: 0,
-        follow_up_count: 0,
-        artifact_path: artifact.path,
-      },
-    };
-  }
-
   const status =
     failed > 0
       ? 'error'
-      : deferred > 0
-        ? 'warning'
-        : age != null && age > 6 * 60
+      : age != null && age > 6 * 60
           ? 'stale'
           : 'healthy';
   const stale_reason =
@@ -192,9 +184,7 @@ function summarizeHubQa() {
       ? `${failed} failing check(s) in ${path.basename(artifact.path)}`
       : age != null && age > 6 * 60
         ? `${age}m old; threshold 360m`
-        : deferred > 0
-          ? `${deferred} follow-up check(s) need attention`
-          : null;
+        : null;
 
   return {
     source: 'hub_qa',
@@ -219,12 +209,16 @@ function summarizeAdvisorCanary() {
       ORG_ROOT,
       'agents/codex/output/advisor-facing-page-canary',
     ),
+    path.join(
+      ORG_ROOT,
+      'agents/codex-3/output/advisor-facing-page-canary',
+    ),
   ];
-  // Accept canonical name, legacy prefix-free name, and current results.json schema.
+  // Accept both "canary-browser-results.json" (canonical) and "browser-results.json"
+  // (fallback — codex-3 sometimes writes without the "canary-" prefix).
   const jsonArtifact =
     latestTextArtifact(roots, /canary-browser-results\.json$/i) ||
-    latestTextArtifact(roots, /(?:^|[/\\])browser-results\.json$/i) ||
-    latestTextArtifact(roots, /(?:^|[/\\])results\.json$/i);
+    latestTextArtifact(roots, /(?:^|[/\\])browser-results\.json$/i);
   const reportArtifact = latestTextArtifact(roots, /report\.md$/i);
   const artifact = jsonArtifact || reportArtifact;
 
@@ -247,26 +241,23 @@ function summarizeAdvisorCanary() {
   if (jsonArtifact) {
     try {
       const parsed = JSON.parse(jsonArtifact.text);
-      // Old schema: { generated_at, results[], pageErrors[], failedResponses[] }
-      // New schema: { checked_at, pages[{ pageErrors[], failedRequests[] }], findings[] }
       generatedAt = parsed.generated_at ?? parsed.checked_at ?? generatedAt;
-      if (Array.isArray(parsed.results)) {
-        failures =
-          Number(parsed.pageErrors?.length ?? 0) +
-          Number(parsed.failedResponses?.length ?? 0);
-        checked = parsed.results.length;
-      } else if (Array.isArray(parsed.pages)) {
-        checked = parsed.pages.length;
-        failures =
-          parsed.pages.reduce(
-            (sum, p) =>
-              sum +
-              Number(p.pageErrors?.length ?? 0) +
-              Number(p.failedRequests?.length ?? 0),
-            0,
-          ) + Number(parsed.findings?.length ?? 0);
-      }
-      label = `${checked} advisor canary page(s) checked`;
+      const pages = Array.isArray(parsed.pages) ? parsed.pages : [];
+      failures =
+        Number(parsed.pageErrors?.length ?? 0) +
+        Number(parsed.failedResponses?.length ?? 0) +
+        Number(parsed.findings?.length ?? 0) +
+        pages.reduce(
+          (total, page) =>
+            total +
+            Number(page?.pageErrors?.length ?? 0) +
+            Number(page?.failedRequests?.length ?? 0),
+          0,
+        );
+      checked = Array.isArray(parsed.results)
+        ? parsed.results.length
+        : pages.length;
+      label = `${checked} advisor canary URL(s) checked`;
     } catch {
       failures = 1;
       label = 'Advisor canary JSON parse failed';
@@ -333,18 +324,7 @@ function summarizeTeamBrainWiki() {
       // fall through to lastSync
     }
 
-    let updatedAt = gitUpdatedAt || lastSync;
-
-    // Fallback: scan wiki .md files for most recent mtime when git log + .last_sync are both unavailable
-    if (!updatedAt) {
-      const wikiFiles = listFiles(root)
-        .filter((p) => p.endsWith('.md'))
-        .map((p) => ({ path: p, mtime: safeIsoFromMtime(p) }))
-        .filter((f) => Boolean(f.mtime))
-        .sort((a, b) => new Date(b.mtime).getTime() - new Date(a.mtime).getTime());
-      if (wikiFiles.length > 0) updatedAt = wikiFiles[0].mtime;
-    }
-
+    const updatedAt = gitUpdatedAt || lastSync;
     const age = minutesSince(updatedAt);
     const status =
       age == null

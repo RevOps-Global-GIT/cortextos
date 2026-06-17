@@ -103,7 +103,7 @@
       "name": "agentops-hourly-dogfood",
       "type": "recurring",
       "interval": "1h",
-      "prompt": "Read prompts/cron-agentops-hourly-dogfood.md and execute one bounded AgentOps product/operator dogfood pass using Codex/Chrome-capable routes while Claude is constrained. Do not deploy, merge, post externally, or create duplicate tasks. Route/update scoped defects only, log results, and Telegram Greg only for P0/P1 or human-action blockers."
+      "prompt": "Read prompts/cron-agentops-hourly-dogfood.md and execute one bounded AgentOps product/operator dogfood pass using the full available QA stack. Claude remains available after Anthropic's -p cutover plan changed; do not treat the cutover as a blocker. Do not deploy, merge, post externally, or create duplicate tasks. Route/update scoped defects only, log results, and Telegram Greg only for P0/P1 or human-action blockers."
     },
     {
       "name": "deliverables-snapshot",
@@ -130,7 +130,7 @@
   "suppress_restart_telegram": true,
   "codex_account_pool": [
     {
-      "priority": 1,
+      "priority": 3,
       "label": "greg@revopsglobal.com personal primary",
       "email_or_workspace_label": "greg@revopsglobal.com",
       "product_surface": "Codex Desktop",
@@ -145,21 +145,7 @@
       "requires_human_approval": false
     },
     {
-      "priority": 2,
-      "label": "gregharned@gmail personal backup",
-      "email_or_workspace_label": "gregharned@gmail.com",
-      "product_surface": "Codex Desktop",
-      "tier": "Pro 20x",
-      "codex_home": "/home/cortextos/.codex-orchestrator-primary",
-      "status": "standby",
-      "intended_lanes": [
-        "backup-interface",
-        "standard-work"
-      ],
-      "requires_human_approval": false
-    },
-    {
-      "priority": 3,
+      "priority": 4,
       "label": "greg@revopsglobal.com work backup",
       "email_or_workspace_label": "greg@revopsglobal.com",
       "product_surface": "Codex Desktop",
@@ -169,6 +155,20 @@
       "intended_lanes": [
         "work-runtime",
         "backup-interface"
+      ],
+      "requires_human_approval": false
+    },
+    {
+      "priority": 5,
+      "label": "gregharned@gmail personal backup",
+      "email_or_workspace_label": "gregharned@gmail.com",
+      "product_surface": "Codex Desktop",
+      "tier": "Pro 20x",
+      "codex_home": "/home/cortextos/.codex-orchestrator-primary",
+      "status": "standby",
+      "intended_lanes": [
+        "backup-interface",
+        "standard-work"
       ],
       "requires_human_approval": false
     }
@@ -193,6 +193,40 @@
     "provider": "codex",
     "runtime": "codex-app-server",
     "model": "gpt-5.5",
-    "switched_at": "2026-06-13T14:11:16.496Z"
-  }
+    "switched_at": "2026-06-17T01:08:57.663Z"
+  },
+  "provider_priority_order": [
+    {
+      "priority": 1,
+      "provider": "claude",
+      "account": "Claude Max",
+      "home": "/home/cortextos/.claude"
+    },
+    {
+      "priority": 2,
+      "provider": "claude",
+      "account": "Claude Team",
+      "home": "/home/cortextos/.claude-team"
+    },
+    {
+      "priority": 3,
+      "provider": "codex",
+      "account": "greg@revopsglobal.com personal Codex",
+      "codex_home": "/home/cortextos/.codex-greg"
+    },
+    {
+      "priority": 4,
+      "provider": "codex",
+      "account": "greg@revopsglobal.com work Codex",
+      "codex_home": "/home/cortextos/.codex-work"
+    },
+    {
+      "priority": 5,
+      "provider": "codex",
+      "account": "gregharned@gmail.com personal Codex",
+      "codex_home": "/home/cortextos/.codex-orchestrator-primary"
+    }
+  ],
+  "provider_priority_note": "Greg corrected 2026-06-17: failover order is Claude Max > Claude Team > greg@revopsglobal.com personal Codex > greg@revopsglobal.com work Codex > gregharned@gmail.com personal Codex. Codex is fallback after Claude capacity is unavailable.",
+  "claude_team_orchestrator_note": "2026-06-17: Greg confirmed Claude Team has credits and should run orchestrator ahead of Codex. Set runtime=claude-code, home=/home/cortextos/.claude-team, model=claude-opus-4-7."
 }

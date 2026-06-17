@@ -1,0 +1,7 @@
+output/git-safety/pre-clean-staged-20260617T013715Z.patch
+output/git-safety/pre-clean-unstaged-20260617T013715Z.patch
+output/git-safety/pre-clean-untracked-20260617T013715Z.txt
+scripts/agentops-uptime-probe.js
+scripts/retired/ob1-hero-assertions.ts
+services/linkedin-poster-selfhost/src/policy.test.ts
+services/linkedin-poster-selfhost/src/policy.ts

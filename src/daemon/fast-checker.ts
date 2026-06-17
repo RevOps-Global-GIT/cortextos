@@ -6,12 +6,11 @@ import { createHash } from 'crypto';
 import { hardRestart } from '../bus/system.js';
 import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
 import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
+import { updateHeartbeat } from '../bus/heartbeat.js';
 import { updateApproval, listPendingApprovals, readApproval } from '../bus/approval.js';
-import { listTasks, recoverStaleInProgressTasks } from '../bus/task.js';
+import { listTasks } from '../bus/task.js';
 import { mirrorTaskToRgos, drainRetryQueue, isEnabled as isMirrorEnabled } from '../bus/rgos-mirror.js';
 import { AgentProcess } from './agent-process.js';
-import { DeadAirGuard, HOLDING_REPLY_TEXT, matchesUsageLimitBounce } from './dead-air-guard.js';
-import { logEvent } from '../bus/event.js';
 import type { TelegramAPI } from '../telegram/api.js';
 import { KEYS } from '../pty/inject.js';
 import { stripControlChars } from '../utils/validate.js';
@@ -26,45 +25,6 @@ import {
 } from './fast-checker-formatters.js';
 
 type LogFn = (msg: string) => void;
-
-/**
- * How long Tier 3 defers a context force-restart while the session is bouncing
- * on usage limits. Restarting a rate-limited session is pure thrash: the fresh
- * session burns rate-limited tokens on bootstrap, crosses the ctx threshold
- * again, and loops (session 62a6bac2: 5 rate-limit hits → 10 handoff cascades).
- * Deferring is safe because context cannot grow while turns are bouncing.
- */
-export const RATE_LIMIT_HANDOFF_BACKOFF_MS = 10 * 60_000;
-
-export type HandoffDeadlineAction =
-  | { action: 'skip'; reason: 'pressure-resolved' }
-  | { action: 'backoff'; nextDeadlineAt: number }
-  | { action: 'restart' };
-
-/**
- * Decide what an expired Tier 3 handoff deadline should do.
- *
- * - Context pressure already resolved (auto-compaction dropped usage below the
- *   handoff threshold, observed as low as 28%): skip the restart entirely and
- *   re-arm Tier 2 for a future climb.
- * - Session currently rate-limited: push the deadline back instead of
- *   restarting — the agent could not have cooperated with the handoff prompt.
- * - Otherwise: pressure persists and the agent ignored the prompt → restart.
- */
-export function resolveHandoffDeadlineAction(opts: {
-  now: number;
-  effectivePct: number;
-  handoffThreshold: number;
-  rateLimited: boolean;
-}): HandoffDeadlineAction {
-  if (opts.effectivePct < opts.handoffThreshold) {
-    return { action: 'skip', reason: 'pressure-resolved' };
-  }
-  if (opts.rateLimited) {
-    return { action: 'backoff', nextDeadlineAt: opts.now + RATE_LIMIT_HANDOFF_BACKOFF_MS };
-  }
-  return { action: 'restart' };
-}
 
 /**
  * Fast message checker for a single agent.
@@ -87,14 +47,7 @@ export class FastChecker {
   private telegramApi?: TelegramAPI;
   private chatId?: string;
   private allowedUserId?: number;
-  private daemonTelegramAlerts: boolean = true;
-  private org: string = 'unknown';
-
-  // Usage-limit dead-air guard: detects consecutive bounced turns and sends
-  // one cooldown-guarded holding reply so the user never gets silent dead air.
-  private deadAirGuard: DeadAirGuard = new DeadAirGuard();
-  // stdout.log byte offset at probe arm time; -1 = no armed probe.
-  private deadAirStdoutOffset: number = -1;
+  private codexAuthBlockedLoggedAt: number = 0;
 
   // External Telegram handler (set by daemon)
   private telegramMessages: Array<{ formatted: string; ackIds: string[] }> = [];
@@ -108,7 +61,6 @@ export class FastChecker {
 
   // Idle-session heartbeat watchdog
   private heartbeatTimer: NodeJS.Timeout | null = null;
-  private staleTaskRecoveryTimer: NodeJS.Timeout | null = null;
 
   // Poll-cycle stall watchdog + circuit breaker
   private pollCycleWatchdog: NodeJS.Timeout | null = null;
@@ -184,8 +136,6 @@ export class FastChecker {
       chatId?: string;
       allowedUserId?: number;
       gmailWatch?: { query: string; intervalMs: number };
-      daemonTelegramAlerts?: boolean;
-      org?: string;
     } = {},
   ) {
     this.agent = agent;
@@ -196,8 +146,6 @@ export class FastChecker {
     this.telegramApi = options.telegramApi;
     this.chatId = options.chatId;
     this.allowedUserId = options.allowedUserId;
-    this.daemonTelegramAlerts = options.daemonTelegramAlerts ?? true;
-    this.org = options.org ?? 'unknown';
 
     // Initialize persistent dedup
     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
@@ -266,26 +214,6 @@ export class FastChecker {
         if (err) this.log(`Heartbeat watchdog error: ${err.message}`);
       });
     }, HEARTBEAT_INTERVAL_MS);
-
-    // Stale-task recovery: hourly sweep (plus one at boot) that flips
-    // in_progress tasks untouched for 24h+ to blocked with blocker context.
-    // Without it a task claimed by a crashed agent sat in_progress forever.
-    const STALE_RECOVERY_INTERVAL_MS = 60 * 60 * 1000;
-    const runStaleRecovery = () => {
-      try {
-        const result = recoverStaleInProgressTasks(this.paths);
-        if (result.recovered.length > 0) {
-          this.log(`stale-task-recovery: blocked ${result.recovered.length} stale in_progress task(s): ${result.recovered.join(', ')}`);
-        }
-        for (const e of result.errors) {
-          this.log(`stale-task-recovery: failed for ${e.id}: ${e.error}`);
-        }
-      } catch (err) {
-        this.log(`stale-task-recovery error: ${err}`);
-      }
-    };
-    runStaleRecovery();
-    this.staleTaskRecoveryTimer = setInterval(runStaleRecovery, STALE_RECOVERY_INTERVAL_MS);
 
     // Poll-cycle stall watchdog: runs independently every 30s.
     // If pollCycle hasn't completed in 90s the loop is wedged — hard-restart.
@@ -385,7 +313,7 @@ export class FastChecker {
           `Halting auto-restart for ${resetMin}min — likely upstream issue. ` +
           `Check manually with: pm2 logs cortextos-daemon`,
         );
-        if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
+        if (this.telegramApi && this.chatId) {
           this.telegramApi
             .sendMessage(
               this.chatId,
@@ -463,10 +391,6 @@ export class FastChecker {
       clearInterval(this.pollCycleWatchdog);
       this.pollCycleWatchdog = null;
     }
-    if (this.staleTaskRecoveryTimer !== null) {
-      clearInterval(this.staleTaskRecoveryTimer);
-      this.staleTaskRecoveryTimer = null;
-    }
   }
 
   /**
@@ -509,6 +433,10 @@ export class FastChecker {
     let messageBlock = '';
     const ackIds: string[] = [];
 
+    if (await this.pauseIfCodexAuthBlocked()) {
+      return;
+    }
+
     // Process queued Telegram messages
     let hasTelegramMessage = false;
     while (this.telegramMessages.length > 0) {
@@ -546,7 +474,6 @@ export class FastChecker {
         // restart the typing indicator after Stop has cleared it.
         if (hasTelegramMessage) {
           this.lastMessageInjectedAt = Date.now();
-          this.armDeadAirProbe();
         }
         // Cooldown after injection (deliberate delay — not a blocker, not timed).
         await sleep(5000);
@@ -564,10 +491,6 @@ export class FastChecker {
     this.watchdogCheck();
     mark('watchdogCheck');
 
-    // Dead-air guard: detect usage-limit bounced turns after Telegram injection
-    this.checkDeadAir();
-    mark('checkDeadAir');
-
     // Gmail watch: check on configured interval (default 15 min)
     await this.checkGmailWatch();
     mark('checkGmailWatch');
@@ -579,82 +502,6 @@ export class FastChecker {
     // Context monitor: check usage thresholds and fire warnings/handoffs
     await this.checkContextStatus();
     mark('checkContextStatus');
-  }
-
-  /**
-   * Arm the dead-air probe after a Telegram message is injected: remember the
-   * current stdout.log size so checkDeadAir() only scans output produced after
-   * this injection.
-   */
-  private armDeadAirProbe(): void {
-    const now = Date.now();
-    this.deadAirGuard.onInjection(now);
-    const stdoutPath = join(this.paths.logDir, 'stdout.log');
-    try {
-      this.deadAirStdoutOffset = existsSync(stdoutPath) ? statSync(stdoutPath).size : 0;
-    } catch {
-      this.deadAirStdoutOffset = 0;
-    }
-  }
-
-  /**
-   * Tail stdout.log from the armed offset and feed new output to the guard.
-   * When the guard fires (N consecutive usage-limit bounces, cooldown clear),
-   * send ONE holding Telegram reply and log a bus event so the incident
-   * surfaces in the morning brief / Warden.
-   */
-  private checkDeadAir(): void {
-    if (this.deadAirStdoutOffset < 0) return;
-    const now = Date.now();
-
-    const stdoutPath = join(this.paths.logDir, 'stdout.log');
-    let newOutput = '';
-    try {
-      if (existsSync(stdoutPath)) {
-        const size = statSync(stdoutPath).size;
-        if (size < this.deadAirStdoutOffset) {
-          // Log rotated underneath us — restart scan from the top of the new file.
-          this.deadAirStdoutOffset = 0;
-        }
-        if (size > this.deadAirStdoutOffset) {
-          const fd = openSync(stdoutPath, 'r');
-          try {
-            // Cap each scan at 64 KB — bounce error text is short and recent.
-            const len = Math.min(size - this.deadAirStdoutOffset, 64 * 1024);
-            const buf = Buffer.alloc(len);
-            const bytesRead = readSync(fd, buf, 0, len, this.deadAirStdoutOffset);
-            newOutput = buf.toString('utf-8', 0, bytesRead);
-            this.deadAirStdoutOffset += bytesRead;
-          } finally {
-            closeSync(fd);
-          }
-        }
-      }
-    } catch {
-      // Unreadable log never blocks the poll cycle.
-    }
-
-    const fired = this.deadAirGuard.onOutput(newOutput, now);
-    if (!this.deadAirGuard.isArmed()) {
-      this.deadAirStdoutOffset = -1;
-    }
-    if (!fired) return;
-
-    const bounces = this.deadAirGuard.getConsecutiveBounces();
-    this.log(`Dead-air guard fired: ${bounces} consecutive usage-limit bounced turns — sending holding reply`);
-    // Sent even when daemonTelegramAlerts is off: this is conversation
-    // continuity for a user actively messaging this agent, not a proactive
-    // daemon alert.
-    if (this.telegramApi && this.chatId) {
-      this.telegramApi.sendMessage(this.chatId, HOLDING_REPLY_TEXT).catch(() => {});
-    }
-    try {
-      logEvent(this.paths, this.agent.name, this.org, 'action', 'degraded_responder_fired', 'warning', {
-        consecutive_bounces: bounces,
-      });
-    } catch (err) {
-      this.log(`Dead-air guard logEvent failed: ${err}`);
-    }
   }
 
   /**
@@ -718,7 +565,7 @@ export class FastChecker {
   private triggerHardRestart(reason: string): void {
     this.watchdogTriggered = true;
     this.lastHardRestartAt = Date.now();
-    if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
+    if (this.telegramApi && this.chatId) {
       this.telegramApi
         .sendMessage(this.chatId, `Got stuck (${reason}). Hard-restarting now.`)
         .catch(() => { /* non-critical */ });
@@ -843,7 +690,6 @@ export class FastChecker {
       if (!errMsg.includes('No OAuth token') && !errMsg.includes('accounts.json')) {
         this.log(`Usage check failed: ${errMsg}`);
       }
-      await this.runProviderFailoverMonitor('usage-check-error');
       return;
     }
 
@@ -885,10 +731,6 @@ export class FastChecker {
 
     this.log(`Usage tier transition: ${prevTier} → ${newTier} (${pct}%)`);
 
-    if (newTier === 2) {
-      await this.runProviderFailoverMonitor('usage-tier-critical');
-    }
-
     // 1. Send Telegram alert directly (no Claude wake needed)
     if (this.telegramApi && this.chatId) {
       this.telegramApi.sendMessage(this.chatId, msg).catch(() => { /* non-critical */ });
@@ -899,43 +741,6 @@ export class FastChecker {
       sendMessage(this.paths, 'fast-checker', this.agent.name, 'urgent', msg);
     } catch (err) {
       this.log(`Usage tier inbox write failed: ${err}`);
-    }
-  }
-
-  /**
-   * Provider failover monitor is a bus/control-plane command, not a prompt.
-   * It is intentionally invoked only by orchestrator's usage checker so a
-   * Claude cap can move the Telegram front door to Codex without waiting for
-   * the capped Claude session to process instructions.
-   */
-  private async runProviderFailoverMonitor(reason: string): Promise<void> {
-    if (this.agent.name !== 'orchestrator') return;
-    try {
-      const stdout = await new Promise<string>((resolve, reject) => {
-        execFile(
-          'cortextos',
-          ['bus', 'provider-failover-monitor', this.agent.name, '--json'],
-          {
-            timeout: this.STEP_HTTP_TIMEOUT_MS,
-            env: {
-              ...process.env,
-              CTX_AGENT_NAME: '',
-              CTX_SESSION_BYPASS: '1',
-            },
-          },
-          (err, out) => {
-            if (err) { reject(err); return; }
-            resolve(out);
-          },
-        );
-      });
-      const parsed = JSON.parse(stdout) as { applied?: boolean; plan?: { selectedProviderId?: string } };
-      this.log(
-        `Provider failover monitor (${reason}): ` +
-        `${parsed.applied ? 'applied' : 'no-op'}${parsed.plan?.selectedProviderId ? ` selected=${parsed.plan.selectedProviderId}` : ''}`,
-      );
-    } catch (err) {
-      this.log(`Provider failover monitor failed (${reason}): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1004,6 +809,26 @@ ${msg.text}
 Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.id}
 
 `;
+  }
+
+  private async pauseIfCodexAuthBlocked(): Promise<boolean> {
+    const config = this.agent.getConfig();
+    if (config.runtime !== 'codex-app-server') return false;
+
+    const recentOutput = this.agent.getOutputBuffer()?.getRecent(12000) ?? '';
+    const authBlocked = /refresh token was revoked|authentication token has been invalidated|codexErrorInfo["']?\s*:\s*["']?unauthorized|HTTP error:\s*401 Unauthorized/i.test(recentOutput);
+    if (!authBlocked) return false;
+
+    const now = Date.now();
+    if (now - this.codexAuthBlockedLoggedAt > 60_000) {
+      this.codexAuthBlockedLoggedAt = now;
+      this.log('Codex app-server auth is blocked (revoked/unauthorized token); pausing inbox delivery so messages are not ACKed without execution');
+      await updateHeartbeat(this.paths, this.agent.name, 'auth_action_required: Codex app-server token revoked; reauth required before dispatch', {
+        currentTask: '',
+      }).catch(err => this.log(`Codex auth-blocked heartbeat update failed: ${err}`));
+    }
+
+    return true;
   }
 
   /**
@@ -1733,18 +1558,6 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
   }
 
   /**
-   * Whether the tail of the PTY output shows a usage-limit turn bounce.
-   * Reuses the dead-air guard's bounce patterns (status-bar usage text does
-   * NOT match). Window is deliberately small: once the agent produces ~4KB of
-   * normal output past a bounce, it no longer counts as "currently limited".
-   * A quiet agent keeps matching, which is fine — deferral while idle is free
-   * because context cannot grow without processed turns.
-   */
-  private isRecentOutputRateLimited(): boolean {
-    return matchesUsageLimitBounce(this.agent.getOutputBuffer()?.getRecent(4000) ?? '');
-  }
-
-  /**
    * Context monitor — called on every poll cycle.
    * Reads context_status.json written by the statusLine bridge hook and takes
    * action when thresholds are crossed.
@@ -1822,28 +1635,8 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     const effectivePct = pct ?? (exceeds200k ? 101 : null);
     if (effectivePct === null) return;
 
-    // Tier 3: deadline exceeded — restart only if context pressure still exists
-    // and the session is not currently bouncing on usage limits. The deadline
-    // alone is not evidence the agent is stuck: auto-compaction may have already
-    // resolved the pressure, and a rate-limited agent cannot cooperate at all.
+    // Tier 3: deadline exceeded — force restart if agent ignored handoff prompt
     if (this.ctxHandoffDeadlineAt > 0 && now > this.ctxHandoffDeadlineAt) {
-      const decision = resolveHandoffDeadlineAction({
-        now,
-        effectivePct,
-        handoffThreshold: handoff,
-        rateLimited: this.isRecentOutputRateLimited(),
-      });
-      if (decision.action === 'skip') {
-        this.ctxHandoffDeadlineAt = 0;
-        this.ctxHandoffFiredAt = 0; // re-arm Tier 2 in case context climbs again
-        this.log(`Handoff deadline expired but ctx is ${Math.round(effectivePct)}% (< ${handoff}%) — pressure resolved, skipping restart`);
-        return;
-      }
-      if (decision.action === 'backoff') {
-        this.ctxHandoffDeadlineAt = decision.nextDeadlineAt;
-        this.log(`Handoff deadline expired at ${Math.round(effectivePct)}% but session is rate-limited — deferring restart ${Math.round(RATE_LIMIT_HANDOFF_BACKOFF_MS / 60_000)}min`);
-        return;
-      }
       this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
       this.ctxHandoffDeadlineAt = 0;
       this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within 5min`);
@@ -1870,13 +1663,6 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
         this.log(`Tier 0 would fire at ${Math.round(effectivePct)}% but session is only ${Math.round(sessionAge / 1000)}s old — skipping (boot-window guard)`);
         return; // do not latch — let the next poll reconsider after boot window
       }
-      // Rate-limit guard: a restart now would burn rate-limited tokens on
-      // bootstrap and immediately re-cross the threshold. Context cannot grow
-      // while turns bounce, so deferring is safe; next poll reconsiders.
-      if (this.isRecentOutputRateLimited()) {
-        this.log(`Tier 0 would fire at ${Math.round(effectivePct)}% but session is rate-limited — deferring (no latch)`);
-        return;
-      }
       const restartPlannedMarker = join(this.paths.stateDir, '.restart-planned');
       if (existsSync(restartPlannedMarker)) {
         let markerAge: number = Infinity;
@@ -1894,15 +1680,6 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
       this.ctxAutoresetFiredAt = now;
       const pctRound = Math.round(effectivePct);
       this.log(`Tier 0 auto-reset fired at ${pctRound}% (threshold ${autoreset}%)`);
-      try {
-        logEvent(this.paths, this.agent.name, this.org, 'action', 'context_autoreset_fired', 'warning', {
-          agent: this.agent.name,
-          used_percentage: pctRound,
-          threshold: autoreset,
-        });
-      } catch (err) {
-        this.log(`Tier 0 logEvent failed: ${err}`);
-      }
       this.runAutoresetSnapshot(`ctx auto-reset at ${pctRound}%`);
       // Reset context_status.json pre-emptively so the restarted session's
       // FastChecker does not immediately re-fire Tier 0 off the stale value.
@@ -1941,15 +1718,6 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
       const sessionAge = this.ctxSessionStartedAt > 0 ? now - this.ctxSessionStartedAt : Infinity;
       if (sessionAge >= 0 && sessionAge < 90_000) {
         // Do not latch ctxHandoffFiredAt — allow Tier 2 to fire once the session is settled.
-        return;
-      }
-
-      // Rate-limit guard: injecting the handoff prompt into a session whose
-      // turns are bouncing arms a 5-min deadline the agent cannot possibly meet,
-      // guaranteeing a Tier 3 force-restart. Defer without latching — context
-      // cannot grow while turns bounce, so Tier 2 fires once the limit lifts.
-      if (this.isRecentOutputRateLimited()) {
-        this.log(`Tier 2 would fire at ${Math.round(effectivePct)}% but session is rate-limited — deferring handoff prompt (no latch)`);
         return;
       }
 
@@ -2044,7 +1812,7 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
       this.saveCtxCircuit();
       const msg = `Context circuit breaker TRIPPED for ${this.agent.name}: 3 restarts in 15min. Watchdog paused 30min. Check logs/${this.agent.name}/restarts.log for details.`;
       this.log(msg);
-      if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
+      if (this.telegramApi && this.chatId) {
         this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
       }
       return;

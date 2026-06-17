@@ -1,0 +1,225 @@
+diff --git a/scripts/hub-qa-playwright.ts b/scripts/hub-qa-playwright.ts
+index a8ab80966..e262778ec 100644
+--- a/scripts/hub-qa-playwright.ts
++++ b/scripts/hub-qa-playwright.ts
+@@ -32,6 +32,13 @@ const getArg = (flag: string, def = '') => {
+ };
+ 
+ const targetPage   = getArg('--page', '/time');
++
++// Operator-console routes intentionally render item-level Stale badges (per-agent
++// heartbeat chips, Voice Bridge idle, task work-state) as operator state — not surface
++// staleness. The page-health DOM stale-badge heuristic is route-scoped off for these
++// (see detectStaleness `operatorConsole`); fleet heartbeat health is monitored separately
++// via orch_agents and surface freshness by carded CHECK 5 Timestamp freshness.
++const OPERATOR_CONSOLE_ROUTES = new Set<string>(['/app/orchestrator']);
+ const userEmail    = getArg('--user', 'greg@revopsglobal.com');
+ const noSend       = argv.includes('--no-send');
+ const sessionFile  = getArg('--session-file', '');
+@@ -5135,7 +5142,14 @@ async function collectPageHealthIssues(
+     5000,
+     [] as string[],
+   );
+-  const staleness = detectStaleness(statusLabels, bodyText);
++  // Operator-console routes (e.g. /app/orchestrator) render by-design item-level Stale
++  // badges (Voice Bridge idle, task work-state, per-agent heartbeat chips). On those
++  // routes the per-entity badge heuristic is suppressed — fleet heartbeat staleness is
++  // monitored separately via orch_agents and surface freshness by carded CHECK 5 — while
++  // a genuine surface-wide "Last synced N ago" data banner still flags.
++  const staleness = detectStaleness(statusLabels, bodyText, {
++    operatorConsole: OPERATOR_CONSOLE_ROUTES.has(targetPage),
++  });
+   if (staleness.stale) {
+     issues.push({ kind: 'staleness', severity: 'warning', detail: staleness.detail ?? 'stale status label detected' });
+   }
+diff --git a/scripts/page-health-staleness.ts b/scripts/page-health-staleness.ts
+index e35ed03e0..e237df69d 100644
+--- a/scripts/page-health-staleness.ts
++++ b/scripts/page-health-staleness.ts
+@@ -26,13 +26,19 @@ export const STALE_BADGE_PATTERNS: RegExp[] = [
+   /\b([3-9]\d|[1-9]\d{2,})h\s+stale\b/i,
+ ];
+ 
++// A surface-wide data-source freshness banner: "Last synced 6 days ago" — a relative
++// timestamp WITH sync-status context. Unlike a bare per-entity "Stale" chip, this signals
++// the WHOLE surface's data feed is stale, so it remains a real signal even on
++// operator-console routes (see detectStaleness `operatorConsole`).
++export const SURFACE_SYNC_STALENESS_PATTERN =
++  /\blast\s+(?:synced|updated|refreshed)\b[\s\S]{0,40}\b([2-9]|\d{2,})\s+(?:days?|weeks?|months?)\s+ago\b/i;
++
+ // Staleness expressed in a short status label (badge/chip/banner/aria-label).
+ export const STATUS_LABEL_STALENESS_PATTERNS: RegExp[] = [
+   /\bstale\b/i,
+   /\bout[- ]of[- ]date\b/i,
+   /\b(?:not|never)\s+synced\b/i,
+-  // "Last synced 6 days ago" — a relative timestamp WITH sync-status context.
+-  /\blast\s+(?:synced|updated|refreshed)\b[\s\S]{0,40}\b([2-9]|\d{2,})\s+(?:days?|weeks?|months?)\s+ago\b/i,
++  SURFACE_SYNC_STALENESS_PATTERN,
+ ];
+ 
+ // DOM selectors for short status/badge/banner elements (and aria-label/title carriers).
+@@ -52,6 +58,23 @@ export interface StalenessResult {
+   detail: string | null;
+ }
+ 
++export interface DetectStalenessOptions {
++  /**
++   * Operator-console routes (e.g. /app/orchestrator) intentionally render per-entity
++   * state badges: Voice Bridge "Stale" (no active Realtime socket), task work-state,
++   * and per-agent "Nd stale" heartbeat chips. These are item-level OPERATOR STATE,
++   * not surface-data staleness — fleet heartbeat health is monitored separately via
++   * orch_agents, and surface freshness is covered by the carded CHECK 5 Timestamp
++   * freshness. Treating every short "Stale" badge as surface staleness makes such a
++   * console permanently "warning", which trains operators to ignore the signal.
++   *
++   * When true, the per-entity badge heuristic is suppressed; only a genuine
++   * surface-wide "Last synced N ago" data-source banner (SURFACE_SYNC_STALENESS_PATTERN)
++   * still flags. Defaults to false (full data-list behavior).
++   */
++  operatorConsole?: boolean;
++}
++
+ function firstSnippet(text: string, patterns: RegExp[]): string | null {
+   for (const pattern of patterns) {
+     const match = text.match(pattern);
+@@ -72,7 +95,25 @@ function firstSnippet(text: string, patterns: RegExp[]): string | null {
+  * @param bodyText Full page innerText — scanned ONLY for the explicit "Nd stale"
+  *   badge form, which is unambiguous regardless of element.
+  */
+-export function detectStaleness(statusLabels: string[], bodyText: string): StalenessResult {
++export function detectStaleness(
++  statusLabels: string[],
++  bodyText: string,
++  opts: DetectStalenessOptions = {},
++): StalenessResult {
++  // Operator-console routes render by-design item-level Stale badges (Voice Bridge idle,
++  // task work-state, per-agent heartbeat chips). Suppress the per-entity heuristic — only
++  // a genuine surface-wide data-source sync banner counts here. Fleet heartbeat staleness
++  // is monitored separately (orch_agents) and surface freshness by carded CHECK 5.
++  if (opts.operatorConsole) {
++    for (const raw of statusLabels) {
++      const label = (raw ?? '').replace(/\s+/g, ' ').trim();
++      if (!label || label.length > MAX_STATUS_LABEL_LEN) continue;
++      const hit = firstSnippet(label, [SURFACE_SYNC_STALENESS_PATTERN]);
++      if (hit) return { stale: true, detail: hit };
++    }
++    return { stale: false, detail: null };
++  }
++
+   // 1. Explicit staleness badges anywhere on the page (unambiguous, structured form).
+   const badge = firstSnippet(bodyText, STALE_BADGE_PATTERNS);
+   if (badge) return { stale: true, detail: badge };
+diff --git a/tests/page-health-staleness.test.ts b/tests/page-health-staleness.test.ts
+new file mode 100644
+index 000000000..812da917a
+--- /dev/null
++++ b/tests/page-health-staleness.test.ts
+@@ -0,0 +1,108 @@
++import { describe, it, expect } from 'vitest';
++import { detectStaleness } from '../scripts/page-health-staleness';
++
++// Real fleet/tasks body content captured from a live page-health run: a tasks board
++// listing tasks with "2 days ago" relative ages. This previously tripped a permanent
++// false staleness warning, blocking the surface from ever going green.
++const FLEET_TASKS_BODY =
++  'theta Proposal 5: graceful partial finalization high Assigned: analyst 2 days ago ' +
++  'Weekly brain digest — 2026-06-01 to 2026-06-08 medium Assigned: analyst 2 days ago ' +
++  'Unstick auto-merge queue: clear memo-conflict false-positive in_progress 5 days ago';
++
++describe('page-health staleness detection', () => {
++  // ---- BLOCK direction: a real staleness signal MUST still flag ----
++  describe('flags genuine staleness (masking guard)', () => {
++    it('flags an explicit "Nd stale" badge in body text', () => {
++      const r = detectStaleness([], 'Data Sources Live — cortextOS 6d stale 8 active');
++      expect(r.stale).toBe(true);
++      expect(r.detail).toMatch(/6d stale/i);
++    });
++
++    it('flags an "Nh stale" badge in body text', () => {
++      expect(detectStaleness([], 'connector 36h stale').stale).toBe(true);
++    });
++
++    it('flags a "Stale" status chip', () => {
++      expect(detectStaleness(['Stale'], FLEET_TASKS_BODY).stale).toBe(true);
++    });
++
++    it('flags a "Stale heartbeat" aria-label', () => {
++      expect(detectStaleness(['Stale heartbeat'], '').stale).toBe(true);
++    });
++
++    it('flags a "Stale agents (no heartbeat 30m+)" status label', () => {
++      expect(detectStaleness(['Stale agents (no heartbeat 30m+)'], '').stale).toBe(true);
++    });
++
++    it('flags a "Last synced 6 days ago" sync banner', () => {
++      const r = detectStaleness(['Last synced 6 days ago'], '');
++      expect(r.stale).toBe(true);
++    });
++
++    it('flags an "out of date" status banner', () => {
++      expect(detectStaleness(['Source out of date'], '').stale).toBe(true);
++    });
++
++    it('flags a "Never synced" connector label', () => {
++      expect(detectStaleness(['Never synced'], '').stale).toBe(true);
++    });
++  });
++
++  // ---- PASS direction: listed content must NOT flag ----
++  describe('does not flag listed content (false-positive guard)', () => {
++    it('does NOT flag a tasks board listing "2 days ago" task ages', () => {
++      expect(detectStaleness([], FLEET_TASKS_BODY).stale).toBe(false);
++    });
++
++    it('does NOT flag a task TITLE containing the word "stale" (long, not a status chip)', () => {
++      const longTitle = 'Auto-recover stale in_progress tasks abandoned by dead agents';
++      expect(detectStaleness([longTitle], FLEET_TASKS_BODY).stale).toBe(false);
++    });
++
++    it('does NOT flag a short content label with a bare relative timestamp (no sync context)', () => {
++      expect(detectStaleness(['Created 3 days ago by analyst'], '').stale).toBe(false);
++    });
++
++    it('does NOT flag "N days ago" appearing only in body text', () => {
++      expect(detectStaleness([], 'updated 4 days ago in the activity feed').stale).toBe(false);
++    });
++
++    it('does NOT flag a clean page with no status labels', () => {
++      expect(detectStaleness([], 'Companies Acme acme.com 120 contacts').stale).toBe(false);
++    });
++  });
++
++  // ---- Operator-console route policy (/app/orchestrator) ----
++  // These surfaces render by-design item-level Stale badges (per-agent heartbeat chips,
++  // Voice Bridge idle, task work-state). The DOM stale-badge heuristic is suppressed there
++  // (opts.operatorConsole), while a genuine surface-wide "Last synced N ago" data banner
++  // still flags. Fleet heartbeat staleness is monitored separately (orch_agents) and surface
++  // freshness by the carded CHECK 5 Timestamp freshness — so suppression loses no coverage.
++  describe('operator-console route policy (false-positive guard for by-design item badges)', () => {
++    const OPS = { operatorConsole: true } as const;
++
++    it('does NOT flag a bare "Stale" badge (Voice Bridge idle / task work-state)', () => {
++      // Same input that DOES flag on a data-list route (asserted above) must NOT flag here.
++      expect(detectStaleness(['Stale'], FLEET_TASKS_BODY).stale).toBe(true); // data-list (default)
++      expect(detectStaleness(['Stale'], FLEET_TASKS_BODY, OPS).stale).toBe(false); // operator-console
++    });
++
++    it('does NOT flag a per-agent "Stale heartbeat" chip (fleet health monitored separately)', () => {
++      expect(detectStaleness(['Stale heartbeat'], '', OPS).stale).toBe(false);
++    });
++
++    it('does NOT flag a "Stale agents (no heartbeat 30m+)" status label', () => {
++      expect(detectStaleness(['Stale agents (no heartbeat 30m+)'], '', OPS).stale).toBe(false);
++    });
++
++    it('does NOT flag an explicit "Nd stale" per-agent heartbeat badge in body', () => {
++      expect(detectStaleness([], 'cortexOS 6d stale 8 active', OPS).stale).toBe(false);
++    });
++
++    it('STILL flags a genuine surface-wide "Last synced N ago" data-source banner', () => {
++      const r = detectStaleness(['Last synced 6 days ago'], '', OPS);
++      expect(r.stale).toBe(true);
++      expect(r.detail).toMatch(/last synced 6 days ago/i);
++    });
++  });
++});

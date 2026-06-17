@@ -15,6 +15,7 @@
 'use strict';
 
 const { execSync, execFileSync, spawnSync } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 const { checkPR, formatComment, postComment } = require('./memo-conflict-check');
 
@@ -285,6 +286,38 @@ function shouldSkipBody(body) {
   return SKIP_BODY_PATTERNS.some(p => p.test(body));
 }
 
+// Returns the id of a still-pending approval whose title/description references
+// this PR (by `#<number>` + the repo short name), or null. Held PRs must never
+// auto-merge ahead of an explicit approval gate.
+// (2026-06-16: PR #862 auto-merged while approval_1781598850 was still pending —
+// the cron had no approval-gate awareness. This closes that bypass.)
+function pendingApprovalForPR(repo, number, dir = path.join(CTX_ROOT, 'orgs', CTX_ORG, 'approvals', 'pending')) {
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  } catch {
+    return null; // no pending dir → nothing to gate on (best-effort, never blocks)
+  }
+  const repoShort = repo.split('/')[1] || repo;
+  const prRe = new RegExp(`#${number}\\b`);
+  for (const f of files) {
+    let appr;
+    try {
+      appr = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+    } catch {
+      continue;
+    }
+    // Files live under pending/ but double-check status so a stale/misfiled
+    // approved record can't block.
+    if (appr.status && appr.status !== 'pending') continue;
+    const text = `${appr.title || ''} ${appr.description || ''}`;
+    if (prRe.test(text) && text.includes(repoShort)) {
+      return appr.id || f.replace(/\.json$/, '');
+    }
+  }
+  return null;
+}
+
 function isWithinSettleWindow(updatedAt, nowMs = Date.now(), windowMs = SETTLE_WINDOW_MS) {
   const t = new Date(updatedAt).getTime();
   if (Number.isNaN(t)) return false;
@@ -445,6 +478,11 @@ async function main() {
         console.log(`[auto-merge] SKIP #${number} ${repo} — body contains skip signal`);
         continue;
       }
+      const heldByApproval = pendingApprovalForPR(repo, number);
+      if (heldByApproval) {
+        console.log(`[auto-merge] SKIP #${number} ${repo} — linked approval pending (${heldByApproval})`);
+        continue;
+      }
       if (mergeable !== 'MERGEABLE') {
         console.log(`[auto-merge] SKIP #${number} ${repo} — mergeable=${mergeable}`);
         continue;
@@ -549,6 +587,6 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
+  module.exports = { shouldSkipBody, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
 }
 

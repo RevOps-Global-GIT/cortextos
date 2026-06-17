@@ -105,6 +105,7 @@ DIRECT_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 USER_MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]+)?>")
+_last_source_activity_count = 0
 
 
 # -- env loading --------------------------------------------------------------
@@ -278,7 +279,7 @@ def build_user_map(token: str) -> Dict[str, str]:
 def mentions_greg(text: str) -> bool:
     if not text:
         return False
-    return f"<@{GREG_USER_ID}>" in text
+    return GREG_USER_ID in USER_MENTION_RE.findall(text)
 
 
 def is_question(text: str) -> bool:
@@ -310,24 +311,26 @@ def is_actionable_text(text: str) -> bool:
     return bool(text) and (is_question(text) or bool(ACTION_VERB_RE.search(text)))
 
 
-def oldest_unanswered_actionable(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Oldest actionable non-Greg message sent after Greg's last message, or None.
-
-    Evaluates every message in the conversation rather than only the newest:
-    a non-actionable follow-up (bare URL, "thanks") sent after a question must
-    not mask the question.
-    """
+def unanswered_candidates_after_greg(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Non-Greg, non-subtype messages sent after Greg's last message."""
     greg_last_ts = max(
         (float(m.get("ts") or 0) for m in messages if m.get("user") == GREG_USER_ID),
         default=0.0,
     )
-    candidates = [
+    return [
         m for m in messages
         if m.get("user")
         and m.get("user") != GREG_USER_ID
         and not m.get("subtype")
         and float(m.get("ts") or 0) > greg_last_ts
-        and is_actionable_text(m.get("text") or "")
+    ]
+
+
+def oldest_unanswered_actionable(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Oldest actionable non-Greg message sent after Greg's last message, or None."""
+    candidates = [
+        m for m in unanswered_candidates_after_greg(messages)
+        if is_actionable_text(m.get("text") or "")
     ]
     if not candidates:
         return None
@@ -469,6 +472,8 @@ def slack_search_mentions(token: str, since_seconds: int) -> List[Dict[str, Any]
 
 
 def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
+    global _last_source_activity_count
+    _last_source_activity_count = 0
     since_ts = time.time() - since_seconds
     scan_start = time.time()
     items: List[Dict[str, Any]] = []
@@ -518,21 +523,21 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
 
     for ch_id, ch_msgs in dm_by_channel.items():
         check_budget()
-        flag_msg = oldest_unanswered_actionable(ch_msgs)
-        if flag_msg is None:
-            continue  # answered, or only non-actionable messages outstanding
-        _dm_text = flag_msg.get("text") or ""
-        ch_name = f"DM:{user_name(flag_msg.get('user'))}"
-        hydrate_mentions(_dm_text)
-        items.append(build_item(
-            source="dm",
-            status="unanswered",
-            channel_id=ch_id,
-            channel_name=ch_name,
-            msg=flag_msg,
-            sender_name=user_name(flag_msg.get("user")),
-            user_lookup=user_cache,
-        ))
+        flag_msgs = unanswered_candidates_after_greg(ch_msgs)
+        _last_source_activity_count += len(flag_msgs)
+        for flag_msg in flag_msgs:
+            _dm_text = flag_msg.get("text") or ""
+            ch_name = f"DM:{user_name(flag_msg.get('user'))}"
+            hydrate_mentions(_dm_text)
+            items.append(build_item(
+                source="dm",
+                status="unanswered",
+                channel_id=ch_id,
+                channel_name=ch_name,
+                msg=flag_msg,
+                sender_name=user_name(flag_msg.get("user")),
+                user_lookup=user_cache,
+            ))
 
     check_budget()
 
@@ -540,6 +545,13 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
     # Replaces the previous 200-call conversations.history loop. Cuts API surface
     # from O(conversations) to O(mention-pages), eliminating the sustained 429 storm.
     search_matches = slack_search_mentions(token, since_seconds)
+    _last_source_activity_count += sum(
+        1
+        for m in search_matches
+        if m.get("user")
+        and m.get("user") != GREG_USER_ID
+        and not m.get("subtype")
+    )
 
     for m in search_matches:
         check_budget()
@@ -772,6 +784,14 @@ def main() -> int:
         print(f"[scanner] ERROR: rate_limited_budget_exceeded — {e}", file=sys.stderr)
         return 3
     print(f"[scanner] found {len(items)} outstanding items", file=sys.stderr)
+
+    if not items and _last_source_activity_count:
+        print(
+            "[scanner] ERROR: zero_items_with_source_activity — "
+            f"source_activity_count={_last_source_activity_count}",
+            file=sys.stderr,
+        )
+        return 4
 
     snapshot = write_snapshot(items, on_demand=args.on_demand)
 

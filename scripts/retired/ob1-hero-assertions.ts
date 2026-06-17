@@ -48,6 +48,7 @@ interface LatestJson {
   date?: string;
   image?: string;
   video?: string;
+  title?: string;
   cast?: Array<{ id: string; name: string; reference_image?: string }>;
   cast_members?: Array<{ id: string; name: string; reference_image?: string }>;
 }
@@ -68,6 +69,143 @@ async function httpHead(url: string): Promise<{ status: number; ok: boolean }> {
   });
 }
 
+async function fetchLatestJson(): Promise<LatestJson> {
+  const resp = await fetch(`${VIGNETTES_BASE}/latest.json`, { cache: 'no-store' });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return await resp.json() as LatestJson;
+}
+
+function estateToday(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
+function expectedDate(): string {
+  return getArg('--expected-date', process.env.OB1_HERO_EXPECTED_DATE || estateToday());
+}
+
+function formatPlaqueDate(iso: string): string {
+  const d = new Date(`${iso}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return iso.toUpperCase();
+  return d
+    .toLocaleDateString('en-US', { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' })
+    .toUpperCase()
+    .replace(/,/g, '');
+}
+
+async function addOb1AuthCookie(context: import('playwright').BrowserContext) {
+  const token = process.env.OB1_SESSION_TOKEN;
+  if (!token) return;
+
+  const base = new URL(BASE_URL);
+  await context.addCookies([
+    {
+      name: 'ob1-auth',
+      value: token,
+      domain: base.hostname,
+      path: '/',
+      httpOnly: true,
+      secure: base.protocol === 'https:',
+      sameSite: 'Lax',
+    },
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Check 0: freshness + rendered plaque date
+// ---------------------------------------------------------------------------
+
+async function checkFreshnessAndRenderedDate(): Promise<AssertionResult[]> {
+  const results: AssertionResult[] = [];
+  const expected = expectedDate();
+  let latest: LatestJson;
+
+  try {
+    latest = await fetchLatestJson();
+  } catch (e) {
+    return [{
+      check: '[FRESHNESS] latest.json fetch',
+      status: 'FAIL',
+      evidence: `Failed to fetch ${VIGNETTES_BASE}/latest.json: ${e}`,
+    }];
+  }
+
+  results.push({
+    check: '[FRESHNESS] latest.json date is today',
+    status: latest.date === expected ? 'PASS' : 'FAIL',
+    evidence: latest.date === expected
+      ? `latest.json date=${latest.date}`
+      : `latest.json date=${latest.date ?? '(missing)'}; expected ${expected}`,
+  });
+
+  if (latest.date !== expected) return results;
+
+  const token = process.env.OB1_SESSION_TOKEN;
+  if (!token) {
+    results.push({
+      check: '[FRESHNESS] authenticated hero plaque render',
+      status: 'SKIP',
+      evidence: 'OB1_SESSION_TOKEN is unset, so the authenticated home hero render could not be verified.',
+    });
+    return results;
+  }
+
+  const expectedPlaque = formatPlaqueDate(expected);
+  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  try {
+    const context = await browser.newContext({
+      baseURL: BASE_URL,
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+      userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+      serviceWorkers: 'block',
+    });
+    await addOb1AuthCookie(context);
+    const page = await context.newPage();
+
+    await page.goto(BASE_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const hero = page.locator('.daily-vignette-hero').first();
+    const text = await hero.innerText({ timeout: 20000 });
+    const screenshotPath = `${OUT_DIR}/ob1-hero-render-${expected}.png`;
+    await page.screenshot({ path: screenshotPath, fullPage: false });
+
+    const hasPlaque = text.includes(expectedPlaque);
+    results.push({
+      check: '[FRESHNESS] authenticated hero plaque date',
+      status: hasPlaque ? 'PASS' : 'FAIL',
+      evidence: hasPlaque
+        ? `Rendered plaque ${expectedPlaque}; screenshot=${screenshotPath}`
+        : `Expected rendered plaque ${expectedPlaque}; hero text was: ${text.replace(/\s+/g, ' ').slice(0, 240)}`,
+    });
+
+    if (latest.title) {
+      const hasTitle = text.includes(latest.title);
+      results.push({
+        check: '[FRESHNESS] authenticated hero title matches latest.json',
+        status: hasTitle ? 'PASS' : 'FAIL',
+        evidence: hasTitle
+          ? `Rendered title "${latest.title}"`
+          : `Expected title "${latest.title}"; hero text was: ${text.replace(/\s+/g, ' ').slice(0, 240)}`,
+      });
+    }
+  } catch (e) {
+    results.push({
+      check: '[FRESHNESS] authenticated hero plaque render',
+      status: 'FAIL',
+      evidence: `Failed to verify authenticated hero render: ${e}`,
+    });
+  } finally {
+    await browser.close();
+  }
+
+  return results;
+}
+
 // ---------------------------------------------------------------------------
 // Check 1: canonical-ref — all cast reference images present + accessible
 // ---------------------------------------------------------------------------
@@ -78,9 +216,7 @@ async function checkCanonicalRefs(): Promise<AssertionResult[]> {
   // Fetch latest.json
   let latest: LatestJson;
   try {
-    const resp = await fetch(`${VIGNETTES_BASE}/latest.json`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    latest = await resp.json() as LatestJson;
+    latest = await fetchLatestJson();
   } catch (e) {
     return [{
       check: '[CANONICAL-REF] latest.json fetch',
@@ -165,6 +301,7 @@ async function checkMobileSafeArea(): Promise<AssertionResult[]> {
 
   try {
     const page = await browser.newPage();
+    await addOb1AuthCookie(page.context());
     // iPhone 14 Pro viewport — matches the target mobile device Greg reviews on
     await page.setViewportSize({ width: 390, height: 844 });
 
@@ -284,6 +421,15 @@ async function main() {
   console.log(`[ob1-hero-assertions] Target: ${BASE_URL}`);
 
   const allResults: AssertionResult[] = [];
+
+  console.log('\n--- Freshness + Rendered Date Checks ---');
+  const freshnessResults = await checkFreshnessAndRenderedDate();
+  allResults.push(...freshnessResults);
+  for (const r of freshnessResults) {
+    const icon = r.status === 'PASS' ? '✓' : r.status === 'FAIL' ? '✗' : '~';
+    console.log(`  ${icon} ${r.check}: ${r.status}`);
+    if (r.status !== 'PASS') console.log(`      ${r.evidence}`);
+  }
 
   console.log('\n--- Canonical-Ref Checks ---');
   const canonicalResults = await checkCanonicalRefs();

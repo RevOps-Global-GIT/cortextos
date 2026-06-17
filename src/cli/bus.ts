@@ -25,25 +25,9 @@ import { createApproval, updateApproval, sendApprovedEmail } from '../bus/approv
 import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
 import { spawnCodex } from '../bus/spawn-codex.js';
 import { handleCodexFallback } from '../bus/codex-fallback.js';
-import { readCrons } from '../bus/crons.js';
-import {
-  applyFailoverCronPlan,
-  buildFailoverPlan,
-  degradedCronAllowlist,
-  patchConfigForProvider,
-  providerIdFromConfig,
-  providerSpecsFromConfig,
-  readAgentRuntimeConfig,
-  readProviderFailoverState,
-  restoreFailoverCrons,
-  writeAgentRuntimeConfig,
-  type ProviderFailoverPlan,
-  type ProviderHealth,
-} from '../bus/provider-failover.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
-import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos, mirrorAgentStatusToRgos, mirrorTaskToRgos } from '../bus/rgos-mirror.js';
-import { reconcileAgentOpsMirror, repairAgentOpsMirror } from '../bus/agentops-mirror-reconcile.js';
+import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos } from '../bus/rgos-mirror.js';
 import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { enforceControlPolicy } from '../bus/orch-control-policy.js';
@@ -63,7 +47,7 @@ import {
   parseAgentTaskEventPayload,
 } from '../bus/agent-task-events.js';
 import { sendHumanBlockersDigest, digestHumanBlockers } from '../bus/human-blockers-digest.js';
-import { logImplicitInvocation, type SkillInvocationSource } from '../bus/skill-instrument.js';
+import { logImplicitInvocation } from '../bus/skill-instrument.js';
 import { registerCronCommands } from './bus-cmds-crons.js';
 import { registerBatchCommands } from './bus-cmds-batch.js';
 
@@ -191,9 +175,6 @@ const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
   'test-cron-fire',
   'migrate-crons',
   'upgrade-cron-teaching',
-  'provider-failover-apply',
-  'provider-failover-monitor',
-  'provider-failover-restore',
   // Knowledge base writes
   'kb-ingest',
   // Lease writes
@@ -803,23 +784,13 @@ busCommand
     process.exit(0);
   });
 
-async function flushTaskMirrorForCli(
-  paths: ReturnType<typeof resolvePaths>,
-  taskId: string,
-  event: 'update' | 'complete',
-): Promise<void> {
-  if (process.env.VITEST || process.env.NODE_ENV === 'test') return;
-  const taskPath = findTaskFile(paths, taskId);
-  if (!taskPath) return;
-  const task = JSON.parse(readFileSync(taskPath, 'utf-8')) as Task;
-  await mirrorTaskToRgos(task, event);
-}
-
 busCommand
   .command('update-task')
   .argument('<id>', 'Task ID')
   .argument('<status>', 'New status (pending, in_progress, completed, blocked, cancelled)')
-  .action(async (id: string, status: string) => {
+  .option('--blocker-reason <reason>', 'Required when setting status to blocked: what is blocking the task')
+  .option('--next-proof <proof>', 'Required when setting status to blocked: observable proof the blocker is resolved')
+  .action((id: string, status: string, opts: { blockerReason?: string; nextProof?: string }) => {
     const validStatuses: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'];
     if (!validStatuses.includes(status as TaskStatus)) {
       console.error(`Invalid status '${status}'. Must be one of: ${validStatuses.join(', ')}`);
@@ -839,9 +810,19 @@ busCommand
       }
     }
 
-    updateTask(paths, id, status as TaskStatus);
-    await flushTaskMirrorForCli(paths, id, 'update');
+    const metaMerge = status === 'blocked'
+      ? {
+          blocker: {
+            blocker_reason: opts.blockerReason,
+            next_proof_required: opts.nextProof,
+          },
+        }
+      : undefined;
+
+    updateTask(paths, id, status as TaskStatus, metaMerge);
     console.log(`Updated ${id} -> ${status}`);
+    // Exit after local write completes — updateTask fires mirrorTaskToRgos
+    // which schedules drainRetryQueue; exit before the drain runs.
     process.exit(0);
   });
 
@@ -964,9 +945,6 @@ busCommand
         await importRgosTaskById(paths, id, agent);
       }
       const task = claimTask(paths, id, agent);
-      if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
-        await mirrorTaskToRgos(task, 'update');
-      }
       console.log(`Claimed ${id} -> in_progress (assigned to ${agent})`);
       console.log(`  Title: ${task.title}`);
     } catch (err) {
@@ -1026,13 +1004,14 @@ busCommand
     }
 
     completeTask(paths, id, effectiveResult, proofStamp);
-    await flushTaskMirrorForCli(paths, id, 'complete');
     console.log(`Completed ${id}`);
 
     // Clear heartbeat so crash notifications show 'idle' not the just-completed task.
     // Swallowed — heartbeat update must never block or fail task completion.
     await updateHeartbeat(paths, env.agentName, 'idle', { org: env.org, currentTask: '' }).catch(() => {});
 
+    // Exit after local write completes — completeTask fires mirrorTaskToRgos
+    // which schedules drainRetryQueue; exit before the drain runs.
     process.exit(0);
   });
 
@@ -1158,23 +1137,6 @@ busCommand
       console.log(`  ${statusIcon}${priIcon}${id}${assignee}${title}`);
     }
     console.log('');
-  });
-
-busCommand
-  .command('log-skill-invocation')
-  .description('Record a skill invocation in orch_skill_invocations without relying on Claude hooks')
-  .argument('<slug>', 'Skill slug/name to record')
-  .option('--source <source>', 'Invocation source', 'manual')
-  .option('--agent <agent>', 'Agent role/name override')
-  .action(async (slug: string, opts: { source: string; agent?: string }) => {
-    const validSources: SkillInvocationSource[] = ['bus_implicit', 'cron', 'codex_native', 'codex_read', 'manual'];
-    if (!validSources.includes(opts.source as SkillInvocationSource)) {
-      console.error(`Invalid source '${opts.source}'. Must be one of: ${validSources.join(', ')}`);
-      process.exit(1);
-    }
-    const env = resolveEnv();
-    await logImplicitInvocation(slug, env.agentDir ?? '', opts.agent ?? env.agentName, { source: opts.source as SkillInvocationSource });
-    console.log(`Logged skill invocation: ${slug} (${opts.source})`);
   });
 
 busCommand
@@ -1526,13 +1488,11 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
     const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
-    const snoozeFile = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'state', 'pr-stuck-watcher-snooze.json');
     const result = runPrStuckWatcher(paths, env.agentName, env.org, {
       repos: opts.repos ? opts.repos.split(',') : undefined,
       stuckHours: parseNonNegativeNumber(opts.stuckHours, 2),
       alertHours: parseNonNegativeNumber(opts.alertHours, 24),
       outputDir,
-      snoozeFile,
     });
     const actions: Array<{ pr: string; action: string; ok: boolean; detail?: string }> = [];
 
@@ -3494,11 +3454,12 @@ busCommand
 
       // Read heartbeat
       const hbFile = join(ctxRoot, 'state', name, 'heartbeat.json');
-      let lastHeartbeat = '', currentTask = '', mode = '';
+      let lastHeartbeat = '', currentTask = '', mode = '', heartbeatStatus = '';
       let heartbeatAgeMinutes: number | null = null;
       if (existsSync(hbFile)) {
         try {
           const hb = JSON.parse(readFileSync(hbFile, 'utf-8'));
+          heartbeatStatus = hb.status ?? '';
           lastHeartbeat = hb.last_heartbeat ?? '';
           currentTask = hb.current_task ?? '';
           mode = hb.mode ?? '';
@@ -3518,12 +3479,15 @@ busCommand
       }
 
       const heartbeatFresh = heartbeatAgeMinutes !== null && heartbeatAgeMinutes <= runningHeartbeatThresholdMinutes;
-      const recoveryState = daemonRunning && !heartbeatFresh
+      const authActionRequired = /auth_action_required|reauth required|token revoked|unauthorized/i.test(heartbeatStatus);
+      const recoveryState = daemonRunning && authActionRequired
+        ? 'auth_action_required'
+        : daemonRunning && !heartbeatFresh
         ? 'stale_heartbeat_action_required'
         : daemonRunning
           ? 'running'
           : 'stopped';
-      const running = daemonRunning && heartbeatFresh;
+      const running = daemonRunning && heartbeatFresh && !authActionRequired;
       if (opts.status === 'running' && !running) continue;
 
       results.push({
@@ -3535,6 +3499,7 @@ busCommand
         daemon_running: daemonRunning,
         recovery_state: recoveryState,
         heartbeat_age_minutes: heartbeatAgeMinutes,
+        heartbeat_status: heartbeatStatus,
         last_heartbeat: lastHeartbeat,
         current_task: currentTask,
         mode,
@@ -4529,115 +4494,6 @@ busCommand
   });
 
 busCommand
-  .command('agentops-mirror-reconcile')
-  .description('Compare live cortextOS state with RGOS AgentOps mirror rows and log drift')
-  .option('--json', 'Output result as JSON', false)
-  .option('--no-log', 'Do not emit mirror_drift_detected Activity events', false)
-  .option('--max-drifts <n>', 'Maximum drift samples to include in output/event', '50')
-  .option('--repair', 'Backfill live tasks and agents into the RGOS AgentOps mirror using existing mirror writers', false)
-  .option('--dry-run', 'With --repair, report the backfill plan without writing mirror rows', false)
-  .option('--verify-delay-ms <n>', 'With --repair, wait before after-reconcile to catch external mirror reassertion', '25000')
-  .action(async (opts: { json?: boolean; noLog?: boolean; maxDrifts?: string; repair?: boolean; dryRun?: boolean; verifyDelayMs?: string }) => {
-    const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const maxDrifts = Number.parseInt(opts.maxDrifts ?? '50', 10);
-    const reconcileOptions = {
-      org: env.org,
-      maxDrifts: Number.isFinite(maxDrifts) && maxDrifts > 0 ? maxDrifts : 50,
-    };
-
-    if (opts.repair) {
-      const verifyDelayMs = Number.parseInt(opts.verifyDelayMs ?? '25000', 10);
-      const result = await repairAgentOpsMirror(paths, {
-        ...reconcileOptions,
-        dryRun: opts.dryRun === true,
-        verifyDelayMs: Number.isFinite(verifyDelayMs) && verifyDelayMs >= 0 ? verifyDelayMs : 25000,
-      });
-
-      if (!opts.noLog) {
-        logEvent(paths, env.agentName, env.org, 'action', result.dry_run ? 'mirror_repair_planned' : 'mirror_repair_completed', result.ok ? 'info' : 'warning', {
-          dry_run: result.dry_run,
-          before_drift_count: result.before.drift_count,
-          after_drift_count: result.after?.drift_count ?? null,
-          verify_delay_ms: result.verify_delay_ms,
-          planned_tasks: result.planned_tasks,
-          planned_agents: result.planned_agents,
-          repaired_tasks: result.repaired_tasks,
-          repaired_agents: result.repaired_agents,
-          failures: result.failures,
-          crons: result.crons,
-        });
-      }
-
-      if (opts.json) {
-        console.log(JSON.stringify(result, null, 2));
-        return;
-      }
-
-      if (result.skipped) {
-        console.log(`agentops-mirror-reconcile --repair: skipped — ${result.reason}`);
-        return;
-      }
-
-      const afterCount = result.after?.drift_count;
-      const mode = result.dry_run ? 'dry-run plan' : 'repair';
-      console.log(`agentops-mirror-reconcile --repair: ${mode}`);
-      console.log(`  before drift: ${result.before.drift_count}`);
-      console.log(`  planned: ${result.planned_tasks} task(s), ${result.planned_agents} agent(s), ${result.crons.live_crons} cron(s) enumerated`);
-      if (result.dry_run) {
-        console.log(`  writes: 0 (dry run)`);
-        console.log(`  cron note: ${result.crons.note}`);
-        return;
-      }
-      console.log(`  repaired: ${result.repaired_tasks} task(s), ${result.repaired_agents} agent(s)`);
-      console.log(`  verify delay: ${result.verify_delay_ms}ms`);
-      console.log(`  after drift: ${afterCount ?? 'not checked'}`);
-      console.log(`  cron note: ${result.crons.note}`);
-      if (result.failures.length > 0) {
-        for (const failure of result.failures.slice(0, 10)) {
-          console.log(`  failure ${failure.kind} ${failure.id}: ${failure.error}`);
-        }
-      }
-      if (!result.ok) process.exit(1);
-      return;
-    }
-
-    const result = await reconcileAgentOpsMirror(paths, reconcileOptions);
-
-    if (!opts.noLog && result.drift_count > 0) {
-      logEvent(paths, env.agentName, env.org, 'action', 'mirror_drift_detected', 'warning', {
-        drift_count: result.drift_count,
-        live_tasks: result.live_tasks,
-        mirror_tasks: result.mirror_tasks,
-        live_agents: result.live_agents,
-        mirror_agents: result.mirror_agents,
-        drifts: result.drifts,
-      });
-    }
-
-    if (opts.json) {
-      console.log(JSON.stringify(result, null, 2));
-      return;
-    }
-
-    if (result.skipped) {
-      console.log(`agentops-mirror-reconcile: skipped — ${result.reason}`);
-      return;
-    }
-
-    if (result.drift_count === 0) {
-      console.log(`agentops-mirror-reconcile: no drift (${result.live_tasks} live tasks, ${result.live_agents} live agents)`);
-      return;
-    }
-
-    console.log(`agentops-mirror-reconcile: ${result.drift_count} drift(s) detected`);
-    for (const drift of result.drifts) {
-      console.log(`  ${drift.kind} ${drift.id}: live=${JSON.stringify(drift.live)} mirror=${JSON.stringify(drift.mirror)}`);
-    }
-    process.exit(1);
-  });
-
-busCommand
   .command('computer-use <prompt>')
   .description('Run a legacy Codex dispatch prompt. Defaults to local code-only Codex; Greg Mac requires explicit guarded fallback.')
   .option('--no-plugin', 'Send a plain Codex prompt without the Computer Use plugin')
@@ -4973,367 +4829,6 @@ busCommand
     }
   });
 
-type ProviderFailoverCliOptions = {
-  from?: string;
-  to?: string;
-  healthJson?: string;
-  reason?: string;
-  dryRun?: boolean;
-  json?: boolean;
-  noRestart?: boolean;
-};
-
-function providerFailoverConfigPath(agent: string): { configPath: string; org: string; frameworkRoot: string } {
-  const env = resolveEnv();
-  const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
-  const org = env.org || 'revops-global';
-  return {
-    configPath: join(frameworkRoot, 'orgs', org, 'agents', agent, 'config.json'),
-    org,
-    frameworkRoot,
-  };
-}
-
-function parseProviderHealthJson(raw: string | undefined): Record<string, ProviderHealth> {
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw) as Record<string, ProviderHealth | string>;
-    const out: Record<string, ProviderHealth> = {};
-    for (const [provider, value] of Object.entries(parsed)) {
-      out[provider] = typeof value === 'string'
-        ? { state: value as ProviderHealth['state'] }
-        : value;
-    }
-    return out;
-  } catch (err) {
-    throw new Error(`invalid --health-json: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-function buildManualProviderPlan(
-  currentProviderId: string,
-  targetProviderId: string,
-  crons: ReturnType<typeof readCrons>,
-  config: ReturnType<typeof readAgentRuntimeConfig>,
-  reason: string,
-): ProviderFailoverPlan {
-  const allow = new Set(degradedCronAllowlist(config));
-  const shouldSwitch = currentProviderId !== targetProviderId;
-  return {
-    currentProviderId,
-    selectedProviderId: targetProviderId,
-    shouldSwitch,
-    degradedMode: true,
-    cronsToDisable: crons.map(c => c.name).filter(name => !allow.has(name)),
-    reason: reason || `manual provider failover ${currentProviderId} -> ${targetProviderId}`,
-  };
-}
-
-function outputProviderFailover(value: unknown, json: boolean | undefined): void {
-  if (json) {
-    console.log(JSON.stringify(value, null, 2));
-    return;
-  }
-  console.log(JSON.stringify(value, null, 2));
-}
-
-async function restartAgentAfterProviderSwitch(agent: string, instanceId: string): Promise<{ attempted: boolean; success: boolean; error?: string }> {
-  const ipc = new IPCClient(instanceId);
-  if (!(await ipc.isDaemonRunning())) {
-    return { attempted: false, success: false, error: 'daemon is not running' };
-  }
-  const resp = await ipc.send({ type: 'restart-agent', agent, source: 'cortextos bus provider-failover-apply' });
-  return { attempted: true, success: resp.success, error: resp.error };
-}
-
-function loadProviderFailoverContext(agent: string, opts: ProviderFailoverCliOptions) {
-  const env = resolveEnv();
-  const { configPath } = providerFailoverConfigPath(agent);
-  const config = readAgentRuntimeConfig(configPath);
-  const crons = readCrons(agent);
-  const currentProviderId = opts.from || providerIdFromConfig(config);
-  const health = parseProviderHealthJson(opts.healthJson);
-  const plan = opts.to
-    ? buildManualProviderPlan(currentProviderId, opts.to, crons, config, opts.reason || '')
-    : buildFailoverPlan({
-        config,
-        crons,
-        fromProviderId: currentProviderId,
-        providerHealth: {
-          [currentProviderId]: { state: 'available' },
-          ...health,
-        },
-      });
-  return { env, configPath, config, crons, currentProviderId, plan };
-}
-
-function isClaudeCapError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /429|rate.?limit|usage|limit|quota|exceeded/i.test(msg);
-}
-
-async function probeClaudeProviderHealth(ctxRoot: string, force = true): Promise<ProviderHealth> {
-  try {
-    const usage = await checkUsageApi(ctxRoot, { force });
-    if (usage.five_hour_utilization >= 0.98) {
-      return { state: 'capped', reason: `Claude 5h utilization ${Math.round(usage.five_hour_utilization * 100)}%` };
-    }
-    if (usage.seven_day_utilization >= 0.98) {
-      return { state: 'capped', reason: `Claude 7d utilization ${Math.round(usage.seven_day_utilization * 100)}%` };
-    }
-    return { state: 'available', reason: `Claude usage API OK: 5h ${Math.round(usage.five_hour_utilization * 100)}%, 7d ${Math.round(usage.seven_day_utilization * 100)}%` };
-  } catch (err) {
-    return isClaudeCapError(err)
-      ? { state: 'capped', reason: err instanceof Error ? err.message : String(err) }
-      : { state: 'unhealthy', reason: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-busCommand
-  .command('provider-failover-status <agent>')
-  .description('Show provider-failover state for an agent front door')
-  .option('--json', 'Output JSON')
-  .action((agent: string, opts: { json?: boolean }) => {
-    try {
-      const env = resolveEnv();
-      const { configPath } = providerFailoverConfigPath(agent);
-      const config = readAgentRuntimeConfig(configPath);
-      const crons = readCrons(agent);
-      const state = readProviderFailoverState(agent, env.ctxRoot);
-      outputProviderFailover({
-        agent,
-        provider: providerIdFromConfig(config),
-        runtime: config.runtime ?? null,
-        model: config.model ?? null,
-        config_path: configPath,
-        failover_state: state,
-        cron_count: crons.length,
-        enabled_cron_count: crons.filter(c => c.enabled).length,
-        providers: providerSpecsFromConfig(config).map(p => ({ id: p.id, runtime: p.runtime, model: p.model ?? null })),
-      }, opts.json);
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-busCommand
-  .command('provider-failover-plan <agent>')
-  .description('Plan a front-door provider switch and degraded cron suppression')
-  .option('--from <provider>', 'Override current provider id')
-  .option('--to <provider>', 'Force a target provider id instead of selecting from health')
-  .option('--health-json <json>', 'Provider health map, e.g. {"claude":{"state":"capped"},"codex":{"state":"available"}}')
-  .option('--reason <text>', 'Operator reason')
-  .option('--json', 'Output JSON')
-  .action((agent: string, opts: ProviderFailoverCliOptions) => {
-    try {
-      const context = loadProviderFailoverContext(agent, opts);
-      outputProviderFailover({
-        agent,
-        current_provider: context.currentProviderId,
-        plan: context.plan,
-        dry_run: true,
-      }, opts.json);
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-busCommand
-  .command('provider-failover-apply <agent>')
-  .description('Apply a front-door provider switch, pause non-essential crons, and restart the agent')
-  .option('--from <provider>', 'Override current provider id')
-  .option('--to <provider>', 'Force target provider id')
-  .option('--health-json <json>', 'Provider health map for automatic selection')
-  .option('--reason <text>', 'Operator reason')
-  .option('--dry-run', 'Show planned config/cron changes without writing')
-  .option('--no-restart', 'Write config/cron state without daemon restart')
-  .option('--json', 'Output JSON')
-  .action(async (agent: string, opts: ProviderFailoverCliOptions) => {
-    try {
-      const context = loadProviderFailoverContext(agent, opts);
-      const providers = providerSpecsFromConfig(context.config);
-      const target = providers.find(p => p.id === context.plan.selectedProviderId);
-      if (!target) {
-        console.error(`No provider runtime spec configured for '${context.plan.selectedProviderId}'`);
-        process.exit(1);
-      }
-
-      const patchedConfig = patchConfigForProvider(context.config, target);
-      if (opts.dryRun) {
-        outputProviderFailover({
-          agent,
-          dry_run: true,
-          config_path: context.configPath,
-          plan: context.plan,
-          next_runtime: patchedConfig.runtime,
-          next_model: patchedConfig.model ?? null,
-        }, opts.json);
-        return;
-      }
-
-      writeAgentRuntimeConfig(context.configPath, patchedConfig);
-      const cronState = context.plan.degradedMode
-        ? applyFailoverCronPlan({
-            agentName: agent,
-            selectedProviderId: context.plan.selectedProviderId,
-            previousProviderId: context.plan.currentProviderId,
-            cronsToDisable: context.plan.cronsToDisable,
-            reason: opts.reason || context.plan.reason,
-            stateRoot: context.env.ctxRoot,
-          })
-        : null;
-      const restart = opts.noRestart
-        ? { attempted: false, success: true, error: 'restart skipped by --no-restart' }
-        : await restartAgentAfterProviderSwitch(agent, context.env.instanceId);
-
-      outputProviderFailover({
-        ok: true,
-        agent,
-        config_path: context.configPath,
-        plan: context.plan,
-        disabled_crons: cronState?.disabledCronNames ?? [],
-        state_path: cronState?.statePath ?? null,
-        restart,
-      }, opts.json);
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-busCommand
-  .command('provider-failover-monitor <agent>')
-  .description('Probe provider health and automatically apply front-door failover when the current provider is capped')
-  .option('--dry-run', 'Show planned monitor action without writing')
-  .option('--no-restart', 'Write config/cron state without daemon restart')
-  .option('--json', 'Output JSON')
-  .action(async (agent: string, opts: ProviderFailoverCliOptions) => {
-    try {
-      const env = resolveEnv();
-      const { configPath } = providerFailoverConfigPath(agent);
-      const config = readAgentRuntimeConfig(configPath);
-      const crons = readCrons(agent);
-      const currentProviderId = providerIdFromConfig(config);
-      const providers = providerSpecsFromConfig(config);
-      const health: Record<string, ProviderHealth> = {
-        [currentProviderId]: { state: 'available' },
-      };
-      if (providers.some(p => p.id === 'claude')) {
-        health.claude = await probeClaudeProviderHealth(env.ctxRoot, true);
-      }
-      if (providers.some(p => p.id === 'codex')) {
-        health.codex = currentProviderId === 'codex'
-          ? { state: 'available', reason: 'current front-door provider' }
-          : { state: 'available', reason: 'configured fallback provider' };
-      }
-
-      const plan = buildFailoverPlan({ config, crons, providerHealth: health, fromProviderId: currentProviderId });
-      const target = providers.find(p => p.id === plan.selectedProviderId);
-      const shouldApply = plan.shouldSwitch || (plan.degradedMode && !readProviderFailoverState(agent, env.ctxRoot)?.active);
-
-      if (opts.dryRun || !shouldApply) {
-        outputProviderFailover({
-          agent,
-          dry_run: Boolean(opts.dryRun),
-          applied: false,
-          current_provider: currentProviderId,
-          health,
-          plan,
-          reason: shouldApply ? 'dry run' : 'no switch needed',
-        }, opts.json);
-        return;
-      }
-
-      if (!target) {
-        console.error(`No provider runtime spec configured for '${plan.selectedProviderId}'`);
-        process.exit(1);
-      }
-
-      writeAgentRuntimeConfig(configPath, patchConfigForProvider(config, target));
-      const cronState = applyFailoverCronPlan({
-        agentName: agent,
-        selectedProviderId: plan.selectedProviderId,
-        previousProviderId: plan.currentProviderId,
-        cronsToDisable: plan.cronsToDisable,
-        reason: plan.reason,
-        stateRoot: env.ctxRoot,
-      });
-      const restart = opts.noRestart
-        ? { attempted: false, success: true, error: 'restart skipped by --no-restart' }
-        : await restartAgentAfterProviderSwitch(agent, env.instanceId);
-
-      outputProviderFailover({
-        ok: true,
-        applied: true,
-        agent,
-        health,
-        plan,
-        disabled_crons: cronState.disabledCronNames,
-        state_path: cronState.statePath,
-        restart,
-      }, opts.json);
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-busCommand
-  .command('provider-failover-restore <agent>')
-  .description('Restore crons paused by provider-failover and optionally switch provider back')
-  .option('--to <provider>', 'Optional provider id to switch to while restoring')
-  .option('--dry-run', 'Show planned restore without writing')
-  .option('--no-restart', 'Write config/cron state without daemon restart')
-  .option('--json', 'Output JSON')
-  .action(async (agent: string, opts: ProviderFailoverCliOptions) => {
-    try {
-      const env = resolveEnv();
-      const { configPath } = providerFailoverConfigPath(agent);
-      const config = readAgentRuntimeConfig(configPath);
-      const state = readProviderFailoverState(agent, env.ctxRoot);
-      const targetProviderId = opts.to || state?.previous_provider_id;
-      const target = targetProviderId
-        ? providerSpecsFromConfig(config).find(p => p.id === targetProviderId)
-        : undefined;
-
-      if (opts.dryRun) {
-        outputProviderFailover({
-          agent,
-          dry_run: true,
-          active_state: state,
-          target_provider: targetProviderId ?? null,
-          config_path: configPath,
-        }, opts.json);
-        return;
-      }
-
-      const restored = restoreFailoverCrons({ agentName: agent, stateRoot: env.ctxRoot });
-      let switchedProvider = false;
-      if (target) {
-        writeAgentRuntimeConfig(configPath, patchConfigForProvider(config, target));
-        switchedProvider = true;
-      }
-      const restart = switchedProvider && !opts.noRestart
-        ? await restartAgentAfterProviderSwitch(agent, env.instanceId)
-        : { attempted: false, success: true, error: switchedProvider ? 'restart skipped by --no-restart' : 'no provider switch requested' };
-
-      outputProviderFailover({
-        ok: true,
-        agent,
-        restored_crons: restored.restoredCronNames,
-        had_active_state: restored.hadActiveState,
-        switched_provider: switchedProvider,
-        target_provider: targetProviderId ?? null,
-        restart,
-      }, opts.json);
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
 busCommand
   .command('decommission-agent <agent>')
   .description('Mark an agent as decommissioned: write suppress markers, disable in registry, stop if running')
@@ -5378,14 +4873,6 @@ busCommand
     if (await ipc.isDaemonRunning()) {
       const resp = await ipc.send({ type: 'stop-agent', agent, source: 'cortextos bus decommission-agent' });
       stoppedViaDaemon = resp.success;
-    }
-    if (!stoppedViaDaemon) {
-      await mirrorAgentStatusToRgos(agent, {
-        isActive: false,
-        reason: 'bus_decommission_agent',
-        instanceId,
-        org: env.org,
-      }).catch(err => console.warn(`RGOS inactive mirror failed for ${agent}: ${err instanceof Error ? err.message : String(err)}`));
     }
 
     console.log(JSON.stringify({

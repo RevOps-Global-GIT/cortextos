@@ -26,13 +26,19 @@ export const STALE_BADGE_PATTERNS: RegExp[] = [
   /\b([3-9]\d|[1-9]\d{2,})h\s+stale\b/i,
 ];
 
+// A surface-wide data-source freshness banner: "Last synced 6 days ago" — a relative
+// timestamp WITH sync-status context. Unlike a bare per-entity "Stale" chip, this signals
+// the WHOLE surface's data feed is stale, so it remains a real signal even on
+// operator-console routes (see detectStaleness `operatorConsole`).
+export const SURFACE_SYNC_STALENESS_PATTERN =
+  /\blast\s+(?:synced|updated|refreshed)\b[\s\S]{0,40}\b([2-9]|\d{2,})\s+(?:days?|weeks?|months?)\s+ago\b/i;
+
 // Staleness expressed in a short status label (badge/chip/banner/aria-label).
 export const STATUS_LABEL_STALENESS_PATTERNS: RegExp[] = [
   /\bstale\b/i,
   /\bout[- ]of[- ]date\b/i,
   /\b(?:not|never)\s+synced\b/i,
-  // "Last synced 6 days ago" — a relative timestamp WITH sync-status context.
-  /\blast\s+(?:synced|updated|refreshed)\b[\s\S]{0,40}\b([2-9]|\d{2,})\s+(?:days?|weeks?|months?)\s+ago\b/i,
+  SURFACE_SYNC_STALENESS_PATTERN,
 ];
 
 // DOM selectors for short status/badge/banner elements (and aria-label/title carriers).
@@ -50,6 +56,23 @@ export const MAX_STATUS_LABEL_LEN = 48;
 export interface StalenessResult {
   stale: boolean;
   detail: string | null;
+}
+
+export interface DetectStalenessOptions {
+  /**
+   * Operator-console routes (e.g. /app/orchestrator) intentionally render per-entity
+   * state badges: Voice Bridge "Stale" (no active Realtime socket), task work-state,
+   * and per-agent "Nd stale" heartbeat chips. These are item-level OPERATOR STATE,
+   * not surface-data staleness — fleet heartbeat health is monitored separately via
+   * orch_agents, and surface freshness is covered by the carded CHECK 5 Timestamp
+   * freshness. Treating every short "Stale" badge as surface staleness makes such a
+   * console permanently "warning", which trains operators to ignore the signal.
+   *
+   * When true, the per-entity badge heuristic is suppressed; only a genuine
+   * surface-wide "Last synced N ago" data-source banner (SURFACE_SYNC_STALENESS_PATTERN)
+   * still flags. Defaults to false (full data-list behavior).
+   */
+  operatorConsole?: boolean;
 }
 
 function firstSnippet(text: string, patterns: RegExp[]): string | null {
@@ -72,7 +95,25 @@ function firstSnippet(text: string, patterns: RegExp[]): string | null {
  * @param bodyText Full page innerText — scanned ONLY for the explicit "Nd stale"
  *   badge form, which is unambiguous regardless of element.
  */
-export function detectStaleness(statusLabels: string[], bodyText: string): StalenessResult {
+export function detectStaleness(
+  statusLabels: string[],
+  bodyText: string,
+  opts: DetectStalenessOptions = {},
+): StalenessResult {
+  // Operator-console routes render by-design item-level Stale badges (Voice Bridge idle,
+  // task work-state, per-agent heartbeat chips). Suppress the per-entity heuristic — only
+  // a genuine surface-wide data-source sync banner counts here. Fleet heartbeat staleness
+  // is monitored separately (orch_agents) and surface freshness by carded CHECK 5.
+  if (opts.operatorConsole) {
+    for (const raw of statusLabels) {
+      const label = (raw ?? '').replace(/\s+/g, ' ').trim();
+      if (!label || label.length > MAX_STATUS_LABEL_LEN) continue;
+      const hit = firstSnippet(label, [SURFACE_SYNC_STALENESS_PATTERN]);
+      if (hit) return { stale: true, detail: hit };
+    }
+    return { stale: false, detail: null };
+  }
+
   // 1. Explicit staleness badges anywhere on the page (unambiguous, structured form).
   const badge = firstSnippet(bodyText, STALE_BADGE_PATTERNS);
   if (badge) return { stale: true, detail: badge };

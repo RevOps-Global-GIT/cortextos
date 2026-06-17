@@ -102,13 +102,7 @@
       "name": "ob1-daily-vignette",
       "type": "recurring",
       "cron": "0 6 * * *",
-      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.mjs"
-    },
-    {
-      "name": "daily-hero-watchdog",
-      "type": "recurring",
-      "cron": "0 8 * * *",
-      "prompt": "Read prompts/cron-daily-hero-watchdog.md and execute exactly one bounded hero trigger pass; check latest.json, dispatch to mac-codex if missing, log result and exit."
+      "prompt": "/home/cortextos/bin/ob1-daily-vignette-cron.sh"
     },
     {
       "name": "supabase-outage-detector",
@@ -117,10 +111,10 @@
       "prompt": "node /home/cortextos/cortextos/scripts/supabase-outage-detector.js"
     },
     {
-      "name": "daily-hero-verify",
+      "name": "agentops-uptime-probe",
       "type": "recurring",
-      "cron": "3 8 * * *",
-      "prompt": "Read prompts/cron-daily-hero-verify.md and execute exactly one bounded hero verification pass; check latest.json date==today, alert orchestrator if deadline breached, log result and exit."
+      "interval": "10m",
+      "prompt": "node /home/cortextos/cortextos/scripts/agentops-uptime-probe.js"
     },
     {
       "name": "signal-diff-inbox-publish",

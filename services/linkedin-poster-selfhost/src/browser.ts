@@ -4,11 +4,23 @@ import { execFile } from 'child_process';
 import type { PosterConfig } from './types.js';
 
 const LOGIN_PATTERN = /log.?in|sign.?in|authwall/i;
+const RESTRICTION_PATTERN =
+  /temporarily restricted|software that automates activity|security verification|checkpoint\/challenge/i;
+
+export interface BrowserHealthSnapshot {
+  healthy: boolean;
+  status: 'unknown' | 'healthy' | 'login_required' | 'restricted' | 'error' | 'quarantined';
+  title?: string;
+  url?: string;
+  message?: string;
+}
 
 export class BrowserManager {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private config: PosterConfig;
+  private quarantined = false;
+  private lastHealth: BrowserHealthSnapshot = { healthy: false, status: 'unknown' };
 
   constructor(config: PosterConfig) {
     this.config = config;
@@ -53,8 +65,15 @@ export class BrowserManager {
   }
 
   getPage(): Page {
+    if (this.quarantined) {
+      throw new Error('LinkedIn browser is quarantined after restriction/checkpoint detection');
+    }
     if (!this.page) throw new Error('BrowserManager not initialized — call init() first');
     return this.page;
+  }
+
+  getLastHealth(): BrowserHealthSnapshot {
+    return this.lastHealth;
   }
 
   private async killLingeringProfileProcesses(): Promise<void> {
@@ -89,6 +108,15 @@ export class BrowserManager {
   }
 
   async checkHealth(): Promise<boolean> {
+    if (this.quarantined) {
+      this.lastHealth = {
+        ...this.lastHealth,
+        healthy: false,
+        status: 'quarantined',
+        message: this.lastHealth.message ?? 'LinkedIn browser quarantined',
+      };
+      return false;
+    }
     if (!this.page) return false;
     try {
       await this.page.goto('https://www.linkedin.com/feed/', {
@@ -96,13 +124,42 @@ export class BrowserManager {
         timeout: 15_000,
       });
       const title = await this.page.title();
+      const url = this.page.url();
+      const bodyText = await this.page.locator('body').innerText({ timeout: 3_000 }).catch(() => '');
+
+      if (
+        RESTRICTION_PATTERN.test(title) ||
+        RESTRICTION_PATTERN.test(url) ||
+        RESTRICTION_PATTERN.test(bodyText)
+      ) {
+        this.quarantined = true;
+        this.lastHealth = {
+          healthy: false,
+          status: 'restricted',
+          title,
+          url,
+          message: 'LinkedIn restriction/checkpoint detected; browser automation quarantined',
+        };
+        console.error(`[browser] LinkedIn restriction/checkpoint detected — title="${title}" url="${url}". Quarantining browser.`);
+        await this.resetContext();
+        return false;
+      }
+
       const healthy = !LOGIN_PATTERN.test(title);
       if (!healthy) {
         console.error(`[browser] Session expired — page title: "${title}"`);
+        this.lastHealth = { healthy: false, status: 'login_required', title, url };
+      } else {
+        this.lastHealth = { healthy: true, status: 'healthy', title, url };
       }
       return healthy;
     } catch (err) {
       console.error('[browser] Health check failed:', (err as Error).message.split('\n')[0]);
+      this.lastHealth = {
+        healthy: false,
+        status: 'error',
+        message: (err as Error).message.split('\n')[0],
+      };
       try {
         await this.recoverAfterCrash();
       } catch (recoverErr) {

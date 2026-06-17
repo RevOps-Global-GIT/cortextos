@@ -1,0 +1,2910 @@
+diff --git a/dashboard/src/data/capability-monitor.json b/dashboard/src/data/capability-monitor.json
+index db95a0cfe..ca36b112e 100644
+--- a/dashboard/src/data/capability-monitor.json
++++ b/dashboard/src/data/capability-monitor.json
+@@ -26,7 +26,7 @@
+       "failWhen": "auth redirect, login wall, 401/403, blank shell, or both sentinel routes fail",
+       "renewalPath": "Drive Hub-QA VM Chrome through Hub magic-link auth using Greg .com Gmail when needed",
+       "proofRequired": "Latest probe event, route screenshots on warn/fail, auth age if available",
+-      "lastCheckedAt": "2026-06-15T08:28:58.948Z",
++      "lastCheckedAt": "2026-06-17T01:13:07.926Z",
+       "lastAuthority": "hub.revopsglobal.com (magic-link auth)",
+       "observed": "/app/fleet/tasks=308, /app/cortex/theta=308",
+       "proof": "Sentinels: /app/fleet/tasks=308, /app/cortex/theta=308",
+@@ -47,7 +47,7 @@
+       "failWhen": "login wall, checkpoint, captcha, 999, account restriction, or upstream invalid result",
+       "renewalPath": "Human or approved browser-auth lane; never account recovery from monitor",
+       "proofRequired": "Non-posting validation result and observed auth surface classification",
+-      "lastCheckedAt": "2026-06-15T08:28:59.786Z",
++      "lastCheckedAt": "2026-06-17T01:13:08.444Z",
+       "lastAuthority": "LinkedIn-Session browser/cookie jar or a Hub presence route that performs real upstream validation",
+       "observed": "No linkedin-cookies.json found — session not provisioned on this VM",
+       "lastEventName": "capability_check_passed"
+@@ -71,7 +71,7 @@
+       "lastAuthority": "@revops_director_bot",
+       "observed": "getMe ok, @revops_director_bot; getUpdates ok",
+       "lastEventName": "capability_check_passed",
+-      "lastCheckedAt": "2026-06-15T08:28:56.574Z",
++      "lastCheckedAt": "2026-06-17T01:13:06.197Z",
+       "proof": "getMe ok=true username=revops_director_bot"
+     },
+     {
+@@ -89,9 +89,9 @@
+       "failWhen": "invalid_grant, 401/403, refresh failure, or profile cannot be read",
+       "renewalPath": "OAuth re-consent for the required account; do not send from fallback account",
+       "proofRequired": "Expected emailAddress, token probe timestamp, and thread/message id after approved sends",
+-      "lastCheckedAt": "2026-06-15T08:28:58.199Z",
++      "lastCheckedAt": "2026-06-17T01:13:07.394Z",
+       "lastAuthority": "greg@revopsglobal.ai",
+-      "observed": "Gmail token valid; emailAddress=greg@revopsglobal.ai; messagesTotal=318",
++      "observed": "Gmail token valid; emailAddress=greg@revopsglobal.ai; messagesTotal=358",
+       "proof": "users.getProfile ok; emailAddress=greg@revopsglobal.ai",
+       "lastEventName": "capability_check_passed"
+     },
+@@ -110,7 +110,7 @@
+       "failWhen": "401/403, SSO authorization missing, target repo inaccessible, or critical bucket exhausted",
+       "renewalPath": "Token refresh or SSO authorization by token owner",
+       "proofRequired": "Rate-limit headers, target repo access result, and reset time",
+-      "lastCheckedAt": "2026-06-15T08:28:57.598Z",
++      "lastCheckedAt": "2026-06-17T01:13:07.003Z",
+       "lastAuthority": "github.com/revopsglobal",
+       "observed": "Authenticated as revopsglobal; scopes=admin:org, admin:org_hook, admin:public_key, admin:repo_hook, admin:ssh_signing_key, notifications, project, repo, user, workflow, write:discussion",
+       "proof": "GET /user ok; login=revopsglobal",
+@@ -131,10 +131,10 @@
+       "failWhen": "auth-wall redirect to /unlock, non-200 on a sentinel, or body under 5KB (blank shell)",
+       "renewalPath": "Refresh OB1_SESSION_TOKEN in orgs/revops-global/secrets.env from a live ob1 session",
+       "proofRequired": "Latest probe event with per-route status + body size",
+-      "lastCheckedAt": "2026-06-15T08:29:00.331Z",
++      "lastCheckedAt": "2026-06-17T01:13:08.656Z",
+       "lastAuthority": "ob1.revopsglobal.com (ob1-auth cookie)",
+-      "observed": "/garden=200 250343b, /insights=200 124789b",
+-      "proof": "Nav sentinels: /garden=200 250343b, /insights=200 124789b",
++      "observed": "/garden=200 289808b, /insights=200 145728b",
++      "proof": "Nav sentinels: /garden=200 289808b, /insights=200 145728b",
+       "lastEventName": "capability_check_passed"
+     }
+   ]
+diff --git a/orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py b/orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py
+index e29c43424..09cb29688 100755
+--- a/orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py
++++ b/orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py
+@@ -105,6 +105,7 @@ DIRECT_QUESTION_RE = re.compile(
+     re.IGNORECASE,
+ )
+ USER_MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]+)?>")
++_last_source_activity_count = 0
+ 
+ 
+ # -- env loading --------------------------------------------------------------
+@@ -278,7 +279,7 @@ def build_user_map(token: str) -> Dict[str, str]:
+ def mentions_greg(text: str) -> bool:
+     if not text:
+         return False
+-    return f"<@{GREG_USER_ID}>" in text
++    return GREG_USER_ID in USER_MENTION_RE.findall(text)
+ 
+ 
+ def is_question(text: str) -> bool:
+@@ -310,24 +311,26 @@ def is_actionable_text(text: str) -> bool:
+     return bool(text) and (is_question(text) or bool(ACTION_VERB_RE.search(text)))
+ 
+ 
+-def oldest_unanswered_actionable(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+-    """Oldest actionable non-Greg message sent after Greg's last message, or None.
+-
+-    Evaluates every message in the conversation rather than only the newest:
+-    a non-actionable follow-up (bare URL, "thanks") sent after a question must
+-    not mask the question.
+-    """
++def unanswered_candidates_after_greg(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
++    """Non-Greg, non-subtype messages sent after Greg's last message."""
+     greg_last_ts = max(
+         (float(m.get("ts") or 0) for m in messages if m.get("user") == GREG_USER_ID),
+         default=0.0,
+     )
+-    candidates = [
++    return [
+         m for m in messages
+         if m.get("user")
+         and m.get("user") != GREG_USER_ID
+         and not m.get("subtype")
+         and float(m.get("ts") or 0) > greg_last_ts
+-        and is_actionable_text(m.get("text") or "")
++    ]
++
++
++def oldest_unanswered_actionable(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
++    """Oldest actionable non-Greg message sent after Greg's last message, or None."""
++    candidates = [
++        m for m in unanswered_candidates_after_greg(messages)
++        if is_actionable_text(m.get("text") or "")
+     ]
+     if not candidates:
+         return None
+@@ -469,6 +472,8 @@ def slack_search_mentions(token: str, since_seconds: int) -> List[Dict[str, Any]
+ 
+ 
+ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
++    global _last_source_activity_count
++    _last_source_activity_count = 0
+     since_ts = time.time() - since_seconds
+     scan_start = time.time()
+     items: List[Dict[str, Any]] = []
+@@ -518,21 +523,21 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
+ 
+     for ch_id, ch_msgs in dm_by_channel.items():
+         check_budget()
+-        flag_msg = oldest_unanswered_actionable(ch_msgs)
+-        if flag_msg is None:
+-            continue  # answered, or only non-actionable messages outstanding
+-        _dm_text = flag_msg.get("text") or ""
+-        ch_name = f"DM:{user_name(flag_msg.get('user'))}"
+-        hydrate_mentions(_dm_text)
+-        items.append(build_item(
+-            source="dm",
+-            status="unanswered",
+-            channel_id=ch_id,
+-            channel_name=ch_name,
+-            msg=flag_msg,
+-            sender_name=user_name(flag_msg.get("user")),
+-            user_lookup=user_cache,
+-        ))
++        flag_msgs = unanswered_candidates_after_greg(ch_msgs)
++        _last_source_activity_count += len(flag_msgs)
++        for flag_msg in flag_msgs:
++            _dm_text = flag_msg.get("text") or ""
++            ch_name = f"DM:{user_name(flag_msg.get('user'))}"
++            hydrate_mentions(_dm_text)
++            items.append(build_item(
++                source="dm",
++                status="unanswered",
++                channel_id=ch_id,
++                channel_name=ch_name,
++                msg=flag_msg,
++                sender_name=user_name(flag_msg.get("user")),
++                user_lookup=user_cache,
++            ))
+ 
+     check_budget()
+ 
+@@ -540,6 +545,13 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
+     # Replaces the previous 200-call conversations.history loop. Cuts API surface
+     # from O(conversations) to O(mention-pages), eliminating the sustained 429 storm.
+     search_matches = slack_search_mentions(token, since_seconds)
++    _last_source_activity_count += sum(
++        1
++        for m in search_matches
++        if m.get("user")
++        and m.get("user") != GREG_USER_ID
++        and not m.get("subtype")
++    )
+ 
+     for m in search_matches:
+         check_budget()
+@@ -773,6 +785,14 @@ def main() -> int:
+         return 3
+     print(f"[scanner] found {len(items)} outstanding items", file=sys.stderr)
+ 
++    if not items and _last_source_activity_count:
++        print(
++            "[scanner] ERROR: zero_items_with_source_activity — "
++            f"source_activity_count={_last_source_activity_count}",
++            file=sys.stderr,
++        )
++        return 4
++
+     snapshot = write_snapshot(items, on_demand=args.on_demand)
+ 
+     if not args.no_supabase and not args.dry_run:
+diff --git a/orgs/revops-global/agents/dev/CLAUDE.md b/orgs/revops-global/agents/dev/CLAUDE.md
+index 700719c6c..4cfc7e9e4 100644
+--- a/orgs/revops-global/agents/dev/CLAUDE.md
++++ b/orgs/revops-global/agents/dev/CLAUDE.md
+@@ -21,6 +21,19 @@ These rules override everything else. Every response to a coding task must satis
+ 
+ ---
+ 
++### RULE 0: IF CONTEXT IS INSUFFICIENT, WRITE BLOCKED IMMEDIATELY
++
++**If the task input does not provide enough context to implement a real change (no file paths, no codebase access, no confirmed tool availability), you MUST write a BLOCKED statement as your entire response.** Do NOT issue exploratory shell commands against systems that have not been confirmed to exist. Do NOT ask clarifying questions. Do NOT describe what you would do. Write BLOCKED and stop.
++
++```
++BLOCKED: <exact reason — e.g., "No file paths or codebase context provided in task input">
++Next step: <single concrete copy-pasteable command that will unblock this>
++```
++
++**This rule applies to every response where you cannot produce a real file write, diff, or complete function.** A sequence of exploratory bash commands against an unconfirmed system is never a valid substitute for a BLOCKED statement.
++
++---
++
+ ### RULE 1: CONCRETE CODE CHANGES ARE MANDATORY
+ 
+ **Every response to a coding task MUST include at least one of these — no exceptions:**
+@@ -44,9 +57,12 @@ grep -r "<symbol>" --include="*.ts" --include="*.py" -l
+ - A response that defers code to a follow-up ("Which file should I start with?", "Once I have X I'll implement…")
+ - A response containing a checklist of planned changes but no actual implementation
+ - A response that is cut off mid-execution without a BLOCKED statement
++- A response consisting entirely of exploratory bash commands with no resulting code change
+ 
+ If discovery returns nothing useful and you genuinely cannot implement, write a BLOCKED statement (see Rule 4). A BLOCKED statement is the ONLY acceptable substitute for actual code.
+ 
++**SPECIAL CASE — ambiguous or context-free tasks:** If a task does not name a specific file, function, or codebase location, and no file paths are confirmed in tool output, you MUST write a BLOCKED statement. Do not invent paths or issue commands against systems whose existence is unconfirmed.
++
+ ---
+ 
+ ### RULE 2: NEVER FABRICATE — CONFIRM EVERYTHING WITH ACTUAL TOOL OUTPUT
+@@ -63,11 +79,16 @@ If discovery returns nothing useful and you genuinely cannot implement, write a
+ - Claiming a test passes without showing actual test runner output
+ - Using a URL, hostname, or API endpoint that does not appear in provided context
+ - Inventing task IDs (e.g., `task_20250110_445821`) — never fabricate output from commands you did not actually run
++- Constructing directory structures, file paths, or CLI interfaces based on assumption rather than confirmed tool output
++- Referencing environment variables (CTX_ROOT, CTX_AGENT_NAME, CTX_ORG, etc.) unless they appear verbatim in the task input
++- Calling tool commands (cortextos bus list-agents, cortextos bus kb-query, cortextos bus check-inbox, cortextos daemon status, etc.) unless those exact commands appear verbatim in the task input or confirmed prior tool output
+ 
+ **CRITICAL: If a tool or command (`cortextos bus create-task`, `cortextos bus log-event`, etc.) does not appear in the task input or in confirmed prior tool output, do NOT call it.** Write a BLOCKED statement instead.
+ 
+ **If a command is shown as a code block but never actually run with visible tool output, it counts as fabrication.** Write commands as tool calls, not as code blocks, and show the returned output.
+ 
++**FABRICATION TEST — before submitting, ask yourself: "Did I actually run this command and see this output in this response?" If the answer is no for any command output you are showing, remove it and either run the command for real or write BLOCKED.**
++
+ If a file cannot be found: write exactly "File not found at `<path>` — searched with `find . -name <filename>` and got no results. Cannot implement without seeing the actual code." Then write a BLOCKED statement.
+ 
+ ---
+@@ -94,9 +115,12 @@ Write this exact form:
+ - **Ending the response without any verification block at all — this is always wrong**
+ - Describing a verification workflow without naming a single concrete command
+ - "I will verify later" or any promise about future verification
++- Cutting off the verification section mid-execution — always complete it fully
+ 
+ **Even for documentation-only or config-only changes, name the exact command (e.g., `grep -c 'complete-task' file.md`) and expected output.**
+ 
++**If you find yourself unable to name a concrete verification command because the system is unconfirmed, write BLOCKED instead of a fabricated verification step.**
++
+ ---
+ 
+ ### RULE 4: END EVERY RESPONSE WITH COMMIT MESSAGE OR EXPLICIT BLOCKER
+@@ -125,6 +149,9 @@ Next step: <single concrete copy-pasteable command that will unblock this>
+ - Analysis or investigation summaries with no code and no BLOCKED statement
+ - Any response that ends mid-execution, mid-command, or mid-sentence
+ - A response that ends after discovery commands with no code and no commit/BLOCKED
++- A response that ends after clarifying questions with no commit/BLOCKED
++
++**CRITICAL: A response that trails off, is cut off, or ends mid-sentence is always invalid. If you cannot complete the response, write BLOCKED immediately rather than truncating.**
+ 
+ ---
+ 
+@@ -141,23 +168,30 @@ Next step: <single concrete copy-pasteable command that will unblock this>
+ - Logging events to the activity feed
+ - Restoring crons
+ - Any operational bookkeeping unrelated to the code change
++- Onboarding checks unrelated to the task at hand
+ 
+ **Do NOT spend response tokens on planning artifacts, tracking entries, or status summaries when actual code is what was requested.** The deliverable is code, not process documentation about code.
+ 
++**Do NOT pivot to clarifying questions or exploratory commands when the task names specific files, PRs, or changes to apply.** Apply the named changes directly.
++
+ ---
+ 
+ ### MANDATORY SELF-CHECK BEFORE SUBMITTING ANY RESPONSE
+ 
+ Before finalizing your response, verify ALL of the following. If any check fails, rewrite the response before sending:
+ 
++- [ ] **Sufficient context**: Does the task input provide enough confirmed context (file paths, codebase access, confirmed tool availability) to make a real change? (If not: write BLOCKED immediately — do not issue exploratory commands against unconfirmed systems)
+ - [ ] **Concrete change**: Does my response contain at least one actual file write, diff, or complete function with file path? (If not: add it or write BLOCKED — a lone shell command is not sufficient)
+ - [ ] **No fabrication**: Did I run `cat` on every file I reference, and does the tool output appear in my response? (If not: run the command first)
+-- [ ] **No fabrication**: Do I call any tool (`cortextos bus create-task`, `cortextos bus log-event`, etc.) that was NOT established in the task input? (If yes: remove it — do not invent tool calls or their output)
+-- [ ] **No fabrication**: Do I reference any URL, hostname, env var, or task ID that was not confirmed in tool output? (If yes: remove it)
++- [ ] **No fabrication**: Do I call any tool (`cortextos bus create-task`, `cortextos bus log-event`, `cortextos bus list-agents`, `cortextos daemon status`, etc.) that was NOT established verbatim in the task input? (If yes: remove it — do not invent tool calls or their output)
++- [ ] **No fabrication**: Do I reference any URL, hostname, env var, file path, or task ID that was not confirmed in tool output shown in this response? (If yes: remove it)
++- [ ] **No fabrication**: Do I show any bash command output that I did not actually execute and receive results from in this response? (If yes: remove it or run it for real)
+ - [ ] **Test/verification**: Does my response end with a test block OR a "Testing not applicable because…" statement with an exact copy-pasteable command and expected output? (If not: add it — this section must never be omitted)
++- [ ] **Verification complete**: Is the verification section fully written out, not cut off mid-execution? (If not: complete it or write BLOCKED)
+ - [ ] **Commit or BLOCKED**: Is the very last block a commit message or BLOCKED statement? (If not: add one — the response is invalid without it)
+-- [ ] **Scoped**: Did I add any operational overhead (memory writes, task creation, Telegram messages, event logging) that wasn't requested? (If yes: remove it)
++- [ ] **Scoped**: Did I add any operational overhead (memory writes, task creation, Telegram messages, event logging, onboarding checks) that wasn't requested? (If yes: remove it)
+ - [ ] **Complete**: Does my response end at a natural stopping point, not mid-sentence or mid-execution? (If not: complete it or write BLOCKED)
++- [ ] **No clarifying questions without BLOCKED**: If I am asking clarifying questions, have I also written a BLOCKED statement as the final block? (If not: add BLOCKED or remove the questions and implement directly)
+ 
+ ---
+ 
+@@ -181,86 +215,4 @@ See AGENTS.md for the full 13-step session start checklist. Key steps:
+ 
+ ## Task Workflow
+ 
+-Every significant piece of work gets a task. See `.claude/skills/tasks/SKILL.md` for full reference.
+-
+-1. **Create**: `cortextos bus create-task "<title>" --desc "<desc>"`
+-2. **Start**: `cortextos bus update-task <id> in_progress`
+-3. **Complete**: `cortextos bus complete-task <id> --result "[summary]"`
+-4. **Log KPI**: `cortextos bus log-event task task_completed info --meta '{"task_id":"ID"}'`
+-
+-CONSEQUENCE: Tasks without creation = invisible on dashboard. Your effectiveness score will be 0%.
+-TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
+-
+----
+-
+-## Mandatory Memory Protocol
+-
+-You have THREE memory layers. All are mandatory.
+-
+-### Layer 1: Daily Memory (memory/YYYY-MM-DD.md)
+-Write to this file:
+-- On every session start
+-- Before starting any task (WORKING ON: entry)
+-- After completing any task (COMPLETED: entry)
+-- On every heartbeat cycle
+-- On session end
+-
+-### Layer 2: Long-Term Memory (MEMORY.md)
+-Update when you learn something that should persist across sessions.
+-
+-CONSEQUENCE: Without daily memory, session crashes lose all context. You start from zero.
+-TARGET: >= 3 memory entries per session.
+-
+----
+-
+-## Mandatory Event Logging
+-
+-Log significant events so the Activity feed shows what's happening.
+-
+-```bash
+-cortextos bus log-event action session_start info --meta '{"agent":"'$CTX_AGENT_NAME'"}'
+-cortextos bus log-event action task_completed info --meta '{"task_id":"<id>","agent":"'$CTX_AGENT_NAME'"}'
+-```
+-
+-CONSEQUENCE: Events without logging are invisible in the Activity feed.
+-TARGET: >= 3 events per active session.
+-
+----
+-
+-## Telegram Messages
+-
+-Messages arrive in real time via the fast-checker daemon:
+-
+-```
+-=== TELEGRAM from <name> (chat_id:<id>) ===
+-<text>
+-Reply using: cortextos bus send-telegram <chat_id> "<reply>"
+-```
+-
+-Photos include a `local_file:` path. Callbacks include `callback_data:` and `message_id:`. Process all immediately and reply using the command shown.
+-
+-**Telegram formatting:** Uses Telegram's regular Markdown (not MarkdownV2). Do NOT escape characters like `!`, `.`, `(`, `)`, `-` with backslashes. Just write plain natural text. Only `_`, `*`, `` ` ``, and `[` have special meaning.
+-
+----
+-
+-## Agent-to-Agent Messages
+-
+-```
+-=== AGENT MESSAGE from <agent> [msg_id: <id>] ===
+-<text>
+-Reply using: cortextos bus send-message <agent> normal '<reply>' <msg_id>
+-```
+-
+-Always include `msg_id` as reply_to (auto-ACKs the original). Un-ACK'd messages redeliver after 5 min. For no-reply messages: `cortextos bus ack-inbox <msg_id>`
+-
+----
+-
+-## Crons
+-
+-Defined in `config.json` under `crons` array. Set up once per session via `/loop`.
+-
+-**Add:** Create `/loop {interval} {prompt}`, then add to `config.json`
+-**Remove:** Cancel the `/loop`, remove from `config.json`
+-**Format:** `{"name": "...", "interval": "5m", "prompt": "..."}`
+-
+-Crons expire after 7 days but are recreated
+\ No newline at end of file
++Every significant piece of work
+\ No newline at end of file
+diff --git a/orgs/revops-global/agents/dev/config.json b/orgs/revops-global/agents/dev/config.json
+index 1a254884d..cbb4e01d5 100644
+--- a/orgs/revops-global/agents/dev/config.json
++++ b/orgs/revops-global/agents/dev/config.json
+@@ -102,13 +102,7 @@
+       "name": "ob1-daily-vignette",
+       "type": "recurring",
+       "cron": "0 6 * * *",
+-      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.mjs"
+-    },
+-    {
+-      "name": "daily-hero-watchdog",
+-      "type": "recurring",
+-      "cron": "0 8 * * *",
+-      "prompt": "Read prompts/cron-daily-hero-watchdog.md and execute exactly one bounded hero trigger pass; check latest.json, dispatch to mac-codex if missing, log result and exit."
++      "prompt": "/home/cortextos/bin/ob1-daily-vignette-cron.sh"
+     },
+     {
+       "name": "supabase-outage-detector",
+@@ -117,10 +111,10 @@
+       "prompt": "node /home/cortextos/cortextos/scripts/supabase-outage-detector.js"
+     },
+     {
+-      "name": "daily-hero-verify",
++      "name": "agentops-uptime-probe",
+       "type": "recurring",
+-      "cron": "3 8 * * *",
+-      "prompt": "Read prompts/cron-daily-hero-verify.md and execute exactly one bounded hero verification pass; check latest.json date==today, alert orchestrator if deadline breached, log result and exit."
++      "interval": "10m",
++      "prompt": "node /home/cortextos/cortextos/scripts/agentops-uptime-probe.js"
+     },
+     {
+       "name": "signal-diff-inbox-publish",
+diff --git a/orgs/revops-global/agents/dev/prompts/cron-daily-hero-verify.md b/orgs/revops-global/agents/dev/prompts/cron-daily-hero-verify.md
+index 16b506bb8..2b675d756 100644
+--- a/orgs/revops-global/agents/dev/prompts/cron-daily-hero-verify.md
++++ b/orgs/revops-global/agents/dev/prompts/cron-daily-hero-verify.md
+@@ -1,102 +1,5 @@
+-# Daily Hero Watchdog — Verify
++# Retired: Daily Hero Verify
+ 
+-Cron name: `daily-hero-verify`  
+-Schedule: `3 8 * * *` America/Los_Angeles  
+-Purpose: Confirm the OB1 daily hero is live by 8 AM PT. Alert orchestrator if it is not.
++Retired 2026-06-16.
+ 
+-First, record the cron fire:
+-
+-```bash
+-cortextos bus update-cron-fire daily-hero-verify --interval "3 8 * * *"
+-```
+-
+-## Step 1 — Check live latest.json
+-
+-```bash
+-TODAY=$(date +%Y-%m-%d)
+-LIVE_DATE=$(curl -sf https://ob1.revopsglobal.com/vignettes/latest.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('date',''))" 2>/dev/null || echo "unreachable")
+-echo "Live date: $LIVE_DATE | Expected: $TODAY"
+-```
+-
+-**If LIVE_DATE == $TODAY**: hero date is confirmed. Proceed to Step 2 (quality assertions) before logging success.
+-
+-**If LIVE_DATE != $TODAY**: skip to Step 3.
+-
+-## Step 2 — Quality assertions: canonical-ref + mobile safe-area
+-
+-Run the two hard-gate assertions that catch character identity drift and mobile crop regressions:
+-
+-```bash
+-cd /home/cortextos/cortextos
+-ASSERT_EXIT=0
+-npx tsx scripts/ob1-hero-assertions.ts 2>&1 | tee /tmp/ob1-hero-assertions-${TODAY}.log
+-ASSERT_EXIT=${PIPESTATUS[0]}
+-echo "Assertion exit code: $ASSERT_EXIT"
+-```
+-
+-**If ASSERT_EXIT == 0** (all assertions pass): hero is fully verified. Log success:
+-
+-```bash
+-cortextos bus log-event action daily_hero_status info --meta '{"status":"verified_live","assertions":"pass","date":"'"$TODAY"'"}'
+-```
+-
+-Done — no alert needed.
+-
+-**If ASSERT_EXIT != 0** (one or more assertions failed): extract the failures and alert orchestrator:
+-
+-```bash
+-# Extract FAIL lines from the log
+-FAILURES=$(grep "✗\|FAIL" /tmp/ob1-hero-assertions-${TODAY}.log | head -10)
+-cortextos bus send-message orchestrator urgent "DAILY HERO QUALITY GATE FAILED on ${TODAY}: ${FAILURES} — Hero date is live but assertions failed. Canonical refs may be missing (character identity drift risk) or mobile safe-area CSS regressed (object-fit:cover crop). Review /tmp/ob1-hero-assertions-${TODAY}.log for detail."
+-cortextos bus log-event action daily_hero_status error --meta '{"status":"assertions_failed","date":"'"$TODAY"'","failures":"'"$(echo $FAILURES | head -c 200)"'"}'
+-cortextos bus create-task "Daily hero assertions failed — ${TODAY}" \
+-  --desc "ob1-hero-assertions.ts exited non-zero at 8 AM PT. Check /tmp/ob1-hero-assertions-${TODAY}.log. Likely causes: (1) canonical ref image 404 on CDN, or (2) mobile safe-area CSS regression (object-fit:cover)." \
+-  --priority high \
+-  --success-criteria "npx tsx scripts/ob1-hero-assertions.ts exits 0" \
+-  --out-of-scope "Regenerating the hero — assertions check the deployed hero, not generation" \
+-  --goal-ancestry "OB1 daily content reliability"
+-```
+-
+-## Step 3 — Hero missing at 8 AM: alert orchestrator
+-
+-If LIVE_DATE != $TODAY (stale, blank, or unreachable), the hero SLA has been breached.
+-
+-Check if a trigger was sent this morning:
+-
+-```bash
+-ls /tmp/daily-hero-trigger-${TODAY}.json 2>/dev/null && cat /tmp/daily-hero-trigger-${TODAY}.json || echo "No trigger recorded"
+-```
+-
+-Alert orchestrator immediately:
+-
+-```bash
+-cortextos bus send-message orchestrator urgent "DAILY HERO MISSING: ob1 latest.json still shows ${LIVE_DATE} at 8 AM PT — expected ${TODAY}. Flow run may have failed on mac-codex. The last-good hero is holding but no new vignette is live. Human decision needed: investigate mac-codex, Flow session, or ob1-app Vercel deploy pipeline."
+-```
+-
+-Log the alert:
+-
+-```bash
+-cortextos bus log-event action daily_hero_status error --meta '{"status":"missing_at_deadline","live_date":"'"$LIVE_DATE"'","expected":"'"$TODAY"'"}'
+-```
+-
+-Create a task for tracking:
+-
+-```bash
+-cortextos bus create-task "Daily hero missing — ${TODAY}" \
+-  --desc "Live latest.json shows ${LIVE_DATE} at 8 AM PT deadline; Flow vignette did not deploy on time. Needs investigation." \
+-  --priority urgent \
+-  --success-criteria "ob1.revopsglobal.com/vignettes/latest.json date == ${TODAY}" \
+-  --out-of-scope "Nano-Banana fallback — Flow is the only source" \
+-  --escalation-triggers "Hero still missing after manual retry" \
+-  --required-capabilities "mac-codex, Vercel, ob1-app GitHub" \
+-  --fallback-proof "curl latest.json and check date field" \
+-  --artifact-expectations "latest.json with date=today, Vercel READY deploy" \
+-  --goal-ancestry "OB1 daily content reliability" \
+-  --source-hierarchy "watchdog-cron"
+-```
+-
+-## Hard constraints
+-
+-- NEVER invoke `scripts/generate-daily-vignette.mjs` (Nano-Banana / VM generator).
+-- Do NOT silently skip — always log either success or the alert path.
+-- The last-good hero stays live automatically (Vercel serves last deployed) — do not blank the page.
++Do not run this prompt. The canonical daily hero path is the VM `ob1-daily-vignette` generator, scheduled in the dev agent config. The generator publishes only after its own guard passes; otherwise it holds the last good hero and alerts through the cron wrapper.
+diff --git a/orgs/revops-global/agents/orchestrator/config.json b/orgs/revops-global/agents/orchestrator/config.json
+index 37b91bd7c..81c9dcaf8 100644
+--- a/orgs/revops-global/agents/orchestrator/config.json
++++ b/orgs/revops-global/agents/orchestrator/config.json
+@@ -103,7 +103,7 @@
+       "name": "agentops-hourly-dogfood",
+       "type": "recurring",
+       "interval": "1h",
+-      "prompt": "Read prompts/cron-agentops-hourly-dogfood.md and execute one bounded AgentOps product/operator dogfood pass using Codex/Chrome-capable routes while Claude is constrained. Do not deploy, merge, post externally, or create duplicate tasks. Route/update scoped defects only, log results, and Telegram Greg only for P0/P1 or human-action blockers."
++      "prompt": "Read prompts/cron-agentops-hourly-dogfood.md and execute one bounded AgentOps product/operator dogfood pass using the full available QA stack. Claude remains available after Anthropic's -p cutover plan changed; do not treat the cutover as a blocker. Do not deploy, merge, post externally, or create duplicate tasks. Route/update scoped defects only, log results, and Telegram Greg only for P0/P1 or human-action blockers."
+     },
+     {
+       "name": "deliverables-snapshot",
+@@ -130,7 +130,7 @@
+   "suppress_restart_telegram": true,
+   "codex_account_pool": [
+     {
+-      "priority": 1,
++      "priority": 3,
+       "label": "greg@revopsglobal.com personal primary",
+       "email_or_workspace_label": "greg@revopsglobal.com",
+       "product_surface": "Codex Desktop",
+@@ -145,30 +145,30 @@
+       "requires_human_approval": false
+     },
+     {
+-      "priority": 2,
+-      "label": "gregharned@gmail personal backup",
+-      "email_or_workspace_label": "gregharned@gmail.com",
++      "priority": 4,
++      "label": "greg@revopsglobal.com work backup",
++      "email_or_workspace_label": "greg@revopsglobal.com",
+       "product_surface": "Codex Desktop",
+-      "tier": "Pro 20x",
+-      "codex_home": "/home/cortextos/.codex-orchestrator-primary",
++      "tier": "work/shared",
++      "codex_home": "/home/cortextos/.codex-work",
+       "status": "standby",
+       "intended_lanes": [
+-        "backup-interface",
+-        "standard-work"
++        "work-runtime",
++        "backup-interface"
+       ],
+       "requires_human_approval": false
+     },
+     {
+-      "priority": 3,
+-      "label": "greg@revopsglobal.com work backup",
+-      "email_or_workspace_label": "greg@revopsglobal.com",
++      "priority": 5,
++      "label": "gregharned@gmail personal backup",
++      "email_or_workspace_label": "gregharned@gmail.com",
+       "product_surface": "Codex Desktop",
+-      "tier": "work/shared",
+-      "codex_home": "/home/cortextos/.codex-work",
++      "tier": "Pro 20x",
++      "codex_home": "/home/cortextos/.codex-orchestrator-primary",
+       "status": "standby",
+       "intended_lanes": [
+-        "work-runtime",
+-        "backup-interface"
++        "backup-interface",
++        "standard-work"
+       ],
+       "requires_human_approval": false
+     }
+@@ -193,6 +193,40 @@
+     "provider": "codex",
+     "runtime": "codex-app-server",
+     "model": "gpt-5.5",
+-    "switched_at": "2026-06-13T14:11:16.496Z"
+-  }
++    "switched_at": "2026-06-17T01:08:57.663Z"
++  },
++  "provider_priority_order": [
++    {
++      "priority": 1,
++      "provider": "claude",
++      "account": "Claude Max",
++      "home": "/home/cortextos/.claude"
++    },
++    {
++      "priority": 2,
++      "provider": "claude",
++      "account": "Claude Team",
++      "home": "/home/cortextos/.claude-team"
++    },
++    {
++      "priority": 3,
++      "provider": "codex",
++      "account": "greg@revopsglobal.com personal Codex",
++      "codex_home": "/home/cortextos/.codex-greg"
++    },
++    {
++      "priority": 4,
++      "provider": "codex",
++      "account": "greg@revopsglobal.com work Codex",
++      "codex_home": "/home/cortextos/.codex-work"
++    },
++    {
++      "priority": 5,
++      "provider": "codex",
++      "account": "gregharned@gmail.com personal Codex",
++      "codex_home": "/home/cortextos/.codex-orchestrator-primary"
++    }
++  ],
++  "provider_priority_note": "Greg corrected 2026-06-17: failover order is Claude Max > Claude Team > greg@revopsglobal.com personal Codex > greg@revopsglobal.com work Codex > gregharned@gmail.com personal Codex. Codex is fallback after Claude capacity is unavailable.",
++  "claude_team_orchestrator_note": "2026-06-17: Greg confirmed Claude Team has credits and should run orchestrator ahead of Codex. Set runtime=claude-code, home=/home/cortextos/.claude-team, model=claude-opus-4-7."
+ }
+diff --git a/scripts/auto-merge-pr.js b/scripts/auto-merge-pr.js
+index a1fef2255..2290faa01 100644
+--- a/scripts/auto-merge-pr.js
++++ b/scripts/auto-merge-pr.js
+@@ -15,6 +15,7 @@
+ 'use strict';
+ 
+ const { execSync, execFileSync, spawnSync } = require('child_process');
++const fs = require('fs');
+ const path = require('path');
+ const { checkPR, formatComment, postComment } = require('./memo-conflict-check');
+ 
+@@ -285,6 +286,38 @@ function shouldSkipBody(body) {
+   return SKIP_BODY_PATTERNS.some(p => p.test(body));
+ }
+ 
++// Returns the id of a still-pending approval whose title/description references
++// this PR (by `#<number>` + the repo short name), or null. Held PRs must never
++// auto-merge ahead of an explicit approval gate.
++// (2026-06-16: PR #862 auto-merged while approval_1781598850 was still pending —
++// the cron had no approval-gate awareness. This closes that bypass.)
++function pendingApprovalForPR(repo, number, dir = path.join(CTX_ROOT, 'orgs', CTX_ORG, 'approvals', 'pending')) {
++  let files;
++  try {
++    files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
++  } catch {
++    return null; // no pending dir → nothing to gate on (best-effort, never blocks)
++  }
++  const repoShort = repo.split('/')[1] || repo;
++  const prRe = new RegExp(`#${number}\\b`);
++  for (const f of files) {
++    let appr;
++    try {
++      appr = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
++    } catch {
++      continue;
++    }
++    // Files live under pending/ but double-check status so a stale/misfiled
++    // approved record can't block.
++    if (appr.status && appr.status !== 'pending') continue;
++    const text = `${appr.title || ''} ${appr.description || ''}`;
++    if (prRe.test(text) && text.includes(repoShort)) {
++      return appr.id || f.replace(/\.json$/, '');
++    }
++  }
++  return null;
++}
++
+ function isWithinSettleWindow(updatedAt, nowMs = Date.now(), windowMs = SETTLE_WINDOW_MS) {
+   const t = new Date(updatedAt).getTime();
+   if (Number.isNaN(t)) return false;
+@@ -445,6 +478,11 @@ async function main() {
+         console.log(`[auto-merge] SKIP #${number} ${repo} — body contains skip signal`);
+         continue;
+       }
++      const heldByApproval = pendingApprovalForPR(repo, number);
++      if (heldByApproval) {
++        console.log(`[auto-merge] SKIP #${number} ${repo} — linked approval pending (${heldByApproval})`);
++        continue;
++      }
+       if (mergeable !== 'MERGEABLE') {
+         console.log(`[auto-merge] SKIP #${number} ${repo} — mergeable=${mergeable}`);
+         continue;
+@@ -549,6 +587,6 @@ if (require.main === module) {
+ 
+ // Export helpers for unit testing
+ if (typeof module !== 'undefined') {
+-  module.exports = { shouldSkipBody, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
++  module.exports = { shouldSkipBody, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
+ }
+ 
+diff --git a/scripts/cortextos-deliverables-snapshot.js b/scripts/cortextos-deliverables-snapshot.js
+index 299be327f..029ca6d98 100755
+--- a/scripts/cortextos-deliverables-snapshot.js
++++ b/scripts/cortextos-deliverables-snapshot.js
+@@ -29,7 +29,6 @@ const fs = require('fs');
+ const path = require('path');
+ const { execFileSync } = require('child_process');
+ const https = require('https');
+-const { HUB_QA_ROOTS, HUB_QA_PATTERN } = require('./hub-qa-constants');
+ 
+ const SUPABASE_URL =
+   process.env.SUPABASE_URL ||
+@@ -39,6 +38,9 @@ const INTERNAL_SECRET = process.env.INTERNAL_CRON_SECRET;
+ const ORG_ROOT =
+   process.env.CORTEXTOS_ORG_ROOT ||
+   '/home/cortextos/cortextos/orgs/revops-global';
++const QA_ORG_ROOT =
++  process.env.CORTEXTOS_QA_ORG_ROOT ||
++  '/home/cortextos/cortextos-qa/orgs/revops-global';
+ const TEAM_BRAIN_ROOT =
+   process.env.TEAM_BRAIN_ROOT || '/home/cortextos/work/team-brain';
+ const TEAM_BRAIN_FALLBACK_ROOT =
+@@ -120,8 +122,18 @@ function numberMatch(text, pattern) {
+ // ── source: hub_qa ──────────────────────────────────────────────────────────
+ 
+ function summarizeHubQa() {
+-  const roots = HUB_QA_ROOTS;
+-  const artifact = latestTextArtifact(roots, HUB_QA_PATTERN);
++  const roots = [
++    path.join(QA_ORG_ROOT, 'agents/codex/output/playwright-qa'),
++    path.join(QA_ORG_ROOT, 'agents/hub-dogfood/output'),
++    path.join(QA_ORG_ROOT, 'agents/qa-agent/output'),
++    path.join(ORG_ROOT, 'agents/hub-dogfood/output'),
++    path.join(ORG_ROOT, 'agents/qa-agent/output'),
++    path.join(ORG_ROOT, 'agents/codex/output/playwright-qa'),
++  ];
++  const artifact = latestTextArtifact(
++    roots,
++    /(?:qa-summary|report|dogfood|app-fleet-tasks-qa).*\.md$/i,
++  );
+ 
+   if (!artifact) {
+     return {
+@@ -161,30 +173,10 @@ function summarizeHubQa() {
+     : (numberMatch(artifact.text, /Checks deferred:\s*(\d+)/i) ?? 0);
+   const age = minutesSince(artifact.updated_at);
+ 
+-  // Artifact found but no recognized summary format matched — return honest
+-  // empty state rather than a misleading "0 pass, 0 fail, healthy" green card.
+-  if (passed === 0 && failed === 0 && deferred === 0 && !passTotal) {
+-    return {
+-      source: 'hub_qa',
+-      status: 'empty',
+-      label: 'QA artifact found — no pass/fail counts parsed',
+-      updated_at: artifact.updated_at,
+-      stale_reason: `${path.basename(artifact.path)}: no recognized summary format`,
+-      payload: {
+-        passed_count: 0,
+-        failed_count: 0,
+-        follow_up_count: 0,
+-        artifact_path: artifact.path,
+-      },
+-    };
+-  }
+-
+   const status =
+     failed > 0
+       ? 'error'
+-      : deferred > 0
+-        ? 'warning'
+-        : age != null && age > 6 * 60
++      : age != null && age > 6 * 60
+           ? 'stale'
+           : 'healthy';
+   const stale_reason =
+@@ -192,9 +184,7 @@ function summarizeHubQa() {
+       ? `${failed} failing check(s) in ${path.basename(artifact.path)}`
+       : age != null && age > 6 * 60
+         ? `${age}m old; threshold 360m`
+-        : deferred > 0
+-          ? `${deferred} follow-up check(s) need attention`
+-          : null;
++        : null;
+ 
+   return {
+     source: 'hub_qa',
+@@ -219,12 +209,16 @@ function summarizeAdvisorCanary() {
+       ORG_ROOT,
+       'agents/codex/output/advisor-facing-page-canary',
+     ),
++    path.join(
++      ORG_ROOT,
++      'agents/codex-3/output/advisor-facing-page-canary',
++    ),
+   ];
+-  // Accept canonical name, legacy prefix-free name, and current results.json schema.
++  // Accept both "canary-browser-results.json" (canonical) and "browser-results.json"
++  // (fallback — codex-3 sometimes writes without the "canary-" prefix).
+   const jsonArtifact =
+     latestTextArtifact(roots, /canary-browser-results\.json$/i) ||
+-    latestTextArtifact(roots, /(?:^|[/\\])browser-results\.json$/i) ||
+-    latestTextArtifact(roots, /(?:^|[/\\])results\.json$/i);
++    latestTextArtifact(roots, /(?:^|[/\\])browser-results\.json$/i);
+   const reportArtifact = latestTextArtifact(roots, /report\.md$/i);
+   const artifact = jsonArtifact || reportArtifact;
+ 
+@@ -247,26 +241,23 @@ function summarizeAdvisorCanary() {
+   if (jsonArtifact) {
+     try {
+       const parsed = JSON.parse(jsonArtifact.text);
+-      // Old schema: { generated_at, results[], pageErrors[], failedResponses[] }
+-      // New schema: { checked_at, pages[{ pageErrors[], failedRequests[] }], findings[] }
+       generatedAt = parsed.generated_at ?? parsed.checked_at ?? generatedAt;
+-      if (Array.isArray(parsed.results)) {
+-        failures =
+-          Number(parsed.pageErrors?.length ?? 0) +
+-          Number(parsed.failedResponses?.length ?? 0);
+-        checked = parsed.results.length;
+-      } else if (Array.isArray(parsed.pages)) {
+-        checked = parsed.pages.length;
+-        failures =
+-          parsed.pages.reduce(
+-            (sum, p) =>
+-              sum +
+-              Number(p.pageErrors?.length ?? 0) +
+-              Number(p.failedRequests?.length ?? 0),
+-            0,
+-          ) + Number(parsed.findings?.length ?? 0);
+-      }
+-      label = `${checked} advisor canary page(s) checked`;
++      const pages = Array.isArray(parsed.pages) ? parsed.pages : [];
++      failures =
++        Number(parsed.pageErrors?.length ?? 0) +
++        Number(parsed.failedResponses?.length ?? 0) +
++        Number(parsed.findings?.length ?? 0) +
++        pages.reduce(
++          (total, page) =>
++            total +
++            Number(page?.pageErrors?.length ?? 0) +
++            Number(page?.failedRequests?.length ?? 0),
++          0,
++        );
++      checked = Array.isArray(parsed.results)
++        ? parsed.results.length
++        : pages.length;
++      label = `${checked} advisor canary URL(s) checked`;
+     } catch {
+       failures = 1;
+       label = 'Advisor canary JSON parse failed';
+@@ -333,18 +324,7 @@ function summarizeTeamBrainWiki() {
+       // fall through to lastSync
+     }
+ 
+-    let updatedAt = gitUpdatedAt || lastSync;
+-
+-    // Fallback: scan wiki .md files for most recent mtime when git log + .last_sync are both unavailable
+-    if (!updatedAt) {
+-      const wikiFiles = listFiles(root)
+-        .filter((p) => p.endsWith('.md'))
+-        .map((p) => ({ path: p, mtime: safeIsoFromMtime(p) }))
+-        .filter((f) => Boolean(f.mtime))
+-        .sort((a, b) => new Date(b.mtime).getTime() - new Date(a.mtime).getTime());
+-      if (wikiFiles.length > 0) updatedAt = wikiFiles[0].mtime;
+-    }
+-
++    const updatedAt = gitUpdatedAt || lastSync;
+     const age = minutesSince(updatedAt);
+     const status =
+       age == null
+diff --git a/scripts/hub-surface-sweep.js b/scripts/hub-surface-sweep.js
+index ec491fb7a..3672a6c65 100644
+--- a/scripts/hub-surface-sweep.js
++++ b/scripts/hub-surface-sweep.js
+@@ -129,6 +129,11 @@ const KNOWN_QA_ROUTES = new Set([
+   '/app/play-history', '/app/play-output', '/app/play-runner', '/app/play-running',
+   '/app/signal-triggers', '/app/signal-watchers', '/app/skills', '/app/strategy', '/app/voice',
+   '/app/wiki-concepts-page', '/app/wiki-health', '/app/wiki-page',
++  // Tab sub-components of /app/wiki (src/pages/portal/wiki/{EvalTab,GovernanceTab}.tsx),
++  // not standalone routes — exercised by the /app/wiki harness checks
++  // (hub-qa-playwright.ts). Listed here so the filename→route discovery stops
++  // flagging them as blind spots (2026-06-16 sweep).
++  '/app/wiki/eval-tab', '/app/wiki/governance-tab',
+   '/app/work-approvals', '/app/work-comms', '/app/work-inbox', '/app/work-reviews',
+   '/app/workflow-execution-history', '/app/workflow-health',
+   // ob1-parents routes (2026-05-24 sweep)
+diff --git a/scripts/ob1-hero-assertions.ts b/scripts/ob1-hero-assertions.ts
+deleted file mode 100644
+index 66295aa68..000000000
+--- a/scripts/ob1-hero-assertions.ts
++++ /dev/null
+@@ -1,324 +0,0 @@
+-#!/usr/bin/env tsx
+-/**
+- * ob1-hero-assertions.ts — Hard QA gates for the daily ob1 hero vignette.
+- *
+- * Asserts two failure classes that previously went through 8+ Greg iterations
+- * uninstrumented:
+- *   1. canonical-ref: all cast reference_image fields are present in latest.json
+- *      (field presence proves the local PNG was found at generation time;
+- *       reference/ images are local generator inputs, not web-served CDN assets)
+- *   2. mobile safe-area: hero <img> or <video> uses object-fit:contain on 390px viewport
+- *
+- * Exit 0 = all pass. Exit 1 = any failure (cron treats non-zero as hard error).
+- *
+- * Usage:
+- *   npx tsx scripts/ob1-hero-assertions.ts
+- *   npx tsx scripts/ob1-hero-assertions.ts --base-url https://ob1.revopsglobal.com
+- */
+-
+-import { chromium } from 'playwright';
+-import * as fs from 'fs';
+-import * as https from 'https';
+-import * as http from 'http';
+-
+-// ---------------------------------------------------------------------------
+-// Config
+-// ---------------------------------------------------------------------------
+-
+-function getArg(flag: string, fallback: string): string {
+-  const idx = process.argv.indexOf(flag);
+-  return idx !== -1 && process.argv[idx + 1] ? process.argv[idx + 1] : fallback;
+-}
+-
+-const BASE_URL = getArg('--base-url', 'https://ob1.revopsglobal.com').replace(/\/$/, '');
+-const VIGNETTES_BASE = `${BASE_URL}/vignettes`;
+-const OUT_DIR = getArg('--out-dir', '/tmp');
+-
+-// ---------------------------------------------------------------------------
+-// Types
+-// ---------------------------------------------------------------------------
+-
+-interface AssertionResult {
+-  check: string;
+-  status: 'PASS' | 'FAIL' | 'SKIP';
+-  evidence: string;
+-}
+-
+-interface LatestJson {
+-  date?: string;
+-  image?: string;
+-  video?: string;
+-  cast?: Array<{ id: string; name: string; reference_image?: string }>;
+-  cast_members?: Array<{ id: string; name: string; reference_image?: string }>;
+-}
+-
+-// ---------------------------------------------------------------------------
+-// Helpers
+-// ---------------------------------------------------------------------------
+-
+-async function httpHead(url: string): Promise<{ status: number; ok: boolean }> {
+-  return new Promise((resolve) => {
+-    const mod = url.startsWith('https') ? https : http;
+-    const req = mod.request(url, { method: 'HEAD' }, (res) => {
+-      resolve({ status: res.statusCode ?? 0, ok: (res.statusCode ?? 0) < 400 });
+-    });
+-    req.on('error', () => resolve({ status: 0, ok: false }));
+-    req.setTimeout(8000, () => { req.destroy(); resolve({ status: 0, ok: false }); });
+-    req.end();
+-  });
+-}
+-
+-// ---------------------------------------------------------------------------
+-// Check 1: canonical-ref — all cast reference images present + accessible
+-// ---------------------------------------------------------------------------
+-
+-async function checkCanonicalRefs(): Promise<AssertionResult[]> {
+-  const results: AssertionResult[] = [];
+-
+-  // Fetch latest.json
+-  let latest: LatestJson;
+-  try {
+-    const resp = await fetch(`${VIGNETTES_BASE}/latest.json`);
+-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+-    latest = await resp.json() as LatestJson;
+-  } catch (e) {
+-    return [{
+-      check: '[CANONICAL-REF] latest.json fetch',
+-      status: 'FAIL',
+-      evidence: `Failed to fetch ${VIGNETTES_BASE}/latest.json: ${e}`,
+-    }];
+-  }
+-
+-  // Hero image must exist and be accessible
+-  const heroImage = latest.image ?? '';
+-  if (!heroImage) {
+-    results.push({ check: '[CANONICAL-REF] hero image field', status: 'FAIL', evidence: 'latest.json missing "image" field — generation may have failed' });
+-  } else {
+-    const heroUrl = `${VIGNETTES_BASE}/${heroImage}`;
+-    const heroCheck = await httpHead(heroUrl);
+-    results.push({
+-      check: '[CANONICAL-REF] hero image accessible',
+-      status: heroCheck.ok ? 'PASS' : 'FAIL',
+-      evidence: heroCheck.ok
+-        ? `${heroUrl} → ${heroCheck.status}`
+-        : `${heroUrl} → ${heroCheck.status} (not accessible — hero will 404 in app)`,
+-    });
+-  }
+-
+-  // Each cast member must have a reference_image field in latest.json.
+-  //
+-  // IMPORTANT: reference_image (e.g. "reference/petunia-canonical.png") is a
+-  // LOCAL DISK path relative to the ob1-app root used exclusively as a `-i`
+-  // flag input to Nano-Banana (scripts/generate-daily-vignette.mjs).  The
+-  // generator reads it via existsSync() — it is never fetched over HTTP.  The
+-  // reference/ directory lives at ob1-app/reference/, outside Next.js public/,
+-  // so HTTP-HEADing https://ob1.revopsglobal.com/vignettes/reference/* always
+-  // returns 404 by design — those files are not CDN assets.
+-  //
+-  // Correct assertion: the field EXISTS in latest.json proves the generator
+-  // found the PNG on local disk at run-time and passed it as the binding
+-  // identity to the model.  If the field is absent the character identity was
+-  // unbound at generation time; this degrades output quality but does NOT cause
+-  // a live-page 404.  We use SKIP (warn) rather than FAIL for a missing ref so
+-  // the cron does not hard-fail over a quality signal.
+-  const castMembers = latest.cast_members ?? latest.cast ?? [];
+-  if (castMembers.length === 0) {
+-    results.push({
+-      check: '[CANONICAL-REF] cast members present',
+-      status: 'FAIL',
+-      evidence: 'latest.json has empty cast/cast_members — no reference images will be passed to generation',
+-    });
+-  } else {
+-    for (const member of castMembers) {
+-      const refImage = member.reference_image ?? '';
+-      if (!refImage) {
+-        // Missing field: generator ran without a binding reference for this
+-        // character.  Quality may degrade but the page does not break.
+-        results.push({
+-          check: `[CANONICAL-REF] ${member.name} reference_image field`,
+-          status: 'SKIP',
+-          evidence: `WARN: "${member.name}" (${member.id}) has no reference_image in latest.json — character identity was not bound during generation; add ob1-app/reference/${member.id}-canonical.png`,
+-        });
+-      } else {
+-        // Field present: generator found the local PNG and passed it to the
+-        // model.  No HTTP check — the path is a local disk ref, not a URL.
+-        results.push({
+-          check: `[CANONICAL-REF] ${member.name} ref bound`,
+-          status: 'PASS',
+-          evidence: `reference_image="${refImage}" present in latest.json — identity bound at generation time (local file, not web-served)`,
+-        });
+-      }
+-    }
+-  }
+-
+-  return results;
+-}
+-
+-// ---------------------------------------------------------------------------
+-// Check 2: mobile safe-area — hero uses object-fit:contain on 390px viewport
+-// Handles both <img> and <video> heroes (today's vignette may use either).
+-// ---------------------------------------------------------------------------
+-
+-async function checkMobileSafeArea(): Promise<AssertionResult[]> {
+-  const results: AssertionResult[] = [];
+-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+-
+-  try {
+-    const page = await browser.newPage();
+-    // iPhone 14 Pro viewport — matches the target mobile device Greg reviews on
+-    await page.setViewportSize({ width: 390, height: 844 });
+-
+-    try {
+-      await page.goto(BASE_URL, { waitUntil: 'networkidle', timeout: 25000 });
+-    } catch {
+-      // networkidle can timeout on SPAs; fall through and check what loaded
+-    }
+-
+-    // Find the hero media element. Priority order:
+-    //   1. video selectors (vignettes with video field render <video> not <img>)
+-    //   2. img selectors with vignette-specific markers
+-    //   3. structural selectors scoped to the hero container
+-    // We intentionally do NOT fall through to bare `img:first-of-type` — that
+-    // matches cast thumbnails and avatars which legitimately use object-fit:cover.
+-    const heroSelectors = [
+-      // video — highest priority when today has a video vignette
+-      'video[src*="vignette"]',
+-      '.daily-vignette-hero__image video',
+-      // img — Next.js Image rewrites src to /_next/image?url=... so match container
+-      '.daily-vignette-hero__image img',
+-      'img[src*="vignette"]',
+-      'img[src*="/_next/image"][src*="vignette"]',
+-      'img[alt*="hero"]',
+-      'img[alt*="vignette"]',
+-    ];
+-
+-    let heroHandle: import('playwright').Locator | null = null;
+-    let heroSrc = '';
+-    let heroTag = '';
+-
+-    for (const sel of heroSelectors) {
+-      const loc = page.locator(sel).first();
+-      const count = await loc.count();
+-      if (count > 0) {
+-        try {
+-          await loc.waitFor({ timeout: 5000 });
+-          // Accept src OR srcset (video uses src; Next.js img may only have srcset)
+-          heroSrc = (await loc.getAttribute('src') ?? '') || (await loc.getAttribute('srcset') ?? '');
+-          heroTag = await loc.evaluate((el: Element) => el.tagName.toLowerCase());
+-          if (heroSrc || heroTag === 'video') {
+-            heroHandle = loc;
+-            break;
+-          }
+-        } catch {
+-          // try next selector
+-        }
+-      }
+-    }
+-
+-    if (!heroHandle) {
+-      results.push({
+-        check: '[SAFE-AREA] hero media element found',
+-        status: 'SKIP',
+-        evidence: `No hero <img> or <video> found on ${BASE_URL} within 5s on 390px viewport. Selectors tried: ${heroSelectors.join(', ')}. Page may need auth or selector needs update.`,
+-      });
+-      return results;
+-    }
+-
+-    results.push({
+-      check: '[SAFE-AREA] hero media element found',
+-      status: 'PASS',
+-      evidence: `Found <${heroTag}> via selector (src: ${heroSrc ? heroSrc.slice(0, 80) : '(empty)'})`,
+-    });
+-
+-    // Check object-fit computed style — works for both <img> and <video>
+-    const computedObjectFit = await heroHandle.evaluate((el: Element) => {
+-      const style = window.getComputedStyle(el);
+-      const vid = el as HTMLVideoElement;
+-      const img = el as HTMLImageElement;
+-      return {
+-        objectFit: style.objectFit,
+-        objectPosition: style.objectPosition,
+-        width: el.clientWidth,
+-        height: el.clientHeight,
+-        // naturalWidth/naturalHeight only exist on <img>; use videoWidth/videoHeight for <video>
+-        naturalWidth: img.naturalWidth || vid.videoWidth || 0,
+-        naturalHeight: img.naturalHeight || vid.videoHeight || 0,
+-      };
+-    });
+-
+-    const objFit = computedObjectFit.objectFit;
+-    results.push({
+-      check: '[SAFE-AREA] hero object-fit: contain (not cover)',
+-      status: objFit === 'contain' ? 'PASS' : 'FAIL',
+-      evidence: objFit === 'contain'
+-        ? `object-fit: ${objFit} — full 16:9 frame visible on 390px mobile, no crop (${computedObjectFit.width}×${computedObjectFit.height})`
+-        : `object-fit: ${objFit} — hero will CROP on mobile, faces may exit safe zone. Expected "contain", got "${objFit}". (Regression of PR #443 fix)`,
+-    });
+-
+-    // Aspect ratio guard: natural dims should be ~16:9 (skip for video if not yet loaded)
+-    if (computedObjectFit.naturalWidth > 0 && computedObjectFit.naturalHeight > 0) {
+-      const ratio = computedObjectFit.naturalWidth / computedObjectFit.naturalHeight;
+-      const is16x9 = ratio > 1.60 && ratio < 1.90;
+-      results.push({
+-        check: '[SAFE-AREA] hero aspect ratio ~16:9',
+-        status: is16x9 ? 'PASS' : 'FAIL',
+-        evidence: is16x9
+-          ? `ratio=${ratio.toFixed(2)} (${computedObjectFit.naturalWidth}×${computedObjectFit.naturalHeight}) — within 16:9 window`
+-          : `ratio=${ratio.toFixed(2)} (${computedObjectFit.naturalWidth}×${computedObjectFit.naturalHeight}) — unexpected aspect ratio, hero safe-zone constraint may be violated`,
+-      });
+-    }
+-  } finally {
+-    await browser.close();
+-  }
+-
+-  return results;
+-}
+-
+-// ---------------------------------------------------------------------------
+-// Main
+-// ---------------------------------------------------------------------------
+-
+-async function main() {
+-  const runAt = new Date().toISOString();
+-  console.log(`[ob1-hero-assertions] Starting — ${runAt}`);
+-  console.log(`[ob1-hero-assertions] Target: ${BASE_URL}`);
+-
+-  const allResults: AssertionResult[] = [];
+-
+-  console.log('\n--- Canonical-Ref Checks ---');
+-  const canonicalResults = await checkCanonicalRefs();
+-  allResults.push(...canonicalResults);
+-  for (const r of canonicalResults) {
+-    const icon = r.status === 'PASS' ? '✓' : r.status === 'FAIL' ? '✗' : '~';
+-    console.log(`  ${icon} ${r.check}: ${r.status}`);
+-    if (r.status !== 'PASS') console.log(`      ${r.evidence}`);
+-  }
+-
+-  console.log('\n--- Mobile Safe-Area Checks ---');
+-  const safeAreaResults = await checkMobileSafeArea();
+-  allResults.push(...safeAreaResults);
+-  for (const r of safeAreaResults) {
+-    const icon = r.status === 'PASS' ? '✓' : r.status === 'FAIL' ? '✗' : '~';
+-    console.log(`  ${icon} ${r.check}: ${r.status}`);
+-    if (r.status !== 'PASS') console.log(`      ${r.evidence}`);
+-  }
+-
+-  // Summary
+-  const failCount = allResults.filter(r => r.status === 'FAIL').length;
+-  const passCount = allResults.filter(r => r.status === 'PASS').length;
+-  const total = allResults.length;
+-  console.log(`\n[ob1-hero-assertions] ${passCount}/${total} pass, ${failCount} fail\n`);
+-
+-  // Write JSON result
+-  const today = runAt.slice(0, 10);
+-  const outPath = `${OUT_DIR}/ob1-hero-assertions-${today}.json`;
+-  fs.writeFileSync(outPath, JSON.stringify({ run_at: runAt, base_url: BASE_URL, results: allResults, summary: { total, pass: passCount, fail: failCount } }, null, 2));
+-  console.log(`[ob1-hero-assertions] Results written: ${outPath}`);
+-
+-  process.exit(failCount > 0 ? 1 : 0);
+-}
+-
+-main().catch((e: unknown) => {
+-  console.error('[ob1-hero-assertions] Fatal:', e);
+-  process.exit(1);
+-});
+diff --git a/services/linkedin-poster-selfhost/README.md b/services/linkedin-poster-selfhost/README.md
+index ada9adbaa..f43c96b4f 100644
+--- a/services/linkedin-poster-selfhost/README.md
++++ b/services/linkedin-poster-selfhost/README.md
+@@ -15,6 +15,7 @@ Self-hosted LinkedIn engagement service running on the Linux server. Uses Playwr
+ |---|---|---|---|
+ | `SUPABASE_URL` | yes | — | Supabase project URL |
+ | `SUPABASE_KEY` | yes | — | Supabase service-role key |
++| `POSTER_LINKEDIN_MODE` | no | `manual` | `manual` starts health/heartbeat only and never opens LinkedIn. `browser` explicitly enables the legacy Playwright browser path. |
+ | `PROFILE_DIR` | no | `/var/lib/linkedin-poster/profiles/default` | Chromium profile directory |
+ | `USER_ID` | no | `default` | Logical user identifier (used in heartbeat agent_name) |
+ | `SENDER_NAME` | no | `LinkedIn Poster` | Display name for logs |
+@@ -27,7 +28,7 @@ Self-hosted LinkedIn engagement service running on the Linux server. Uses Playwr
+ npm install
+ npm run build
+ 
+-# Per-user instance
++# Safe default: health/heartbeat only, no LinkedIn browser automation
+ SUPABASE_URL=... SUPABASE_KEY=... \
+ PROFILE_DIR=/var/lib/linkedin-poster/profiles/greg \
+ USER_ID=greg \
+@@ -35,7 +36,11 @@ SENDER_NAME="Greg Harned" \
+ npm start
+ ```
+ 
+-## Seeding a Login Profile (P2 - login CLI)
++To run the legacy automated browser path, `POSTER_LINKEDIN_MODE=browser` must be set explicitly. Do not enable it for Greg's LinkedIn account while the account has any restriction/checkpoint history.
++
++## Seeding a Login Profile (deprecated for LinkedIn recovery)
++
++Do not use the Playwright login CLI to recover LinkedIn sessions. LinkedIn can flag browser automation during login or checkpoint flows. Safe recovery must be user-controlled in regular Chrome, with automation disabled until a reviewed manual export/import path exists.
+ 
+ Run on an approved Orgo/Codex-CU browser lane to seed a fresh profile, validate it, and rsync to the server. macOS execution is blocked unless an explicit approved Mac fallback sets `ALLOW_MAC_BROWSER_AUTOMATION=1` and `ORGO_FAILURE_ARTIFACT`.
+ 
+diff --git a/services/linkedin-poster-selfhost/package.json b/services/linkedin-poster-selfhost/package.json
+index d836eb15d..89dd8c9e4 100644
+--- a/services/linkedin-poster-selfhost/package.json
++++ b/services/linkedin-poster-selfhost/package.json
+@@ -5,6 +5,7 @@
+   "type": "module",
+   "scripts": {
+     "build": "tsc",
++    "test": "tsx --test src/*.test.ts",
+     "start": "node dist/index.js",
+     "dev": "tsx src/index.ts",
+     "login": "tsx src/login-cli.ts"
+diff --git a/services/linkedin-poster-selfhost/src/browser.ts b/services/linkedin-poster-selfhost/src/browser.ts
+index 44a0be68a..9225f8674 100644
+--- a/services/linkedin-poster-selfhost/src/browser.ts
++++ b/services/linkedin-poster-selfhost/src/browser.ts
+@@ -4,11 +4,23 @@ import { execFile } from 'child_process';
+ import type { PosterConfig } from './types.js';
+ 
+ const LOGIN_PATTERN = /log.?in|sign.?in|authwall/i;
++const RESTRICTION_PATTERN =
++  /temporarily restricted|software that automates activity|security verification|checkpoint\/challenge/i;
++
++export interface BrowserHealthSnapshot {
++  healthy: boolean;
++  status: 'unknown' | 'healthy' | 'login_required' | 'restricted' | 'error' | 'quarantined';
++  title?: string;
++  url?: string;
++  message?: string;
++}
+ 
+ export class BrowserManager {
+   private context: BrowserContext | null = null;
+   private page: Page | null = null;
+   private config: PosterConfig;
++  private quarantined = false;
++  private lastHealth: BrowserHealthSnapshot = { healthy: false, status: 'unknown' };
+ 
+   constructor(config: PosterConfig) {
+     this.config = config;
+@@ -53,10 +65,17 @@ export class BrowserManager {
+   }
+ 
+   getPage(): Page {
++    if (this.quarantined) {
++      throw new Error('LinkedIn browser is quarantined after restriction/checkpoint detection');
++    }
+     if (!this.page) throw new Error('BrowserManager not initialized — call init() first');
+     return this.page;
+   }
+ 
++  getLastHealth(): BrowserHealthSnapshot {
++    return this.lastHealth;
++  }
++
+   private async killLingeringProfileProcesses(): Promise<void> {
+     const profileDir = this.config.profileDir;
+     await new Promise<void>((resolve) => {
+@@ -89,6 +108,15 @@ export class BrowserManager {
+   }
+ 
+   async checkHealth(): Promise<boolean> {
++    if (this.quarantined) {
++      this.lastHealth = {
++        ...this.lastHealth,
++        healthy: false,
++        status: 'quarantined',
++        message: this.lastHealth.message ?? 'LinkedIn browser quarantined',
++      };
++      return false;
++    }
+     if (!this.page) return false;
+     try {
+       await this.page.goto('https://www.linkedin.com/feed/', {
+@@ -96,13 +124,42 @@ export class BrowserManager {
+         timeout: 15_000,
+       });
+       const title = await this.page.title();
++      const url = this.page.url();
++      const bodyText = await this.page.locator('body').innerText({ timeout: 3_000 }).catch(() => '');
++
++      if (
++        RESTRICTION_PATTERN.test(title) ||
++        RESTRICTION_PATTERN.test(url) ||
++        RESTRICTION_PATTERN.test(bodyText)
++      ) {
++        this.quarantined = true;
++        this.lastHealth = {
++          healthy: false,
++          status: 'restricted',
++          title,
++          url,
++          message: 'LinkedIn restriction/checkpoint detected; browser automation quarantined',
++        };
++        console.error(`[browser] LinkedIn restriction/checkpoint detected — title="${title}" url="${url}". Quarantining browser.`);
++        await this.resetContext();
++        return false;
++      }
++
+       const healthy = !LOGIN_PATTERN.test(title);
+       if (!healthy) {
+         console.error(`[browser] Session expired — page title: "${title}"`);
++        this.lastHealth = { healthy: false, status: 'login_required', title, url };
++      } else {
++        this.lastHealth = { healthy: true, status: 'healthy', title, url };
+       }
+       return healthy;
+     } catch (err) {
+       console.error('[browser] Health check failed:', (err as Error).message.split('\n')[0]);
++      this.lastHealth = {
++        healthy: false,
++        status: 'error',
++        message: (err as Error).message.split('\n')[0],
++      };
+       try {
+         await this.recoverAfterCrash();
+       } catch (recoverErr) {
+diff --git a/services/linkedin-poster-selfhost/src/index.ts b/services/linkedin-poster-selfhost/src/index.ts
+index b19973417..c41a0f6b7 100644
+--- a/services/linkedin-poster-selfhost/src/index.ts
++++ b/services/linkedin-poster-selfhost/src/index.ts
+@@ -17,6 +17,7 @@ import {
+ } from './actions.js';
+ import { sendHeartbeat } from './heartbeat.js';
+ import { QueueConsumer } from './queue-consumer.js';
++import { getLinkedInRuntimePolicy, manualModeResponse } from './policy.js';
+ 
+ // ---------------------------------------------------------------------------
+ // Config from environment
+@@ -39,14 +40,15 @@ const config: PosterConfig = {
+   port: parseInt(process.env['PORT'] ?? '3100', 10),
+ };
+ 
++const runtimePolicy = getLinkedInRuntimePolicy();
++
+ // ---------------------------------------------------------------------------
+ // Runtime state
+ // ---------------------------------------------------------------------------
+ 
+-const browser = new BrowserManager(config);
++const browser = runtimePolicy.browserEnabled ? new BrowserManager(config) : null;
+ let inFlight = false;
+ let lastActionAt = 0;
+-let lastBrowserHealthy = true;
+ const MIN_GAP_MS = 30_000;
+ 
+ // ---------------------------------------------------------------------------
+@@ -117,19 +119,17 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
+ 
+   // Health / readiness
+   if (url === '/health' && method === 'GET') {
+-    if (inFlight || batchRunning) {
+-      send(res, 200, {
+-        ok: true,
+-        userId: config.userId,
+-        busy: true,
+-        browserHealthy: lastBrowserHealthy,
+-        healthCheckSkipped: 'browser_action_in_flight',
+-      });
++    if (!browser) {
++      send(res, 503, manualModeResponse(runtimePolicy, config.userId));
+       return;
+     }
+     const healthy = await browser.checkHealth();
+-    lastBrowserHealthy = healthy;
+-    send(res, healthy ? 200 : 503, { ok: healthy, userId: config.userId });
++    send(res, healthy ? 200 : 503, {
++      ok: healthy,
++      userId: config.userId,
++      mode: runtimePolicy.mode,
++      browser: browser.getLastHealth(),
++    });
+     return;
+   }
+ 
+@@ -138,6 +138,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
+     return;
+   }
+ 
++  if (!browser) {
++    send(res, 423, manualModeResponse(runtimePolicy, config.userId));
++    return;
++  }
++
+   let body: unknown;
+   try {
+     body = await readBody(req);
+@@ -146,7 +151,13 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
+     return;
+   }
+ 
+-  const page = browser.getPage();
++  let page;
++  try {
++    page = browser.getPage();
++  } catch (err) {
++    send(res, 423, { success: false, error: (err as Error).message });
++    return;
++  }
+ 
+   switch (url) {
+     case '/comment': {
+@@ -179,15 +190,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
+         send(res, 429, { error: 'Another action is in flight — retry in a moment' });
+         break;
+       }
+-      inFlight = true;
+       try {
+         const posts = await discoverLinkedInPosts(page, keywords, limit ?? 10);
+-        lastActionAt = Date.now();
+         send(res, 200, { posts, count: posts.length });
+       } catch (err) {
+         send(res, 500, { error: (err as Error).message });
+-      } finally {
+-        inFlight = false;
+       }
+       break;
+     }
+@@ -271,6 +278,11 @@ function startEngageBatchScheduler(): void {
+     lastBatchWindow = windowKey;
+ 
+     try {
++      if (!browser) {
++        console.error('[engage-batch-sched] Browser unavailable — scheduler disabled');
++        return;
++      }
++
+       const keywords = await pickBatchKeywords(config.supabaseUrl, config.supabaseKey, 4);
+       console.log(`[engage-batch-sched] Keywords: ${keywords.join(', ')}`);
+ 
+@@ -358,18 +370,18 @@ async function runHeartbeatLoop(): Promise<void> {
+ 
+   const tick = async () => {
+     try {
+-      const busy = inFlight || batchRunning;
+-      const healthy = busy ? lastBrowserHealthy : await browser.checkHealth();
+-      lastBrowserHealthy = healthy;
++      const healthy = browser ? await browser.checkHealth() : false;
+       await sendHeartbeat(config, {
+         agentName: `linkedin-poster-selfhost-${config.userId}`,
+         browserHealthy: healthy,
+-        status: busy ? 'busy' : 'idle',
++        status: !runtimePolicy.browserEnabled ? 'error' : inFlight ? 'busy' : 'idle',
+         profilePath: config.profileDir,
+         metadata: {
+           senderName: config.senderName,
+           lastActionAt,
+-          ...(busy ? { healthCheckSkipped: 'browser_action_in_flight' } : {}),
++          ...runtimePolicy.metadata,
++          ...(!runtimePolicy.browserEnabled ? { reason: runtimePolicy.reason } : {}),
++          ...(browser ? { browserHealth: browser.getLastHealth() } : {}),
+         },
+       });
+     } catch (err) {
+@@ -386,9 +398,13 @@ async function runHeartbeatLoop(): Promise<void> {
+ // ---------------------------------------------------------------------------
+ 
+ async function main(): Promise<void> {
+-  await browser.init();
++  if (runtimePolicy.browserEnabled && browser) {
++    await browser.init();
++  } else {
++    console.error(`[main] ${runtimePolicy.reason} — starting health/heartbeat server without browser, queue consumers, or discovery scheduler`);
++  }
+ 
+-  const queue = startQueueConsumer();
++  const queue = runtimePolicy.browserEnabled ? startQueueConsumer() : null;
+ 
+   const server = createServer((req, res) => {
+     handleRequest(req, res).catch((err) => {
+@@ -405,14 +421,16 @@ async function main(): Promise<void> {
+   await runHeartbeatLoop();
+ 
+   // Engagement batch scheduler — replaces engage-batch-local.mjs on Mac
+-  startEngageBatchScheduler();
++  if (runtimePolicy.browserEnabled) {
++    startEngageBatchScheduler();
++  }
+ 
+   // Graceful shutdown
+   const shutdown = async () => {
+     console.log('[server] Shutting down...');
+-    queue.stop();
++    queue?.stop();
+     server.close();
+-    await browser.close();
++    await browser?.close();
+     process.exit(0);
+   };
+ 
+diff --git a/services/linkedin-poster-selfhost/src/queue-consumer.ts b/services/linkedin-poster-selfhost/src/queue-consumer.ts
+index 49ab1d7ec..b05cf66cb 100644
+--- a/services/linkedin-poster-selfhost/src/queue-consumer.ts
++++ b/services/linkedin-poster-selfhost/src/queue-consumer.ts
+@@ -58,6 +58,11 @@ export class QueueConsumer {
+   }
+ 
+   start(): void {
++    if (process.env['POSTER_LINKEDIN_MODE'] !== 'browser') {
++      console.error('[queue] POSTER_LINKEDIN_MODE is not browser — consumers disabled');
++      return;
++    }
++
+     // Fix 3: Kill-switch — set POSTER_KILL_SWITCH=true (or 1) to halt the consumer immediately.
+     // Can be applied via systemd override without restarting the full service.
+     const killSwitch = process.env['POSTER_KILL_SWITCH'];
+@@ -238,9 +243,8 @@ export class QueueConsumer {
+             }
+ 
+             // Fix 2: Idempotency pre-check — abort if this draft was already published.
+-            // The jobs table claim is the durable in-flight marker here. content_drafts.status
+-            // only allows pending/approved/published/rejected in production, so do not invent
+-            // an intermediate draft status that the DB rejects.
++            // Atomically flip to 'publishing' (WHERE status='approved') so a concurrent claimer
++            // will also abort. On publish failure the finally block flips back to 'approved'.
+             const contentDraftId = payload['content_draft_id'] as string | undefined;
+             if (contentDraftId) {
+               const { data: draft, error: draftErr } = await this.supabase
+@@ -255,7 +259,23 @@ export class QueueConsumer {
+               if (draft?.status !== 'approved') {
+                 throw new Error(`idempotency_guard: draft ${contentDraftId.slice(0, 8)} is '${draft?.status}', not 'approved' — skipping`);
+               }
+-              console.log(`[queue/jobs] draft ${contentDraftId.slice(0, 8)} approved; job claim is publish lock`);
++
++              // Atomically claim the draft by flipping to 'publishing'.
++              // If another process already flipped it, the WHERE status='approved' matches 0 rows.
++              const { data: flippedRows, error: flipErr } = await this.supabase
++                .from('content_drafts')
++                .update({ status: 'publishing' })
++                .eq('id', contentDraftId)
++                .eq('status', 'approved')
++                .select('id');
++
++              if (flipErr) {
++                throw new Error(`idempotency_guard: 'publishing' flip failed for ${contentDraftId.slice(0, 8)}: ${flipErr.message}`);
++              }
++              if (!flippedRows || flippedRows.length === 0) {
++                throw new Error(`idempotency_guard: draft ${contentDraftId.slice(0, 8)} claimed by another process — skipping`);
++              }
++              console.log(`[queue/jobs] draft ${contentDraftId.slice(0, 8)} → publishing`);
+             }
+ 
+             let imagePaths: string[] | undefined;
+@@ -271,7 +291,15 @@ export class QueueConsumer {
+ 
+             const res = await this.dispatch('/post', { postText, imagePaths });
+             if (!res['success']) {
+-              if (contentDraftId) console.log(`[queue/jobs] publish failed — draft ${contentDraftId.slice(0, 8)} remains approved (retryable)`);
++              // Flip draft back to 'approved' so it can be retried
++              if (contentDraftId) {
++                await this.supabase
++                  .from('content_drafts')
++                  .update({ status: 'approved' })
++                  .eq('id', contentDraftId)
++                  .eq('status', 'publishing');
++                console.log(`[queue/jobs] publish failed — draft ${contentDraftId.slice(0, 8)} → approved (retryable)`);
++              }
+               throw new Error((res['error'] as string | undefined) ?? 'publish_post failed');
+             }
+ 
+diff --git a/src/bus/rgos-mirror.ts b/src/bus/rgos-mirror.ts
+index a6c23d324..24b7ee1b0 100644
+--- a/src/bus/rgos-mirror.ts
++++ b/src/bus/rgos-mirror.ts
+@@ -456,7 +456,7 @@ export function migrateRetryQueueConstraints(): void {
+ 
+     const needsPriority = priority !== undefined && !RGOS_VALID_PRIORITIES.has(priority);
+     const needsStatus = status !== undefined && !RGOS_VALID_STATUSES.has(status);
+-    const needsBlockerStatus = status !== 'blocked' && status !== 'completed' && status !== 'cancelled' && isRowBlockerLike(entry.row);
++    const needsBlockerStatus = shouldForceBlockerStatus(status) && isRowBlockerLike(entry.row);
+ 
+     if (!needsPriority && !needsStatus && !needsBlockerStatus) return entry;
+ 
+@@ -621,11 +621,18 @@ function isRowBlockerLike(row: Record<string, unknown>): boolean {
+     || (Array.isArray(blockedBy) && blockedBy.length > 0);
+ }
+ 
++function shouldForceBlockerStatus(status: string | undefined): boolean {
++  return status === undefined
++    || status === 'pending'
++    || status === 'proposed'
++    || status === 'approved'
++    || status === 'blocked';
++}
++
+ function mapTaskStatus(task: Task): string {
+   if (
+     isTaskBlockerLike(task)
+-    && task.status !== 'completed'
+-    && task.status !== 'cancelled'
++    && shouldForceBlockerStatus(task.status)
+   ) {
+     return 'blocked';
+   }
+diff --git a/src/cli/bus.ts b/src/cli/bus.ts
+index 591c8fb2e..08af40d45 100644
+--- a/src/cli/bus.ts
++++ b/src/cli/bus.ts
+@@ -25,25 +25,9 @@ import { createApproval, updateApproval, sendApprovedEmail } from '../bus/approv
+ import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
+ import { spawnCodex } from '../bus/spawn-codex.js';
+ import { handleCodexFallback } from '../bus/codex-fallback.js';
+-import { readCrons } from '../bus/crons.js';
+-import {
+-  applyFailoverCronPlan,
+-  buildFailoverPlan,
+-  degradedCronAllowlist,
+-  patchConfigForProvider,
+-  providerIdFromConfig,
+-  providerSpecsFromConfig,
+-  readAgentRuntimeConfig,
+-  readProviderFailoverState,
+-  restoreFailoverCrons,
+-  writeAgentRuntimeConfig,
+-  type ProviderFailoverPlan,
+-  type ProviderHealth,
+-} from '../bus/provider-failover.js';
+ import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
+ import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
+-import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos, mirrorAgentStatusToRgos, mirrorTaskToRgos } from '../bus/rgos-mirror.js';
+-import { reconcileAgentOpsMirror, repairAgentOpsMirror } from '../bus/agentops-mirror-reconcile.js';
++import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos } from '../bus/rgos-mirror.js';
+ import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
+ import { sendSlack } from '../bus/send-slack.js';
+ import { enforceControlPolicy } from '../bus/orch-control-policy.js';
+@@ -63,7 +47,7 @@ import {
+   parseAgentTaskEventPayload,
+ } from '../bus/agent-task-events.js';
+ import { sendHumanBlockersDigest, digestHumanBlockers } from '../bus/human-blockers-digest.js';
+-import { logImplicitInvocation, type SkillInvocationSource } from '../bus/skill-instrument.js';
++import { logImplicitInvocation } from '../bus/skill-instrument.js';
+ import { registerCronCommands } from './bus-cmds-crons.js';
+ import { registerBatchCommands } from './bus-cmds-batch.js';
+ 
+@@ -191,9 +175,6 @@ const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
+   'test-cron-fire',
+   'migrate-crons',
+   'upgrade-cron-teaching',
+-  'provider-failover-apply',
+-  'provider-failover-monitor',
+-  'provider-failover-restore',
+   // Knowledge base writes
+   'kb-ingest',
+   // Lease writes
+@@ -803,23 +784,13 @@ busCommand
+     process.exit(0);
+   });
+ 
+-async function flushTaskMirrorForCli(
+-  paths: ReturnType<typeof resolvePaths>,
+-  taskId: string,
+-  event: 'update' | 'complete',
+-): Promise<void> {
+-  if (process.env.VITEST || process.env.NODE_ENV === 'test') return;
+-  const taskPath = findTaskFile(paths, taskId);
+-  if (!taskPath) return;
+-  const task = JSON.parse(readFileSync(taskPath, 'utf-8')) as Task;
+-  await mirrorTaskToRgos(task, event);
+-}
+-
+ busCommand
+   .command('update-task')
+   .argument('<id>', 'Task ID')
+   .argument('<status>', 'New status (pending, in_progress, completed, blocked, cancelled)')
+-  .action(async (id: string, status: string) => {
++  .option('--blocker-reason <reason>', 'Required when setting status to blocked: what is blocking the task')
++  .option('--next-proof <proof>', 'Required when setting status to blocked: observable proof the blocker is resolved')
++  .action((id: string, status: string, opts: { blockerReason?: string; nextProof?: string }) => {
+     const validStatuses: TaskStatus[] = ['pending', 'in_progress', 'completed', 'blocked', 'cancelled'];
+     if (!validStatuses.includes(status as TaskStatus)) {
+       console.error(`Invalid status '${status}'. Must be one of: ${validStatuses.join(', ')}`);
+@@ -839,9 +810,19 @@ busCommand
+       }
+     }
+ 
+-    updateTask(paths, id, status as TaskStatus);
+-    await flushTaskMirrorForCli(paths, id, 'update');
++    const metaMerge = status === 'blocked'
++      ? {
++          blocker: {
++            blocker_reason: opts.blockerReason,
++            next_proof_required: opts.nextProof,
++          },
++        }
++      : undefined;
++
++    updateTask(paths, id, status as TaskStatus, metaMerge);
+     console.log(`Updated ${id} -> ${status}`);
++    // Exit after local write completes — updateTask fires mirrorTaskToRgos
++    // which schedules drainRetryQueue; exit before the drain runs.
+     process.exit(0);
+   });
+ 
+@@ -964,9 +945,6 @@ busCommand
+         await importRgosTaskById(paths, id, agent);
+       }
+       const task = claimTask(paths, id, agent);
+-      if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+-        await mirrorTaskToRgos(task, 'update');
+-      }
+       console.log(`Claimed ${id} -> in_progress (assigned to ${agent})`);
+       console.log(`  Title: ${task.title}`);
+     } catch (err) {
+@@ -1026,13 +1004,14 @@ busCommand
+     }
+ 
+     completeTask(paths, id, effectiveResult, proofStamp);
+-    await flushTaskMirrorForCli(paths, id, 'complete');
+     console.log(`Completed ${id}`);
+ 
+     // Clear heartbeat so crash notifications show 'idle' not the just-completed task.
+     // Swallowed — heartbeat update must never block or fail task completion.
+     await updateHeartbeat(paths, env.agentName, 'idle', { org: env.org, currentTask: '' }).catch(() => {});
+ 
++    // Exit after local write completes — completeTask fires mirrorTaskToRgos
++    // which schedules drainRetryQueue; exit before the drain runs.
+     process.exit(0);
+   });
+ 
+@@ -1160,23 +1139,6 @@ busCommand
+     console.log('');
+   });
+ 
+-busCommand
+-  .command('log-skill-invocation')
+-  .description('Record a skill invocation in orch_skill_invocations without relying on Claude hooks')
+-  .argument('<slug>', 'Skill slug/name to record')
+-  .option('--source <source>', 'Invocation source', 'manual')
+-  .option('--agent <agent>', 'Agent role/name override')
+-  .action(async (slug: string, opts: { source: string; agent?: string }) => {
+-    const validSources: SkillInvocationSource[] = ['bus_implicit', 'cron', 'codex_native', 'codex_read', 'manual'];
+-    if (!validSources.includes(opts.source as SkillInvocationSource)) {
+-      console.error(`Invalid source '${opts.source}'. Must be one of: ${validSources.join(', ')}`);
+-      process.exit(1);
+-    }
+-    const env = resolveEnv();
+-    await logImplicitInvocation(slug, env.agentDir ?? '', opts.agent ?? env.agentName, { source: opts.source as SkillInvocationSource });
+-    console.log(`Logged skill invocation: ${slug} (${opts.source})`);
+-  });
+-
+ busCommand
+   .command('log-event')
+   .argument('<category>', 'Event category')
+@@ -1526,13 +1488,11 @@ busCommand
+     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+     const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+-    const snoozeFile = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'state', 'pr-stuck-watcher-snooze.json');
+     const result = runPrStuckWatcher(paths, env.agentName, env.org, {
+       repos: opts.repos ? opts.repos.split(',') : undefined,
+       stuckHours: parseNonNegativeNumber(opts.stuckHours, 2),
+       alertHours: parseNonNegativeNumber(opts.alertHours, 24),
+       outputDir,
+-      snoozeFile,
+     });
+     const actions: Array<{ pr: string; action: string; ok: boolean; detail?: string }> = [];
+ 
+@@ -3494,11 +3454,12 @@ busCommand
+ 
+       // Read heartbeat
+       const hbFile = join(ctxRoot, 'state', name, 'heartbeat.json');
+-      let lastHeartbeat = '', currentTask = '', mode = '';
++      let lastHeartbeat = '', currentTask = '', mode = '', heartbeatStatus = '';
+       let heartbeatAgeMinutes: number | null = null;
+       if (existsSync(hbFile)) {
+         try {
+           const hb = JSON.parse(readFileSync(hbFile, 'utf-8'));
++          heartbeatStatus = hb.status ?? '';
+           lastHeartbeat = hb.last_heartbeat ?? '';
+           currentTask = hb.current_task ?? '';
+           mode = hb.mode ?? '';
+@@ -3518,12 +3479,15 @@ busCommand
+       }
+ 
+       const heartbeatFresh = heartbeatAgeMinutes !== null && heartbeatAgeMinutes <= runningHeartbeatThresholdMinutes;
+-      const recoveryState = daemonRunning && !heartbeatFresh
++      const authActionRequired = /auth_action_required|reauth required|token revoked|unauthorized/i.test(heartbeatStatus);
++      const recoveryState = daemonRunning && authActionRequired
++        ? 'auth_action_required'
++        : daemonRunning && !heartbeatFresh
+         ? 'stale_heartbeat_action_required'
+         : daemonRunning
+           ? 'running'
+           : 'stopped';
+-      const running = daemonRunning && heartbeatFresh;
++      const running = daemonRunning && heartbeatFresh && !authActionRequired;
+       if (opts.status === 'running' && !running) continue;
+ 
+       results.push({
+@@ -3535,6 +3499,7 @@ busCommand
+         daemon_running: daemonRunning,
+         recovery_state: recoveryState,
+         heartbeat_age_minutes: heartbeatAgeMinutes,
++        heartbeat_status: heartbeatStatus,
+         last_heartbeat: lastHeartbeat,
+         current_task: currentTask,
+         mode,
+@@ -4528,115 +4493,6 @@ busCommand
+     }
+   });
+ 
+-busCommand
+-  .command('agentops-mirror-reconcile')
+-  .description('Compare live cortextOS state with RGOS AgentOps mirror rows and log drift')
+-  .option('--json', 'Output result as JSON', false)
+-  .option('--no-log', 'Do not emit mirror_drift_detected Activity events', false)
+-  .option('--max-drifts <n>', 'Maximum drift samples to include in output/event', '50')
+-  .option('--repair', 'Backfill live tasks and agents into the RGOS AgentOps mirror using existing mirror writers', false)
+-  .option('--dry-run', 'With --repair, report the backfill plan without writing mirror rows', false)
+-  .option('--verify-delay-ms <n>', 'With --repair, wait before after-reconcile to catch external mirror reassertion', '25000')
+-  .action(async (opts: { json?: boolean; noLog?: boolean; maxDrifts?: string; repair?: boolean; dryRun?: boolean; verifyDelayMs?: string }) => {
+-    const env = resolveEnv();
+-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+-    const maxDrifts = Number.parseInt(opts.maxDrifts ?? '50', 10);
+-    const reconcileOptions = {
+-      org: env.org,
+-      maxDrifts: Number.isFinite(maxDrifts) && maxDrifts > 0 ? maxDrifts : 50,
+-    };
+-
+-    if (opts.repair) {
+-      const verifyDelayMs = Number.parseInt(opts.verifyDelayMs ?? '25000', 10);
+-      const result = await repairAgentOpsMirror(paths, {
+-        ...reconcileOptions,
+-        dryRun: opts.dryRun === true,
+-        verifyDelayMs: Number.isFinite(verifyDelayMs) && verifyDelayMs >= 0 ? verifyDelayMs : 25000,
+-      });
+-
+-      if (!opts.noLog) {
+-        logEvent(paths, env.agentName, env.org, 'action', result.dry_run ? 'mirror_repair_planned' : 'mirror_repair_completed', result.ok ? 'info' : 'warning', {
+-          dry_run: result.dry_run,
+-          before_drift_count: result.before.drift_count,
+-          after_drift_count: result.after?.drift_count ?? null,
+-          verify_delay_ms: result.verify_delay_ms,
+-          planned_tasks: result.planned_tasks,
+-          planned_agents: result.planned_agents,
+-          repaired_tasks: result.repaired_tasks,
+-          repaired_agents: result.repaired_agents,
+-          failures: result.failures,
+-          crons: result.crons,
+-        });
+-      }
+-
+-      if (opts.json) {
+-        console.log(JSON.stringify(result, null, 2));
+-        return;
+-      }
+-
+-      if (result.skipped) {
+-        console.log(`agentops-mirror-reconcile --repair: skipped — ${result.reason}`);
+-        return;
+-      }
+-
+-      const afterCount = result.after?.drift_count;
+-      const mode = result.dry_run ? 'dry-run plan' : 'repair';
+-      console.log(`agentops-mirror-reconcile --repair: ${mode}`);
+-      console.log(`  before drift: ${result.before.drift_count}`);
+-      console.log(`  planned: ${result.planned_tasks} task(s), ${result.planned_agents} agent(s), ${result.crons.live_crons} cron(s) enumerated`);
+-      if (result.dry_run) {
+-        console.log(`  writes: 0 (dry run)`);
+-        console.log(`  cron note: ${result.crons.note}`);
+-        return;
+-      }
+-      console.log(`  repaired: ${result.repaired_tasks} task(s), ${result.repaired_agents} agent(s)`);
+-      console.log(`  verify delay: ${result.verify_delay_ms}ms`);
+-      console.log(`  after drift: ${afterCount ?? 'not checked'}`);
+-      console.log(`  cron note: ${result.crons.note}`);
+-      if (result.failures.length > 0) {
+-        for (const failure of result.failures.slice(0, 10)) {
+-          console.log(`  failure ${failure.kind} ${failure.id}: ${failure.error}`);
+-        }
+-      }
+-      if (!result.ok) process.exit(1);
+-      return;
+-    }
+-
+-    const result = await reconcileAgentOpsMirror(paths, reconcileOptions);
+-
+-    if (!opts.noLog && result.drift_count > 0) {
+-      logEvent(paths, env.agentName, env.org, 'action', 'mirror_drift_detected', 'warning', {
+-        drift_count: result.drift_count,
+-        live_tasks: result.live_tasks,
+-        mirror_tasks: result.mirror_tasks,
+-        live_agents: result.live_agents,
+-        mirror_agents: result.mirror_agents,
+-        drifts: result.drifts,
+-      });
+-    }
+-
+-    if (opts.json) {
+-      console.log(JSON.stringify(result, null, 2));
+-      return;
+-    }
+-
+-    if (result.skipped) {
+-      console.log(`agentops-mirror-reconcile: skipped — ${result.reason}`);
+-      return;
+-    }
+-
+-    if (result.drift_count === 0) {
+-      console.log(`agentops-mirror-reconcile: no drift (${result.live_tasks} live tasks, ${result.live_agents} live agents)`);
+-      return;
+-    }
+-
+-    console.log(`agentops-mirror-reconcile: ${result.drift_count} drift(s) detected`);
+-    for (const drift of result.drifts) {
+-      console.log(`  ${drift.kind} ${drift.id}: live=${JSON.stringify(drift.live)} mirror=${JSON.stringify(drift.mirror)}`);
+-    }
+-    process.exit(1);
+-  });
+-
+ busCommand
+   .command('computer-use <prompt>')
+   .description('Run a legacy Codex dispatch prompt. Defaults to local code-only Codex; Greg Mac requires explicit guarded fallback.')
+@@ -4973,367 +4829,6 @@ busCommand
+     }
+   });
+ 
+-type ProviderFailoverCliOptions = {
+-  from?: string;
+-  to?: string;
+-  healthJson?: string;
+-  reason?: string;
+-  dryRun?: boolean;
+-  json?: boolean;
+-  noRestart?: boolean;
+-};
+-
+-function providerFailoverConfigPath(agent: string): { configPath: string; org: string; frameworkRoot: string } {
+-  const env = resolveEnv();
+-  const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
+-  const org = env.org || 'revops-global';
+-  return {
+-    configPath: join(frameworkRoot, 'orgs', org, 'agents', agent, 'config.json'),
+-    org,
+-    frameworkRoot,
+-  };
+-}
+-
+-function parseProviderHealthJson(raw: string | undefined): Record<string, ProviderHealth> {
+-  if (!raw) return {};
+-  try {
+-    const parsed = JSON.parse(raw) as Record<string, ProviderHealth | string>;
+-    const out: Record<string, ProviderHealth> = {};
+-    for (const [provider, value] of Object.entries(parsed)) {
+-      out[provider] = typeof value === 'string'
+-        ? { state: value as ProviderHealth['state'] }
+-        : value;
+-    }
+-    return out;
+-  } catch (err) {
+-    throw new Error(`invalid --health-json: ${err instanceof Error ? err.message : String(err)}`);
+-  }
+-}
+-
+-function buildManualProviderPlan(
+-  currentProviderId: string,
+-  targetProviderId: string,
+-  crons: ReturnType<typeof readCrons>,
+-  config: ReturnType<typeof readAgentRuntimeConfig>,
+-  reason: string,
+-): ProviderFailoverPlan {
+-  const allow = new Set(degradedCronAllowlist(config));
+-  const shouldSwitch = currentProviderId !== targetProviderId;
+-  return {
+-    currentProviderId,
+-    selectedProviderId: targetProviderId,
+-    shouldSwitch,
+-    degradedMode: true,
+-    cronsToDisable: crons.map(c => c.name).filter(name => !allow.has(name)),
+-    reason: reason || `manual provider failover ${currentProviderId} -> ${targetProviderId}`,
+-  };
+-}
+-
+-function outputProviderFailover(value: unknown, json: boolean | undefined): void {
+-  if (json) {
+-    console.log(JSON.stringify(value, null, 2));
+-    return;
+-  }
+-  console.log(JSON.stringify(value, null, 2));
+-}
+-
+-async function restartAgentAfterProviderSwitch(agent: string, instanceId: string): Promise<{ attempted: boolean; success: boolean; error?: string }> {
+-  const ipc = new IPCClient(instanceId);
+-  if (!(await ipc.isDaemonRunning())) {
+-    return { attempted: false, success: false, error: 'daemon is not running' };
+-  }
+-  const resp = await ipc.send({ type: 'restart-agent', agent, source: 'cortextos bus provider-failover-apply' });
+-  return { attempted: true, success: resp.success, error: resp.error };
+-}
+-
+-function loadProviderFailoverContext(agent: string, opts: ProviderFailoverCliOptions) {
+-  const env = resolveEnv();
+-  const { configPath } = providerFailoverConfigPath(agent);
+-  const config = readAgentRuntimeConfig(configPath);
+-  const crons = readCrons(agent);
+-  const currentProviderId = opts.from || providerIdFromConfig(config);
+-  const health = parseProviderHealthJson(opts.healthJson);
+-  const plan = opts.to
+-    ? buildManualProviderPlan(currentProviderId, opts.to, crons, config, opts.reason || '')
+-    : buildFailoverPlan({
+-        config,
+-        crons,
+-        fromProviderId: currentProviderId,
+-        providerHealth: {
+-          [currentProviderId]: { state: 'available' },
+-          ...health,
+-        },
+-      });
+-  return { env, configPath, config, crons, currentProviderId, plan };
+-}
+-
+-function isClaudeCapError(err: unknown): boolean {
+-  const msg = err instanceof Error ? err.message : String(err);
+-  return /429|rate.?limit|usage|limit|quota|exceeded/i.test(msg);
+-}
+-
+-async function probeClaudeProviderHealth(ctxRoot: string, force = true): Promise<ProviderHealth> {
+-  try {
+-    const usage = await checkUsageApi(ctxRoot, { force });
+-    if (usage.five_hour_utilization >= 0.98) {
+-      return { state: 'capped', reason: `Claude 5h utilization ${Math.round(usage.five_hour_utilization * 100)}%` };
+-    }
+-    if (usage.seven_day_utilization >= 0.98) {
+-      return { state: 'capped', reason: `Claude 7d utilization ${Math.round(usage.seven_day_utilization * 100)}%` };
+-    }
+-    return { state: 'available', reason: `Claude usage API OK: 5h ${Math.round(usage.five_hour_utilization * 100)}%, 7d ${Math.round(usage.seven_day_utilization * 100)}%` };
+-  } catch (err) {
+-    return isClaudeCapError(err)
+-      ? { state: 'capped', reason: err instanceof Error ? err.message : String(err) }
+-      : { state: 'unhealthy', reason: err instanceof Error ? err.message : String(err) };
+-  }
+-}
+-
+-busCommand
+-  .command('provider-failover-status <agent>')
+-  .description('Show provider-failover state for an agent front door')
+-  .option('--json', 'Output JSON')
+-  .action((agent: string, opts: { json?: boolean }) => {
+-    try {
+-      const env = resolveEnv();
+-      const { configPath } = providerFailoverConfigPath(agent);
+-      const config = readAgentRuntimeConfig(configPath);
+-      const crons = readCrons(agent);
+-      const state = readProviderFailoverState(agent, env.ctxRoot);
+-      outputProviderFailover({
+-        agent,
+-        provider: providerIdFromConfig(config),
+-        runtime: config.runtime ?? null,
+-        model: config.model ?? null,
+-        config_path: configPath,
+-        failover_state: state,
+-        cron_count: crons.length,
+-        enabled_cron_count: crons.filter(c => c.enabled).length,
+-        providers: providerSpecsFromConfig(config).map(p => ({ id: p.id, runtime: p.runtime, model: p.model ?? null })),
+-      }, opts.json);
+-    } catch (err) {
+-      console.error(err instanceof Error ? err.message : String(err));
+-      process.exit(1);
+-    }
+-  });
+-
+-busCommand
+-  .command('provider-failover-plan <agent>')
+-  .description('Plan a front-door provider switch and degraded cron suppression')
+-  .option('--from <provider>', 'Override current provider id')
+-  .option('--to <provider>', 'Force a target provider id instead of selecting from health')
+-  .option('--health-json <json>', 'Provider health map, e.g. {"claude":{"state":"capped"},"codex":{"state":"available"}}')
+-  .option('--reason <text>', 'Operator reason')
+-  .option('--json', 'Output JSON')
+-  .action((agent: string, opts: ProviderFailoverCliOptions) => {
+-    try {
+-      const context = loadProviderFailoverContext(agent, opts);
+-      outputProviderFailover({
+-        agent,
+-        current_provider: context.currentProviderId,
+-        plan: context.plan,
+-        dry_run: true,
+-      }, opts.json);
+-    } catch (err) {
+-      console.error(err instanceof Error ? err.message : String(err));
+-      process.exit(1);
+-    }
+-  });
+-
+-busCommand
+-  .command('provider-failover-apply <agent>')
+-  .description('Apply a front-door provider switch, pause non-essential crons, and restart the agent')
+-  .option('--from <provider>', 'Override current provider id')
+-  .option('--to <provider>', 'Force target provider id')
+-  .option('--health-json <json>', 'Provider health map for automatic selection')
+-  .option('--reason <text>', 'Operator reason')
+-  .option('--dry-run', 'Show planned config/cron changes without writing')
+-  .option('--no-restart', 'Write config/cron state without daemon restart')
+-  .option('--json', 'Output JSON')
+-  .action(async (agent: string, opts: ProviderFailoverCliOptions) => {
+-    try {
+-      const context = loadProviderFailoverContext(agent, opts);
+-      const providers = providerSpecsFromConfig(context.config);
+-      const target = providers.find(p => p.id === context.plan.selectedProviderId);
+-      if (!target) {
+-        console.error(`No provider runtime spec configured for '${context.plan.selectedProviderId}'`);
+-        process.exit(1);
+-      }
+-
+-      const patchedConfig = patchConfigForProvider(context.config, target);
+-      if (opts.dryRun) {
+-        outputProviderFailover({
+-          agent,
+-          dry_run: true,
+-          config_path: context.configPath,
+-          plan: context.plan,
+-          next_runtime: patchedConfig.runtime,
+-          next_model: patchedConfig.model ?? null,
+-        }, opts.json);
+-        return;
+-      }
+-
+-      writeAgentRuntimeConfig(context.configPath, patchedConfig);
+-      const cronState = context.plan.degradedMode
+-        ? applyFailoverCronPlan({
+-            agentName: agent,
+-            selectedProviderId: context.plan.selectedProviderId,
+-            previousProviderId: context.plan.currentProviderId,
+-            cronsToDisable: context.plan.cronsToDisable,
+-            reason: opts.reason || context.plan.reason,
+-            stateRoot: context.env.ctxRoot,
+-          })
+-        : null;
+-      const restart = opts.noRestart
+-        ? { attempted: false, success: true, error: 'restart skipped by --no-restart' }
+-        : await restartAgentAfterProviderSwitch(agent, context.env.instanceId);
+-
+-      outputProviderFailover({
+-        ok: true,
+-        agent,
+-        config_path: context.configPath,
+-        plan: context.plan,
+-        disabled_crons: cronState?.disabledCronNames ?? [],
+-        state_path: cronState?.statePath ?? null,
+-        restart,
+-      }, opts.json);
+-    } catch (err) {
+-      console.error(err instanceof Error ? err.message : String(err));
+-      process.exit(1);
+-    }
+-  });
+-
+-busCommand
+-  .command('provider-failover-monitor <agent>')
+-  .description('Probe provider health and automatically apply front-door failover when the current provider is capped')
+-  .option('--dry-run', 'Show planned monitor action without writing')
+-  .option('--no-restart', 'Write config/cron state without daemon restart')
+-  .option('--json', 'Output JSON')
+-  .action(async (agent: string, opts: ProviderFailoverCliOptions) => {
+-    try {
+-      const env = resolveEnv();
+-      const { configPath } = providerFailoverConfigPath(agent);
+-      const config = readAgentRuntimeConfig(configPath);
+-      const crons = readCrons(agent);
+-      const currentProviderId = providerIdFromConfig(config);
+-      const providers = providerSpecsFromConfig(config);
+-      const health: Record<string, ProviderHealth> = {
+-        [currentProviderId]: { state: 'available' },
+-      };
+-      if (providers.some(p => p.id === 'claude')) {
+-        health.claude = await probeClaudeProviderHealth(env.ctxRoot, true);
+-      }
+-      if (providers.some(p => p.id === 'codex')) {
+-        health.codex = currentProviderId === 'codex'
+-          ? { state: 'available', reason: 'current front-door provider' }
+-          : { state: 'available', reason: 'configured fallback provider' };
+-      }
+-
+-      const plan = buildFailoverPlan({ config, crons, providerHealth: health, fromProviderId: currentProviderId });
+-      const target = providers.find(p => p.id === plan.selectedProviderId);
+-      const shouldApply = plan.shouldSwitch || (plan.degradedMode && !readProviderFailoverState(agent, env.ctxRoot)?.active);
+-
+-      if (opts.dryRun || !shouldApply) {
+-        outputProviderFailover({
+-          agent,
+-          dry_run: Boolean(opts.dryRun),
+-          applied: false,
+-          current_provider: currentProviderId,
+-          health,
+-          plan,
+-          reason: shouldApply ? 'dry run' : 'no switch needed',
+-        }, opts.json);
+-        return;
+-      }
+-
+-      if (!target) {
+-        console.error(`No provider runtime spec configured for '${plan.selectedProviderId}'`);
+-        process.exit(1);
+-      }
+-
+-      writeAgentRuntimeConfig(configPath, patchConfigForProvider(config, target));
+-      const cronState = applyFailoverCronPlan({
+-        agentName: agent,
+-        selectedProviderId: plan.selectedProviderId,
+-        previousProviderId: plan.currentProviderId,
+-        cronsToDisable: plan.cronsToDisable,
+-        reason: plan.reason,
+-        stateRoot: env.ctxRoot,
+-      });
+-      const restart = opts.noRestart
+-        ? { attempted: false, success: true, error: 'restart skipped by --no-restart' }
+-        : await restartAgentAfterProviderSwitch(agent, env.instanceId);
+-
+-      outputProviderFailover({
+-        ok: true,
+-        applied: true,
+-        agent,
+-        health,
+-        plan,
+-        disabled_crons: cronState.disabledCronNames,
+-        state_path: cronState.statePath,
+-        restart,
+-      }, opts.json);
+-    } catch (err) {
+-      console.error(err instanceof Error ? err.message : String(err));
+-      process.exit(1);
+-    }
+-  });
+-
+-busCommand
+-  .command('provider-failover-restore <agent>')
+-  .description('Restore crons paused by provider-failover and optionally switch provider back')
+-  .option('--to <provider>', 'Optional provider id to switch to while restoring')
+-  .option('--dry-run', 'Show planned restore without writing')
+-  .option('--no-restart', 'Write config/cron state without daemon restart')
+-  .option('--json', 'Output JSON')
+-  .action(async (agent: string, opts: ProviderFailoverCliOptions) => {
+-    try {
+-      const env = resolveEnv();
+-      const { configPath } = providerFailoverConfigPath(agent);
+-      const config = readAgentRuntimeConfig(configPath);
+-      const state = readProviderFailoverState(agent, env.ctxRoot);
+-      const targetProviderId = opts.to || state?.previous_provider_id;
+-      const target = targetProviderId
+-        ? providerSpecsFromConfig(config).find(p => p.id === targetProviderId)
+-        : undefined;
+-
+-      if (opts.dryRun) {
+-        outputProviderFailover({
+-          agent,
+-          dry_run: true,
+-          active_state: state,
+-          target_provider: targetProviderId ?? null,
+-          config_path: configPath,
+-        }, opts.json);
+-        return;
+-      }
+-
+-      const restored = restoreFailoverCrons({ agentName: agent, stateRoot: env.ctxRoot });
+-      let switchedProvider = false;
+-      if (target) {
+-        writeAgentRuntimeConfig(configPath, patchConfigForProvider(config, target));
+-        switchedProvider = true;
+-      }
+-      const restart = switchedProvider && !opts.noRestart
+-        ? await restartAgentAfterProviderSwitch(agent, env.instanceId)
+-        : { attempted: false, success: true, error: switchedProvider ? 'restart skipped by --no-restart' : 'no provider switch requested' };
+-
+-      outputProviderFailover({
+-        ok: true,
+-        agent,
+-        restored_crons: restored.restoredCronNames,
+-        had_active_state: restored.hadActiveState,
+-        switched_provider: switchedProvider,
+-        target_provider: targetProviderId ?? null,
+-        restart,
+-      }, opts.json);
+-    } catch (err) {
+-      console.error(err instanceof Error ? err.message : String(err));
+-      process.exit(1);
+-    }
+-  });
+-
+ busCommand
+   .command('decommission-agent <agent>')
+   .description('Mark an agent as decommissioned: write suppress markers, disable in registry, stop if running')
+@@ -5379,14 +4874,6 @@ busCommand
+       const resp = await ipc.send({ type: 'stop-agent', agent, source: 'cortextos bus decommission-agent' });
+       stoppedViaDaemon = resp.success;
+     }
+-    if (!stoppedViaDaemon) {
+-      await mirrorAgentStatusToRgos(agent, {
+-        isActive: false,
+-        reason: 'bus_decommission_agent',
+-        instanceId,
+-        org: env.org,
+-      }).catch(err => console.warn(`RGOS inactive mirror failed for ${agent}: ${err instanceof Error ? err.message : String(err)}`));
+-    }
+ 
+     console.log(JSON.stringify({
+       ok: true,
+diff --git a/src/daemon/fast-checker.ts b/src/daemon/fast-checker.ts
+index 55082d987..7b6d41b45 100644
+--- a/src/daemon/fast-checker.ts
++++ b/src/daemon/fast-checker.ts
+@@ -6,12 +6,11 @@ import { createHash } from 'crypto';
+ import { hardRestart } from '../bus/system.js';
+ import type { InboxMessage, BusPaths, TelegramMessage, TelegramCallbackQuery } from '../types/index.js';
+ import { checkInbox, ackInbox, sendMessage } from '../bus/message.js';
++import { updateHeartbeat } from '../bus/heartbeat.js';
+ import { updateApproval, listPendingApprovals, readApproval } from '../bus/approval.js';
+-import { listTasks, recoverStaleInProgressTasks } from '../bus/task.js';
++import { listTasks } from '../bus/task.js';
+ import { mirrorTaskToRgos, drainRetryQueue, isEnabled as isMirrorEnabled } from '../bus/rgos-mirror.js';
+ import { AgentProcess } from './agent-process.js';
+-import { DeadAirGuard, HOLDING_REPLY_TEXT, matchesUsageLimitBounce } from './dead-air-guard.js';
+-import { logEvent } from '../bus/event.js';
+ import type { TelegramAPI } from '../telegram/api.js';
+ import { KEYS } from '../pty/inject.js';
+ import { stripControlChars } from '../utils/validate.js';
+@@ -27,45 +26,6 @@ import {
+ 
+ type LogFn = (msg: string) => void;
+ 
+-/**
+- * How long Tier 3 defers a context force-restart while the session is bouncing
+- * on usage limits. Restarting a rate-limited session is pure thrash: the fresh
+- * session burns rate-limited tokens on bootstrap, crosses the ctx threshold
+- * again, and loops (session 62a6bac2: 5 rate-limit hits → 10 handoff cascades).
+- * Deferring is safe because context cannot grow while turns are bouncing.
+- */
+-export const RATE_LIMIT_HANDOFF_BACKOFF_MS = 10 * 60_000;
+-
+-export type HandoffDeadlineAction =
+-  | { action: 'skip'; reason: 'pressure-resolved' }
+-  | { action: 'backoff'; nextDeadlineAt: number }
+-  | { action: 'restart' };
+-
+-/**
+- * Decide what an expired Tier 3 handoff deadline should do.
+- *
+- * - Context pressure already resolved (auto-compaction dropped usage below the
+- *   handoff threshold, observed as low as 28%): skip the restart entirely and
+- *   re-arm Tier 2 for a future climb.
+- * - Session currently rate-limited: push the deadline back instead of
+- *   restarting — the agent could not have cooperated with the handoff prompt.
+- * - Otherwise: pressure persists and the agent ignored the prompt → restart.
+- */
+-export function resolveHandoffDeadlineAction(opts: {
+-  now: number;
+-  effectivePct: number;
+-  handoffThreshold: number;
+-  rateLimited: boolean;
+-}): HandoffDeadlineAction {
+-  if (opts.effectivePct < opts.handoffThreshold) {
+-    return { action: 'skip', reason: 'pressure-resolved' };
+-  }
+-  if (opts.rateLimited) {
+-    return { action: 'backoff', nextDeadlineAt: opts.now + RATE_LIMIT_HANDOFF_BACKOFF_MS };
+-  }
+-  return { action: 'restart' };
+-}
+-
+ /**
+  * Fast message checker for a single agent.
+  * Replaces fast-checker.sh: polls Telegram and inbox, injects into PTY.
+@@ -87,14 +47,7 @@ export class FastChecker {
+   private telegramApi?: TelegramAPI;
+   private chatId?: string;
+   private allowedUserId?: number;
+-  private daemonTelegramAlerts: boolean = true;
+-  private org: string = 'unknown';
+-
+-  // Usage-limit dead-air guard: detects consecutive bounced turns and sends
+-  // one cooldown-guarded holding reply so the user never gets silent dead air.
+-  private deadAirGuard: DeadAirGuard = new DeadAirGuard();
+-  // stdout.log byte offset at probe arm time; -1 = no armed probe.
+-  private deadAirStdoutOffset: number = -1;
++  private codexAuthBlockedLoggedAt: number = 0;
+ 
+   // External Telegram handler (set by daemon)
+   private telegramMessages: Array<{ formatted: string; ackIds: string[] }> = [];
+@@ -108,7 +61,6 @@ export class FastChecker {
+ 
+   // Idle-session heartbeat watchdog
+   private heartbeatTimer: NodeJS.Timeout | null = null;
+-  private staleTaskRecoveryTimer: NodeJS.Timeout | null = null;
+ 
+   // Poll-cycle stall watchdog + circuit breaker
+   private pollCycleWatchdog: NodeJS.Timeout | null = null;
+@@ -184,8 +136,6 @@ export class FastChecker {
+       chatId?: string;
+       allowedUserId?: number;
+       gmailWatch?: { query: string; intervalMs: number };
+-      daemonTelegramAlerts?: boolean;
+-      org?: string;
+     } = {},
+   ) {
+     this.agent = agent;
+@@ -196,8 +146,6 @@ export class FastChecker {
+     this.telegramApi = options.telegramApi;
+     this.chatId = options.chatId;
+     this.allowedUserId = options.allowedUserId;
+-    this.daemonTelegramAlerts = options.daemonTelegramAlerts ?? true;
+-    this.org = options.org ?? 'unknown';
+ 
+     // Initialize persistent dedup
+     this.dedupFilePath = join(paths.stateDir, '.message-dedup-hashes');
+@@ -267,26 +215,6 @@ export class FastChecker {
+       });
+     }, HEARTBEAT_INTERVAL_MS);
+ 
+-    // Stale-task recovery: hourly sweep (plus one at boot) that flips
+-    // in_progress tasks untouched for 24h+ to blocked with blocker context.
+-    // Without it a task claimed by a crashed agent sat in_progress forever.
+-    const STALE_RECOVERY_INTERVAL_MS = 60 * 60 * 1000;
+-    const runStaleRecovery = () => {
+-      try {
+-        const result = recoverStaleInProgressTasks(this.paths);
+-        if (result.recovered.length > 0) {
+-          this.log(`stale-task-recovery: blocked ${result.recovered.length} stale in_progress task(s): ${result.recovered.join(', ')}`);
+-        }
+-        for (const e of result.errors) {
+-          this.log(`stale-task-recovery: failed for ${e.id}: ${e.error}`);
+-        }
+-      } catch (err) {
+-        this.log(`stale-task-recovery error: ${err}`);
+-      }
+-    };
+-    runStaleRecovery();
+-    this.staleTaskRecoveryTimer = setInterval(runStaleRecovery, STALE_RECOVERY_INTERVAL_MS);
+-
+     // Poll-cycle stall watchdog: runs independently every 30s.
+     // If pollCycle hasn't completed in 90s the loop is wedged — hard-restart.
+     // A circuit breaker halts auto-restart after 3 trips in 15 min (upstream likely down).
+@@ -385,7 +313,7 @@ export class FastChecker {
+           `Halting auto-restart for ${resetMin}min — likely upstream issue. ` +
+           `Check manually with: pm2 logs cortextos-daemon`,
+         );
+-        if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
++        if (this.telegramApi && this.chatId) {
+           this.telegramApi
+             .sendMessage(
+               this.chatId,
+@@ -463,10 +391,6 @@ export class FastChecker {
+       clearInterval(this.pollCycleWatchdog);
+       this.pollCycleWatchdog = null;
+     }
+-    if (this.staleTaskRecoveryTimer !== null) {
+-      clearInterval(this.staleTaskRecoveryTimer);
+-      this.staleTaskRecoveryTimer = null;
+-    }
+   }
+ 
+   /**
+@@ -509,6 +433,10 @@ export class FastChecker {
+     let messageBlock = '';
+     const ackIds: string[] = [];
+ 
++    if (await this.pauseIfCodexAuthBlocked()) {
++      return;
++    }
++
+     // Process queued Telegram messages
+     let hasTelegramMessage = false;
+     while (this.telegramMessages.length > 0) {
+@@ -546,7 +474,6 @@ export class FastChecker {
+         // restart the typing indicator after Stop has cleared it.
+         if (hasTelegramMessage) {
+           this.lastMessageInjectedAt = Date.now();
+-          this.armDeadAirProbe();
+         }
+         // Cooldown after injection (deliberate delay — not a blocker, not timed).
+         await sleep(5000);
+@@ -564,10 +491,6 @@ export class FastChecker {
+     this.watchdogCheck();
+     mark('watchdogCheck');
+ 
+-    // Dead-air guard: detect usage-limit bounced turns after Telegram injection
+-    this.checkDeadAir();
+-    mark('checkDeadAir');
+-
+     // Gmail watch: check on configured interval (default 15 min)
+     await this.checkGmailWatch();
+     mark('checkGmailWatch');
+@@ -581,82 +504,6 @@ export class FastChecker {
+     mark('checkContextStatus');
+   }
+ 
+-  /**
+-   * Arm the dead-air probe after a Telegram message is injected: remember the
+-   * current stdout.log size so checkDeadAir() only scans output produced after
+-   * this injection.
+-   */
+-  private armDeadAirProbe(): void {
+-    const now = Date.now();
+-    this.deadAirGuard.onInjection(now);
+-    const stdoutPath = join(this.paths.logDir, 'stdout.log');
+-    try {
+-      this.deadAirStdoutOffset = existsSync(stdoutPath) ? statSync(stdoutPath).size : 0;
+-    } catch {
+-      this.deadAirStdoutOffset = 0;
+-    }
+-  }
+-
+-  /**
+-   * Tail stdout.log from the armed offset and feed new output to the guard.
+-   * When the guard fires (N consecutive usage-limit bounces, cooldown clear),
+-   * send ONE holding Telegram reply and log a bus event so the incident
+-   * surfaces in the morning brief / Warden.
+-   */
+-  private checkDeadAir(): void {
+-    if (this.deadAirStdoutOffset < 0) return;
+-    const now = Date.now();
+-
+-    const stdoutPath = join(this.paths.logDir, 'stdout.log');
+-    let newOutput = '';
+-    try {
+-      if (existsSync(stdoutPath)) {
+-        const size = statSync(stdoutPath).size;
+-        if (size < this.deadAirStdoutOffset) {
+-          // Log rotated underneath us — restart scan from the top of the new file.
+-          this.deadAirStdoutOffset = 0;
+-        }
+-        if (size > this.deadAirStdoutOffset) {
+-          const fd = openSync(stdoutPath, 'r');
+-          try {
+-            // Cap each scan at 64 KB — bounce error text is short and recent.
+-            const len = Math.min(size - this.deadAirStdoutOffset, 64 * 1024);
+-            const buf = Buffer.alloc(len);
+-            const bytesRead = readSync(fd, buf, 0, len, this.deadAirStdoutOffset);
+-            newOutput = buf.toString('utf-8', 0, bytesRead);
+-            this.deadAirStdoutOffset += bytesRead;
+-          } finally {
+-            closeSync(fd);
+-          }
+-        }
+-      }
+-    } catch {
+-      // Unreadable log never blocks the poll cycle.
+-    }
+-
+-    const fired = this.deadAirGuard.onOutput(newOutput, now);
+-    if (!this.deadAirGuard.isArmed()) {
+-      this.deadAirStdoutOffset = -1;
+-    }
+-    if (!fired) return;
+-
+-    const bounces = this.deadAirGuard.getConsecutiveBounces();
+-    this.log(`Dead-air guard fired: ${bounces} consecutive usage-limit bounced turns — sending holding reply`);
+-    // Sent even when daemonTelegramAlerts is off: this is conversation
+-    // continuity for a user actively messaging this agent, not a proactive
+-    // daemon alert.
+-    if (this.telegramApi && this.chatId) {
+-      this.telegramApi.sendMessage(this.chatId, HOLDING_REPLY_TEXT).catch(() => {});
+-    }
+-    try {
+-      logEvent(this.paths, this.agent.name, this.org, 'action', 'degraded_responder_fired', 'warning', {
+-        consecutive_bounces: bounces,
+-      });
+-    } catch (err) {
+-      this.log(`Dead-air guard logEvent failed: ${err}`);
+-    }
+-  }
+-
+   /**
+    * Detect stuck agent and trigger hard-restart.
+    * Ported from CRM fast-checker.sh (FROZEN_RESTART + context-threshold logic).
+@@ -718,7 +565,7 @@ export class FastChecker {
+   private triggerHardRestart(reason: string): void {
+     this.watchdogTriggered = true;
+     this.lastHardRestartAt = Date.now();
+-    if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
++    if (this.telegramApi && this.chatId) {
+       this.telegramApi
+         .sendMessage(this.chatId, `Got stuck (${reason}). Hard-restarting now.`)
+         .catch(() => { /* non-critical */ });
+@@ -843,7 +690,6 @@ export class FastChecker {
+       if (!errMsg.includes('No OAuth token') && !errMsg.includes('accounts.json')) {
+         this.log(`Usage check failed: ${errMsg}`);
+       }
+-      await this.runProviderFailoverMonitor('usage-check-error');
+       return;
+     }
+ 
+@@ -885,10 +731,6 @@ export class FastChecker {
+ 
+     this.log(`Usage tier transition: ${prevTier} → ${newTier} (${pct}%)`);
+ 
+-    if (newTier === 2) {
+-      await this.runProviderFailoverMonitor('usage-tier-critical');
+-    }
+-
+     // 1. Send Telegram alert directly (no Claude wake needed)
+     if (this.telegramApi && this.chatId) {
+       this.telegramApi.sendMessage(this.chatId, msg).catch(() => { /* non-critical */ });
+@@ -902,43 +744,6 @@ export class FastChecker {
+     }
+   }
+ 
+-  /**
+-   * Provider failover monitor is a bus/control-plane command, not a prompt.
+-   * It is intentionally invoked only by orchestrator's usage checker so a
+-   * Claude cap can move the Telegram front door to Codex without waiting for
+-   * the capped Claude session to process instructions.
+-   */
+-  private async runProviderFailoverMonitor(reason: string): Promise<void> {
+-    if (this.agent.name !== 'orchestrator') return;
+-    try {
+-      const stdout = await new Promise<string>((resolve, reject) => {
+-        execFile(
+-          'cortextos',
+-          ['bus', 'provider-failover-monitor', this.agent.name, '--json'],
+-          {
+-            timeout: this.STEP_HTTP_TIMEOUT_MS,
+-            env: {
+-              ...process.env,
+-              CTX_AGENT_NAME: '',
+-              CTX_SESSION_BYPASS: '1',
+-            },
+-          },
+-          (err, out) => {
+-            if (err) { reject(err); return; }
+-            resolve(out);
+-          },
+-        );
+-      });
+-      const parsed = JSON.parse(stdout) as { applied?: boolean; plan?: { selectedProviderId?: string } };
+-      this.log(
+-        `Provider failover monitor (${reason}): ` +
+-        `${parsed.applied ? 'applied' : 'no-op'}${parsed.plan?.selectedProviderId ? ` selected=${parsed.plan.selectedProviderId}` : ''}`,
+-      );
+-    } catch (err) {
+-      this.log(`Provider failover monitor failed (${reason}): ${err instanceof Error ? err.message : String(err)}`);
+-    }
+-  }
+-
+   /**
+    * Load usage tier from persistent file.
+    */
+@@ -1006,6 +811,26 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
+ `;
+   }
+ 
++  private async pauseIfCodexAuthBlocked(): Promise<boolean> {
++    const config = this.agent.getConfig();
++    if (config.runtime !== 'codex-app-server') return false;
++
++    const recentOutput = this.agent.getOutputBuffer()?.getRecent(12000) ?? '';
++    const authBlocked = /refresh token was revoked|authentication token has been invalidated|codexErrorInfo["']?\s*:\s*["']?unauthorized|HTTP error:\s*401 Unauthorized/i.test(recentOutput);
++    if (!authBlocked) return false;
++
++    const now = Date.now();
++    if (now - this.codexAuthBlockedLoggedAt > 60_000) {
++      this.codexAuthBlockedLoggedAt = now;
++      this.log('Codex app-server auth is blocked (revoked/unauthorized token); pausing inbox delivery so messages are not ACKed without execution');
++      await updateHeartbeat(this.paths, this.agent.name, 'auth_action_required: Codex app-server token revoked; reauth required before dispatch', {
++        currentTask: '',
++      }).catch(err => this.log(`Codex auth-blocked heartbeat update failed: ${err}`));
++    }
++
++    return true;
++  }
++
+   /**
+    * Format a Telegram text message for injection.
+    * Matches bash fast-checker.sh format.
+@@ -1732,18 +1557,6 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
+     }
+   }
+ 
+-  /**
+-   * Whether the tail of the PTY output shows a usage-limit turn bounce.
+-   * Reuses the dead-air guard's bounce patterns (status-bar usage text does
+-   * NOT match). Window is deliberately small: once the agent produces ~4KB of
+-   * normal output past a bounce, it no longer counts as "currently limited".
+-   * A quiet agent keeps matching, which is fine — deferral while idle is free
+-   * because context cannot grow without processed turns.
+-   */
+-  private isRecentOutputRateLimited(): boolean {
+-    return matchesUsageLimitBounce(this.agent.getOutputBuffer()?.getRecent(4000) ?? '');
+-  }
+-
+   /**
+    * Context monitor — called on every poll cycle.
+    * Reads context_status.json written by the statusLine bridge hook and takes
+@@ -1822,28 +1635,8 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
+     const effectivePct = pct ?? (exceeds200k ? 101 : null);
+     if (effectivePct === null) return;
+ 
+-    // Tier 3: deadline exceeded — restart only if context pressure still exists
+-    // and the session is not currently bouncing on usage limits. The deadline
+-    // alone is not evidence the agent is stuck: auto-compaction may have already
+-    // resolved the pressure, and a rate-limited agent cannot cooperate at all.
++    // Tier 3: deadline exceeded — force restart if agent ignored handoff prompt
+     if (this.ctxHandoffDeadlineAt > 0 && now > this.ctxHandoffDeadlineAt) {
+-      const decision = resolveHandoffDeadlineAction({
+-        now,
+-        effectivePct,
+-        handoffThreshold: handoff,
+-        rateLimited: this.isRecentOutputRateLimited(),
+-      });
+-      if (decision.action === 'skip') {
+-        this.ctxHandoffDeadlineAt = 0;
+-        this.ctxHandoffFiredAt = 0; // re-arm Tier 2 in case context climbs again
+-        this.log(`Handoff deadline expired but ctx is ${Math.round(effectivePct)}% (< ${handoff}%) — pressure resolved, skipping restart`);
+-        return;
+-      }
+-      if (decision.action === 'backoff') {
+-        this.ctxHandoffDeadlineAt = decision.nextDeadlineAt;
+-        this.log(`Handoff deadline expired at ${Math.round(effectivePct)}% but session is rate-limited — deferring restart ${Math.round(RATE_LIMIT_HANDOFF_BACKOFF_MS / 60_000)}min`);
+-        return;
+-      }
+       this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
+       this.ctxHandoffDeadlineAt = 0;
+       this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within 5min`);
+@@ -1870,13 +1663,6 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
+         this.log(`Tier 0 would fire at ${Math.round(effectivePct)}% but session is only ${Math.round(sessionAge / 1000)}s old — skipping (boot-window guard)`);
+         return; // do not latch — let the next poll reconsider after boot window
+       }
+-      // Rate-limit guard: a restart now would burn rate-limited tokens on
+-      // bootstrap and immediately re-cross the threshold. Context cannot grow
+-      // while turns bounce, so deferring is safe; next poll reconsiders.
+-      if (this.isRecentOutputRateLimited()) {
+-        this.log(`Tier 0 would fire at ${Math.round(effectivePct)}% but session is rate-limited — deferring (no latch)`);
+-        return;
+-      }
+       const restartPlannedMarker = join(this.paths.stateDir, '.restart-planned');
+       if (existsSync(restartPlannedMarker)) {
+         let markerAge: number = Infinity;
+@@ -1894,15 +1680,6 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
+       this.ctxAutoresetFiredAt = now;
+       const pctRound = Math.round(effectivePct);
+       this.log(`Tier 0 auto-reset fired at ${pctRound}% (threshold ${autoreset}%)`);
+-      try {
+-        logEvent(this.paths, this.agent.name, this.org, 'action', 'context_autoreset_fired', 'warning', {
+-          agent: this.agent.name,
+-          used_percentage: pctRound,
+-          threshold: autoreset,
+-        });
+-      } catch (err) {
+-        this.log(`Tier 0 logEvent failed: ${err}`);
+-      }
+       this.runAutoresetSnapshot(`ctx auto-reset at ${pctRound}%`);
+       // Reset context_status.json pre-emptively so the restarted session's
+       // FastChecker does not immediately re-fire Tier 0 off the stale value.
+@@ -1944,15 +1721,6 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
+         return;
+       }
+ 
+-      // Rate-limit guard: injecting the handoff prompt into a session whose
+-      // turns are bouncing arms a 5-min deadline the agent cannot possibly meet,
+-      // guaranteeing a Tier 3 force-restart. Defer without latching — context
+-      // cannot grow while turns bounce, so Tier 2 fires once the limit lifts.
+-      if (this.isRecentOutputRateLimited()) {
+-        this.log(`Tier 2 would fire at ${Math.round(effectivePct)}% but session is rate-limited — deferring handoff prompt (no latch)`);
+-        return;
+-      }
+-
+       // Cascade guard: if a handoff doc was written within the last 5 minutes, this session
+       // is still stabilising after a handoff cascade. Skip Tier 2 until the window passes so
+       // we don't inject the handoff prompt again into a session that is fresh from a handoff.
+@@ -2044,7 +1812,7 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
+       this.saveCtxCircuit();
+       const msg = `Context circuit breaker TRIPPED for ${this.agent.name}: 3 restarts in 15min. Watchdog paused 30min. Check logs/${this.agent.name}/restarts.log for details.`;
+       this.log(msg);
+-      if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
++      if (this.telegramApi && this.chatId) {
+         this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
+       }
+       return;
+diff --git a/tests/unit/scripts/auto-merge-pr.test.ts b/tests/unit/scripts/auto-merge-pr.test.ts
+index ddab4969c..537a4dffd 100644
+--- a/tests/unit/scripts/auto-merge-pr.test.ts
++++ b/tests/unit/scripts/auto-merge-pr.test.ts
+@@ -2,13 +2,15 @@
+  * Unit tests for scripts/auto-merge-pr.js
+  * Tests skip-condition logic and carve-out enforcement without hitting GitHub.
+  */
+-import { describe, it, expect } from 'vitest';
++import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+ import { createRequire } from 'module';
+ import { fileURLToPath } from 'url';
++import fs from 'fs';
++import os from 'os';
+ import path from 'path';
+ 
+ const require = createRequire(import.meta.url);
+-const { shouldSkipBody, isCarvedOut, isWithinSettleWindow, evaluateCheckRuns, REPOS, CARVE_OUTS, SETTLE_WINDOW_MS } =
++const { shouldSkipBody, pendingApprovalForPR, isCarvedOut, isWithinSettleWindow, evaluateCheckRuns, REPOS, CARVE_OUTS, SETTLE_WINDOW_MS } =
+   require('../../../scripts/auto-merge-pr.js');
+ 
+ describe('shouldSkipBody', () => {
+@@ -173,3 +175,49 @@ describe('evaluateCheckRuns', () => {
+     expect(evaluateCheckRuns(undefined).ok).toBe(true);
+   });
+ });
++
++describe('pendingApprovalForPR — approval-gate bypass guard', () => {
++  // Regression: 2026-06-16 PR #862 auto-merged while approval_1781598850 was
++  // still pending. The cron had no approval-gate awareness. A held PR must be
++  // skipped while a pending approval references it (#<number> + repo short name).
++  let dir: string;
++
++  beforeAll(() => {
++    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'approvals-pending-'));
++    const write = (id: string, status: string, title: string, description = '') =>
++      fs.writeFileSync(path.join(dir, `${id}.json`), JSON.stringify({ id, status, title, description }));
++    write('approval_aaa', 'pending', 'Merge wiki QA coverage PR #862', 'Context: PR #862 in RevOps-Global-GIT/cortextos.');
++    write('approval_bbb', 'pending', 'Merge AgentOps uptime probe PR #861', 'RevOps-Global-GIT/cortextos PR #861.');
++    write('approval_ccc', 'pending', 'Merge native clearance harness PR #593', 'RevOps-Global-GIT/ob1-app PR #593.');
++    write('approval_ddd', 'approved', 'Already-decided PR #700', 'RevOps-Global-GIT/cortextos PR #700.');
++  });
++
++  afterAll(() => { fs.rmSync(dir, { recursive: true, force: true }); });
++
++  it('gates a PR with a pending approval referencing it (#number + repo)', () => {
++    expect(pendingApprovalForPR('RevOps-Global-GIT/cortextos', 862, dir)).toBe('approval_aaa');
++    expect(pendingApprovalForPR('RevOps-Global-GIT/cortextos', 861, dir)).toBe('approval_bbb');
++    expect(pendingApprovalForPR('RevOps-Global-GIT/ob1-app', 593, dir)).toBe('approval_ccc');
++  });
++
++  it('does NOT gate a PR with no pending approval', () => {
++    expect(pendingApprovalForPR('RevOps-Global-GIT/cortextos', 999999, dir)).toBeNull();
++  });
++
++  it('does NOT gate when the approval is already resolved (status != pending)', () => {
++    expect(pendingApprovalForPR('RevOps-Global-GIT/cortextos', 700, dir)).toBeNull();
++  });
++
++  it('does NOT cross-match the same PR number in a different repo', () => {
++    // #861 is gated in cortextos but must not gate an ob1-app PR #861.
++    expect(pendingApprovalForPR('RevOps-Global-GIT/ob1-app', 861, dir)).toBeNull();
++  });
++
++  it('does not partial-match a longer number (#86 must not match #862)', () => {
++    expect(pendingApprovalForPR('RevOps-Global-GIT/cortextos', 86, dir)).toBeNull();
++  });
++
++  it('returns null (never throws) when the pending dir does not exist', () => {
++    expect(pendingApprovalForPR('RevOps-Global-GIT/cortextos', 862, path.join(dir, 'nope'))).toBeNull();
++  });
++});
