@@ -1502,8 +1502,14 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
       }
     } catch { /* keep stale values */ }
     const config = this.agent.getConfig();
+    const normalizeThreshold = (value: unknown, fallback: number): number => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return fallback;
+      // Configs historically used both whole percentages (85) and fractions (0.85).
+      // context_status.used_percentage is a whole percentage, so normalize fractions.
+      return value > 0 && value <= 1 ? value * 100 : value;
+    };
     const raw = config.ctx_autoreset_threshold;
-    const autoreset = typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : 0;
+    const autoreset = normalizeThreshold(raw, 0);
     // Treat 0 as "use default" (disabled) — a threshold of 0 means "fire at 0% context"
     // which is never the intent. Agents that want to disable the monitor set thresholds
     // to 0; treating those as the default (70/80) keeps the feature off for them since
@@ -1511,8 +1517,8 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     const warnRaw = config.ctx_warning_threshold;
     const handoffRaw = config.ctx_handoff_threshold;
     return {
-      warn: typeof warnRaw === 'number' && warnRaw > 0 ? warnRaw : 70,
-      handoff: typeof handoffRaw === 'number' && handoffRaw > 0 ? handoffRaw : 80,
+      warn: normalizeThreshold(warnRaw, 70),
+      handoff: normalizeThreshold(handoffRaw, 80),
       autoreset,
     };
   }
