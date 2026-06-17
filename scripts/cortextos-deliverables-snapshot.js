@@ -312,6 +312,7 @@ function summarizeAdvisorCanary() {
 
 function summarizeTeamBrainWiki() {
   const roots = [TEAM_BRAIN_ROOT, TEAM_BRAIN_FALLBACK_ROOT].filter(Boolean);
+  const candidates = [];
 
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
@@ -365,7 +366,7 @@ function summarizeTeamBrainWiki() {
           ? 'Team Brain git/wiki stale'
           : 'Team Brain git/wiki state unknown';
 
-    return {
+    const summary = {
       source: 'team_brain_wiki',
       status,
       label,
@@ -378,6 +379,17 @@ function summarizeTeamBrainWiki() {
         git_updated_at: gitUpdatedAt,
       },
     };
+
+    candidates.push(summary);
+  }
+
+  if (candidates.length > 0) {
+    candidates.sort((a, b) => {
+      const aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+      const bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+      return bTime - aTime;
+    });
+    return candidates[0];
   }
 
   return {
