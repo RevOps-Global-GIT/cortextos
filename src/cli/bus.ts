@@ -57,6 +57,12 @@ import { recordSpan } from '../utils/observe.js';
 import { resolvePaths } from '../utils/paths.js';
 import { resolveEnv, applySecretsToEnv, validateEnvContent } from '../utils/env.js';
 import { verifySessionOwnership, SessionOwnershipError } from '../utils/session-lock.js';
+import {
+  enqueueLockedWrite,
+  readLockedWrites,
+  rewriteLockedWrites,
+  type LockedWriteEntry,
+} from '../utils/locked-write-queue.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { logOutboundMessage, cacheLastSent, recordOutboundDogfoodTelegramAudit } from '../telegram/logging.js';
@@ -150,6 +156,7 @@ const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
   'save-output',
   'compact-tasks',
   'archive-tasks',
+  'drain-locked-writes',
   // Events / heartbeat / activity
   'log-event',
   'update-heartbeat',
@@ -216,6 +223,78 @@ export const SESSION_LOCK_READ_ONLY_ALLOWLIST: ReadonlySet<string> = new Set([
   // list-* commands are also read-only by convention.
 ]);
 
+/**
+ * Mutation commands whose writes must NOT be dropped when a non-owner session
+ * lock blocks them. Instead of exiting non-zero and losing the work, these are
+ * appended to the per-agent locked-write queue (state/<agent>/locked-writes.jsonl)
+ * and replayed when the legitimate owner session next runs a bus mutation.
+ *
+ * Scope is deliberately narrow: scheduled/cron-spawned analyst runs lose
+ * exactly create-task and kb-ingest under a held lock (see the analyst
+ * maintenance-loop report, 2026-06-17). Other mutations (heartbeat, log-event,
+ * ack-inbox, …) are either idempotent, transient, or owner-only by nature and
+ * are correctly hard-failed by the existing guard — queuing a stale heartbeat
+ * would be worse than dropping it.
+ */
+const QUEUEABLE_LOCKED_COMMANDS: ReadonlySet<string> = new Set([
+  'create-task',
+  'kb-ingest',
+]);
+
+/**
+ * Env flag set on replayed subprocesses so a drain cannot recurse: a queued
+ * command re-invoked by drainLockedWrites() must neither re-enqueue (it now
+ * runs as the owner and should succeed) nor trigger a nested drain.
+ */
+const LOCKED_DRAIN_ENV = 'CTX_LOCKED_DRAIN';
+
+/**
+ * Replay every queued locked-write for `agentName` by re-invoking the original
+ * `cortextos bus …` argv as a subprocess that inherits the current (owner)
+ * environment — so each replayed command passes verifySessionOwnership().
+ *
+ * Called from the preAction hook once the current process is confirmed to own
+ * the session lock. Entries that still fail are retained for the next attempt;
+ * succeeded entries are removed. Returns the count drained.
+ *
+ * Guarded by LOCKED_DRAIN_ENV so replayed children never re-enter the drain.
+ */
+function drainLockedWrites(stateDir: string, opts: { quiet?: boolean } = {}): number {
+  if (process.env[LOCKED_DRAIN_ENV] === '1') return 0;
+  const entries = readLockedWrites(stateDir);
+  if (entries.length === 0) return 0;
+
+  const cliEntry = process.argv[1];
+  const childEnv = { ...process.env, [LOCKED_DRAIN_ENV]: '1' };
+  const stillFailed: LockedWriteEntry[] = [];
+  let drained = 0;
+
+  for (const entry of entries) {
+    try {
+      execFileSync(process.execPath, [cliEntry, ...entry.argv], {
+        env: childEnv,
+        stdio: opts.quiet ? 'ignore' : 'inherit',
+        timeout: 120_000,
+      });
+      drained += 1;
+    } catch {
+      // Keep the entry queued so a later owner mutation retries it. We do not
+      // re-throw: a failing replay must not break the owner's actual command.
+      stillFailed.push(entry);
+    }
+  }
+
+  rewriteLockedWrites(stateDir, stillFailed);
+  if (!opts.quiet && drained > 0) {
+    process.stderr.write(
+      `[locked-write-queue] drained ${drained}/${entries.length} queued write` +
+      `${entries.length === 1 ? '' : 's'} for this agent` +
+      `${stillFailed.length ? ` (${stillFailed.length} still failing)` : ''}\n`,
+    );
+  }
+  return drained;
+}
+
 export const busCommand = new Command('bus')
   .description('Bus commands for agent messaging, tasks, and events')
   .hook('preAction', () => {
@@ -254,10 +333,46 @@ export const busCommand = new Command('bus')
       verifySessionOwnership(paths.stateDir, agentName);
     } catch (err) {
       if (err instanceof SessionOwnershipError) {
+        // A non-owner session is blocked. For writes we must not lose
+        // (create-task / kb-ingest from a cron-spawned run while the main
+        // session holds the lock), append to the per-agent locked-write queue
+        // instead of dropping the work; the owner session replays it on its
+        // next mutation. The LOCKED_DRAIN_ENV guard keeps a replayed child from
+        // re-enqueuing itself. Everything else keeps the hard non-zero exit.
+        if (
+          QUEUEABLE_LOCKED_COMMANDS.has(commandName) &&
+          process.env[LOCKED_DRAIN_ENV] !== '1'
+        ) {
+          const depth = enqueueLockedWrite(paths.stateDir, {
+            ts: new Date().toISOString(),
+            command: commandName,
+            argv: process.argv.slice(2),
+            conflicting_pid: err.conflictingPid,
+          });
+          process.stderr.write(
+            `cortextos: session.lock for "${agentName}" held by pid ${err.conflictingPid} — ` +
+            `queued "${commandName}" to drain when this agent's owner session resumes ` +
+            `(not dropped; ${depth} write${depth === 1 ? '' : 's'} queued).\n`,
+          );
+          process.exit(0);
+        }
         process.stderr.write(err.message + '\n');
         process.exit(2);
       }
       throw err;
+    }
+
+    // Ownership confirmed. Opportunistically drain any writes that a prior
+    // non-owner run queued while this session (or a previous owner) held the
+    // lock, so scheduled create-task/kb-ingest land as soon as the owner is
+    // active again. Skipped for the explicit drain command (it drains itself)
+    // and for replayed children (LOCKED_DRAIN_ENV guard inside drainLockedWrites).
+    if (commandName !== 'drain-locked-writes') {
+      try {
+        drainLockedWrites(paths.stateDir);
+      } catch {
+        /* never let an opportunistic drain break the owner's real command */
+      }
     }
   });
 
@@ -4524,6 +4639,33 @@ busCommand
       console.log(`drain-mirror: drained ${drained}/${before} — queue is now empty.`);
     } else {
       console.log(`drain-mirror: drained ${drained}/${before} — ${after} still failed (PostgREST unreachable?).`);
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('drain-locked-writes')
+  .description('Replay bus writes (create-task/kb-ingest) that were queued because a non-owner session held session.lock. Owner-only.')
+  .option('--json', 'Output result as JSON', false)
+  .action((opts: { json?: boolean }) => {
+    // The preAction hook already verified this process owns the session lock
+    // (drain-locked-writes is a MUTATION_COMMAND) and skipped its own auto-drain.
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const before = readLockedWrites(paths.stateDir).length;
+    if (before === 0) {
+      if (opts.json) console.log(JSON.stringify({ ok: true, before: 0, drained: 0, after: 0 }));
+      else console.log('drain-locked-writes: queue is empty — nothing to drain.');
+      return;
+    }
+    const drained = drainLockedWrites(paths.stateDir, { quiet: true });
+    const after = readLockedWrites(paths.stateDir).length;
+    if (opts.json) {
+      console.log(JSON.stringify({ ok: after === 0, before, drained, after }));
+    } else if (after === 0) {
+      console.log(`drain-locked-writes: drained ${drained}/${before} — queue is now empty.`);
+    } else {
+      console.log(`drain-locked-writes: drained ${drained}/${before} — ${after} still failing.`);
       process.exit(1);
     }
   });
