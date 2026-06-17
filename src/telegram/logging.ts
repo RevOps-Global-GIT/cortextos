@@ -113,9 +113,122 @@ export function recordInboundTelegram(
       from_name: fromName,
       has_media: hasMedia,
       text_chars: text.length,
+      text: text.slice(0, 200),
     });
   } catch (err) {
     log?.(`logEvent(telegram_received) failed: ${err}`);
+  }
+
+  try {
+    recordDogfoodTelegramAudit(paths, ctxRoot, agentName, org, 'inbound', {
+      chatId: String(msg.chat?.id ?? ''),
+      messageId: msg.message_id,
+      threadMessageId: msg.reply_to_message?.message_id ?? null,
+      fromName,
+      timestamp: msg.date ? new Date(msg.date * 1000).toISOString() : new Date().toISOString(),
+      text,
+    }, log);
+  } catch (err) {
+    log?.(`recordDogfoodTelegramAudit(inbound) failed: ${err}`);
+  }
+}
+
+const DOGFOOD_RESULT_SOURCE_PATTERN = /\b(agentops|estate|ob1|orca|harned)\s+dogfood\b/i;
+const DOGFOOD_RESULT_CONTEXT_PATTERN = /\bdogfood\b/i;
+const DOGFOOD_RESULT_SIGNAL_PATTERN = /\b(pass|fail|failed|blocked|warn|warning|result|proof|report|artifact|scenario|runner|assert|p[0-9]|qa|smoke|audit)\b/i;
+
+function isDogfoodResultText(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) return false;
+  return DOGFOOD_RESULT_SOURCE_PATTERN.test(normalized)
+    || (DOGFOOD_RESULT_CONTEXT_PATTERN.test(normalized) && DOGFOOD_RESULT_SIGNAL_PATTERN.test(normalized));
+}
+
+function dogfoodAuditKey(agentName: string, direction: 'inbound' | 'outbound', chatId: string, messageId: string | number): string {
+  return [
+    'dogfood-telegram',
+    agentName,
+    direction,
+    chatId || 'unknown-chat',
+    String(messageId || 'unknown-message'),
+  ].join(':');
+}
+
+function alreadyAuditedDogfoodResult(ctxRoot: string, agentName: string, key: string): boolean {
+  const stateDir = join(ctxRoot, 'state', agentName);
+  mkdirSync(stateDir, { recursive: true });
+  const ledgerPath = join(stateDir, 'dogfood-telegram-audit.jsonl');
+  if (existsSync(ledgerPath)) {
+    const raw = readFileSync(ledgerPath, 'utf-8');
+    if (raw.split('\n').some(line => line.includes(`"key":"${key}"`))) {
+      return true;
+    }
+  }
+  appendFileSync(ledgerPath, JSON.stringify({
+    key,
+    audited_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+  }) + '\n', 'utf-8');
+  return false;
+}
+
+export function recordOutboundDogfoodTelegramAudit(
+  paths: BusPaths,
+  ctxRoot: string,
+  agentName: string,
+  org: string,
+  chatId: string | number,
+  messageId: number,
+  text: string,
+  log?: (m: string) => void,
+): void {
+  recordDogfoodTelegramAudit(paths, ctxRoot, agentName, org, 'outbound', {
+    chatId: String(chatId),
+    messageId,
+    threadMessageId: null,
+    fromName: agentName,
+    timestamp: new Date().toISOString(),
+    text,
+  }, log);
+}
+
+function recordDogfoodTelegramAudit(
+  paths: BusPaths,
+  ctxRoot: string,
+  agentName: string,
+  org: string,
+  direction: 'inbound' | 'outbound',
+  data: {
+    chatId: string;
+    messageId: number;
+    threadMessageId: number | null;
+    fromName: string;
+    timestamp: string;
+    text: string;
+  },
+  log?: (m: string) => void,
+): void {
+  if (!isDogfoodResultText(data.text)) return;
+
+  const key = dogfoodAuditKey(agentName, direction, data.chatId, data.messageId);
+  if (alreadyAuditedDogfoodResult(ctxRoot, agentName, key)) return;
+
+  const metadata = {
+    audit_key: key,
+    telegram_agent: agentName,
+    direction,
+    chat_id: data.chatId,
+    message_id: data.messageId,
+    thread_message_id: data.threadMessageId,
+    from_name: data.fromName,
+    telegram_timestamp: data.timestamp,
+    text_chars: data.text.length,
+    text: data.text.slice(0, 1000),
+  };
+
+  try {
+    logEvent(paths, agentName, org, 'message', 'dogfood_telegram_audited', 'info', metadata);
+  } catch (err) {
+    log?.(`logEvent(dogfood_telegram_audited) failed: ${err}`);
   }
 }
 

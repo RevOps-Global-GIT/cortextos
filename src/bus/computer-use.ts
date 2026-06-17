@@ -10,7 +10,7 @@
  *   cortextos bus computer-use --timeout 120 "slow task"
  *
  * How it works:
- *   1. SSH to Greg's Mac (gregs-mac / 100.84.86.6 via Tailscale)
+ *   1. SSH to Greg's Mac (gregharned@gregs-macbook-air via Tailscale)
  *   2. Run ~/work/team-brain/scripts/codex-dispatch.sh with the prompt
  *   3. codex-dispatch.sh invokes `codex exec` with the Computer Use plugin
  *      reference ([@Computer Use](plugin://computer-use@openai-bundled))
@@ -80,12 +80,14 @@ export interface ComputerUseOptions {
   workdir?: string;
   /** Timeout in seconds (default: 300) */
   timeout?: number;
-  /** SSH host (default: gregs-mac) */
+  /** SSH target (default: gregharned@gregs-macbook-air) */
   sshHost?: string;
   /** Path to codex-dispatch.sh on the Mac */
   dispatchScript?: string;
   /** Disable localhost codex exec fallback when Mac SSH is unreachable (default: fallback enabled) */
   noFallback?: boolean;
+  /** Path to recent failed Orgo lease attempt artifact required before Mac SSH fallback */
+  orgoFailureArtifact?: string;
 }
 
 export interface ComputerUseResult {
@@ -97,7 +99,7 @@ export interface ComputerUseResult {
   usedFallback?: boolean;
 }
 
-const DEFAULT_SSH_HOST = 'gregs-mac';
+const DEFAULT_SSH_HOST = process.env.CORTEXTOS_COMPUTER_USE_SSH_HOST ?? 'gregharned@gregs-macbook-air';
 const DEFAULT_DISPATCH_SCRIPT = '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh';
 const DEFAULT_MAC_CODEX_BIN = '/Applications/Codex.app/Contents/Resources/codex';
 
@@ -108,9 +110,12 @@ const DEFAULT_MAC_CODEX_BIN = '/Applications/Codex.app/Contents/Resources/codex'
 const SSH_CONNECTION_ERROR_PATTERNS = [
   /connect to host .* port \d+: (Connection refused|No route to host|Network is unreachable)/i,
   /ssh: connect to host .* port \d+: Operation timed out/i,
+  /Could not resolve hostname/i,
   /ConnectTimeout/i,
   /Connection timed out/i,
+  /Name or service not known/i,
   /No such host/i,
+  /nodename nor servname provided/i,
   /Temporary failure in name resolution/i,
   /EHOSTUNREACH/i,
   /ECONNREFUSED/i,
@@ -118,8 +123,36 @@ const SSH_CONNECTION_ERROR_PATTERNS = [
   /kex_exchange_identification: Connection closed/i,
 ];
 
+/**
+ * Authentication and host-key failures are not availability failures. Do not
+ * fall back locally, because that would hide a broken Mac dispatch lane.
+ */
+const SSH_AUTH_OR_HOST_KEY_ERROR_PATTERNS = [
+  /Permission denied/i,
+  /Too many authentication failures/i,
+  /Host key verification failed/i,
+  /REMOTE HOST IDENTIFICATION HAS CHANGED/i,
+  /Offending .* key/i,
+  /no matching host key type found/i,
+];
+
 function isSshConnectionError(msg: string): boolean {
   return SSH_CONNECTION_ERROR_PATTERNS.some((re) => re.test(msg));
+}
+
+function isSshAuthOrHostKeyError(msg: string): boolean {
+  return SSH_AUTH_OR_HOST_KEY_ERROR_PATTERNS.some((re) => re.test(msg));
+}
+
+function errorText(err: unknown): string {
+  if (typeof err === 'string') return err;
+  const maybe = err as { message?: string; stderr?: Buffer | string; stdout?: Buffer | string };
+  const combined = [maybe?.stderr, maybe?.stdout, maybe?.message]
+    .filter(Boolean)
+    .map((part) => String(part).trim())
+    .filter(Boolean)
+    .join('\n');
+  return combined || String(err);
 }
 
 function resolveLocalCodexBin(): string {
@@ -217,7 +250,16 @@ export async function computerUse(
       durationMs: Date.now() - start,
     };
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = errorText(err);
+
+    if (isSshAuthOrHostKeyError(msg)) {
+      return {
+        ok: false,
+        error: `Mac SSH authentication/host-key failure (${sshHost}) — fix SSH trust or authorized_keys before dispatch can use the Mac.`,
+        durationMs: Date.now() - start,
+        usedFallback: false,
+      };
+    }
 
     // Only attempt fallback on connection-level SSH failures
     if (!isSshConnectionError(msg)) {

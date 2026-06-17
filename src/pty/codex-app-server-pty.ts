@@ -561,8 +561,19 @@ export class CodexAppServerPTY {
   private async startTurn(input: unknown[]): Promise<void> {
     if (!this._threadId) throw new Error('No Codex app-server thread is active');
     const completion = this.createTurnCompletion();
-    await this.request('turn/start', { threadId: this._threadId, input, ...TURN_PERMISSION_OVERRIDES });
-    await completion;
+    const completionResult = completion.then(
+      () => null,
+      (err) => err instanceof Error ? err : new Error(String(err)),
+    );
+
+    try {
+      await this.request('turn/start', { threadId: this._threadId, input, ...TURN_PERMISSION_OVERRIDES });
+      const completionErr = await completionResult;
+      if (completionErr) throw completionErr;
+    } catch (err) {
+      this.rejectTurnCompletion(err instanceof Error ? err : new Error(String(err)));
+      throw err;
+    }
   }
 
   /**

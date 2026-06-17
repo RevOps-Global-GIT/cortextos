@@ -1,26 +1,37 @@
 import { Command } from 'commander';
 import { spawnSync, execFileSync } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName } from '../utils/validate.js';
 import { randomString } from '../utils/random.js';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks, findTaskFile } from '../bus/task.js';
+import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, listBlockedBy, checkStaleTasks, archiveTasks, checkHumanTasks, findTaskFile } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
+import { pollWatchdog } from '../bus/watchdog.js';
+import { runPrStuckWatcher } from '../bus/pr-stuck-watcher.js';
+import { runWipEnforcer } from '../bus/wip-enforcer.js';
+import { runDocDriftChecker } from '../bus/doc-drift-checker.js';
+import { runGoalProgressProbe } from '../bus/goal-progress-probe.js';
+import { runHeartbeatHealthWatch, inferRunningFromHeartbeats } from '../bus/heartbeat-health-watch.js';
+import { runCustomerSurfaceQa } from '../bus/customer-surface-qa.js';
+import { runCodebaseScan } from '../bus/codebase-scan.js';
+import { computeUvd, writeUvdResult } from '../bus/compute-uvd.js';
+import { runSecurityAudit } from '../bus/security-audit.js';
 import { selfRestart, hardRestart, autoCommit, autoCompactAgent, checkGoalStaleness, postActivity } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig, loadExperiment, syncExperimentToSupabase, syncAllExperimentsToSupabase } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
-import { createApproval, updateApproval } from '../bus/approval.js';
+import { createApproval, updateApproval, sendApprovedEmail } from '../bus/approval.js';
 import { createReminder, listReminders, ackReminder, pruneReminders } from '../bus/reminders.js';
-import { updateCronFire, parseDurationMs, readCronState } from '../bus/cron-state.js';
-import { addCron, removeCron, readCrons, updateCron as updateCronDef, getCronByName, getExecutionLog } from '../bus/crons.js';
-import { nextFireFromCron } from '../daemon/cron-scheduler.js';
+import { spawnCodex } from '../bus/spawn-codex.js';
+import { handleCodexFallback } from '../bus/codex-fallback.js';
 import { queryKnowledgeBase, ingestKnowledgeBase, ensureKBDirs } from '../bus/knowledge-base.js';
 import { checkUsageApi, refreshOAuthToken, rotateOAuth, loadAccounts, ALERT_5H, ALERT_7D } from '../bus/oauth.js';
-import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled } from '../bus/rgos-mirror.js';
+import { drainRetryQueue, readRetryQueue, retryQueuePath, isEnabled, mirrorPrUrlToRgos } from '../bus/rgos-mirror.js';
+import { importApprovedRgosTasks, importRgosTaskById } from '../bus/rgos-tasks.js';
 import { createSkillPr } from '../bus/skill-autopr.js';
 import { sendSlack } from '../bus/send-slack.js';
 import { enforceControlPolicy } from '../bus/orch-control-policy.js';
@@ -30,14 +41,30 @@ import { generateSkill } from '../bus/generate-skill.js';
 import { syncSkills } from '../bus/sync-skills.js';
 import { runWorkflow } from '../bus/run-workflow.js';
 import { computerUse } from '../bus/computer-use.js';
+import { validateTask } from '../bus/task-validate.js';
+import { checkOrgoLeaseWatchdog, claimOrgoLease, formatLeaseStatus, listOrgoLeaseStatus, releaseOrgoLease } from '../bus/orgo-lease.js';
+import { lastpassCred, LastPassCredApprovalRequiredError, LastPassCredFetchError, LastPassCredRejectedError } from '../bus/lastpass-cred.js';
+import { closeWhisperRoom, readVoiceSettings, sendWhisper, summarizeWhisperRoom, watchWhisperRoom, whisperRoomId } from '../bus/whisper-room.js';
+import {
+  AGENT_TASK_EVENT_TYPES,
+  emitAgentTaskEvent,
+  isAgentTaskEventType,
+  parseAgentTaskEventPayload,
+} from '../bus/agent-task-events.js';
+import { sendHumanBlockersDigest, digestHumanBlockers } from '../bus/human-blockers-digest.js';
+import { logImplicitInvocation } from '../bus/skill-instrument.js';
+import { registerCronCommands } from './bus-cmds-crons.js';
+import { registerBatchCommands } from './bus-cmds-batch.js';
 
 import { atomicWriteSync } from '../utils/atomic.js';
+import { recordSpan } from '../utils/observe.js';
 import { resolvePaths } from '../utils/paths.js';
-import { resolveEnv } from '../utils/env.js';
+import { resolveEnv, applySecretsToEnv, validateEnvContent } from '../utils/env.js';
+import { verifySessionOwnership, SessionOwnershipError } from '../utils/session-lock.js';
 import { IPCClient } from '../daemon/ipc-server.js';
 import { TelegramAPI } from '../telegram/api.js';
-import { logOutboundMessage, cacheLastSent } from '../telegram/logging.js';
-import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext, CronDefinition } from '../types/index.js';
+import { logOutboundMessage, cacheLastSent, recordOutboundDogfoodTelegramAudit } from '../telegram/logging.js';
+import type { Priority, Task, TaskStatus, EventCategory, EventSeverity, ApprovalCategory, ApprovalStatus, OrgContext } from '../types/index.js';
 
 /**
  * Check if the org requires deliverables and the task has none attached.
@@ -75,8 +102,156 @@ function checkDeliverableRequirement(taskId: string, frameworkRoot: string, org:
   return null;
 }
 
+/**
+ * Commands that mutate bus state. These MUST verify session ownership before
+ * running and MUST NOT honor CTX_SESSION_BYPASS — a dup-spawned session
+ * setting BYPASS would re-create the exact collision we're guarding against.
+ *
+ * Keep this list explicit (no startsWith() matching) so a new mutation
+ * command does not silently slip past the guard. Read-only commands stay
+ * unlisted and pass through without a check, for a safer rollout.
+ */
+const MUTATION_COMMANDS: ReadonlySet<string> = new Set([
+  // Inbox / messaging
+  'send-message',
+  'ack-inbox',
+  'ack-health-probe',
+  'send-telegram',
+  'react-telegram',
+  'send-telegram-voice',
+  'send-mobile-reply',
+  'send-slack',
+  'voice-reply',
+  'notify-agent',
+  'edit-message',
+  'answer-callback',
+  'register-telegram-commands',
+  'reply-mode',
+  // Tasks
+  'create-task',
+  'update-task',
+  'complete-task',
+  'set-pr-url',
+  'validate-task',
+  'claim-task',
+  'save-output',
+  'compact-tasks',
+  'archive-tasks',
+  // Events / heartbeat / activity
+  'log-event',
+  'update-heartbeat',
+  'post-activity',
+  'update-env-file',
+  // Restart / lifecycle
+  'self-restart',
+  'hard-restart',
+  'soft-restart',
+  'soft-restart-all',
+  'auto-compact-agent',
+  'auto-commit',
+  // Approvals / reminders
+  'create-approval',
+  'update-approval',
+  'create-reminder',
+  'ack-reminder',
+  'prune-reminders',
+  // Crons (write side)
+  'add-cron',
+  'remove-cron',
+  'update-cron',
+  'update-cron-fire',
+  'test-cron-fire',
+  'migrate-crons',
+  'upgrade-cron-teaching',
+  // Knowledge base writes
+  'kb-ingest',
+  // Lease writes
+  'orgo-lease-claim',
+  'orgo-lease-release',
+  'farm-dispatch',
+  'whisper-send',
+  'whisper-watch',
+  'whisper-close',
+  'orch-talk',
+  // Skill / catalog writes
+  'create-skill-pr',
+  'install-community-item',
+  'submit-community-item',
+  'prepare-submission',
+  'generate-skill',
+  'sync-skills',
+  // Experiments (write side)
+  'create-experiment',
+  'run-experiment',
+  'evaluate-experiment',
+  'manage-cycle',
+  'sync-experiments',
+  // Credential access writes audit lines and can create approvals.
+  'lastpass-cred',
+]);
+
+/**
+ * Read-only commands that may honor CTX_SESSION_BYPASS=1 in a future
+ * expansion of session-lock to cover reads. Today, unlisted commands
+ * skip the check entirely, so BYPASS is documentation — but recording
+ * the allowlist here makes the intent explicit and easy to widen later.
+ *
+ * Per orchestrator direction: keep this list conservative.
+ * The set is exported so tests and audit tooling can reference it.
+ */
+export const SESSION_LOCK_READ_ONLY_ALLOWLIST: ReadonlySet<string> = new Set([
+  'check-inbox',
+  'read-all-heartbeats',
+  'kb-query',
+  'kb-collections',
+  'get-cron-log',
+  // list-* commands are also read-only by convention.
+]);
+
 export const busCommand = new Command('bus')
-  .description('Bus commands for agent messaging, tasks, and events');
+  .description('Bus commands for agent messaging, tasks, and events')
+  .hook('preAction', () => {
+    // Load org secrets.env + agent .env into process.env so all bus modules
+    // can access SUPABASE_RGOS_URL, SUPABASE_RGOS_SERVICE_KEY, etc. without
+    // requiring the parent shell to manually source them.
+    applySecretsToEnv(resolveEnv());
+  })
+  .hook('preAction', (_thisCommand, actionCommand) => {
+    // Session-lock enforcement. Mutation commands must prove the caller
+    // owns the daemon-spawned PTY for CTX_AGENT_NAME. A separately launched
+    // session for the same agent (manual claude-code, scoped spawn-codex,
+    // orphaned snapshot run) will not carry CTX_SESSION_OWNER_PID matching
+    // the daemon's pid, and will be rejected here with a hard error that
+    // names the conflicting pid for operator diagnosis.
+    //
+    // BYPASS semantics: CTX_SESSION_BYPASS=1 is intentionally ignored for
+    // every mutation command in MUTATION_COMMANDS. The escape hatch only
+    // applies to the read-only allowlist; mutations must never be forced
+    // through, because the bug we are fixing IS a dup session writing.
+    const commandName = actionCommand.name();
+    if (!MUTATION_COMMANDS.has(commandName)) return;
+
+    const agentName = process.env.CTX_AGENT_NAME;
+    if (!agentName) return; // no agent identity → nothing to lock
+    const instanceId = process.env.CTX_INSTANCE_ID || 'default';
+
+    let paths: ReturnType<typeof resolvePaths>;
+    try {
+      paths = resolvePaths(agentName, instanceId);
+    } catch {
+      return; // invalid agent name will be rejected by the downstream action
+    }
+
+    try {
+      verifySessionOwnership(paths.stateDir, agentName);
+    } catch (err) {
+      if (err instanceof SessionOwnershipError) {
+        process.stderr.write(err.message + '\n');
+        process.exit(2);
+      }
+      throw err;
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Reply-mode helpers
@@ -185,6 +360,16 @@ function isRegisteredAgent(frameworkRoot: string, target: string): boolean {
   return false;
 }
 
+function parseNonNegativeNumber(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function isLocalVoiceEndpoint(target: string): boolean {
+  return target === 'voice-orch-talk' || target.startsWith('voice-session-');
+}
+
 // Extensions that are safe to publish to {ctxRoot}/dashboard-uploads so the
 // dashboard bus channel can link or render them. Media types render inline
 // (image/audio/video); document types render as a download chip. We avoid
@@ -258,7 +443,7 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
-    const agentExists = isRegisteredAgent(projectRoot, to);
+    const agentExists = isRegisteredAgent(projectRoot, to) || isLocalVoiceEndpoint(to);
     if (!agentExists) {
       // If target isn't a known agent, it's the user (dashboard/Telegram identity).
       // Fall through to user-destination handling below — no warning.
@@ -305,6 +490,7 @@ busCommand
     try {
       logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null, trace_id: opts.traceId ?? null, mode: agentExists ? null : mode }));
     } catch { /* non-fatal */ }
+    recordSpan('bus.send_message', { taskId: opts.traceId, attributes: { to, priority, msg_id: msgId } });
 
     // -----------------------------------------------------------------------
     // Telegram mirror — when replying to the user, also deliver on Telegram
@@ -348,6 +534,7 @@ busCommand
     }
 
     console.log(msgId);
+    await logImplicitInvocation('comms', env.agentDir ?? '', env.agentName);
     // Exit immediately after all local writes and Telegram mirror complete.
     // sendMessage() and logEvent() both schedule fire-and-forget async work via
     // setImmediate → mirrorMessageToRgos/mirrorEventToRgos → drainRetryQueue.
@@ -382,18 +569,89 @@ busCommand
     process.exit(0);
   });
 
+
+busCommand
+  .command('ack-health-probe')
+  .argument('<probe_id>', 'Probe ID to acknowledge (from the ping message)')
+  .description('Acknowledge a daemon health probe, writing acked status to state/health-probe.json')
+  .action((probeId: string) => {
+    const env = resolveEnv();
+    const agentName = env.agentName;
+    if (!agentName) {
+      console.error('[ack-health-probe] CTX_AGENT_NAME is not set');
+      process.exit(1);
+    }
+    const ctxRoot = process.env.CTX_ROOT ?? join(homedir(), '.cortextos', env.instanceId || 'default');
+    const stateDir = join(ctxRoot, 'state', agentName);
+    const probeFile = join(stateDir, 'health-probe.json');
+
+    // Validate that probe_id matches what is pending (best-effort — if the file
+    // is missing we still write the ack so the daemon sees it on next check).
+    try {
+      mkdirSync(stateDir, { recursive: true });
+      if (existsSync(probeFile)) {
+        const state = JSON.parse(readFileSync(probeFile, 'utf-8'));
+        if (state.probe_id && state.probe_id !== probeId) {
+          console.error(`[ack-health-probe] probe_id mismatch: expected ${state.probe_id}, got ${probeId}`);
+          process.exit(1);
+        }
+      }
+      writeFileSync(probeFile, JSON.stringify({ status: 'acked', probe_id: probeId, acked_at: new Date().toISOString() }));
+      console.log(`[ack-health-probe] Acked probe ${probeId} for ${agentName}`);
+    } catch (err) {
+      console.error(`[ack-health-probe] Failed to write ack: ${err}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+
 busCommand
   .command('create-task')
   .argument('<title>', 'Task title')
   .option('--desc <description>', 'Task description')
-  .option('--assignee <agent>', 'Assigned agent')
+  .option('--assignee <agent>', 'Assigned agent (single). Use --assignees for multi-agent comma list.')
+  .option('--assignees <agents>', 'Comma-separated list of assignees. Primary assignee (first) is set on the task; all are stored in meta.assignees.')
   .option('--priority <p>', 'Priority (urgent, high, normal, low)', 'normal')
   .option('--project <name>', 'Project name')
   .option('--needs-approval', 'Require human approval before execution')
   .option('--blocked-by <ids>', 'Comma-separated task IDs that must complete before this task can progress')
   .option('--blocks <ids>', 'Comma-separated task IDs that this new task will block (symmetric reverse edge)')
   .option('--meta <json>', 'Free-form correlation metadata as JSON object (e.g. \'{"cron":"poll-codex-outbox"}\')')
-  .action((title: string, opts: { desc?: string; assignee?: string; priority: string; project?: string; needsApproval?: boolean; blockedBy?: string; blocks?: string; meta?: string }) => {
+  .option('--success-criteria <text>', 'Machine-checkable condition proving task is done. Auto-creates a linked goal guard on high-stakes tasks.')
+  .option('--out-of-scope <text>', 'What this task explicitly does NOT do.')
+  .option('--escalation-triggers <text>', 'Conditions that should escalate this task to a human.')
+  .option('--source-hierarchy <text>', 'Who assigned this task (e.g. "orchestrator", "greg", "self-directed").')
+  .option('--required-capabilities <text>', 'Tools/access/permissions needed to complete this task.')
+  .option('--fallback-proof <text>', 'How to verify the task if the primary artifact is unavailable.')
+  .option('--artifact-expectations <text>', 'What output/file/PR/result is expected from this task.')
+  .option('--goal-ancestry <text>', 'Which org goal this task traces back to.')
+  .option('--loop-cron <expr>', 'Cron expression for a linked polling loop (e.g. "*/15 * * * *"). Requires --loop-prompt.')
+  .option('--loop-prompt <text>', 'Prompt that fires on each loop iteration when --loop-cron is set.')
+  .option('--skip-brief-validation', 'Skip brief contract field validation (for backward-compatible scripts and tests).', false)
+  .option('--skip-dedup', 'Skip duplicate-title similarity check (use when intentionally creating a follow-on or variant task).', false)
+  .action(async (title: string, opts: {
+    desc?: string;
+    assignee?: string;
+    assignees?: string;
+    priority: string;
+    project?: string;
+    needsApproval?: boolean;
+    blockedBy?: string;
+    blocks?: string;
+    meta?: string;
+    successCriteria?: string;
+    outOfScope?: string;
+    escalationTriggers?: string;
+    sourceHierarchy?: string;
+    requiredCapabilities?: string;
+    fallbackProof?: string;
+    artifactExpectations?: string;
+    goalAncestry?: string;
+    loopCron?: string;
+    loopPrompt?: string;
+    skipBriefValidation?: boolean;
+    skipDedup?: boolean;
+  }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const parseList = (raw?: string) => (raw ? raw.split(',').map(s => s.trim()).filter(Boolean) : []);
@@ -411,28 +669,108 @@ busCommand
         process.exit(1);
       }
     }
+    // Multi-assignee resolution: --assignees overrides --assignee.
+    // The primary assignee (first entry) is stored in assigned_to; all are
+    // stored in meta.assignees so downstream readers can fan-out notifications.
+    let primaryAssignee: string | undefined = opts.assignee;
+    let assigneeList: string[] | undefined;
+    if (opts.assignees) {
+      assigneeList = parseList(opts.assignees);
+      if (assigneeList.length > 0) {
+        primaryAssignee = assigneeList[0];
+      }
+    }
+    if (!opts.skipBriefValidation) {
+      const briefChecks: Array<[string, string | undefined, string]> = [
+        ['--success-criteria', opts.successCriteria, 'Provide a machine-checkable condition that proves this task is done.'],
+        ['--out-of-scope', opts.outOfScope, 'Declare what this task explicitly will NOT do.'],
+        ['--escalation-triggers', opts.escalationTriggers, 'List conditions that should trigger escalation to a human.'],
+        ['--source-hierarchy', opts.sourceHierarchy, 'State who assigned this task (orchestrator / greg / self-directed).'],
+        ['--required-capabilities', opts.requiredCapabilities, 'List the tools/access/permissions needed to complete this task.'],
+        ['--fallback-proof', opts.fallbackProof, 'Describe how to verify the task if the primary artifact is unavailable.'],
+        ['--artifact-expectations', opts.artifactExpectations, 'Specify what output/file/PR/result is expected from this task.'],
+        ['--goal-ancestry', opts.goalAncestry, 'Identify which org goal this task traces back to.'],
+      ];
+      for (const [flag, val, explanation] of briefChecks) {
+        if (!val || val.trim() === '') {
+          console.error(`Error: ${flag} is required. ${explanation}`);
+          process.exit(1);
+        }
+      }
+    }
+    if ((opts.loopCron && !opts.loopPrompt) || (!opts.loopCron && opts.loopPrompt)) {
+      console.error('--loop-cron and --loop-prompt must be specified together');
+      process.exit(1);
+    }
+    // Pre-dispatch dedup gate: warn if an open task has a similar title.
+    // Catches the "FIFO-drift" pattern where stale inbox re-dispatches produce
+    // near-duplicate tasks. Similarity = >40% keyword overlap (after stripping
+    // stop words). Warns but does not block — use --skip-dedup to suppress.
+    if (!opts.skipDedup) {
+      const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'in', 'on', 'for', 'to', 'of', 'is', 'are', 'was', 'be', 'fix', 'add', 'update', 'with', 'from', 'at', 'by']);
+      const tokenize = (s: string) => s.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2 && !stopWords.has(w));
+      const newTokens = new Set(tokenize(title));
+      if (newTokens.size > 0) {
+        let openTasks: ReturnType<typeof listTasks> = [];
+        try {
+          openTasks = listTasks(paths, { status: 'pending' }).concat(listTasks(paths, { status: 'in_progress' }));
+        } catch (e: unknown) {
+          // Task directory not yet created — no existing tasks to deduplicate against
+          if (!(e instanceof Error) || !e.message.startsWith('list-tasks: task directory not found')) throw e;
+        }
+        for (const existing of openTasks) {
+          const existingTokens = new Set(tokenize(existing.title));
+          const overlap = [...newTokens].filter(t => existingTokens.has(t)).length;
+          const similarity = overlap / Math.max(newTokens.size, existingTokens.size);
+          if (similarity >= 0.4) {
+            console.warn(`[dedup-warn] Similar open task: "${existing.title}" (id: ${existing.id}, status: ${existing.status}) — overlap: ${Math.round(similarity * 100)}%. Use --skip-dedup to suppress.`);
+          }
+        }
+      }
+    }
+
     // Pre-generate trace_id so it's stored with the task from creation.
     // The task ID itself serves as the trace root — agents use it as `--trace-id $TASK_ID`
     // on downstream send-message calls to correlate the full workflow chain.
     const autoTraceId = randomString(12);
     const taskId = createTask(paths, env.agentName, env.org, title, {
       description: opts.desc,
-      assignee: opts.assignee,
+      assignee: primaryAssignee,
       priority: opts.priority as Priority,
       project: opts.project,
       needsApproval: opts.needsApproval ?? false,
       blockedBy: parseList(opts.blockedBy),
       blocks: parseList(opts.blocks),
-      meta: { trace_id: autoTraceId, ...(meta ?? {}) },
+      meta: {
+        trace_id: autoTraceId,
+        ...(assigneeList && assigneeList.length > 1 ? { assignees: assigneeList } : {}),
+        ...(meta ?? {}),
+      },
+      successCriteria: opts.successCriteria,
+      outOfScope: opts.outOfScope,
+      escalationTriggers: opts.escalationTriggers,
+      sourceHierarchy: opts.sourceHierarchy,
+      requiredCapabilities: opts.requiredCapabilities,
+      fallbackProof: opts.fallbackProof,
+      artifactExpectations: opts.artifactExpectations,
+      goalAncestry: opts.goalAncestry,
+      skipBriefValidation: opts.skipBriefValidation,
+      ...(opts.loopCron && opts.loopPrompt ? { linkedLoop: { cron: opts.loopCron, prompt: opts.loopPrompt } } : {}),
     });
     console.log(taskId);
-    // Auto-notify assignee so the task is visible immediately (issue #78)
-    if (opts.assignee && opts.assignee !== env.agentName) {
-      const assigneePaths = resolvePaths(opts.assignee, env.instanceId, env.org);
-      const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
-      sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
-        `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
+    recordSpan('bus.create_task', { taskId, attributes: { title, priority: opts.priority, assignee: primaryAssignee ?? '' } });
+    // Auto-notify assignee(s) so the task is visible immediately (issue #78).
+    // For multi-assignee tasks, all agents beyond the caller receive a notification.
+    const desc = opts.desc ? ` — ${opts.desc.slice(0, 120)}` : '';
+    const notifyTargets = assigneeList && assigneeList.length > 1 ? assigneeList : (primaryAssignee ? [primaryAssignee] : []);
+    for (const target of notifyTargets) {
+      if (target !== env.agentName) {
+        const targetPaths = resolvePaths(target, env.instanceId, env.org);
+        sendMessage(targetPaths, env.agentName, target, 'normal',
+          `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
+      }
     }
+    await logImplicitInvocation('tasks', env.agentDir ?? '', env.agentName);
     // Exit after all local writes complete. createTask() fires mirrorTaskToRgos
     // and sendMessage() fires mirrorMessageToRgos — both via fire-and-forget;
     // the drain is persisted to disk and runs on the next daemon cycle.
@@ -509,6 +847,42 @@ busCommand
     for (const d of open) console.log(`  ${d.id}  [${d.status}]`);
   });
 
+
+busCommand
+  .command('list-blocked')
+  .description('List all tasks that have the given task in their blocked_by array')
+  .requiredOption('--on <task_id>', 'Task ID to query dependents for')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { on: string; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const tasks = listBlockedBy(paths, opts.on);
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(tasks, null, 2));
+      return;
+    }
+
+    if (tasks.length === 0) {
+      console.log(`No tasks blocked by ${opts.on}`);
+      return;
+    }
+
+    const STATUS_ICON: Record<string, string> = { pending: '○', in_progress: '●', blocked: '◑', completed: '✓', done: '✓', cancelled: '✗' };
+    console.log(`\n  Tasks blocked by ${opts.on} (${tasks.length})\n`);
+    const header = '  Status  ID                              Assignee         Title';
+    console.log(header);
+    console.log('  ' + '-'.repeat(header.length - 2));
+    for (const t of tasks) {
+      const statusIcon = (STATUS_ICON[t.status] || '?').padEnd(8);
+      const id = t.id.padEnd(32);
+      const assignee = (t.assigned_to || '-').substring(0, 16).padEnd(17);
+      const title = t.title.substring(0, 50);
+      console.log(`  ${statusIcon}${id}${assignee}${title}`);
+    }
+    console.log('');
+  });
+
 busCommand
   .command('task-history')
   .description("Show a task's append-only audit log (every status change, claim, and completion)")
@@ -530,7 +904,8 @@ busCommand
     for (const e of entries) {
       const transition = e.from && e.to ? `${e.from} -> ${e.to}` : e.to || '';
       const note = e.note ? ` | ${e.note}` : '';
-      console.log(`  ${e.ts}  ${e.event.padEnd(8)}  ${e.agent.padEnd(16)}  ${transition}${note}`);
+      const agent = (e.agent ?? 'unknown').padEnd(16);
+      console.log(`  ${e.ts}  ${e.event.padEnd(8)}  ${agent}  ${transition}${note}`);
     }
   });
 
@@ -539,7 +914,7 @@ busCommand
   .description('Atomically claim a pending task — marks in_progress + sets assignee in one shot, rejecting if another agent already owns it')
   .argument('<id>', 'Task ID')
   .option('--agent <name>', 'Agent claiming the task (defaults to CTX_AGENT_NAME)')
-  .action((id: string, opts: { agent?: string }) => {
+  .action(async (id: string, opts: { agent?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     const agent = opts.agent || env.agentName;
@@ -548,6 +923,9 @@ busCommand
       process.exit(1);
     }
     try {
+      if (!findTaskFile(paths, id)) {
+        await importRgosTaskById(paths, id, agent);
+      }
       const task = claimTask(paths, id, agent);
       console.log(`Claimed ${id} -> in_progress (assigned to ${agent})`);
       console.log(`  Title: ${task.title}`);
@@ -562,7 +940,8 @@ busCommand
   .argument('<id>', 'Task ID')
   .argument('[result]', 'Completion result (optional positional form)')
   .option('--result <text>', 'Completion result')
-  .action((id: string, resultArg: string | undefined, opts: { result?: string }) => {
+  .option('--override', 'Skip task validation gate (emergency use only)')
+  .action(async (id: string, resultArg: string | undefined, opts: { result?: string; override?: boolean }) => {
     // Accept result as either positional arg or --result flag (P1 fix #8)
     const effectiveResult = opts.result ?? resultArg;
     const env = resolveEnv();
@@ -577,11 +956,64 @@ busCommand
       }
     }
 
+    // Guard: local validation gate — block vague completions without spending provider credits.
+    if (!opts.override) {
+      try {
+        const validation = await validateTask(paths, id, effectiveResult);
+        if (validation.score < 7) {
+          console.error(`Validation blocked: score ${validation.score}/10 (${validation.verdict}) — ${validation.reasoning}`);
+          console.error('Use --override to bypass the validation gate.');
+          process.exit(1);
+        }
+        console.log(`Validation passed: ${validation.score}/10 — ${validation.reasoning}`);
+      } catch (err) {
+        // Missing task files or malformed task JSON should not prevent the canonical
+        // completeTask path from running its own lookup/error handling.
+        console.error(`Warning: validation skipped — ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (opts.override) {
+      console.log('[override] Skipping validation gate.');
+    }
+
     completeTask(paths, id, effectiveResult);
     console.log(`Completed ${id}`);
+
+    // Clear heartbeat so crash notifications show 'idle' not the just-completed task.
+    // Swallowed — heartbeat update must never block or fail task completion.
+    await updateHeartbeat(paths, env.agentName, 'idle', { org: env.org, currentTask: '' }).catch(() => {});
+
     // Exit after local write completes — completeTask fires mirrorTaskToRgos
     // which schedules drainRetryQueue; exit before the drain runs.
     process.exit(0);
+  });
+
+busCommand
+  .command('set-pr-url')
+  .argument('<task-id>', 'Bus task ID (task_EPOCH_RAND)')
+  .argument('<pr-url>', 'PR URL to record in orch_tasks mirror row metadata')
+  .description('Best-effort: patches pr_url into the orch_tasks mirror row for a bus task (enables pr_cycle_minutes metric).')
+  .action(async (taskId: string, prUrl: string) => {
+    await mirrorPrUrlToRgos(taskId, prUrl).catch(() => {});
+    process.exit(0);
+  });
+
+busCommand
+  .command('validate-task')
+  .argument('<id>', 'Task ID')
+  .description('Locally validate a task against its success_criteria. Exits 0 if score >= 7, exits 1 if score < 7.')
+  .action(async (id: string) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      const result = await validateTask(paths, id);
+      const icon = result.verdict === 'pass' ? 'PASS' : result.verdict === 'needs-revision' ? 'NEEDS-REVISION' : 'FAIL';
+      console.log(`${icon} score=${result.score}/10 verdict=${result.verdict}`);
+      console.log(result.reasoning);
+      process.exit(result.score >= 7 ? 0 : 1);
+    } catch (err) {
+      console.error(`validate-task failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(2);
+    }
   });
 
 busCommand
@@ -620,14 +1052,28 @@ busCommand
   .option('--status <s>', 'Filter by status')
   .option('--format <fmt>', 'Output format: json or text', 'text')
   .option('--respect-deps', 'Sort DAG-aware: unblocked tasks first, blocked tasks last')
-  .action((opts: { agent?: string; status?: string; format?: string; respectDeps?: boolean }) => {
+  .action(async (opts: { agent?: string; status?: string; format?: string; respectDeps?: boolean }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const tasks = listTasks(paths, {
-      agent: opts.agent,
-      status: opts.status as TaskStatus,
-      respectDeps: opts.respectDeps ?? false,
-    });
+    const requestedStatus = opts.status === 'approved' ? 'pending' : opts.status;
+    if (opts.status === 'approved') {
+      try {
+        await importApprovedRgosTasks(paths, { agent: opts.agent });
+      } catch (err) {
+        console.error(`[list-tasks] Supabase approved backlog sync failed; showing local tasks only: ${(err as Error).message}`);
+      }
+    }
+    let tasks;
+    try {
+      tasks = listTasks(paths, {
+        agent: opts.agent,
+        status: requestedStatus as TaskStatus,
+        respectDeps: opts.respectDeps ?? false,
+      });
+    } catch (err: unknown) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
 
     if (opts.format === 'json') {
       console.log(JSON.stringify(tasks, null, 2));
@@ -644,7 +1090,7 @@ busCommand
     const STATUS_ICON: Record<string, string> = { pending: '○', in_progress: '●', blocked: '◑', completed: '✓', done: '✓', cancelled: '✗' };
 
     console.log(`\n  Tasks (${tasks.length})\n`);
-    const header = '  Status  Pri  ID                        Assignee         Title';
+    const header = '  Status  Pri  ID                              Assignee         Title';
     const separator = '  ' + '-'.repeat(header.length - 2);
     console.log(header);
     console.log(separator);
@@ -652,7 +1098,7 @@ busCommand
     for (const t of tasks) {
       const statusIcon = (STATUS_ICON[t.status] || '?').padEnd(8);
       const priIcon = (PRIORITY_ICON[t.priority] || '·').padEnd(5);
-      const id = t.id.substring(0, 26).padEnd(26);
+      const id = t.id.padEnd(32);
       const assignee = (t.assigned_to || '-').substring(0, 16).padEnd(17);
       const title = t.title.substring(0, 50);
       console.log(`  ${statusIcon}${priIcon}${id}${assignee}${title}`);
@@ -666,8 +1112,8 @@ busCommand
   .argument('<event>', 'Event name')
   .argument('<severity>', 'Severity (info, warning, error, critical)')
   .option('--meta <json>', 'Metadata JSON string', '{}')
-  .action((category: string, event: string, severity: string, opts: { meta: string }) => {
-    const validCategories: EventCategory[] = ['action', 'error', 'metric', 'milestone', 'heartbeat', 'message', 'task', 'approval'];
+  .action(async (category: string, event: string, severity: string, opts: { meta: string }) => {
+    const validCategories: EventCategory[] = ['action', 'error', 'metric', 'milestone', 'heartbeat', 'message', 'task', 'approval', 'agent_activity', 'capability'];
     if (!validCategories.includes(category as EventCategory)) {
       console.error(`Invalid category '${category}'. Must be one of: ${validCategories.join(', ')}`);
       process.exit(1);
@@ -681,9 +1127,50 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     logEvent(paths, env.agentName, env.org, category as EventCategory, event, severity as EventSeverity, opts.meta);
     console.log(`Logged ${category}/${event} (${severity})`);
+    await logImplicitInvocation('event-logging', env.agentDir ?? '', env.agentName);
     // Exit after local JSONL write completes — logEvent schedules mirrorEventToRgos
     // via setImmediate which triggers drainRetryQueue; exit before drain runs.
     process.exit(0);
+  });
+
+busCommand
+  .command('emit-task-event')
+  .description('Emit a STACK-17 per-task agent event to Supabase')
+  .argument('<task-id>', 'Task ID to attach the event to')
+  .argument('<event-type>', 'Event type')
+  .argument('<payload-json>', 'Payload JSON object')
+  .option('--agent <agent-id>', 'Override agent ID')
+  .option('--org <org-id>', 'Override org ID')
+  .action(async (
+    taskId: string,
+    eventType: string,
+    payloadJson: string,
+    opts: { agent?: string; org?: string },
+  ) => {
+    if (!isAgentTaskEventType(eventType)) {
+      console.error(`Invalid event type '${eventType}'. Must be one of: ${AGENT_TASK_EVENT_TYPES.join(', ')}`);
+      process.exit(1);
+    }
+
+    let payload: Record<string, unknown>;
+    try {
+      payload = parseAgentTaskEventPayload(payloadJson);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+
+    try {
+      const env = resolveEnv();
+      const row = await emitAgentTaskEvent(env, taskId, eventType, payload, {
+        agentId: opts.agent,
+        orgId: opts.org,
+      });
+      console.log(JSON.stringify(row));
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
   });
 
 busCommand
@@ -692,7 +1179,7 @@ busCommand
   .option('--task <task>', 'Current task description')
   .option('--timezone <tz>', 'Timezone for day/night mode detection')
   .option('--interval <i>', 'Loop interval from cron config')
-  .action((status: string, opts: { task?: string; timezone?: string; interval?: string }) => {
+  .action(async (status: string, opts: { task?: string; timezone?: string; interval?: string }) => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
@@ -732,7 +1219,7 @@ busCommand
       }
     }
 
-    updateHeartbeat(paths, env.agentName, status, {
+    await updateHeartbeat(paths, env.agentName, status, {
       org: env.org,
       timezone: opts.timezone,
       loopInterval: opts.interval,
@@ -748,10 +1235,501 @@ busCommand
       // Non-fatal: heartbeat write already succeeded
     }
     console.log(`Heartbeat updated: ${env.agentName}`);
+    await logImplicitInvocation('heartbeat', env.agentDir ?? '', env.agentName);
     // Exit after all local writes complete — logEvent schedules mirrorEventToRgos
     // via setImmediate → drainRetryQueue. The drain is disk-persisted and runs
     // on the next daemon cycle; exiting here does not lose data.
     process.exit(0);
+  });
+
+busCommand
+  .command('session-heartbeat')
+  .description('Announce a live CLI session to the fleet board (kind=external-cli presence card)')
+  .requiredOption('--session-id <id>', 'Unique session identifier, e.g. gregs-mac-codex')
+  .requiredOption('--label <label>', 'Human-readable label shown on the card, e.g. "Greg · Codex (Mac)"')
+  .option('--kind <kind>', 'Session kind tag (default: external-cli)', 'external-cli')
+  .option('--cwd <path>', 'Current working directory of the session')
+  .option('--status <status>', 'Session status: active | idle | ended (default: active)', 'active')
+  .option('--summary <text>', 'One-line description of what the session is doing')
+  .action(async (opts: { sessionId: string; label: string; kind: string; cwd?: string; status: string; summary?: string }) => {
+    const { pushSessionHeartbeat } = await import('../bus/heartbeat.js');
+    try {
+      await pushSessionHeartbeat({
+        sessionId: opts.sessionId,
+        label: opts.label,
+        kind: opts.kind,
+        cwd: opts.cwd,
+        status: opts.status,
+        summary: opts.summary,
+      });
+      if (opts.status === 'ended') {
+        console.log(`Session ${opts.sessionId} marked ended`);
+      } else {
+        console.log(`Session heartbeat: ${opts.sessionId} (${opts.status})`);
+      }
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exit(1);
+    }
+    process.exit(0);
+  });
+
+busCommand
+  .command('orgo-lease-claim')
+  .description('Claim an Orgo fleet node lease in Supabase orch_fleet_nodes')
+  .requiredOption('--node <node_key>', 'Orgo node_key to claim')
+  .requiredOption('--focus <text>', 'Current focus/workload for the lease')
+  .option('--holder <agent>', 'Lease holder (defaults to CTX_AGENT_NAME)')
+  .option('--preconditions <json>', 'Required app/session/tool preconditions as JSON object', '{}')
+  .option('--artifact <text>', 'Expected artifact/deliverable')
+  .option('--release <text>', 'Release condition')
+  .option('--escalation <text>', 'Escalation rule')
+  .option('--ttl <minutes>', 'Artifact TTL / lease expiry in minutes', '60')
+  .option('--value <text>', 'Throughput/cost/value signal')
+  .option('--task <id>', 'Linked task id')
+  .option('--force', 'Claim even when node is already busy or leased')
+  .option('--json', 'Emit JSON')
+  .action(async (opts: { node: string; focus: string; holder?: string; preconditions?: string; artifact?: string; release?: string; escalation?: string; ttl?: string; value?: string; task?: string; force?: boolean; json?: boolean }) => {
+    try {
+      const result = await claimOrgoLease({
+        node: opts.node,
+        focus: opts.focus,
+        holder: opts.holder,
+        preconditions: opts.preconditions,
+        artifact: opts.artifact,
+        release: opts.release,
+        escalation: opts.escalation,
+        ttl: parseInt(opts.ttl ?? '60', 10),
+        value: opts.value,
+        task: opts.task,
+        force: opts.force ?? false,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Claimed ${result.node.node_key} lease ${result.lease.lease_id}`);
+        console.log(`  holder: ${result.lease.holder}`);
+        console.log(`  focus: ${result.lease.focus}`);
+        console.log(`  expires_at: ${result.lease.expires_at}`);
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('orgo-lease-release')
+  .description('Release an active Orgo fleet node lease')
+  .option('--lease <uuid>', 'Lease id to release')
+  .option('--node <node_key>', 'Node key whose active lease should be released')
+  .option('--result <text>', 'Result or produced artifact summary')
+  .option('--json', 'Emit JSON')
+  .action(async (opts: { lease?: string; node?: string; result?: string; json?: boolean }) => {
+    if (!opts.lease && !opts.node) {
+      console.error('Either --lease or --node is required');
+      process.exit(1);
+    }
+    try {
+      const result = await releaseOrgoLease({ lease: opts.lease, node: opts.node, result: opts.result });
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(`Released ${result.node.node_key} lease ${result.released.lease_id}`);
+        if (result.released.result) console.log(`  result: ${result.released.result}`);
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('orgo-lease-status')
+  .description('Show Orgo fleet lease status from Supabase orch_fleet_nodes')
+  .option('--node <node_key>', 'Filter to a node')
+  .option('--status <status>', 'busy, idle, or all', 'all')
+  .option('--json', 'Emit JSON')
+  .action(async (opts: { node?: string; status?: string; json?: boolean }) => {
+    if (opts.status && !['busy', 'idle', 'all'].includes(opts.status)) {
+      console.error('--status must be one of: busy, idle, all');
+      process.exit(1);
+    }
+    try {
+      const nodes = await listOrgoLeaseStatus({ node: opts.node, status: opts.status as 'busy' | 'idle' | 'all' });
+      console.log(opts.json ? JSON.stringify(nodes, null, 2) : formatLeaseStatus(nodes));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('orgo-lease-watchdog')
+  .description('List expired Orgo leases that need escalation')
+  .option('--json', 'Emit JSON')
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const expired = await checkOrgoLeaseWatchdog();
+      if (opts.json) {
+        console.log(JSON.stringify(expired, null, 2));
+      } else if (expired.length === 0) {
+        console.log('No expired Orgo leases.');
+      } else {
+        for (const item of expired) {
+          console.log(`${item.node_key} expired at ${item.expired_at}: ${item.lease.escalation_rule}`);
+        }
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+const FARM_ORGO_COMPUTER_ID = '3ec3d7f3-a5da-4678-8b25-ce28b7aed829';
+const FARM_INBOX_DIR = '/opt/claude-farm/inbox';
+const FARM_RESULTS_DIR = '/opt/claude-farm/results';
+const ORGO_API_BASE = 'https://www.orgo.ai/api';
+
+type FarmDispatchTask = {
+  id: string;
+  prompt: string;
+};
+
+type FarmDispatchJob = {
+  run_id: string;
+  tasks: FarmDispatchTask[];
+  timeout: number;
+  reply_to: string;
+};
+
+type OrgoExecResponse = {
+  success: boolean;
+  output: string;
+};
+
+function parseFarmTasks(raw: string): FarmDispatchTask[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`--tasks-json must be valid JSON: ${(err as Error).message}`);
+  }
+
+  const candidate = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === 'object' && Array.isArray((parsed as { tasks?: unknown }).tasks)
+      ? (parsed as { tasks: unknown[] }).tasks
+      : null;
+
+  if (!candidate) {
+    throw new Error('--tasks-json must be an array of {id,prompt} objects, or an object with a tasks array');
+  }
+
+  if (candidate.length === 0) {
+    throw new Error('--tasks-json must include at least one task');
+  }
+
+  return candidate.map((item, idx) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`task ${idx + 1} must be an object`);
+    }
+    const record = item as Record<string, unknown>;
+    const id = typeof record.id === 'string' ? record.id.trim() : '';
+    const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : '';
+    if (!id) throw new Error(`task ${idx + 1} is missing a non-empty string id`);
+    if (!prompt) throw new Error(`task ${idx + 1} is missing a non-empty string prompt`);
+    return { id, prompt };
+  });
+}
+
+function parseFarmTaskSpec(raw: string): FarmDispatchTask {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error('--task must not be empty');
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const id = typeof record.id === 'string' ? record.id.trim() : '';
+      const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : '';
+      if (!id || !prompt) {
+        throw new Error('--task JSON must include non-empty string id and prompt fields');
+      }
+      return { id, prompt };
+    }
+    if (typeof parsed === 'string' && parsed.trim()) {
+      return { id: `task-${randomString(8)}`, prompt: parsed.trim() };
+    }
+    throw new Error('--task JSON must be an object with id and prompt, or a prompt string');
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      const separator = trimmed.match(/^([^:\s|]+)(?:::|\|)\s*(.+)$/s);
+      if (separator) {
+        return { id: separator[1].trim(), prompt: separator[2].trim() };
+      }
+      return { id: `task-${randomString(8)}`, prompt: trimmed };
+    }
+    throw err;
+  }
+}
+
+async function orgoExec(computerId: string, apiKey: string, code: string): Promise<OrgoExecResponse> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch(`${ORGO_API_BASE}/computers/${computerId}/exec`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ code, timeout: 20 }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Orgo exec failed: HTTP ${res.status} ${body}`.trim());
+    }
+    return res.json() as Promise<OrgoExecResponse>;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildFarmDropCode(job: FarmDispatchJob, jobFileName: string): string {
+  const encoded = Buffer.from(JSON.stringify(job, null, 2) + '\n', 'utf-8').toString('base64');
+  return `
+import base64, json, os, tempfile
+
+inbox_dir = ${JSON.stringify(FARM_INBOX_DIR)}
+results_dir = ${JSON.stringify(FARM_RESULTS_DIR)}
+job_file = ${JSON.stringify(jobFileName)}
+payload = base64.b64decode(${JSON.stringify(encoded)})
+
+os.makedirs(inbox_dir, exist_ok=True)
+os.makedirs(results_dir, exist_ok=True)
+target = os.path.join(inbox_dir, job_file)
+
+fd, tmp = tempfile.mkstemp(prefix=".farm-", suffix=".json", dir=inbox_dir)
+try:
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, target)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+
+print(json.dumps({"ok": True, "job_path": target, "bytes": len(payload)}))
+`.trim();
+}
+
+busCommand
+  .command('farm-dispatch')
+  .description('Dispatch a job to the Codex-CU Claude farm inbox')
+  .option('--task <taskspec>', 'Single task as JSON {id,prompt}, id::prompt, or a prompt string')
+  .option('--tasks-json <json>', 'Batch JSON array of {id,prompt} tasks, or {"tasks":[...]}')
+  .option('--timeout <seconds>', 'Per-job timeout passed to the farm daemon', '60')
+  .option('--computer <id>', 'Codex-CU Orgo computer ID', FARM_ORGO_COMPUTER_ID)
+  .option('--api-key <key>', 'Orgo API key (defaults to ORGO_API_KEY)')
+  .action(async (opts: { task?: string; tasksJson?: string; timeout: string; computer: string; apiKey?: string }) => {
+    try {
+      if (!opts.task && !opts.tasksJson) {
+        throw new Error('Provide either --task TASKSPEC or --tasks-json JSON');
+      }
+      if (opts.task && opts.tasksJson) {
+        throw new Error('Use either --task or --tasks-json, not both');
+      }
+
+      const timeout = parseInt(opts.timeout, 10);
+      if (!Number.isFinite(timeout) || timeout <= 0) {
+        throw new Error('--timeout must be a positive integer number of seconds');
+      }
+
+      const apiKey = opts.apiKey || process.env['ORGO_API_KEY'] || '';
+      if (!apiKey) {
+        throw new Error('ORGO_API_KEY is required; set it in secrets.env or pass --api-key');
+      }
+
+      const env = resolveEnv();
+      const timestamp = new Date().toISOString().replace(/[-:.TZ]/g, '');
+      const runId = `farm-${timestamp}-${randomString(6).toLowerCase()}`;
+      const jobFileName = `${runId}.json`;
+      const job: FarmDispatchJob = {
+        run_id: runId,
+        tasks: opts.task ? [parseFarmTaskSpec(opts.task)] : parseFarmTasks(opts.tasksJson!),
+        timeout,
+        reply_to: env.agentName,
+      };
+
+      const response = await orgoExec(opts.computer, apiKey, buildFarmDropCode(job, jobFileName));
+      if (!response.success) {
+        throw new Error(`Orgo exec returned success=false: ${response.output}`);
+      }
+
+      let remote: unknown = null;
+      try {
+        remote = JSON.parse((response.output || '').trim());
+      } catch {
+        remote = { raw_output: response.output };
+      }
+
+      const result = {
+        run_id: runId,
+        task_count: job.tasks.length,
+        timeout,
+        reply_to: job.reply_to,
+        computer_id: opts.computer,
+        job_path: `${FARM_INBOX_DIR}/${jobFileName}`,
+        result_path: `${FARM_RESULTS_DIR}/result-${runId}.json`,
+        remote,
+      };
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+function parsePositiveIntOpt(value: string | undefined, flagName: string): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${flagName} must be a positive integer`);
+  }
+  return parsed;
+}
+
+busCommand
+  .command('whisper-send')
+  .description('Send a silent whisper-room message between talk agents')
+  .argument('<to>', 'Target talk agent, e.g. analyst-talk')
+  .argument('<text>', 'Message text')
+  .option('--from <agent>', 'Override sender identity, e.g. codex-talk')
+  .option('--room <id>', 'Explicit whisper room ID')
+  .option('--timeout-ms <ms>', 'Room timeout in milliseconds; defaults to voice-settings.json')
+  .action((to: string, text: string, opts: { from?: string; room?: string; timeoutMs?: string }) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      const from = opts.from || env.agentName;
+      const timeoutMs = parsePositiveIntOpt(opts.timeoutMs, '--timeout-ms');
+      const message = sendWhisper(paths, from, to, text, { roomId: opts.room, timeoutMs, agentDir: env.agentDir });
+      logEvent(paths, env.agentName, env.org, 'message', 'whisper_sent', 'info', JSON.stringify({ room_id: message.room_id, from, to, bus_message_id: message.bus_message_id }));
+      console.log(JSON.stringify(message, null, 2));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('whisper-watch')
+  .description('Watch a whisper room until it closes or the timeout fires')
+  .argument('<room>', 'Whisper room ID')
+  .option('--timeout-ms <ms>', 'Timeout in milliseconds; defaults to voice-settings.json')
+  .option('--poll-ms <ms>', 'Polling interval in milliseconds', '1000')
+  .option('--summarize', 'Print a compact transcript summary after close')
+  .action(async (room: string, opts: { timeoutMs?: string; pollMs: string; summarize?: boolean }) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      const timeoutMs = parsePositiveIntOpt(opts.timeoutMs, '--timeout-ms');
+      const pollMs = parsePositiveIntOpt(opts.pollMs, '--poll-ms');
+      const result = await watchWhisperRoom(paths, room, { timeoutMs, pollMs, summarize: opts.summarize });
+      logEvent(paths, env.agentName, env.org, 'message', 'whisper_watch_closed', 'info', JSON.stringify(result));
+      console.log(JSON.stringify(result, null, 2));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('whisper-summary')
+  .description('Print a compact summary of a whisper room transcript')
+  .argument('<room>', 'Whisper room ID')
+  .option('--max <count>', 'Maximum recent messages to include')
+  .action((room: string, opts: { max?: string }) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      const maxMessages = parsePositiveIntOpt(opts.max, '--max');
+      console.log(summarizeWhisperRoom(paths, room, maxMessages));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('whisper-close')
+  .description('Close a whisper room manually')
+  .argument('<room>', 'Whisper room ID')
+  .option('--reason <reason>', 'Close reason', 'manual')
+  .action((room: string, opts: { reason: string }) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      const session = closeWhisperRoom(paths, room, opts.reason);
+      logEvent(paths, env.agentName, env.org, 'message', 'whisper_closed', 'info', JSON.stringify({ room_id: room, reason: opts.reason }));
+      console.log(JSON.stringify(session, null, 2));
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+busCommand
+  .command('orch-talk')
+  .description('Voice-command handler for whisper room operations')
+  .argument('<command>', 'settings | whisper | summary | close | room-id')
+  .argument('[args...]')
+  .action((command: string, args: string[]) => {
+    try {
+      const env = resolveEnv();
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      if (command === 'settings') {
+        console.log(JSON.stringify(readVoiceSettings(paths, env.agentDir), null, 2));
+        return;
+      }
+      if (command === 'room-id') {
+        const [a, b] = args;
+        if (!a || !b) throw new Error('Usage: cortextos bus orch-talk room-id <agent-a> <agent-b>');
+        console.log(whisperRoomId(a, b));
+        return;
+      }
+      if (command === 'whisper') {
+        const [to, ...textParts] = args;
+        if (!to || textParts.length === 0) throw new Error('Usage: cortextos bus orch-talk whisper <to> <text>');
+        const message = sendWhisper(paths, env.agentName, to, textParts.join(' '), { agentDir: env.agentDir });
+        logEvent(paths, env.agentName, env.org, 'message', 'orch_talk_whisper_sent', 'info', JSON.stringify({ room_id: message.room_id, to }));
+        console.log(JSON.stringify(message, null, 2));
+        return;
+      }
+      if (command === 'summary') {
+        const [room] = args;
+        if (!room) throw new Error('Usage: cortextos bus orch-talk summary <room>');
+        console.log(summarizeWhisperRoom(paths, room));
+        return;
+      }
+      if (command === 'close') {
+        const [room, ...reasonParts] = args;
+        if (!room) throw new Error('Usage: cortextos bus orch-talk close <room> [reason]');
+        const session = closeWhisperRoom(paths, room, reasonParts.join(' ') || 'manual');
+        logEvent(paths, env.agentName, env.org, 'message', 'orch_talk_whisper_closed', 'info', JSON.stringify({ room_id: room, reason: session.close_reason || null }));
+        console.log(JSON.stringify(session, null, 2));
+        return;
+      }
+      throw new Error(`Unknown orch-talk command '${command}'`);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
   });
 
 busCommand
@@ -780,6 +1758,463 @@ busCommand
       console.log(`${label} (${hb.org}) — ${hb.status}${staleFlag} — last seen ${hb.last_heartbeat}`);
       if (hb.current_task) console.log(`  task: ${hb.current_task}`);
     }
+  });
+
+busCommand
+  .command('pr-stuck-watcher')
+  .description('Scan watched GitHub repositories for open PRs that are stuck past age thresholds')
+  .option('--repos <repos>', 'Comma-separated repo list. Defaults to grandamenium/cortextos + RevOps-Global-GIT/*')
+  .option('--stuck-hours <hours>', 'Report open PRs older than this many hours', '2')
+  .option('--alert-hours <hours>', 'Notify orchestrator when PRs exceed this many hours', '24')
+  .option('--notify-agent <agent>', 'Agent to notify when alert threshold is exceeded', 'orchestrator')
+  .option('--auto-merge', 'Auto-merge eligible stuck PRs under RevOps blanket policy')
+  .option('--create-tasks', 'Create local/RGOS tasks for stuck PRs that are not auto-merged')
+  .option('--dry-run', 'Do not send alert messages')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { repos?: string; stuckHours?: string; alertHours?: string; notifyAgent?: string; autoMerge?: boolean; createTasks?: boolean; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const result = runPrStuckWatcher(paths, env.agentName, env.org, {
+      repos: opts.repos ? opts.repos.split(',') : undefined,
+      stuckHours: parseNonNegativeNumber(opts.stuckHours, 2),
+      alertHours: parseNonNegativeNumber(opts.alertHours, 24),
+      outputDir,
+    });
+    const actions: Array<{ pr: string; action: string; ok: boolean; detail?: string }> = [];
+
+    for (const pr of result.stuckPrs) {
+      const prRef = `${pr.repo}#${pr.number}`;
+      if (!opts.dryRun && opts.autoMerge && pr.autoMergeEligible) {
+        try {
+          execFileSync('gh', ['pr', 'merge', String(pr.number), '--repo', pr.repo, '--squash', '--delete-branch'], { encoding: 'utf-8', stdio: 'pipe', timeout: 120_000 });
+          logEvent(paths, env.agentName, env.org, 'action', 'pr_stuck_watcher_auto_merged', 'info', { repo: pr.repo, number: pr.number, url: pr.url });
+          actions.push({ pr: prRef, action: 'auto_merge', ok: true });
+        } catch (err) {
+          actions.push({ pr: prRef, action: 'auto_merge', ok: false, detail: err instanceof Error ? err.message : String(err) });
+        }
+        continue;
+      }
+
+      if (!opts.dryRun && opts.createTasks) {
+        const title = `PR stuck: ${prRef} ${pr.title}`;
+        const existing = listTasks(paths).some(task => task.title === title && !['completed', 'cancelled'].includes(task.status));
+        if (!existing) {
+          const taskId = createTask(paths, env.agentName, env.org, title, {
+            description: `PR ${pr.url} has been idle for ${pr.updatedHoursAgo.toFixed(1)}h. CI: ${pr.ciState}. Merge: ${pr.mergeState}. Last review: ${pr.lastReview}.`,
+            assignee: pr.author === 'app/github-actions' ? 'orchestrator' : env.agentName,
+            priority: 'normal',
+            project: 'maintenance',
+            meta: { source: 'pr-stuck-watcher', repo: pr.repo, pr_number: pr.number, url: pr.url },
+            skipBriefValidation: true,
+          });
+          actions.push({ pr: prRef, action: 'create_task', ok: true, detail: taskId });
+        } else {
+          actions.push({ pr: prRef, action: 'create_task', ok: true, detail: 'deduped_existing_task' });
+        }
+      }
+    }
+
+    if (!opts.dryRun && result.alertPrs.length > 0 && opts.notifyAgent) {
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
+      const sample = result.alertPrs.slice(0, 8).map(pr => `${pr.repo}#${pr.number} (${pr.ageHours.toFixed(1)}h)`).join(', ');
+      sendMessage(
+        targetPaths,
+        env.agentName,
+        opts.notifyAgent,
+        'high',
+        `PR-stuck watcher alert: ${result.alertPrs.length} PR(s) open >${result.alertThresholdHours}h. ${sample}. Report: ${result.reportPath || 'not written'}`,
+      );
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify({ ...result, actions }, null, 2));
+      return;
+    }
+
+    console.log(`Checked ${result.checkedRepos.length}/${result.watchedRepos.length} repos.`);
+    console.log(`Open PRs >${result.stuckThresholdHours}h: ${result.stuckPrs.length}`);
+    console.log(`Open PRs >${result.alertThresholdHours}h: ${result.alertPrs.length}`);
+    if (actions.length > 0) console.log(`Actions: ${actions.length}`);
+    if (result.reportPath) console.log(`Report: ${result.reportPath}`);
+    if (result.failedRepos.length > 0) {
+      console.log(`Repo errors: ${result.failedRepos.length}`);
+      for (const failure of result.failedRepos.slice(0, 10)) {
+        console.log(`- ${failure.repo}: ${failure.error.split('\n')[0]}`);
+      }
+    }
+  });
+
+busCommand
+  .command('wip-enforcer')
+  .description('Enforce per-agent WIP targets: ping under-target agents and Telegram-alert on persistent shortfall')
+  .option('--telegram-chat-id <id>', 'Telegram chat ID for persistent-shortfall alerts (defaults to $CTX_TELEGRAM_CHAT_ID)')
+  .option('--dry-run', 'Compute counters but do not send agent messages or Telegram alerts')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action(async (opts: { telegramChatId?: string; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+
+    // Resolve BOT_TOKEN: agent .env first (most specific), then process env.
+    // Same precedence as the send-telegram command — keeps a single source of
+    // truth for which token a cron tick uses to alert Greg.
+    let botToken = '';
+    if (env.agentDir) {
+      const agentEnv = join(env.agentDir, '.env');
+      if (existsSync(agentEnv)) {
+        const match = readFileSync(agentEnv, 'utf-8').match(/^BOT_TOKEN=(.+)$/m);
+        if (match && match[1].trim()) botToken = match[1].trim();
+      }
+    }
+    if (!botToken) botToken = process.env.BOT_TOKEN || '';
+
+    const result = await runWipEnforcer(paths, env.agentName, env.org, {
+      telegramChatId: opts.telegramChatId,
+      botToken,
+      dryRun: !!opts.dryRun,
+    });
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    const underTarget = result.agents.filter(a => a.under_target);
+    console.log(`Agents checked: ${result.agents.length}`);
+    console.log(`Under target: ${underTarget.length}`);
+    for (const a of underTarget) {
+      const flags: string[] = [];
+      if (a.message_sent) flags.push('msg');
+      if (a.telegram_alerted) flags.push('tg');
+      const suffix = flags.length ? ` [${flags.join(',')}]` : '';
+      console.log(`- ${a.agent}: ${a.in_progress}/${a.wip_target} (ticks=${a.ticks_under_target})${suffix}`);
+    }
+  });
+
+busCommand
+  .command('doc-drift-checker')
+  .description('Compare cortextOS docs against actual project, skill, and cron structure')
+  .option('--threshold-lines <n>', 'Create a task when drift findings exceed this count', '5')
+  .option('--no-create-tasks', 'Write the report without creating a follow-up task')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { thresholdLines?: string; createTasks?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const threshold = Number(opts.thresholdLines ?? 5);
+    const report = runDocDriftChecker(paths, env.agentName, env.org, projectRoot, {
+      thresholdLines: Number.isFinite(threshold) && threshold >= 0 ? threshold : 5,
+      outputDir,
+      createTasks: opts.createTasks,
+    });
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    console.log(`Doc drift findings: ${report.findings.length}`);
+    console.log(`Threshold: ${report.thresholdLines}`);
+    console.log(`Task created: ${report.taskCreated ? report.taskId : 'no'}`);
+    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
+  });
+
+busCommand
+  .command('goal-progress-probe')
+  .description('Check whether each agent memory mentions its active goals in the last 24h')
+  .option('--notify-agent <agent>', 'Agent to notify when more than two agents appear stalled', 'orchestrator')
+  .option('--dry-run', 'Do not send stall notifications')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { notifyAgent?: string; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const result = runGoalProgressProbe(paths, env.agentName, env.org, projectRoot, { outputDir });
+
+    if (!opts.dryRun && result.stalledAgents.length > 2 && opts.notifyAgent) {
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
+      sendMessage(
+        targetPaths,
+        env.agentName,
+        opts.notifyAgent,
+        'normal',
+        `Goal-progress probe flagged ${result.stalledAgents.length} agents with no goal mentions in last 24h memory: ${result.stalledAgents.map(a => a.agent).join(', ')}. Report: ${result.reportPath || 'not written'}`,
+      );
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+
+    console.log(`Agents checked: ${result.agentsChecked}`);
+    console.log(`Stalled agents: ${result.stalledAgents.length}`);
+    if (result.reportPath) console.log(`Report: ${result.reportPath}`);
+    if (result.memoryPath) console.log(`Memory: ${result.memoryPath}`);
+  });
+
+busCommand
+  .command('heartbeat-health-watch')
+  .description('Detect agents the daemon reports as running while their heartbeat is stale')
+  .option('--threshold-minutes <n>', 'Stale heartbeat threshold for running agents', '90')
+  .option('--restart', 'Attempt daemon restart for stale running agents')
+  .option('--notify-agent <agent>', 'Agent to notify when stale running agents are found', 'orchestrator')
+  .option('--skip-agent <name>', 'Exclude agent from stale-running check (repeatable)', (val: string, acc: string[]) => [...acc, val], [] as string[])
+  .option('--dry-run', 'Do not send notifications or restart agents')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action(async (opts: { thresholdMinutes?: string; restart?: boolean; notifyAgent?: string; skipAgent?: string[]; dryRun?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const ipc = new IPCClient(env.instanceId);
+    const runningAgents = new Set<string>();
+    try {
+      const status = await ipc.send({ type: 'status', source: 'heartbeat-health-watch' });
+      if (status.success && Array.isArray(status.data)) {
+        for (const item of status.data as Array<{ name?: string; status?: string }>) {
+          if (item.name && item.status === 'running') runningAgents.add(item.name);
+        }
+      } else {
+        // Daemon responded but returned an error — fall back to heartbeat files
+        for (const name of inferRunningFromHeartbeats(paths.ctxRoot)) runningAgents.add(name);
+      }
+    } catch {
+      // IPC timed out or connection failed — daemon event loop may be frozen.
+      // Fall back to inferring running state from heartbeat.json files so the
+      // health-watch report remains useful even when the daemon is unresponsive.
+      for (const name of inferRunningFromHeartbeats(paths.ctxRoot)) runningAgents.add(name);
+    }
+
+    const threshold = Number(opts.thresholdMinutes ?? 90);
+    const report = runHeartbeatHealthWatch(paths, env.agentName, env.org, projectRoot, runningAgents, {
+      thresholdMinutes: Number.isFinite(threshold) && threshold >= 1 ? threshold : 90,
+      outputDir,
+      skipAgents: opts.skipAgent ?? [],
+    });
+
+    const restartAttempts: Array<{ agent: string; success: boolean; error?: string }> = [];
+    if (!opts.dryRun && opts.restart) {
+      for (const agent of report.staleRunningAgents) {
+        try {
+          const response = await ipc.send({ type: 'restart-agent', agent: agent.agent, source: 'heartbeat-health-watch' });
+          restartAttempts.push({ agent: agent.agent, success: response.success, error: response.error });
+        } catch (err) {
+          restartAttempts.push({ agent: agent.agent, success: false, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    }
+
+    if (!opts.dryRun && report.staleRunningAgents.length > 0 && opts.notifyAgent) {
+      const targetPaths = resolvePaths(opts.notifyAgent, env.instanceId, env.org);
+      sendMessage(
+        targetPaths,
+        env.agentName,
+        opts.notifyAgent,
+        'high',
+        `Heartbeat-health watch found ${report.staleRunningAgents.length} running agent(s) with heartbeat >${report.thresholdMinutes}m stale: ${report.staleRunningAgents.map(a => a.agent).join(', ')}. Restart attempts: ${restartAttempts.length}. Report: ${report.reportPath || 'not written'}`,
+      );
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify({ ...report, restartAttempts }, null, 2));
+      return;
+    }
+
+    console.log(`Agents checked: ${report.agents.length}`);
+    console.log(`Stale running agents: ${report.staleRunningAgents.length}`);
+    if (restartAttempts.length > 0) console.log(`Restart attempts: ${restartAttempts.length}`);
+    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
+  });
+
+busCommand
+  .command('customer-surface-qa')
+  .description('Run customer-surface Playwright QA and create tasks for failures')
+  .option('--pages <pages>', 'Comma-separated hub pages to check. Defaults to core customer surfaces')
+  .option('--user <email>', 'Hub user email for QA session setup', 'greg@revopsglobal.com')
+  .option('--no-create-tasks', 'Write report without creating tasks for failing pages')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .action((opts: { pages?: string; user?: string; createTasks?: boolean; format?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
+    const outputDir = join(projectRoot, 'orgs', env.org, 'agents', env.agentName, 'output');
+    const report = runCustomerSurfaceQa(paths, env.agentName, env.org, projectRoot, {
+      pages: opts.pages ? opts.pages.split(',').map(page => page.trim()).filter(Boolean) : undefined,
+      user: opts.user,
+      outputDir,
+      createTasks: opts.createTasks,
+    });
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+
+    console.log(`Pages checked: ${report.pages.length}`);
+    console.log(`Pages with failures: ${report.failures.length}`);
+    console.log(`Tasks created: ${report.taskIds.length}`);
+    if (report.reportPath) console.log(`Report: ${report.reportPath}`);
+  });
+
+busCommand
+  .command('poll-watchdog')
+  .description('Check all agent heartbeats against their lease thresholds and emit alerts for expired agents')
+  .option('--format <fmt>', 'Output format: json or text', 'text')
+  .option('--lease <seconds>', 'Default lease threshold in seconds (overridden per-agent by config.json watchdog.lease_seconds)', String(14400))
+  .option('--restart', 'Auto soft-restart expired agents via daemon IPC')
+  .action(async (opts: { format?: string; lease?: string; restart?: boolean }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const defaultLeaseSeconds = Math.max(60, parseInt(opts.lease ?? '14400', 10) || 14400);
+
+    const results = pollWatchdog(paths, env.agentName, env.org, {
+      projectRoot: env.projectRoot,
+      defaultLeaseSeconds,
+    });
+
+    const expired = results.filter(r => r.expired);
+
+    if (opts.restart && expired.length > 0) {
+      const ipc = new IPCClient(env.ctxRoot);
+      for (const r of expired) {
+        try {
+          await ipc.send({ type: 'restart-agent', agent: r.agent, source: 'poll-watchdog' });
+          console.log(`Restart signal sent for ${r.agent}`);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Failed to restart ${r.agent}: ${msg}`);
+        }
+      }
+    }
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    if (results.length === 0) {
+      console.log('No agents found.');
+      return;
+    }
+
+    for (const r of results) {
+      const flag = r.expired ? ' [EXPIRED]' : ' [OK]';
+      const label = r.org ? `${r.agent} (${r.org})` : r.agent;
+      const ageMin = Math.round(r.age_seconds / 60);
+      const leaseMin = Math.round(r.lease_seconds / 60);
+      console.log(`${label}${flag} — last seen ${r.last_heartbeat} (${ageMin}m ago, lease ${leaseMin}m)`);
+    }
+    if (expired.length > 0) {
+      console.log(`\n${expired.length} agent(s) expired.`);
+    } else {
+      console.log('\nAll agents within lease.');
+    }
+  });
+
+busCommand
+  .command('codebase-scan')
+  .description('Scan src/ for TODO/FIXME/HACK/XXX markers and large files; write daily report and create RGOS tasks')
+  .option('--output <path>', 'Override output file path (default: agent output dir)')
+  .option('--dry-run', 'Print report path but do not create RGOS tasks')
+  .action(async (opts: { output?: string; dryRun?: boolean }) => {
+    const env = resolveEnv();
+    const today = new Date().toISOString().slice(0, 10);
+    const outputPath = opts.output ??
+      join(env.agentDir ?? join(env.projectRoot ?? env.frameworkRoot, 'orgs', env.org, 'agents', env.agentName),
+        'output', `${today}-codebase-scan.md`);
+
+    console.log(`[codebase-scan] Scanning ${env.frameworkRoot}/src ...`);
+    const result = runCodebaseScan(env.frameworkRoot, outputPath);
+    console.log(`[codebase-scan] Report written → ${outputPath}`);
+    console.log(`[codebase-scan] Hits: ${result.hits.length} markers, ${result.largeFiles.length} large files`);
+
+    if (!opts.dryRun && result.topActionable.length > 0) {
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      for (const item of result.topActionable) {
+        const taskId = createTask(paths, env.agentName, env.org, `[codebase-scan] ${item}`, {
+          description: `Auto-generated by codebase-scan loop on ${today}. See ${outputPath} for full report.`,
+          priority: 'low',
+          skipBriefValidation: true,
+        });
+        console.log(`[codebase-scan] Created task ${taskId}: ${item}`);
+        logEvent(paths, env.agentName, env.org, 'action', 'codebase_scan_task_created', 'info', { task_id: taskId });
+      }
+    }
+
+    logEvent(
+      resolvePaths(env.agentName, env.instanceId, env.org),
+      env.agentName, env.org, 'action', 'codebase_scan_complete', 'info',
+      { hits: result.hits.length, large_files: result.largeFiles.length, output: outputPath },
+    );
+  });
+
+busCommand
+  .command('compute-uvd')
+  .description('Compute UVD/w (Unsupervised Value Deliverables per week) for the org and write to metrics dir')
+  .option('--days <n>', 'Rolling window in days (default: 7)', '7')
+  .action((opts: { days: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const days = parseInt(opts.days, 10) || 7;
+    const result = computeUvd(paths.taskDir, { days });
+    const metricsDir = join(paths.analyticsDir, '..', 'metrics');
+    const outPath = writeUvdResult(metricsDir, result);
+    console.log(`[compute-uvd] UVD/${days}d: ${result.uvd_count} (${result.uvd_per_day}/day)`);
+    console.log(`[compute-uvd] Evaluated: ${result.tasks_evaluated} completed tasks`);
+    console.log(`[compute-uvd] Excluded: ${result.excluded_outside_window} outside window, ${result.excluded_human_created} human-created, ${result.excluded_no_result} no result, ${result.excluded_housekeeping} housekeeping`);
+    console.log(`[compute-uvd] Written → ${outPath}`);
+    logEvent(
+      paths, env.agentName, env.org, 'action', 'uvd_computed', 'info',
+      { uvd_count: result.uvd_count, uvd_per_day: result.uvd_per_day, window_days: days, output: outPath },
+    );
+  });
+
+busCommand
+  .command('security-audit')
+  .description('Run npm audit, write daily report, and create RGOS tasks for critical/high vulns with fixes')
+  .option('--output <path>', 'Override output file path (default: agent output dir)')
+  .option('--dry-run', 'Write report but do not create RGOS tasks')
+  .option('--cwd <dir>', 'Directory to audit (default: framework root)')
+  .action(async (opts: { output?: string; dryRun?: boolean; cwd?: string }) => {
+    const env = resolveEnv();
+    const auditCwd = opts.cwd ?? env.frameworkRoot;
+    const today = new Date().toISOString().slice(0, 10);
+    const outputPath = opts.output ??
+      join(env.agentDir ?? join(env.projectRoot ?? env.frameworkRoot, 'orgs', env.org, 'agents', env.agentName),
+        'output', `${today}-npm-audit.md`);
+
+    console.log(`[security-audit] Running npm audit in ${auditCwd} ...`);
+    const result = runSecurityAudit(auditCwd, outputPath);
+    console.log(`[security-audit] Report written → ${outputPath}`);
+    console.log(`[security-audit] Critical: ${result.criticalCount}, High: ${result.highCount}, Actionable: ${result.actionable.length}`);
+
+    if (!opts.dryRun && result.actionable.length > 0) {
+      const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      for (const vuln of result.actionable) {
+        const fix = typeof vuln.fixAvailable === 'object'
+          ? `upgrade to ${vuln.fixAvailable.name}@${vuln.fixAvailable.version}`
+          : 'fix available';
+        const taskId = createTask(paths, env.agentName, env.org,
+          `[security] ${vuln.severity} vuln in ${vuln.name} — ${fix}`, {
+            description: `Detected by security-audit loop on ${today}. See ${outputPath}.`,
+            priority: vuln.severity === 'critical' ? 'high' : 'normal',
+            skipBriefValidation: true,
+          });
+        console.log(`[security-audit] Created task ${taskId}: ${vuln.name} (${vuln.severity})`);
+        logEvent(paths, env.agentName, env.org, 'action', 'security_vuln_task_created', 'info',
+          { task_id: taskId, package: vuln.name, severity: vuln.severity });
+      }
+    }
+
+    logEvent(
+      resolvePaths(env.agentName, env.instanceId, env.org),
+      env.agentName, env.org, 'action', 'security_audit_complete', 'info',
+      { critical: result.criticalCount, high: result.highCount, actionable: result.actionable.length, output: outputPath },
+    );
   });
 
 busCommand
@@ -1016,6 +2451,53 @@ busCommand
   });
 
 busCommand
+  .command('update-env-file')
+  .description('Safely write KEY=VALUE content to an env file with pre-write validation (rejects empty/malformed writes)')
+  .argument('<file>', 'Path to the env file to write (absolute or relative to cwd)')
+  .option('--content <text>', 'New file content (KEY=VALUE lines). Reads from stdin if omitted.')
+  .option('--require <keys>', 'Comma-separated list of keys that must be present and non-empty', '')
+  .action(async (file: string, opts: { content?: string; require?: string }) => {
+    const { resolve } = await import('path');
+    const { readFileSync, writeFileSync, chmodSync } = await import('fs');
+
+    const filePath = resolve(file);
+    const requiredKeys = opts.require ? opts.require.split(',').map(k => k.trim()).filter(Boolean) : [];
+
+    // Read content: from --content flag or stdin
+    let content = opts.content ?? '';
+    if (!content) {
+      try {
+        content = readFileSync('/dev/stdin', 'utf-8');
+      } catch {
+        console.error('Error: no content provided via --content and stdin is not readable');
+        process.exit(1);
+      }
+    }
+
+    // Validate before any write touches disk
+    let parsed: Record<string, string>;
+    try {
+      parsed = validateEnvContent(content, requiredKeys);
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+
+    // Write atomically: chmod 644 → write → chmod 444
+    try {
+      try { chmodSync(filePath, 0o644); } catch { /* file may not exist yet */ }
+      writeFileSync(filePath, content.endsWith('\n') ? content : content + '\n', 'utf-8');
+      try { chmodSync(filePath, 0o444); } catch { /* best-effort lock */ }
+    } catch (err) {
+      console.error(`Error writing ${filePath}: ${(err as Error).message}`);
+      process.exit(1);
+    }
+
+    const keyList = Object.keys(parsed).join(', ');
+    console.log(`Written ${Object.keys(parsed).length} key(s) to ${filePath} [chmod 444]: ${keyList}`);
+  });
+
+busCommand
   .command('create-experiment')
   .description('Create a new experiment proposal')
   .argument('<metric>', 'Metric to measure')
@@ -1147,7 +2629,18 @@ busCommand
   .option('--cycle <name>', 'Cycle name')
   .action((action: string, agent: string, opts: { metric?: string; metricType?: string; surface?: string; direction?: string; window?: string; measurement?: string; loopInterval?: string; enabled?: string; cycle?: string }) => {
     const env = resolveEnv();
-    const agentDir = env.agentDir || process.cwd();
+    // Resolve the TARGET agent's experiments dir from the <agent> argument, not the
+    // caller's env. Without this, `bus manage-cycle create orchestrator ...` from
+    // an analyst shell wrote the cycle into analyst/experiments/config.json — where
+    // the row has agent="orchestrator" but lives in the wrong file, invisible to
+    // orchestrator's autoresearch runtime which reads its OWN experiments/config.json.
+    // Symptom: paused experiment-signal-ratio cron firing into cycles:[] (2026-05-29).
+    let agentDir: string;
+    if (env.projectRoot && env.org) {
+      agentDir = join(env.projectRoot, 'orgs', env.org, 'agents', agent);
+    } else {
+      agentDir = env.agentDir || process.cwd();
+    }
     if (opts.direction && opts.direction !== 'higher' && opts.direction !== 'lower') {
       console.error(`Invalid --direction '${opts.direction}'. Must be 'higher' or 'lower'`);
       process.exit(1);
@@ -1386,6 +2879,7 @@ busCommand
           const paths = resolvePaths(env.agentName, env.instanceId, env.org);
           const preview = message.length > 120 ? message.slice(0, 120) + '…' : message;
           logEvent(paths, env.agentName, env.org, 'message', 'telegram_sent', 'info', JSON.stringify({ chat_id: chatId, message_id: sentMessageId, preview }));
+          recordOutboundDogfoodTelegramAudit(paths, env.ctxRoot, env.agentName, env.org, chatId, sentMessageId, dashText);
         } catch { /* non-fatal */ }
       }
 
@@ -1821,27 +3315,106 @@ busCommand
   });
 
 busCommand
+  .command('react-telegram')
+  .description("Set the bot's reaction on a Telegram message (single emoji ack)")
+  .argument('<chat-id>', 'Telegram chat ID')
+  .argument('<message-id>', 'ID of the message to react to')
+  .argument('[emoji]', 'Reaction emoji (default: 👍). Pass an empty string to clear.', '👍')
+  .action(async (chatId: string, messageIdRaw: string, emoji: string) => {
+    const messageId = Number(messageIdRaw);
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      console.error(`Invalid message-id '${messageIdRaw}'. Must be a positive integer.`);
+      process.exit(1);
+    }
+
+    // Resolve bot token: agent .env first, then process.env (same flow as
+    // send-telegram so the agent identity / personality of the reaction
+    // matches the agent that owns the conversation).
+    const env = resolveEnv();
+    let botToken = '';
+    if (env.agentDir) {
+      const { readFileSync, existsSync } = require('fs');
+      const { join } = require('path');
+      const agentEnv = join(env.agentDir, '.env');
+      if (existsSync(agentEnv)) {
+        const content = readFileSync(agentEnv, 'utf-8');
+        const match = content.match(/^BOT_TOKEN=(.+)$/m);
+        if (match && match[1].trim()) botToken = match[1].trim();
+      }
+    }
+    if (!botToken) botToken = process.env.BOT_TOKEN || '';
+    if (!botToken) {
+      console.error('Error: BOT_TOKEN not configured. Set it in your agent .env file or as an environment variable to enable Telegram.');
+      process.exit(1);
+    }
+
+    const api = new TelegramAPI(botToken);
+    try {
+      // Empty string clears the reaction; otherwise send a single-emoji array.
+      // Telegram limits bots to one reaction per message; we treat that as the
+      // primitive here. Multi-emoji is a future feature if/when needed.
+      const emojis = emoji === '' ? [] : [emoji];
+      await api.setMessageReaction(chatId, messageId, emojis);
+      console.log(emojis.length > 0 ? `Reacted ${emoji}` : 'Reaction cleared');
+    } catch (err: any) {
+      console.error(`Failed to react: ${err.message || err}`);
+      process.exit(1);
+    }
+  });
+
+busCommand
   .command('create-approval')
   .description('Request human approval for a high-stakes action')
   .argument('<title>', 'What you are requesting approval for')
   .argument('<category>', 'Category: external-comms, financial, deployment, data-deletion, other')
   .argument('[context]', 'Additional context')
-  .action(async (title: string, category: string, context?: string) => {
+  .option('--email-meta <json>', 'JSON email metadata for send-approved-email: {"to":"...","subject":"...","body":"..."}')
+  .option('--linked-orch-approval-id <uuid>', 'UUID of a paired orch_approvals row in Supabase — when set, the Telegram callback will also update that row so the Hub reflects the decision in real-time')
+  .action(async (title: string, category: string, context?: string, opts?: { emailMeta?: string; linkedOrchApprovalId?: string }) => {
     const validCategories: ApprovalCategory[] = ['external-comms', 'financial', 'deployment', 'data-deletion', 'other'];
     if (!validCategories.includes(category as ApprovalCategory)) {
       console.error(`Invalid category '${category}'. Must be one of: ${validCategories.join(', ')}`);
       process.exit(1);
     }
+    let emailMeta;
+    if (opts?.emailMeta) {
+      try {
+        emailMeta = JSON.parse(opts.emailMeta);
+      } catch {
+        console.error('--email-meta must be valid JSON: {"to":"...","subject":"...","body":"..."}');
+        process.exit(1);
+      }
+      if (!emailMeta.to || !emailMeta.subject || !emailMeta.body) {
+        console.error('--email-meta must include to, subject, and body fields');
+        process.exit(1);
+      }
+    }
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    // await — createApproval fan-out posts to the activity channel, which
-    // must complete before the CLI process exits or the post silently
-    // never sends. env.frameworkRoot is passed so the activity-channel
-    // orgDir resolves to where activity-channel.env actually lives (the
-    // framework repo path, NOT the runtime state path — see
-    // src/bus/approval.ts:postApprovalToActivityChannel for the history).
-    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir);
+    const id = await createApproval(paths, env.agentName, env.org, title, category as ApprovalCategory, context || '', env.frameworkRoot, env.agentDir, emailMeta, opts?.linkedOrchApprovalId);
     console.log(id);
+    await logImplicitInvocation('approvals', env.agentDir ?? '', env.agentName);
+  });
+
+busCommand
+  .command('send-approved-email')
+  .description('Send an approved email by approval id (approval must have status=approved + email_meta)')
+  .argument('<approval-id>', 'Approval ID (approval_EPOCH_RAND)')
+  .option('--dry-run', 'Validate and print the email without sending', false)
+  .action((approvalId: string, opts: { dryRun?: boolean }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      const result = sendApprovedEmail(paths, approvalId, { dryRun: opts.dryRun });
+      if (opts.dryRun) {
+        console.log('[dry-run] Email validated — not sent');
+      } else {
+        console.log(`Sent: message_id=${result.id}${result.threadId ? ` thread_id=${result.threadId}` : ''}`);
+      }
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
   });
 
 busCommand
@@ -1862,6 +3435,43 @@ busCommand
     console.log(`Approval ${id} -> ${status}`);
   });
 
+busCommand
+  .command('lastpass-cred')
+  .description('Fetch one approved LastPass credential via an explicit legacy Mac proxy')
+  .argument('<service>', 'LastPass service/item key')
+  .option('--ssh-host <host>', 'Explicit SSH host for the guarded legacy Mac credential proxy')
+  .option('--remote-script <path>', 'Remote fetcher path on Mac', '/Users/gregharned/.cortextos/bin/lastpass-cred-fetch.sh')
+  .action(async (service: string, opts: { sshHost?: string; remoteScript?: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    try {
+      const result = await lastpassCred(paths, service, {
+        agentName: env.agentName,
+        org: env.org,
+        frameworkRoot: env.frameworkRoot,
+        agentDir: env.agentDir,
+        sshHost: opts.sshHost,
+        remoteScript: opts.remoteScript,
+      });
+      process.stdout.write(result.credential);
+      if (!result.credential.endsWith('\n')) process.stdout.write('\n');
+    } catch (err) {
+      if (err instanceof LastPassCredApprovalRequiredError) {
+        process.stderr.write(`${err.message}\napproval_id: ${err.approvalId}\n`);
+        process.exit(2);
+      }
+      if (err instanceof LastPassCredRejectedError) {
+        process.stderr.write(`${err.message}\napproval_id: ${err.approvalId}\n`);
+        process.exit(3);
+      }
+      if (err instanceof LastPassCredFetchError) {
+        process.stderr.write(`lastpass-cred failed: ${err.message}\n`);
+        process.exit(1);
+      }
+      throw err;
+    }
+  });
+
 // ---------------------------------------------------------------------------
 // Knowledge Base commands
 // ---------------------------------------------------------------------------
@@ -1875,8 +3485,9 @@ busCommand
   .option('--scope <s>', 'Scope: shared, private, or all', 'all')
   .option('--top-k <n>', 'Number of results', '5')
   .option('--threshold <f>', 'Minimum similarity score (0-1)', '0.5')
+  .option('--no-embed', 'Skip embedding provider; use wiki-grep fallback only')
   .option('--json', 'Output raw JSON')
-  .action((question: string, opts: { org?: string; agent?: string; scope?: string; topK?: string; threshold?: string; json?: boolean }) => {
+  .action((question: string, opts: { org?: string; agent?: string; scope?: string; topK?: string; threshold?: string; noEmbed?: boolean; json?: boolean }) => {
     const env = resolveEnv();
     const org = opts.org || env.org;
     if (!org) {
@@ -1895,6 +3506,7 @@ busCommand
         threshold: parseFloat(opts.threshold || '0.5'),
         frameworkRoot: env.frameworkRoot || process.cwd(),
         instanceId: env.instanceId,
+        noEmbed: opts.noEmbed,
       },
     );
 
@@ -1957,68 +3569,40 @@ busCommand
       process.exit(1);
     }
 
-    const { execFileSync } = require('child_process');
-    const { existsSync, readFileSync } = require('fs');
+    const { execSync } = require('child_process');
+    const { existsSync } = require('fs');
     const { join: pjoin } = require('path');
     const { homedir: hdir } = require('os');
 
-    const frameworkRoot = env.frameworkRoot || process.cwd();
-    const instanceId = env.instanceId;
-    const kbRoot = pjoin(hdir(), '.cortextos', instanceId, 'orgs', org, 'knowledge-base');
-    const chromaDir = pjoin(kbRoot, 'chromadb');
-    const isWin = process.platform === 'win32';
-    const venvBin = isWin ? 'Scripts' : 'bin';
-    const pythonExe = isWin ? 'python.exe' : 'python3';
-    const pythonPath = pjoin(frameworkRoot, 'knowledge-base', 'venv', venvBin, pythonExe);
-    const mmragPath = pjoin(frameworkRoot, 'knowledge-base', 'scripts', 'mmrag.py');
+    const wikiDir = process.env.WIKI_PATH || pjoin(hdir(), 'work', 'team-brain');
+    if (!existsSync(wikiDir)) {
+      console.log('Collection        Count');
+      console.log('---------------- -----');
+      console.log('wiki-grep         0');
+      console.log('open-brain        0');
+      return;
+    }
 
-    // Load .env and secrets.env (same as bash `source`)
-    const envFiles = [
-      pjoin(frameworkRoot, '.env'),
-      pjoin(frameworkRoot, 'orgs', org, 'secrets.env'),
-    ];
-    const extraVars: Record<string, string> = {};
-    for (const ef of envFiles) {
-      if (existsSync(ef)) {
-        for (const line of readFileSync(ef, 'utf-8').split('\n')) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed.startsWith('#')) continue;
-          const idx = trimmed.indexOf('=');
-          if (idx > 0) {
-            let val = trimmed.slice(idx + 1);
-            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-              val = val.slice(1, -1);
-            }
-            extraVars[trimmed.slice(0, idx)] = val;
-          }
-        }
+    const countFiles = (pattern: string): number => {
+      try {
+        const out = execSync(`find ${pattern} -type f -name '*.md' 2>/dev/null | wc -l`, {
+          cwd: wikiDir,
+          encoding: 'utf-8',
+          timeout: 10000,
+        });
+        return parseInt(out.trim(), 10) || 0;
+      } catch {
+        return 0;
       }
-    }
-
-    if (!existsSync(chromaDir)) {
-      console.log('No collections found. Run kb-ingest first.');
-      process.exit(0);
-    }
-
-    const envVars: Record<string, string | undefined> = {
-      ...process.env,
-      ...extraVars,
-      CTX_ORG: org,
-      CTX_INSTANCE_ID: instanceId,
-      CTX_FRAMEWORK_ROOT: frameworkRoot,
-      MMRAG_DIR: kbRoot,
-      MMRAG_CHROMADB_DIR: chromaDir,
-      MMRAG_CONFIG: pjoin(kbRoot, 'config.json'),
     };
-    try {
-      execFileSync(pythonPath, [mmragPath, 'collections'], {
-        stdio: 'inherit',
-        env: envVars,
-      });
-    } catch {
-      // python printed error already
-      process.exit(1);
-    }
+
+    const wikiCount = countFiles('docs wiki .claude');
+    const openBrainCount = countFiles('wiki/sources/thoughts');
+    console.log('Collection        Count');
+    console.log('---------------- -----');
+    console.log(`wiki-grep         ${wikiCount}`);
+    console.log(`open-brain        ${openBrainCount}`);
+    console.log(`[kb] ChromaDB collections are deprecated for org ${org}; retrieval uses team-brain wiki-grep.`);
   });
 
 // ---------------------------------------------------------------------------
@@ -2270,12 +3854,12 @@ busCommand
       // Daemon not running — no running agent data available
     }
 
+    const runningHeartbeatThresholdMinutes = 120;
     const results = [];
     for (const [name, info] of Object.entries(agentMap)) {
       if (opts.org && info.org !== opts.org) continue;
 
-      const running = runningAgents.has(name);
-      if (opts.status === 'running' && !running) continue;
+      const daemonRunning = runningAgents.has(name);
 
       // Read role from IDENTITY.md
       let role = '';
@@ -2292,23 +3876,64 @@ busCommand
       // Read heartbeat
       const hbFile = join(ctxRoot, 'state', name, 'heartbeat.json');
       let lastHeartbeat = '', currentTask = '', mode = '';
+      let heartbeatAgeMinutes: number | null = null;
       if (existsSync(hbFile)) {
         try {
           const hb = JSON.parse(readFileSync(hbFile, 'utf-8'));
           lastHeartbeat = hb.last_heartbeat ?? '';
           currentTask = hb.current_task ?? '';
           mode = hb.mode ?? '';
+          if (lastHeartbeat) {
+            const parsed = Date.parse(lastHeartbeat);
+            if (Number.isFinite(parsed)) heartbeatAgeMinutes = Math.max(0, (Date.now() - parsed) / 60_000);
+          }
         } catch { /* skip */ }
       }
+      if (!currentTask) {
+        try {
+          const taskPaths = resolvePaths(name, env.instanceId, info.org || env.org);
+          const activeTasks = listTasks(taskPaths, { agent: name, status: 'in_progress' });
+          const activeTask = activeTasks[0];
+          if (activeTask) currentTask = `${activeTask.id}: ${activeTask.title}`;
+        } catch { /* task store unavailable */ }
+      }
 
-      results.push({ name, org: info.org, role, enabled: info.enabled, running, last_heartbeat: lastHeartbeat, current_task: currentTask, mode });
+      const heartbeatFresh = heartbeatAgeMinutes !== null && heartbeatAgeMinutes <= runningHeartbeatThresholdMinutes;
+      const recoveryState = daemonRunning && !heartbeatFresh
+        ? 'stale_heartbeat_action_required'
+        : daemonRunning
+          ? 'running'
+          : 'stopped';
+      const running = daemonRunning && heartbeatFresh;
+      if (opts.status === 'running' && !running) continue;
+
+      results.push({
+        name,
+        org: info.org,
+        role,
+        enabled: info.enabled,
+        running,
+        daemon_running: daemonRunning,
+        recovery_state: recoveryState,
+        heartbeat_age_minutes: heartbeatAgeMinutes,
+        last_heartbeat: lastHeartbeat,
+        current_task: currentTask,
+        mode,
+      });
     }
 
     if (opts.format === 'text') {
       console.log(`Agents in system:\n`);
       for (const a of results) {
-        const status = a.running ? 'RUNNING' : 'stopped';
+        const status = a.recovery_state === 'stale_heartbeat_action_required'
+          ? 'STALE heartbeat'
+          : a.running
+            ? 'RUNNING'
+            : 'stopped';
         console.log(`  ${a.name} (${a.org || 'root'}) [${status}]`);
+        if (a.recovery_state === 'stale_heartbeat_action_required') {
+          console.log(`    Recovery: daemon reports running but heartbeat is ${Math.round(a.heartbeat_age_minutes ?? 0)}m old; restart/action required`);
+        }
         if (a.role) console.log(`    Role: ${a.role}`);
         if (a.current_task) console.log(`    Working on: ${a.current_task}`);
         console.log('');
@@ -2574,8 +4199,8 @@ busCommand
   .description('List pending approval requests')
   .option('--format <fmt>', 'Output format: json|text', 'json')
   .option('--all-orgs', 'Scan all orgs under CTX_ROOT (matches dashboard view)', false)
-  .action((opts: { format?: string; allOrgs?: boolean }) => {
-    const { listPendingApprovals } = require('../bus/approval.js');
+  .action(async (opts: { format?: string; allOrgs?: boolean }) => {
+    const { listPendingApprovals, reconcileOrchApprovals } = require('../bus/approval.js');
     const { readdirSync, existsSync } = require('fs');
     const { join, homedir: _homedir } = require('path');
     const { homedir } = require('os');
@@ -2594,10 +4219,14 @@ busCommand
         : [];
       for (const org of orgs) {
         const orgPaths = resolvePaths(env.agentName, env.instanceId, org);
+        // Reconcile dashboard-resolved approvals against orch_approvals before listing
+        await reconcileOrchApprovals(orgPaths).catch(() => {});
         approvals = approvals.concat(listPendingApprovals(orgPaths));
       }
     } else {
       const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+      // Reconcile dashboard-resolved approvals against orch_approvals before listing
+      await reconcileOrchApprovals(paths).catch(() => {});
       approvals = listPendingApprovals(paths);
     }
 
@@ -2684,596 +4313,8 @@ busCommand
     console.log(`Pruned ${pruned} acked reminder(s)`);
   });
 
-busCommand
-  .command('update-cron-fire')
-  .argument('<cron-name>', 'Name of the cron as defined in config.json')
-  .option('--interval <interval>', 'Expected interval, e.g. "6h", "24h", "30m"')
-  .description('Record that a named cron just fired (enables daemon gap detection for dead zones)')
-  .action((cronName: string, opts: { interval?: string }) => {
-    const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    updateCronFire(paths.stateDir, cronName, opts.interval);
-    console.log(`Recorded fire for cron "${cronName}"`);
-  });
-
-// ---------------------------------------------------------------------------
-// External Persistent Cron Management (Subtask 1.4)
-// ---------------------------------------------------------------------------
-
-/**
- * Validate a schedule string — either an interval shorthand ("6h", "30m") or
- * a 5-field cron expression ("0 8 * * *").  Returns the normalised schedule
- * string, or throws an Error with a human-readable message on failure.
- */
-function validateSchedule(raw: string): string {
-  const trimmed = raw.trim();
-  // Detect format by counting whitespace-separated tokens
-  const tokens = trimmed.split(/\s+/);
-  if (tokens.length === 1) {
-    // Interval shorthand: must match parseDurationMs
-    if (isNaN(parseDurationMs(trimmed))) {
-      throw new Error(
-        `Invalid interval '${trimmed}'. Expected formats: "6h", "30m", "1d", "2w".`
-      );
-    }
-    return trimmed;
-  }
-  if (tokens.length === 5) {
-    // 5-field cron expression: validate by computing a next fire time
-    const probe = nextFireFromCron(trimmed, Date.now());
-    if (isNaN(probe)) {
-      throw new Error(
-        `Invalid cron expression '${trimmed}'. Expected 5-field cron ("0 8 * * *", "*/30 * * * *", etc.).`
-      );
-    }
-    return trimmed;
-  }
-  throw new Error(
-    `Invalid schedule '${trimmed}'. Use an interval ("6h") or a 5-field cron expression ("0 8 * * *").`
-  );
-}
-
-/**
- * Check whether an agent exists in the current framework root.
- * Returns false if the framework root is unknown (graceful degradation).
- */
-function agentExistsInFramework(agentName: string, frameworkRoot: string): boolean {
-  if (!frameworkRoot) return true; // can't check — allow
-  const { existsSync: fsExists, readdirSync: fsReaddir } = require('fs');
-  const { join: pjoin } = require('path');
-  const orgsDir = pjoin(frameworkRoot, 'orgs');
-  if (!fsExists(orgsDir)) return true; // no orgs dir — allow
-  try {
-    for (const org of fsReaddir(orgsDir)) {
-      if (fsExists(pjoin(orgsDir, org, 'agents', agentName))) return true;
-    }
-  } catch { /* ignore */ }
-  return false;
-}
-
-/**
- * Format an ISO timestamp for display (shortens to "YYYY-MM-DD HH:mm UTC").
- */
-function fmtTs(iso: string | undefined): string {
-  if (!iso) return '-';
-  return iso.replace('T', ' ').slice(0, 16) + ' UTC';
-}
-
-/**
- * Send a reload-crons IPC signal to the daemon (non-blocking, best-effort).
- * Silently swallows errors — the daemon will pick up changes on its next tick.
- */
-async function signalCronReload(agentName: string, instanceId: string): Promise<void> {
-  try {
-    const ipc = new IPCClient(instanceId);
-    await ipc.send({ type: 'reload-crons', agent: agentName, source: 'cortextos bus cron-cmd' });
-  } catch { /* non-fatal — scheduler picks up file change on next 30s tick */ }
-}
-
-busCommand
-  .command('add-cron')
-  .description('Add a new persistent cron for an agent')
-  .argument('<agent>', 'Agent name')
-  .argument('<name>', 'Cron name (unique per agent, slug format recommended)')
-  .argument('<interval>', 'Schedule: interval ("6h", "30m", "1d") or 5-field cron expr ("0 8 * * *")')
-  .argument('<prompt...>', 'Prompt text injected when the cron fires (all remaining words joined)')
-  .option('--desc <description>', 'Human-readable description (optional)')
-  .action(async (agent: string, name: string, interval: string, promptWords: string[], opts: { desc?: string }) => {
-    // Validate agent name format
-    try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
-
-    const env = resolveEnv();
-
-    // Validate agent exists in framework
-    if (!agentExistsInFramework(agent, env.frameworkRoot)) {
-      console.error(`Error: agent '${agent}' not found in framework. Check orgs/*/agents/ directory.`);
-      process.exit(1);
-    }
-
-    // Validate schedule
-    let schedule: string;
-    try { schedule = validateSchedule(interval); } catch (err) { console.error(String(err)); process.exit(1); }
-
-    const prompt = promptWords.join(' ');
-    const cron: CronDefinition = {
-      name,
-      prompt,
-      schedule,
-      enabled: true,
-      created_at: new Date().toISOString(),
-      ...(opts.desc ? { description: opts.desc } : {}),
-    };
-
-    try {
-      addCron(agent, cron);
-    } catch (err) {
-      console.error(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-
-    await signalCronReload(agent, env.instanceId);
-    console.log(`Added cron '${name}' for ${agent}`);
-  });
-
-busCommand
-  .command('remove-cron')
-  .description('Remove a persistent cron from an agent')
-  .argument('<agent>', 'Agent name')
-  .argument('<name>', 'Cron name to remove')
-  .action(async (agent: string, name: string) => {
-    try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
-
-    const removed = removeCron(agent, name);
-    if (!removed) {
-      console.error(`Error: cron '${name}' not found for agent '${agent}'.`);
-      process.exit(1);
-    }
-
-    const env = resolveEnv();
-    await signalCronReload(agent, env.instanceId);
-    console.log(`Removed cron '${name}' from ${agent}`);
-  });
-
-busCommand
-  .command('list-crons')
-  .description('List all persistent crons configured for an agent')
-  .argument('<agent>', 'Agent name')
-  .option('--json', 'Emit raw JSON instead of a formatted table')
-  .action((agent: string, opts: { json?: boolean }) => {
-    try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
-
-    const crons = readCrons(agent);
-
-    // BUG 1 fix: merge cron-state.json's `last_fire` records into the displayed
-    // last-fire timestamp. The daemon writes fire timestamps to two surfaces:
-    //   - crons.json `last_fired_at` (via cron-scheduler.updateCron)
-    //   - cron-state.json `last_fire` (via bus update-cron-fire from agent skills)
-    // For a single source of truth in the CLI, take the most recent of the two.
-    const env = resolveEnv();
-    const paths = resolvePaths(agent, env.instanceId, env.org);
-    const stateRecords = readCronState(paths.stateDir).crons;
-    const fireByName = new Map<string, string>();
-    for (const rec of stateRecords) fireByName.set(rec.name, rec.last_fire);
-
-    const mostRecent = (a?: string, b?: string): string | undefined => {
-      if (!a) return b;
-      if (!b) return a;
-      return new Date(a).getTime() >= new Date(b).getTime() ? a : b;
-    };
-
-    if (opts.json) {
-      const enriched = crons.map(c => ({
-        ...c,
-        last_fired_at: mostRecent(c.last_fired_at, fireByName.get(c.name)),
-      }));
-      console.log(JSON.stringify(enriched, null, 2));
-      return;
-    }
-
-    if (crons.length === 0) {
-      console.log(`No crons configured for ${agent}`);
-      return;
-    }
-
-    // Compute next_fire_at for each cron so the table is informative
-    const now = Date.now();
-    const rows = crons.map(c => {
-      const lastFire = mostRecent(c.last_fired_at, fireByName.get(c.name));
-      let nextFire = '-';
-      const dms = parseDurationMs(c.schedule);
-      if (!isNaN(dms)) {
-        const refMs = lastFire ? new Date(lastFire).getTime() : now;
-        nextFire = fmtTs(new Date(refMs + dms).toISOString());
-      } else {
-        const nf = nextFireFromCron(c.schedule, now);
-        if (!isNaN(nf)) nextFire = fmtTs(new Date(nf).toISOString());
-      }
-      const promptPreview = c.prompt.length > 60 ? c.prompt.slice(0, 57) + '...' : c.prompt;
-      return {
-        name: c.name,
-        schedule: c.schedule,
-        enabled: c.enabled ? 'yes' : 'no',
-        last_fire: fmtTs(lastFire),
-        next_fire: nextFire,
-        prompt: promptPreview,
-      };
-    });
-
-    // Column widths
-    const nameW = Math.max(4, ...rows.map(r => r.name.length));
-    const schedW = Math.max(8, ...rows.map(r => r.schedule.length));
-    const enW = 7;
-    const lastW = 18;
-    const nextW = 18;
-
-    const pad = (s: string, w: number) => s.padEnd(w);
-    const sep = '-'.repeat(nameW + schedW + enW + lastW + nextW + 63 + 5);
-
-    console.log(`\nCrons for ${agent} (${rows.length})\n`);
-    console.log(`  ${pad('Name', nameW)}  ${pad('Schedule', schedW)}  ${pad('Enabled', enW)}  ${pad('Last Fire', lastW)}  ${pad('Next Fire', nextW)}  Prompt`);
-    console.log(`  ${sep}`);
-    for (const r of rows) {
-      console.log(`  ${pad(r.name, nameW)}  ${pad(r.schedule, schedW)}  ${pad(r.enabled, enW)}  ${pad(r.last_fire, lastW)}  ${pad(r.next_fire, nextW)}  ${r.prompt}`);
-    }
-    console.log('');
-  });
-
-busCommand
-  .command('update-cron')
-  .description('Update fields of an existing persistent cron')
-  .argument('<agent>', 'Agent name')
-  .argument('<name>', 'Cron name to update')
-  .option('--interval <i>', 'New schedule (interval or cron expression)')
-  .option('--cron-expr <e>', 'Alias for --interval (5-field cron expression)')
-  .option('--prompt <p>', 'New prompt text')
-  .option('--enabled <bool>', 'Enable (true) or disable (false) the cron')
-  .option('--desc <d>', 'New description')
-  .action(async (agent: string, name: string, opts: { interval?: string; cronExpr?: string; prompt?: string; enabled?: string; desc?: string }) => {
-    try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
-
-    const rawSchedule = opts.interval ?? opts.cronExpr;
-    if (!rawSchedule && opts.prompt === undefined && opts.enabled === undefined && opts.desc === undefined) {
-      console.error('Error: at least one of --interval, --cron-expr, --prompt, --enabled, or --desc is required.');
-      process.exit(1);
-    }
-
-    const patch: Partial<CronDefinition> = {};
-
-    if (rawSchedule !== undefined) {
-      try { patch.schedule = validateSchedule(rawSchedule); } catch (err) { console.error(String(err)); process.exit(1); }
-    }
-    if (opts.prompt !== undefined) {
-      patch.prompt = opts.prompt;
-    }
-    if (opts.enabled !== undefined) {
-      if (opts.enabled !== 'true' && opts.enabled !== 'false') {
-        console.error(`Error: --enabled must be 'true' or 'false', got '${opts.enabled}'.`);
-        process.exit(1);
-      }
-      patch.enabled = opts.enabled === 'true';
-    }
-    if (opts.desc !== undefined) {
-      patch.description = opts.desc;
-    }
-
-    const ok = updateCronDef(agent, name, patch);
-    if (!ok) {
-      console.error(`Error: cron '${name}' not found for agent '${agent}'.`);
-      process.exit(1);
-    }
-
-    const env = resolveEnv();
-    await signalCronReload(agent, env.instanceId);
-    console.log(`Updated cron '${name}' for ${agent}`);
-  });
-
-busCommand
-  .command('test-cron-fire')
-  .description('Fire a cron immediately for testing (injects prompt into agent PTY via daemon IPC)')
-  .argument('<agent>', 'Agent name')
-  .argument('<name>', 'Cron name to fire')
-  .action(async (agent: string, name: string) => {
-    try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
-
-    const cron = getCronByName(agent, name);
-    if (!cron) {
-      console.error(`Error: cron '${name}' not found for agent '${agent}'.`);
-      process.exit(1);
-    }
-
-    const env = resolveEnv();
-    const ipc = new IPCClient(env.instanceId);
-
-    const daemonRunning = await ipc.isDaemonRunning();
-    if (!daemonRunning) {
-      console.error('Error: daemon is not running. Start it with: cortextos start');
-      process.exit(1);
-    }
-
-    const resp = await ipc.send({
-      type: 'fire-cron',
-      agent,
-      data: { name: cron.name, prompt: cron.prompt },
-      source: 'cortextos bus test-cron-fire',
-    });
-
-    if (!resp.success) {
-      console.error(`Error: ${resp.error}`);
-      process.exit(1);
-    }
-
-    console.log(`Fired cron '${name}' for ${agent}`);
-  });
-
-busCommand
-  .command('get-cron-log')
-  .description('Display cron execution log entries for an agent')
-  .argument('<agent>', 'Agent name')
-  .argument('[name]', 'Cron name to filter by (optional — omit to show all crons)')
-  .option('--limit <n>', 'Maximum number of entries to show (default: 50)', '50')
-  .option('--json', 'Emit raw JSON array instead of a formatted table')
-  .action((agent: string, name: string | undefined, opts: { limit?: string; json?: boolean }) => {
-    try { validateAgentName(agent); } catch (err) { console.error(String(err)); process.exit(1); }
-
-    const limit = parseInt(opts.limit ?? '50', 10);
-    if (isNaN(limit) || limit < 0) {
-      console.error(`Error: --limit must be a non-negative integer, got '${opts.limit}'.`);
-      process.exit(1);
-    }
-
-    const entries = getExecutionLog(agent, name, limit);
-
-    if (opts.json) {
-      console.log(JSON.stringify(entries, null, 2));
-      return;
-    }
-
-    if (entries.length === 0) {
-      if (name !== undefined) {
-        console.log(`No log entries for cron '${name}' on ${agent}`);
-      } else {
-        console.log(`No log entries for ${agent}`);
-      }
-      return;
-    }
-
-    // Human-readable table: ts | cron | status | attempt | duration | error
-    const pad = (s: string, w: number) => s.padEnd(w);
-    const header = `  ${pad('Timestamp', 20)}  ${pad('Cron', 22)}  ${pad('Status', 7)}  ${pad('Att', 3)}  ${pad('ms', 7)}  Error`;
-    const sep = '-'.repeat(header.length);
-
-    console.log(`\nExecution log for ${agent}${name ? ` / ${name}` : ''} (${entries.length} entries)\n`);
-    console.log(header);
-    console.log(`  ${sep}`);
-
-    for (const e of entries) {
-      const ts = e.ts.replace('T', ' ').slice(0, 19) + 'Z';
-      const status = e.status;
-      const att = String(e.attempt);
-      const ms = String(e.duration_ms);
-      const error = e.error ?? '';
-      const cronPad = pad(e.cron.length > 22 ? e.cron.slice(0, 19) + '...' : e.cron, 22);
-      console.log(
-        `  ${pad(ts, 20)}  ${cronPad}  ${pad(status, 7)}  ${pad(att, 3)}  ${pad(ms, 7)}  ${error}`
-      );
-    }
-    console.log('');
-  });
-
-// ---------------------------------------------------------------------------
-// migrate-crons — Subtask 2.2: Manual one-shot migration command
-// ---------------------------------------------------------------------------
-
-busCommand
-  .command('migrate-crons')
-  .description('Migrate crons from config.json to crons.json for one or all agents')
-  .argument('[agent]', 'Agent name to migrate (omit to migrate all enabled agents)')
-  .option('--force', 'Re-run migration even if the marker file already exists')
-  .action(async (agentArg: string | undefined, opts: { force?: boolean }) => {
-    const { migrateCronsForAgent: migrateSingle, migrateAllAgents: migrateAll } = await import('../daemon/cron-migration.js');
-    const env = resolveEnv();
-    const ctxRoot = env.ctxRoot;
-    const frameworkRoot = env.frameworkRoot || process.cwd();
-
-    const log = (msg: string) => console.log(msg);
-    const migOpts = { force: opts.force ?? false, log };
-
-    if (agentArg) {
-      // Single-agent migration
-      try { validateAgentName(agentArg); } catch (err) { console.error(String(err)); process.exit(1); }
-
-      // Resolve config.json path via filesystem scan
-      const { existsSync: fsExists, readdirSync: fsReaddir } = require('fs') as typeof import('fs');
-      const orgsDir = join(frameworkRoot, 'orgs');
-      let configPath: string | undefined;
-      if (fsExists(orgsDir)) {
-        try {
-          for (const org of fsReaddir(orgsDir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name)) {
-            const candidate = join(orgsDir, org, 'agents', agentArg, 'config.json');
-            if (fsExists(candidate)) { configPath = candidate; break; }
-          }
-        } catch { /* ignore scan errors */ }
-      }
-
-      if (!configPath) {
-        console.error(`Error: agent '${agentArg}' not found in framework. Check orgs/*/agents/ directory.`);
-        process.exit(1);
-      }
-
-      const result = migrateSingle(agentArg, configPath, ctxRoot, migOpts);
-
-      switch (result.status) {
-        case 'skipped-already-migrated':
-          console.log(`Skipped ${agentArg}: already migrated (use --force to re-run)`);
-          break;
-        case 'no-config':
-          console.log(`Skipped ${agentArg}: no config.json found`);
-          break;
-        case 'no-crons':
-          console.log(`Skipped ${agentArg}: config.json has no crons — empty crons.json written`);
-          break;
-        case 'migrated':
-          console.log(
-            `Migrated ${agentArg}: ${result.cronsMigrated} cron(s) migrated` +
-            (result.cronsSkipped?.length ? `, ${result.cronsSkipped.length} skipped (${result.cronsSkipped.join(', ')})` : '')
-          );
-          break;
-      }
-    } else {
-      // All-agents migration
-      const summary = migrateAll(frameworkRoot, ctxRoot, migOpts);
-
-      const migrated = summary.results.filter(r => r.status === 'migrated').length;
-      const skippedAlready = summary.results.filter(r => r.status === 'skipped-already-migrated').length;
-      const noConfig = summary.results.filter(r => r.status === 'no-config').length;
-      const noCrons = summary.results.filter(r => r.status === 'no-crons').length;
-
-      console.log(`\nMigration summary:`);
-      console.log(`  Agents processed    : ${summary.processed}`);
-      console.log(`  Agents migrated     : ${migrated} (${summary.totalCronsMigrated} crons)`);
-      console.log(`  Already migrated    : ${skippedAlready}`);
-      console.log(`  No config.json      : ${noConfig}`);
-      console.log(`  No crons in config  : ${noCrons}`);
-    }
-  });
-
-// ---------------------------------------------------------------------------
-// upgrade-cron-teaching — Subtask 2.4: scan agent workspace for stale
-// CronCreate / /loop / config.json cron-registration teaching that predates
-// the external-persistent-crons migration.  Scan-only by default; --apply
-// performs only the safe literal substitutions known not to depend on
-// surrounding context.
-// ---------------------------------------------------------------------------
-
-busCommand
-  .command('upgrade-cron-teaching')
-  .description('Scan agent workspace files for stale CronCreate/loop/config.json cron teaching')
-  .argument('[agent]', 'Agent name to scan (omit to scan all agents under orgs/)')
-  .option('--apply', 'Perform safe literal substitutions in place (does not rewrite CronCreate references)')
-  .option('--json', 'Emit JSON instead of human-readable text')
-  .action(async (
-    agentArg: string | undefined,
-    opts: { apply?: boolean; json?: boolean },
-  ) => {
-    const { scanAgentDir, groupMatchesByFile } =
-      await import('../utils/cron-teaching-scanner.js');
-    const env = resolveEnv();
-    const frameworkRoot = env.frameworkRoot || process.cwd();
-
-    const { existsSync: fsExists, readdirSync: fsReaddir } =
-      require('fs') as typeof import('fs');
-
-    // Resolve agent name to its absolute workspace dir (orgs/*/agents/AGENT).
-    function resolveAgentDir(agent: string): string | undefined {
-      const orgsDir = join(frameworkRoot, 'orgs');
-      if (!fsExists(orgsDir)) return undefined;
-      try {
-        for (const entry of fsReaddir(orgsDir, { withFileTypes: true })) {
-          if (!entry.isDirectory()) continue;
-          const candidate = join(orgsDir, entry.name, 'agents', agent);
-          if (fsExists(candidate)) return candidate;
-        }
-      } catch {
-        // ignore scan errors
-      }
-      return undefined;
-    }
-
-    // List every agent dir under orgs/ORG/agents/.
-    function listAllAgents(): { agent: string; dir: string }[] {
-      const orgsDir = join(frameworkRoot, 'orgs');
-      const out: { agent: string; dir: string }[] = [];
-      if (!fsExists(orgsDir)) return out;
-      try {
-        for (const orgEntry of fsReaddir(orgsDir, { withFileTypes: true })) {
-          if (!orgEntry.isDirectory()) continue;
-          const agentsRoot = join(orgsDir, orgEntry.name, 'agents');
-          if (!fsExists(agentsRoot)) continue;
-          for (const a of fsReaddir(agentsRoot, { withFileTypes: true })) {
-            if (a.isDirectory() && !a.name.startsWith('.')) {
-              out.push({ agent: a.name, dir: join(agentsRoot, a.name) });
-            }
-          }
-        }
-      } catch {
-        // ignore scan errors
-      }
-      return out;
-    }
-
-    type Report = {
-      agent: string;
-      result: ReturnType<typeof scanAgentDir>;
-    };
-
-    const reports: Report[] = [];
-    if (agentArg) {
-      try { validateAgentName(agentArg); } catch (err) { console.error(String(err)); process.exit(1); }
-      const dir = resolveAgentDir(agentArg);
-      if (!dir) {
-        console.error(`Error: agent '${agentArg}' not found under ${join(frameworkRoot, 'orgs')}/*/agents/`);
-        process.exit(1);
-      }
-      reports.push({ agent: agentArg, result: scanAgentDir(dir, { apply: opts.apply }) });
-    } else {
-      for (const { agent, dir } of listAllAgents()) {
-        reports.push({ agent, result: scanAgentDir(dir, { apply: opts.apply }) });
-      }
-    }
-
-    if (opts.json) {
-      console.log(JSON.stringify(
-        reports.map((r) => ({
-          agent: r.agent,
-          agentDir: r.result.agentDir,
-          scannedFiles: r.result.scannedFiles,
-          skippedSentinelFiles: r.result.skippedSentinelFiles,
-          appliedSubstitutions: r.result.appliedSubstitutions,
-          matches: r.result.matches,
-        })),
-        null,
-        2,
-      ));
-      const totalMatches = reports.reduce((sum, r) => sum + r.result.matches.length, 0);
-      process.exit(totalMatches === 0 ? 0 : 1);
-    }
-
-    let totalMatches = 0;
-    let totalApplied = 0;
-    for (const { agent, result } of reports) {
-      totalMatches += result.matches.length;
-      totalApplied += result.appliedSubstitutions;
-
-      if (result.matches.length === 0 && result.appliedSubstitutions === 0) {
-        console.log(`✓ ${agent}: no stale cron-teaching references (${result.scannedFiles.length} files scanned)`);
-        continue;
-      }
-
-      console.log(`\n${agent}: ${result.matches.length} stale reference(s) in ${result.scannedFiles.length} files`);
-      if (result.skippedSentinelFiles.length > 0) {
-        console.log(`  (skipped ${result.skippedSentinelFiles.length} sentinel-marked file(s): ${result.skippedSentinelFiles.map((f) => f.replace(result.agentDir + '/', '')).join(', ')})`);
-      }
-      const grouped = groupMatchesByFile(result.matches);
-      for (const [file, matches] of grouped) {
-        const rel = file.replace(result.agentDir + '/', '');
-        console.log(`\n  ${rel}`);
-        for (const m of matches) {
-          console.log(`    L${m.line} [${m.pattern}]: ${m.excerpt}`);
-          console.log(`      → ${m.suggestion}`);
-        }
-      }
-      if (result.appliedSubstitutions > 0) {
-        console.log(`\n  Applied ${result.appliedSubstitutions} safe substitution(s) in place.`);
-      }
-    }
-
-    console.log(`\nSummary: ${totalMatches} stale reference(s) across ${reports.length} agent(s)` +
-      (opts.apply ? `, ${totalApplied} substitution(s) applied.` : '.'));
-    if (totalMatches > 0 && !opts.apply) {
-      console.log(`Run with --apply to substitute the safe-rewritable patterns. CronCreate / /loop references must be updated manually.`);
-    }
-    process.exit(totalMatches === 0 ? 0 : 1);
-  });
+registerCronCommands(busCommand);
+registerBatchCommands(busCommand);
 
 busCommand
   .command('hook-context-status')
@@ -3344,6 +4385,26 @@ busCommand
   .command('hook-skill-telemetry')
   .description('PostToolUse hook: logs Skill tool calls and SKILL.md Read tool calls to orch_skill_invocations')
   .action(() => runHook('hook-skill-telemetry'));
+
+busCommand
+  .command('hook-blocked-auto-rotate')
+  .description('PostToolUse hook (Bash): enforces blocked-task auto-rotate protocol — warns when agent marks task blocked without spawning a worker')
+  .action(() => runHook('hook-blocked-auto-rotate'));
+
+busCommand
+  .command('hook-env-write-guard')
+  .description('PreToolUse hook (Write/Edit): rejects writes to *.env files with empty or non-parseable content')
+  .action(() => runHook('hook-env-write-guard'));
+
+busCommand
+  .command('hook-agent-task-event')
+  .description('PostToolUse hook: emits STACK-17 task events and appends live-state log entries for Agent Cockpit')
+  .action(() => runHook('hook-agent-task-event'));
+
+busCommand
+  .command('hook-pr-url-wire')
+  .description('PostToolUse hook (Bash): detects gh pr create, extracts PR URL, patches orch_tasks mirror metadata.pr_url for pr_cycle_minutes metric')
+  .action(() => runHook('hook-pr-url-wire'));
 
 busCommand
   .command('create-skill-pr')
@@ -3623,7 +4684,6 @@ busCommand
     }
   });
 
-
 busCommand
   .command('run-workflow')
   .description('Execute a declarative workflow YAML file (sequential multi-agent orchestration)')
@@ -3874,13 +4934,15 @@ busCommand
 
 busCommand
   .command('computer-use <prompt>')
-  .description('Run a prompt on Codex with @Computer Use plugin via SSH to Greg\'s Mac')
+  .description('Run a legacy Codex dispatch prompt. Defaults to local code-only Codex; Greg Mac requires explicit guarded fallback.')
   .option('--no-plugin', 'Send a plain Codex prompt without the Computer Use plugin')
-  .option('--workdir <dir>', 'Working directory for Codex on the Mac')
+  .option('--workdir <dir>', 'Working directory for Codex')
   .option('--timeout <seconds>', 'Max wait time in seconds (default: 300)', '300')
-  .option('--ssh-host <host>', 'SSH host (default: gregs-mac)', 'gregs-mac')
+  .option('--ssh-host <host>', 'Explicit SSH host. Use gregs-mac only with --orgo-failure-artifact.')
   .option('--dispatch-script <path>', 'Path to codex-dispatch.sh on the Mac', '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh')
+  .option('--orgo-failure-artifact <path>', 'Recent failed Orgo lease attempt artifact required before Mac SSH fallback')
   .option('--disable-fallback', 'Disable localhost codex exec fallback when Mac SSH is unreachable')
+  .option('--auto-fallback', 'On Codex long_lock (weekly cap), automatically spawn a claude-opus-4-7 spillover worker. Default OFF — do not enable globally.', false)
   .action(async (
     prompt: string,
     opts: {
@@ -3890,7 +4952,9 @@ busCommand
       timeout?: string;
       sshHost?: string;
       dispatchScript?: string;
+      orgoFailureArtifact?: string;
       disableFallback?: boolean;
+      autoFallback?: boolean;
     },
   ) => {
     const result = await computerUse(prompt, {
@@ -3899,23 +4963,189 @@ busCommand
       timeout: parseInt(opts.timeout ?? '300', 10),
       sshHost: opts.sshHost,
       dispatchScript: opts.dispatchScript,
+      orgoFailureArtifact: opts.orgoFailureArtifact,
       noFallback: opts.disableFallback,
     });
 
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+
     if (!result.ok) {
+      if (opts.autoFallback) {
+        const fallback = await handleCodexFallback(
+          { stderr: result.error ?? '', exitCode: 1 },
+          { prompt, dir: opts.workdir ?? process.cwd(), parentAgent: env.agentName, autoFallback: true, claudeTeamHome: process.env.CLAUDE_TEAM_HOME },
+          paths, env.agentName, env.org,
+        );
+        if (fallback.dispatched && fallback.workerName) {
+          console.log(`codex-fallback: long_lock detected — spillover worker dispatched: ${fallback.workerName}`);
+          process.exit(0);
+        } else if (fallback.limitClass !== 'none') {
+          console.log(`codex-fallback: ${fallback.limitClass} detected — no auto-dispatch (short throttle or auth issue)`);
+        }
+      }
       console.error(`computer-use failed: ${result.error}`);
       process.exit(1);
     }
 
     // Log the event
-    const env = resolveEnv();
-    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
     logEvent(paths, env.agentName, env.org, 'action', 'computer_use_task', 'info', { prompt: prompt.slice(0, 200), duration_ms: result.durationMs, used_fallback: result.usedFallback ?? false });
 
     if (result.usedFallback) {
       console.log('[via cortex VM fallback — Mac SSH was unreachable]');
     }
     console.log(result.output);
+  });
+
+// --- spawn-codex ---
+function bestEffortTaskStatus(
+  paths: ReturnType<typeof resolvePaths>,
+  taskId: string | undefined,
+  status: TaskStatus,
+): { ok: boolean; error?: string } {
+  if (!taskId) return { ok: false, error: 'no task id' };
+  try {
+    updateTask(paths, taskId, status);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function routeTelegramFallback(
+  paths: ReturnType<typeof resolvePaths>,
+  env: ReturnType<typeof resolveEnv>,
+  targetChat: string,
+  artifactPath: string,
+  error: unknown,
+): void {
+  const fallbackAgent = env.orchestrator || 'orchestrator';
+  const reason = error instanceof Error ? error.message : String(error);
+  try {
+    sendMessage(
+      paths,
+      env.agentName,
+      fallbackAgent,
+      'normal',
+      `spawn-codex Telegram delivery blocked or failed for chat ${targetChat}. Artifact: ${artifactPath}. Error: ${reason.slice(0, 500)}`,
+    );
+  } catch {
+    // Non-fatal: artifact path and sidecar were already persisted.
+  }
+}
+
+busCommand
+  .command('spawn-codex <prompt-file>')
+  .description('Run a scoped Codex session locally, capture output to agents/<agent>/output/, and write a JSON sidecar')
+  .option('--workdir <dir>', 'Working directory for the Codex process (default: cwd)')
+  .option('--timeout <seconds>', 'Max wait time in seconds (default: 300)', '300')
+  .option('--agent <name>', 'Agent name for output path (defaults to CTX_AGENT_NAME)')
+  .option('--agents-root <path>', 'Root of the agents/ tree (defaults to CTX_AGENT_DIR/../..)')
+  .option('--task-id <id>', 'Optional task id to record in metadata')
+  .option('--requester <agent>', 'Optional requester to record in metadata')
+  .option('--reply-to <msg_id>', 'Optional message id to record in metadata')
+  .option('--priority <priority>', 'Optional priority to record in metadata')
+  .option('--telegram <chat_id>', 'Send artifact path to this Telegram chat after completion')
+  .option('--model <model>', 'Model override — passed as --model (e.g. o4-mini, claude-sonnet-4-6)')
+  .option('--effort <level>', 'Effort level — passed as --effort (e.g. high, medium, low)')
+  .option('--mcp-config <path>', 'MCP config file path — passed as --mcp-config')
+  .option('--sandbox <mode>', 'Codex sandbox mode (read-only, workspace-write, danger-full-access)')
+  .option('--json-output', 'Print the run metadata JSON instead of only the artifact path')
+  .option('--auto-fallback', 'On Codex long_lock (weekly cap), automatically spawn a claude-opus-4-7 spillover worker. Default OFF — do not enable globally.', false)
+  .action(async (
+    promptFile: string,
+    opts: {
+      workdir?: string;
+      timeout?: string;
+      agent?: string;
+      agentsRoot?: string;
+      taskId?: string;
+      requester?: string;
+      replyTo?: string;
+      priority?: string;
+      telegram?: string;
+      model?: string;
+      effort?: string;
+      mcpConfig?: string;
+      sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
+      jsonOutput?: boolean;
+      autoFallback?: boolean;
+    },
+  ) => {
+    const env = resolveEnv();
+    const agentName = opts.agent ?? env.agentName;
+    // Default agentsRoot: CTX_AGENT_DIR/../../  (orgs/<org>) or fall back to cwd
+    let agentsRoot = opts.agentsRoot;
+    if (!agentsRoot) {
+      const agentDir = process.env.CTX_AGENT_DIR;
+      if (agentDir) {
+        agentsRoot = join(agentDir, '..', '..');
+      }
+    }
+
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const startedTaskUpdate = bestEffortTaskStatus(paths, opts.taskId, 'in_progress');
+    const result = spawnCodex(promptFile, {
+      workdir: opts.workdir,
+      timeout: parseInt(opts.timeout ?? '300', 10),
+      agentName,
+      agentsRoot,
+      telegramChatId: opts.telegram,
+      model: opts.model,
+      effort: opts.effort,
+      mcpConfig: opts.mcpConfig,
+      sandbox: opts.sandbox,
+      taskId: opts.taskId,
+      requester: opts.requester,
+      replyTo: opts.replyTo,
+      priority: opts.priority,
+    });
+
+    const completedTaskUpdate = opts.taskId
+      ? bestEffortTaskStatus(paths, opts.taskId, result.ok ? 'completed' : 'blocked')
+      : { ok: false, error: 'no task id' };
+
+    logEvent(paths, env.agentName, env.org, 'action', 'spawn_codex_task', result.ok ? 'info' : 'error', {
+      ...result.metadata,
+      task_status_update: {
+        started: startedTaskUpdate,
+        completed: completedTaskUpdate,
+      },
+    });
+
+    console.log(opts.jsonOutput ? JSON.stringify(result.metadata, null, 2) : result.outputPath);
+
+    // Optional Telegram callback — send artifact path so dispatcher can pick it up
+    if (opts.telegram) {
+      const { execFileSync: exec } = await import('child_process');
+      try {
+        exec('cortextos', ['bus', 'send-telegram', opts.telegram, `artifact: ${result.outputPath}`], {
+          encoding: 'utf-8',
+          timeout: 30_000,
+        });
+      } catch (err) {
+        routeTelegramFallback(paths, env, opts.telegram, result.outputPath, err);
+      }
+    }
+
+    if (!result.ok && opts.autoFallback) {
+      const fallback = await handleCodexFallback(
+        { stderr: result.stderr, exitCode: result.exitCode },
+        { prompt: promptFile, dir: opts.workdir ?? process.cwd(), parentAgent: agentName, taskId: opts.taskId, autoFallback: true, claudeTeamHome: process.env.CLAUDE_TEAM_HOME },
+        paths, env.agentName, env.org,
+      );
+      if (fallback.dispatched && fallback.workerName) {
+        console.log(`codex-fallback: long_lock detected — spillover worker dispatched: ${fallback.workerName}`);
+        process.exit(0); // handoff succeeded; don't propagate exit(1) to daemon
+      } else if (fallback.limitClass !== 'none') {
+        console.log(`codex-fallback: ${fallback.limitClass} detected — no auto-dispatch (short throttle or auth issue)`);
+      }
+    }
+
+    if (!result.ok) {
+      console.error(`spawn-codex failed: ${result.status}; artifact: ${result.outputPath}`);
+      process.exit(1);
+    }
   });
 
 function sleepMs(ms: number): Promise<void> {
@@ -3925,3 +5155,118 @@ function sleepMs(ms: number): Promise<void> {
 function pct(v: number): string {
   return `${Math.round(v * 100)}%`;
 }
+
+busCommand
+  .command('human-blockers-digest')
+  .description('Send a digest of pending human-required tasks and approvals to Telegram')
+  .argument('<chat-id>', 'Telegram chat ID to send the digest to')
+  .option('--since <iso>', 'Only include items created after this ISO 8601 timestamp')
+  .option('--dry-run', 'Print the digest to stdout instead of sending Telegram', false)
+  .option('--bot-token <token>', 'Telegram bot token (defaults to BOT_TOKEN env var)')
+  .action(async (chatId: string, opts: { since?: string; dryRun?: boolean; botToken?: string }) => {
+    const env = resolveEnv();
+    // Resolve bot token: CLI flag > agent .env > process.env
+    let botToken = opts.botToken || '';
+    if (!botToken && env.agentDir) {
+      const agentEnvPath = join(env.agentDir, '.env');
+      if (existsSync(agentEnvPath)) {
+        const content = readFileSync(agentEnvPath, 'utf-8');
+        const match = content.match(/^BOT_TOKEN=(.+)$/m);
+        if (match?.[1]?.trim()) botToken = match[1].trim();
+      }
+    }
+    if (!botToken) botToken = process.env.BOT_TOKEN || '';
+
+    try {
+      await sendHumanBlockersDigest({
+        chatId,
+        instanceId: env.instanceId,
+        since: opts.since,
+        dryRun: opts.dryRun,
+        botToken,
+      });
+    } catch (err) {
+      console.error(`human-blockers-digest failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// External health monitor status
+// ---------------------------------------------------------------------------
+
+busCommand
+  .command('health-monitor-status')
+  .description('Read the external health monitor recovery log and return the last N events as JSON')
+  .option('--limit <n>', 'Number of recent events to return', '10')
+  .option('--format <fmt>', 'Output format: json|text', 'json')
+  .action((opts: { limit?: string; format?: string }) => {
+    const { existsSync: fsExistsSync, readFileSync: fsReadFileSync } = require('fs');
+    const { join: pathJoin } = require('path');
+    const { homedir: osHomedir } = require('os');
+    const env = resolveEnv();
+    const ctxRoot = process.env.CTX_ROOT || pathJoin(osHomedir(), '.cortextos', env.instanceId);
+    const recoveryLog = pathJoin(ctxRoot, 'logs', 'external-health-monitor', 'recovery.log');
+    const limit = Math.max(1, parseInt(opts.limit ?? '10', 10) || 10);
+
+    if (!fsExistsSync(recoveryLog)) {
+      const result = { status: 'no_log', path: recoveryLog, events: [] };
+      if (opts.format === 'text') {
+        console.log('No recovery log found at: ' + recoveryLog);
+      } else {
+        console.log(JSON.stringify(result, null, 2));
+      }
+      return;
+    }
+
+    let lines: string[];
+    try {
+      lines = (fsReadFileSync(recoveryLog, 'utf-8') as string)
+        .split('\n')
+        .filter((l: string) => l.trim().length > 0);
+    } catch (err) {
+      console.error(`health-monitor-status: failed to read log: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+      return;
+    }
+
+    const recent = lines.slice(-limit);
+
+    // Parse each log line into a structured event.
+    // Format: [external-health-monitor] <iso-ts> <LEVEL> [agent=<name>] <message>
+    const events = recent.map((line: string) => {
+      const m = line.match(
+        /^\[external-health-monitor\]\s+(\S+)\s+(INFO|WARN|ERROR)(?:\s+agent=(\S+))?\s+(.+)$/,
+      );
+      if (!m) return { raw: line };
+      return {
+        timestamp: m[1],
+        level: m[2],
+        agent: m[3] ?? null,
+        message: m[4],
+      };
+    });
+
+    const result = {
+      status: 'ok',
+      path: recoveryLog,
+      total_lines: lines.length,
+      returned: events.length,
+      events,
+    };
+
+    if (opts.format === 'text') {
+      console.log(`Recovery log: ${recoveryLog} (${lines.length} total lines)`);
+      console.log(`Last ${events.length} events:`);
+      for (const ev of events) {
+        if ('raw' in ev) {
+          console.log('  ' + ev.raw);
+        } else {
+          const agent = (ev as { agent?: string | null }).agent ? ` [${(ev as { agent?: string | null }).agent}]` : '';
+          console.log(`  ${(ev as { timestamp: string }).timestamp} ${(ev as { level: string }).level}${agent}: ${(ev as { message: string }).message}`);
+        }
+      }
+    } else {
+      console.log(JSON.stringify(result, null, 2));
+    }
+  });

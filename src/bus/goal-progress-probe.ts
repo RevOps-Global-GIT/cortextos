@@ -1,0 +1,363 @@
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { join } from 'path';
+import type { BusPaths, Task } from '../types/index.js';
+import { logEvent } from './event.js';
+
+interface AgentGoals {
+  focus?: string;
+  goals?: string[];
+  bottleneck?: string;
+  updated_at?: string;
+}
+
+export interface GoalProbeAgentResult {
+  agent: string;
+  goalCount: number;
+  goalsUpdatedAt: string;
+  goalsAgeHours: number | null;
+  staleGoalsFile: boolean;
+  mentioned: boolean;
+  matchedTerms: string[];
+  latestMemoryFiles: string[];
+  bottleneck: string;
+}
+
+export interface GoalProgressProbeResult {
+  generatedAt: string;
+  agentsChecked: number;
+  stalledAgents: GoalProbeAgentResult[];
+  stampStaleAgents: GoalProbeAgentResult[];
+  agents: GoalProbeAgentResult[];
+  reportPath?: string;
+  memoryPath?: string;
+}
+
+const STOP_WORDS = new Set([
+  'about',
+  'after',
+  'agent',
+  'agents',
+  'also',
+  'and',
+  'any',
+  'are',
+  'but',
+  'for',
+  'from',
+  'has',
+  'have',
+  'into',
+  'not',
+  'now',
+  'only',
+  'or',
+  'per',
+  'run',
+  'task',
+  'that',
+  'the',
+  'this',
+  'to',
+  'with',
+]);
+
+function todayUtc(offsetDays = 0): string {
+  const d = new Date(Date.now() + offsetDays * 86_400_000);
+  return d.toISOString().slice(0, 10);
+}
+
+function readJson<T>(path: string): T | null {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8')) as T;
+  } catch {
+    return null;
+  }
+}
+
+function memoryText(agentDir: string): { text: string; files: string[] } {
+  const memoryDir = join(agentDir, 'memory');
+  const files = [todayUtc(0), todayUtc(-1)]
+    .map(day => join(memoryDir, `${day}.md`))
+    .filter(path => existsSync(path));
+  return {
+    text: files.map(path => readFileSync(path, 'utf-8')).join('\n').toLowerCase(),
+    files,
+  };
+}
+
+/** Returns true if the agent's today memory file has any heading timestamp within the last withinHours. */
+function hasRecentMemoryActivity(agentDir: string, withinHours: number, nowMs: number): boolean {
+  const today = todayUtc(0);
+  const memoryFile = join(agentDir, 'memory', `${today}.md`);
+  if (!existsSync(memoryFile)) return false;
+  const content = readFileSync(memoryFile, 'utf-8');
+  // Match headings like "## Heartbeat Update - 23:32 UTC" or "## Session Start - 22:59 UTC"
+  const timePattern = /##[^\n]+-\s+(\d{2}:\d{2})\s+UTC/g;
+  const cutoffMs = nowMs - withinHours * 3_600_000;
+  let match: RegExpExecArray | null;
+  while ((match = timePattern.exec(content)) !== null) {
+    const entryMs = new Date(`${today}T${match[1]}:00Z`).getTime();
+    if (Number.isFinite(entryMs) && entryMs >= cutoffMs && entryMs <= nowMs) return true;
+  }
+  return false;
+}
+
+function isAgentRunning(ctxRoot: string, agentName: string, staleThresholdHours = 2): boolean {
+  const heartbeatFile = join(ctxRoot, 'state', agentName, 'heartbeat.json');
+  if (!existsSync(heartbeatFile)) return false;
+  try {
+    const hb = JSON.parse(readFileSync(heartbeatFile, 'utf-8')) as { last_heartbeat?: string };
+    if (!hb.last_heartbeat) return false;
+    const ageHours = (Date.now() - Date.parse(hb.last_heartbeat)) / 3_600_000;
+    return ageHours < staleThresholdHours;
+  } catch {
+    return false;
+  }
+}
+
+function readEnabledAgents(ctxRoot: string): Record<string, { enabled?: boolean }> {
+  const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
+  if (!existsSync(enabledFile)) return {};
+  try {
+    return JSON.parse(readFileSync(enabledFile, 'utf-8')) as Record<string, { enabled?: boolean }>;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Returns true when an agent should be treated as a "codex-runtime" agent:
+ * either its config.json declares runtime === "codex-app-server" (ChatGPT/Codex
+ * app process), or its name contains the substring "codex" (e.g. "mac-codex").
+ * This mirrors the set {codex, codex-2, codex-3, mac-codex} without hardcoding names.
+ */
+function isCodexRuntimeAgent(agentConfig: { runtime?: string } | null, agentName: string): boolean {
+  if (agentConfig?.runtime === 'codex-app-server') return true;
+  return agentName.toLowerCase().includes('codex');
+}
+
+/**
+ * Returns true when the task directory contains at least one task that was
+ * assigned to `agentName` and created by "orchestrator" within the last 24 hours.
+ *
+ * An orchestrator-issued task signals that the codex agent is part of an active
+ * workstream — goal-progress tracking should apply. Absence of such a task means
+ * the agent is truly idle (e.g. deprioritized due to auth/credit issues) and
+ * should be suppressed to avoid false-positive "stalled" alerts.
+ */
+function hasOrchIssuedTaskInLast24h(taskDir: string, agentName: string, nowMs: number): boolean {
+  if (!existsSync(taskDir)) return false;
+  const cutoffMs = nowMs - 24 * 3_600_000;
+  let files: string[];
+  try {
+    files = readdirSync(taskDir).filter(f => !f.startsWith('.') && f.endsWith('.json'));
+  } catch {
+    return false;
+  }
+  for (const file of files) {
+    try {
+      const raw = readFileSync(join(taskDir, file), 'utf-8');
+      const task = JSON.parse(raw) as Task;
+      if (
+        task.assigned_to === agentName &&
+        task.created_by === 'orchestrator' &&
+        typeof task.created_at === 'string'
+      ) {
+        const createdMs = Date.parse(task.created_at);
+        if (Number.isFinite(createdMs) && createdMs >= cutoffMs) return true;
+      }
+    } catch {
+      // Skip unparseable task files.
+    }
+  }
+  return false;
+}
+
+function keywords(input: string): string[] {
+  return Array.from(new Set(
+    input
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, ' ')
+      .split(/\s+/)
+      .map(word => word.trim())
+      .filter(word => word.length >= 4)
+      .filter(word => !STOP_WORDS.has(word)),
+  )).slice(0, 12);
+}
+
+function goalTerms(goals: AgentGoals): string[] {
+  const parts = [goals.focus || '', ...(goals.goals || [])];
+  return Array.from(new Set(parts.flatMap(keywords)));
+}
+
+function statusEvidenceTerms(text: string): string[] {
+  const matches: string[] = [];
+  if (/\bparked\b|\bno[-\s]?touch\b|\bdo not (?:edit|touch|mutate)\b/.test(text)) {
+    matches.push('status:parked');
+  }
+  if (/\breassign(?:ed|s|ment)?\b|\bexplicit reassignment\b/.test(text)) {
+    matches.push('status:reassigned');
+  }
+  if (
+    /\bown(?:s|ed|ing)?\b.{0,80}\bfix(?:es|ed|ing)?\b/.test(text) ||
+    /\bfix(?:es|ed|ing)?\b.{0,80}\bown(?:s|ed|ing)?\b/.test(text)
+  ) {
+    matches.push('status:owned');
+  }
+  return Array.from(new Set(matches));
+}
+
+function hoursSince(iso: string | undefined, nowMs: number): number | null {
+  if (!iso) return null;
+  const parsed = Date.parse(iso);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.max(0, (nowMs - parsed) / 3_600_000);
+}
+
+function renderReport(result: GoalProgressProbeResult): string {
+  const lines = [
+    '# Goal Progress Probe',
+    '',
+    `Generated: ${result.generatedAt}`,
+    `Agents checked: ${result.agentsChecked}`,
+    `Stalled agents: ${result.stalledAgents.length}`,
+    `Stamp-stale agents: ${result.stampStaleAgents.length}`,
+    '',
+  ];
+
+  if (result.stalledAgents.length > 0) {
+    lines.push('## Stalled', '');
+    for (const agent of result.stalledAgents) {
+      const reasons = [
+        agent.staleGoalsFile ? `goals.json age ${agent.goalsAgeHours === null ? 'unknown' : `${agent.goalsAgeHours.toFixed(1)}h`}` : '',
+        !agent.mentioned ? 'no goal keywords found in last 24h memory' : '',
+      ].filter(Boolean).join('; ');
+      lines.push(`- ${agent.agent}: ${agent.goalCount} goals, ${reasons}. Bottleneck: ${agent.bottleneck || 'none'}`);
+    }
+    lines.push('');
+  }
+
+  if (result.stampStaleAgents.length > 0) {
+    lines.push('## Stamp-stale (goals.json needs re-stamp, agent is active)', '');
+    for (const agent of result.stampStaleAgents) {
+      lines.push(`- ${agent.agent}: goals.json age ${agent.goalsAgeHours === null ? 'unknown' : `${agent.goalsAgeHours.toFixed(1)}h`}, mentioned=yes (${agent.matchedTerms.join(', ') || '-'})`);
+    }
+    lines.push('');
+  }
+
+  lines.push('## Agent Results', '');
+  lines.push('| Agent | Goals | Goals age | Mentioned | Matched terms |');
+  lines.push('| --- | ---: | ---: | --- | --- |');
+  for (const agent of result.agents) {
+    lines.push(`| ${agent.agent} | ${agent.goalCount} | ${agent.goalsAgeHours === null ? '-' : agent.goalsAgeHours.toFixed(1)}h | ${agent.mentioned ? 'yes' : 'no'} | ${agent.matchedTerms.join(', ') || '-'} |`);
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
+export function runGoalProgressProbe(
+  paths: BusPaths,
+  agentName: string,
+  org: string,
+  projectRoot: string,
+  options: { outputDir?: string; orchestratorMemoryDir?: string } = {},
+): GoalProgressProbeResult {
+  const generatedAt = new Date().toISOString();
+  const nowMs = Date.now();
+  const agentsDir = join(projectRoot, 'orgs', org, 'agents');
+  const agents: GoalProbeAgentResult[] = [];
+
+  const enabledAgents = readEnabledAgents(paths.ctxRoot);
+
+  if (existsSync(agentsDir)) {
+    for (const entry of readdirSync(agentsDir, { withFileTypes: true }).filter(e => e.isDirectory())) {
+      const name = entry.name;
+
+      // Self-exclude: the calling agent is its own evidence source, skip to avoid false positives.
+      if (name === agentName) continue;
+
+      // Skip disabled agents — they are not expected to make progress.
+      const enabledEntry = enabledAgents[name];
+      if (enabledEntry && enabledEntry.enabled === false) continue;
+
+      // Skip agents whose config.json marks them disabled.
+      const agentConfig = readJson<{ enabled?: boolean; runtime?: string }>(join(agentsDir, name, 'config.json'));
+      if (agentConfig && agentConfig.enabled === false) continue;
+
+      // Skip agents not currently running (heartbeat older than 2h).
+      if (!isAgentRunning(paths.ctxRoot, name)) continue;
+
+      // Skip codex-runtime agents that have no orchestrator-issued task in the
+      // last 24 h.  These agents go idle when Codex is deprioritised (auth/credit
+      // issues) and would otherwise generate spurious "stalled" alerts.  The moment
+      // an orchestrator assigns them real work they are tracked again.
+      if (isCodexRuntimeAgent(agentConfig, name) && !hasOrchIssuedTaskInLast24h(paths.taskDir, name, nowMs)) continue;
+
+      const agentDir = join(agentsDir, name);
+      const goals = readJson<AgentGoals>(join(agentDir, 'goals.json'));
+      if (!goals || !(goals.focus || (goals.goals && goals.goals.length > 0))) continue;
+      const terms = goalTerms(goals);
+      const memory = memoryText(agentDir);
+      const matchedTerms = [
+        ...terms.filter(term => memory.text.includes(term)),
+        ...statusEvidenceTerms(memory.text),
+      ];
+      const goalsAgeHours = hoursSince(goals.updated_at, nowMs);
+      agents.push({
+        agent: name,
+        goalCount: goals.goals?.length || 0,
+        goalsUpdatedAt: goals.updated_at || '',
+        goalsAgeHours,
+        staleGoalsFile: goalsAgeHours === null || goalsAgeHours > 24,
+        mentioned: matchedTerms.length > 0,
+        matchedTerms: matchedTerms.slice(0, 8),
+        latestMemoryFiles: memory.files,
+        bottleneck: goals.bottleneck || '',
+      });
+    }
+  }
+
+  agents.sort((a, b) => a.agent.localeCompare(b.agent));
+  // Stamp-stale: goals.json file is old but agent IS mentioning goal terms in memory —
+  // the file just needs re-stamping, the agent isn't truly blocked.
+  const stampStaleAgents = agents.filter(
+    agent => agent.staleGoalsFile && agent.mentioned,
+  );
+  // Truly stalled: not mentioning goals AND either no recent memory in 4h or stale goals file.
+  const stalledAgents = agents.filter(
+    agent =>
+      !agent.mentioned &&
+      (!hasRecentMemoryActivity(join(agentsDir, agent.agent), 4, nowMs) || agent.staleGoalsFile),
+  );
+  const result: GoalProgressProbeResult = {
+    generatedAt,
+    agentsChecked: agents.length,
+    stalledAgents,
+    stampStaleAgents,
+    agents,
+  };
+
+  if (options.outputDir) {
+    mkdirSync(options.outputDir, { recursive: true });
+    const reportPath = join(options.outputDir, `${generatedAt.slice(0, 10)}-goal-progress-probe.md`);
+    result.reportPath = reportPath;
+    writeFileSync(reportPath, renderReport(result), 'utf-8');
+  }
+
+  const memoryDir = options.orchestratorMemoryDir || join(projectRoot, 'orgs', org, 'agents', 'orchestrator', 'memory');
+  if (existsSync(memoryDir)) {
+    const memoryPath = join(memoryDir, `${generatedAt.slice(0, 10)}.md`);
+    result.memoryPath = memoryPath;
+    appendFileSync(memoryPath, `\n## Goal Progress Probe - ${generatedAt.slice(11, 19)} UTC\n- Agents checked: ${agents.length}\n- Stalled agents: ${stalledAgents.map(a => a.agent).join(', ') || 'none'}\n- Stamp-stale agents: ${stampStaleAgents.map(a => a.agent).join(', ') || 'none'}\n- Report: ${result.reportPath || 'not written'}\n`, 'utf-8');
+  }
+
+  logEvent(paths, agentName, org, 'action', 'goal_progress_probe_completed', 'info', {
+    agents_checked: agents.length,
+    stalled_agents: stalledAgents.map(a => a.agent),
+    stamp_stale_agents: stampStaleAgents.map(a => a.agent),
+    report_path: result.reportPath || null,
+  });
+
+  return result;
+}

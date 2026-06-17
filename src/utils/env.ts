@@ -1,9 +1,10 @@
 import { readFileSync, existsSync, writeFileSync } from 'fs';
-import { join, basename } from 'path';
+import { join, basename, resolve as resolvePath, sep } from 'path';
 import { homedir } from 'os';
 import type { CtxEnv } from '../types/index.js';
 import { ensureDir } from './atomic.js';
 import { validateAgentName, validateOrgName } from './validate.js';
+import { stripBom } from './strip-bom.js';
 
 /**
  * Resolve the cortextOS environment context.
@@ -43,11 +44,12 @@ export function resolveEnv(overrides?: Partial<CtxEnv>): CtxEnv {
     envFile.CTX_AGENT_NAME ||
     basename(process.cwd());
 
+  // Use 'in' check so CTX_ORG='' explicitly selects root scope instead of
+  // falling through to the .cortextos-env value via the falsy || chain.
   const org =
-    overrides?.org ||
-    process.env.CTX_ORG ||
-    envFile.CTX_ORG ||
-    '';
+    overrides?.org !== undefined ? overrides.org :
+    'CTX_ORG' in process.env ? (process.env.CTX_ORG ?? '') :
+    envFile.CTX_ORG ?? '';
 
   const projectRoot =
     overrides?.projectRoot ||
@@ -76,11 +78,40 @@ export function resolveEnv(overrides?: Partial<CtxEnv>): CtxEnv {
     try {
       const contextPath = join(projectRoot, 'orgs', org, 'context.json');
       if (existsSync(contextPath)) {
-        const ctx = JSON.parse(readFileSync(contextPath, 'utf-8'));
+        // stripBom: PowerShell/Notepad-saved context.json files have a BOM
+        // that breaks JSON.parse at position 0 — silent fallback to wrong
+        // timezone/orchestrator. See src/utils/strip-bom.ts for incident.
+        const ctx = JSON.parse(stripBom(readFileSync(contextPath, 'utf-8')));
         if (!timezone && ctx.timezone) timezone = ctx.timezone;
         if (!orchestrator && ctx.orchestrator) orchestrator = ctx.orchestrator;
       }
     } catch { /* ignore */ }
+  }
+
+  // Sandbox/live isolation (issue #313): when both CTX_FRAMEWORK_ROOT and CTX_AGENT_DIR
+  // are set, the resolved agentDir MUST be subordinate to frameworkRoot. Catches the leak
+  // class where a CLI subprocess inherits CTX_AGENT_DIR (or CTX_PROJECT_ROOT) from a live
+  // agent shell while only CTX_FRAMEWORK_ROOT was overridden — agentDir then silently
+  // points at the live install. Equality check on projectRoot vs frameworkRoot catches
+  // the same divergence on the projectRoot axis.
+  if (agentDir && frameworkRoot) {
+    const fwRootResolved = resolvePath(frameworkRoot);
+    const agentDirResolved = resolvePath(agentDir);
+    if (agentDirResolved !== fwRootResolved && !agentDirResolved.startsWith(fwRootResolved + sep)) {
+      throw new Error(
+        `Resolved CTX_AGENT_DIR '${agentDir}' is not under CTX_FRAMEWORK_ROOT '${frameworkRoot}'. ` +
+        `This indicates a sandbox/live environment leak — likely CTX_FRAMEWORK_ROOT was overridden ` +
+        `but CTX_AGENT_DIR or CTX_PROJECT_ROOT was inherited from the parent shell. ` +
+        `Refusing to proceed.`,
+      );
+    }
+  }
+  if (projectRoot && frameworkRoot && resolvePath(projectRoot) !== resolvePath(frameworkRoot)) {
+    throw new Error(
+      `CTX_PROJECT_ROOT '${projectRoot}' must equal CTX_FRAMEWORK_ROOT '${frameworkRoot}'. ` +
+      `A divergence indicates a sandbox/live environment leak — likely one of the two was ` +
+      `inherited from the parent shell while the other was overridden. Refusing to proceed.`,
+    );
   }
 
   // Security (H9): Validate agent name and org before they flow into filesystem paths.
@@ -106,6 +137,47 @@ export function resolveEnv(overrides?: Partial<CtxEnv>): CtxEnv {
 }
 
 /**
+ * Load org secrets.env and agent .env into process.env.
+ *
+ * Mirrors the loading order of `ctx_source_env()` in bus/_ctx-env.sh:
+ *   1. Org-level secrets.env (shared keys: SUPABASE_RGOS_URL, etc.)
+ *   2. Agent .env (agent-specific keys win on conflict)
+ *   3. Existing process.env values are never overwritten.
+ *
+ * Call once at bus CLI startup so all TypeScript bus modules can read
+ * SUPABASE_RGOS_URL, SUPABASE_RGOS_SERVICE_KEY, OPENAI_KEY, etc. from
+ * process.env without requiring the parent shell to manually source them.
+ */
+export function applySecretsToEnv(env: CtxEnv): void {
+  const sources: string[] = [];
+
+  // 1. Org-level secrets
+  if (env.org && env.projectRoot) {
+    sources.push(join(env.projectRoot, 'orgs', env.org, 'secrets.env'));
+  }
+
+  // 2. Agent .env (wins over org secrets for same keys)
+  if (env.agentDir) {
+    sources.push(join(env.agentDir, '.env'));
+  }
+
+  // Snapshot keys already present in process.env before we touch anything.
+  // Parent-shell vars are never overwritten. Keys set by earlier sources
+  // (org secrets) CAN be overwritten by later sources (agent .env).
+  const preExisting = new Set(Object.keys(process.env));
+
+  for (const filePath of sources) {
+    if (!existsSync(filePath)) continue;
+    const vars = parseEnvFile(filePath);
+    for (const [key, value] of Object.entries(vars)) {
+      if (!preExisting.has(key)) {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+/**
  * Write .cortextos-env file for backward compatibility with bash bus scripts.
  * Per D6: maintain this pattern.
  */
@@ -125,6 +197,57 @@ export function writeCortextosEnv(agentDir: string, env: CtxEnv): void {
 }
 
 /**
+ * Validate env file content before writing it to disk.
+ *
+ * Rejects content that is:
+ *   - Empty or whitespace-only (the most common wipe failure mode)
+ *   - Contains no parseable KEY=VALUE pairs
+ *   - Missing any of the caller-specified required keys
+ *
+ * Throws an Error with a human-readable message on rejection.
+ * Returns the parsed key→value map on success so callers can inspect it.
+ */
+export function validateEnvContent(
+  content: string,
+  requiredKeys: string[] = [],
+): Record<string, string> {
+  if (!content || !content.trim()) {
+    throw new Error('env write rejected: content is empty');
+  }
+
+  // Parse inline to reuse the same logic as parseEnvFile (no I/O)
+  const result: Record<string, string> = {};
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let value = trimmed.slice(eqIdx + 1).trim();
+    if (value.length >= 2 && ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'")))) {
+      value = value.slice(1, -1);
+    }
+    result[key] = value;
+  }
+
+  if (Object.keys(result).length === 0) {
+    throw new Error('env write rejected: content has no parseable KEY=VALUE pairs');
+  }
+
+  for (const key of requiredKeys) {
+    if (!result[key] && result[key] !== '') {
+      throw new Error(`env write rejected: required key "${key}" is missing`);
+    }
+    if (!result[key]) {
+      throw new Error(`env write rejected: required key "${key}" has an empty value`);
+    }
+  }
+
+  return result;
+}
+
+/**
  * Parse a KEY=VALUE env file. Supports:
  *   - `#` comments at start of line
  *   - Surrounding single or double quotes on the value (stripped)
@@ -134,8 +257,13 @@ export function writeCortextosEnv(agentDir: string, env: CtxEnv): void {
 export function parseEnvFile(filePath: string): Record<string, string> {
   const result: Record<string, string> = {};
   try {
-    const content = readFileSync(filePath, 'utf-8');
-    for (const line of content.split('\n')) {
+    // stripBom + CRLF-aware split: Windows tooling (PowerShell Out-File,
+    // Notepad) writes .env files with a UTF-8 BOM at position 0 AND CRLF
+    // line endings. Without stripBom the first KEY line never matches
+    // because position 0 is the BOM byte; without the regex split, each
+    // value gets a trailing \r that breaks downstream validators.
+    const content = stripBom(readFileSync(filePath, 'utf-8'));
+    for (const line of content.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
       const eqIdx = trimmed.indexOf('=');

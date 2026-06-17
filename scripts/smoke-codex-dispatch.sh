@@ -7,7 +7,7 @@
 #
 # Useful overrides:
 #   DIRECT_ONLY=1 scripts/smoke-codex-dispatch.sh
-#   BUS_ONLY=1 SSH_HOST=gregs-mac scripts/smoke-codex-dispatch.sh
+#   BUS_ONLY=1 SSH_HOST=gregharned@gregs-macbook-air scripts/smoke-codex-dispatch.sh
 #   ALLOW_FALLBACK=1 scripts/smoke-codex-dispatch.sh
 
 set -euo pipefail
@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 DISPATCH_SCRIPT="${DISPATCH_SCRIPT:-/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh}"
 CORTEXTOS_CLI="${CORTEXTOS_CLI:-$ROOT/dist/cli.js}"
-SSH_HOST="${SSH_HOST:-gregs-mac}"
+SSH_HOST="${SSH_HOST:-gregharned@gregs-macbook-air}"
 TIMEOUT="${TIMEOUT:-120}"
 DIRECT_ONLY="${DIRECT_ONLY:-0}"
 BUS_ONLY="${BUS_ONLY:-0}"
@@ -98,4 +98,3 @@ fi
 if [[ "$DIRECT_ONLY" != "1" ]]; then
   run_bus
 fi
-

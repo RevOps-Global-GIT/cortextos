@@ -40,6 +40,47 @@ export interface TaskOutput {
   label?: string;
 }
 
+/**
+ * Blocker context — stored at `task.meta.blocker` on every task with
+ * `status: "blocked"`. Both fields are required; use
+ * `"field-not-applicable: <reason>"` when a field genuinely does not apply
+ * so the Fleet Tasks UI can render a consistent view instead of "No blocking
+ * reason recorded".
+ */
+export interface TaskBlockerContext {
+  /** Human-readable explanation of what is preventing progress. */
+  blocker_reason: string;
+  /** Observable evidence or artifact that proves the blocker is resolved. */
+  next_proof_required: string;
+}
+
+/**
+ * Structured task brief — stored at `task.meta.brief`. All 9 fields are
+ * required; use `"field-not-applicable: <reason>"` for fields not relevant
+ * to a given task rather than omitting them, so the Fleet Tasks UI can
+ * render a consistent contract view across all task types.
+ */
+export interface TaskBrief {
+  /** What observable state proves this task is done. */
+  success_criteria: string;
+  /** What this task explicitly will NOT do. */
+  out_of_scope: string;
+  /** Conditions that should trigger escalation to a human. */
+  escalation_triggers: string;
+  /** Ordered list of authoritative sources (first = highest authority). */
+  source_hierarchy: string | string[];
+  /** Preferred agent runtime (e.g. "codex", "dev", "analyst"). */
+  preferred_runtime: string;
+  /** Agent capabilities this task requires. */
+  required_capabilities: string | string[];
+  /** Evidence that a fallback path exists if the primary path fails. */
+  fallback_proof: string;
+  /** Expected deliverable files or API responses. */
+  artifact_expectations: string;
+  /** Goal chain this task derives from (e.g. ["G1", "sprint objective"]). */
+  goal_ancestry: string | string[];
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -77,6 +118,93 @@ export interface Task {
    * bus — the dashboard surfaces it as-is.
    */
   meta?: Record<string, unknown>;
+  /**
+   * Machine-checkable condition proving this task is done. Promoted from
+   * meta.brief.success_criteria to a top-level field so it is queryable
+   * without parsing the opaque meta blob.  Required for all tasks (brief
+   * contract field 1 of 4).
+   */
+  success_criteria?: string;
+  /**
+   * What this task explicitly will NOT do. Brief contract field 2 of 4.
+   * Required at creation time via --out-of-scope.
+   */
+  out_of_scope?: string;
+  /**
+   * Conditions that should trigger escalation to a human. Brief contract
+   * field 3 of 4. Required at creation time via --escalation-triggers.
+   */
+  escalation_triggers?: string;
+  /**
+   * Who assigned this task (e.g. "orchestrator", "greg", "self-directed").
+   * Brief contract field 4 of 4. Required at creation time via --source-hierarchy.
+   */
+  source_hierarchy?: string;
+  /**
+   * Batch dispatch grouping. Tasks created in the same `bus dispatch-batch`
+   * call share a UUID and `parallel_count`, allowing fleet views to render
+   * the group as one row with N progress dots.
+   */
+  dispatch_batch_id?: string;
+  parallel_count?: number;
+  /**
+   * Goal guard — auto-created when a high-stakes task has a
+   * success_criteria. Lifecycle: active → met (task completes) or failed.
+   */
+  linked_goal?: LinkedGoal;
+  /**
+   * Loop config — auto-suggested when the task description implies polling
+   * is needed. The executing agent creates the real session cron and
+   * records the cron_id.
+   */
+  linked_loop?: LinkedLoop;
+}
+
+/**
+ * Linked goal guard — auto-created on high-stakes tasks (priority=high/urgent
+ * or needs_approval=true) when a success_criteria is present. Tracks whether
+ * the observable success condition has been evaluated.
+ */
+export interface LinkedGoal {
+  status: 'active' | 'met' | 'failed';
+  created_at: string;
+  deadline?: string;
+  owner?: string;
+}
+
+/**
+ * Linked loop — auto-created (as a suggestion) when task description
+ * implies polling is needed (keywords: poll, check, every N min, until merged,
+ * etc.). The executing agent creates the actual cron and records its ID.
+ */
+export interface LinkedLoop {
+  cron: string;
+  prompt: string;
+  status: 'suggested' | 'active' | 'completed' | 'cancelled';
+  created_at: string;
+  cron_id?: string;
+}
+
+/**
+ * One replay fixture for a feedback rule. Pairs the rule's check function
+ * with the exact scenario from the original incident so the test suite can
+ * prove the rule would have prevented it.
+ */
+export interface FeedbackRuleFixture {
+  /** Slug matching the feedback memory file name (without .md). */
+  ruleName: string;
+  /** One-line description of the original incident. */
+  incidentSummary: string;
+  /**
+   * The raw input from the original incident (PR body text, command string,
+   * agent heartbeat message, etc.) that should be flagged by the rule.
+   */
+  originalInput: string;
+  /**
+   * Run the rule check against `input`. Returns a non-null violation message
+   * if the input would have been flagged; null if the input is clean.
+   */
+  check: (input: string) => string | null;
 }
 
 // Event Types
@@ -90,7 +218,8 @@ export type EventCategory =
   | 'message'
   | 'task'
   | 'approval'
-  | 'agent_activity';
+  | 'agent_activity'
+  | 'capability';
 
 export type EventSeverity = 'info' | 'warning' | 'error' | 'critical';
 
@@ -116,6 +245,12 @@ export interface Heartbeat {
   mode: 'day' | 'night';
   last_heartbeat: string; // ISO 8601
   loop_interval: string;
+  /**
+   * How many distinct `dispatch_batch_id` groups this agent currently has in
+   * `in_progress`. Populated by updateHeartbeat() so fleet views can show
+   * "agent X is running N parallel batches" without re-scanning task files.
+   */
+  active_parallel_count?: number;
   // Legacy field — sync.ts falls back to this if last_heartbeat absent
   timestamp?: string;
 }
@@ -131,6 +266,15 @@ export type ApprovalCategory =
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected';
 
+export interface EmailMeta {
+  to: string;
+  subject: string;
+  body: string;
+  reply_to?: string;
+  cc?: string;
+  from?: string;
+}
+
 export interface Approval {
   id: string;
   title: string;
@@ -143,6 +287,50 @@ export interface Approval {
   updated_at: string;
   resolved_at: string | null;
   resolved_by: string | null;
+  email_meta?: EmailMeta;
+  /** UUID of the paired orch_approvals row in Supabase (if any). When set,
+   *  routeApprovalCallback also PATCHes that row so the Hub reflects the
+   *  Telegram decision in real-time. */
+  linked_orch_approval_id?: string;
+}
+
+// Agent Steer Types
+
+export type AgentSteerActionClass =
+  | 'guidance'
+  | 'status_request'
+  | 'artifact_request'
+  | 'pause'
+  | 'resume'
+  | 'escalate'
+  | 'stop';
+
+export type AgentSteerApprovalClass = 'low_risk_direct' | 'high_risk_approval';
+
+export type AgentSteerArtifactType = 'log' | 'diff' | 'screenshot' | 'report';
+
+export interface AgentSteerPayload {
+  instruction?: string;
+  artifactType?: AgentSteerArtifactType;
+  reason?: string;
+  sourcePanel?: 'agent_work_panel';
+  liveStatePath?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface AgentSteerAction {
+  actor: string;
+  target_agent: string;
+  action_class: AgentSteerActionClass;
+  payload: AgentSteerPayload;
+  task_id?: string | null;
+}
+
+export interface AgentSteerApprovalDecision {
+  approval_class: AgentSteerApprovalClass;
+  approval_required: boolean;
+  approval_category: ApprovalCategory | null;
+  reason: string;
 }
 
 // Agent Config Types (config.json)
@@ -166,7 +354,44 @@ export interface AgentConfig {
   startup_delay?: number;
   max_session_seconds?: number;
   max_crashes_per_day?: number;
+  /**
+   * Sliding-window crash-loop detector. When N crashes occur within the window,
+   * the agent auto-pauses (status: 'halted') instead of retrying. Absent = legacy
+   * daily counter only.
+   */
+  crash_window?: { seconds: number; max_crashes?: number };
+  /**
+   * Premature-voluntary-exit guard. Detects the footgun where a prompt or
+   * handoff doc contains `/exit` and the claude session walks out cleanly
+   * (exit code 0, no signal) within `threshold_seconds` of starting. These
+   * exits look like normal shutdowns but the agent is supposed to be always-on,
+   * so the daemon's exponential-backoff restart re-injects the same prompt
+   * and restarts the loop in seconds.
+   *
+   * Behavior:
+   * - A premature voluntary exit does NOT increment the crash counter.
+   * - The daemon waits `backoff_seconds` (default 300s = 5 min) before
+   *   restarting, instead of the usual exponential 5s→10s→20s.
+   * - If `max_exits` (default 3) premature exits happen within `seconds`
+   *   (default 600s = 10 min), the agent is halted and requires manual
+   *   intervention. The thinking: rapid restart will just re-trigger the
+   *   same prompt path.
+   *
+   * Set `seconds: 0` to disable entirely.
+   */
+  premature_exit_window?: {
+    /** Sliding window length in seconds. Default: 600 (10 min). */
+    seconds?: number;
+    /** Halt after this many premature exits inside the window. Default: 3. */
+    max_exits?: number;
+    /** Uptime below this counts as "premature." Default: 60. */
+    threshold_seconds?: number;
+    /** How long to wait before auto-restarting. Default: 300 (5 min). */
+    backoff_seconds?: number;
+  };
   model?: string;
+  /** Override the HOME path so claude reads credentials from $home/.claude/ instead of ~/.claude/ */
+  home?: string;
   /**
    * Cost tier for model routing: 'haiku' | 'sonnet' | 'opus'.
    * Ignored when `model` is set (explicit model takes precedence).
@@ -245,7 +470,12 @@ export interface AgentConfig {
    * NousResearch/hermes-agent) with Hermes-specific bootstrap, session
    * continuity, and exit handling.
    */
-  runtime?: 'claude-code' | 'hermes' | 'codex-app-server';
+  runtime?: 'claude-code' | 'hermes' | 'codex-app-server' | 'script';
+  /**
+   * Path to the Node.js script to run when runtime is 'script'.
+   * May be absolute or relative to the framework root (cortextos repo root).
+   */
+  script_path?: string;
   /**
    * Whether this agent runs a Telegram poller. Defaults to true when absent
    * (preserves existing behaviour). Set to false on specialist agents that
@@ -254,6 +484,12 @@ export interface AgentConfig {
    * poller will be skipped regardless.
    */
   telegram_polling?: boolean;
+  /**
+   * When true, pass --strict-mcp-config to Claude Code so only MCP servers
+   * from user settings and the project .mcp.json are loaded — blocking
+   * account-level Claude.ai integrations that bloat the context window.
+   */
+  strict_mcp?: boolean;
 }
 
 export interface CronEntry {
@@ -343,8 +579,9 @@ export interface CronEntry {
  *   - Standard 5-field cron expression: `"0 8 * * *"`, `"0 0,6,12,18 * * *"` (every 6h)
  *     Evaluated by the daemon scheduler (Subtask 1.3).
  *
- * The daemon fires the cron by injecting `[CRON: {name}] {prompt}` into
- * the agent's PTY session.
+ * By default the daemon fires the cron by injecting `[CRON: {name}] {prompt}`
+ * into the agent's PTY session. Crons with metadata.runner = "spawn-codex"
+ * run a bounded Codex process instead and write an artifact + JSON sidecar.
  */
 export interface CronDefinition {
   // ------------------------------------------------------------------
@@ -452,7 +689,11 @@ export interface CronDefinition {
 
   /**
    * Arbitrary key-value pairs for agent-specific context.
-   * Not interpreted by the daemon; surfaced in dashboard + execution logs.
+   * Most metadata is only surfaced in dashboard + execution logs.
+   * Daemon-supported keys:
+   * - runner: "pty" | "spawn-codex"
+   * - prompt_file: org-relative prompt path for spawn-codex runner
+   * - workdir, agent, timeout_seconds, task_id, reply_to, model, effort, mcp_config, sandbox
    *
    * @example { "priority": "high", "source": "/loop" }
    */
@@ -499,6 +740,12 @@ export interface CronExecutionLogEntry {
   duration_ms: number;
   /** Error message if status is "retried" or "failed"; null otherwise. */
   error: string | null;
+  /** Optional phase marker for agent-reported results after scheduler injection. */
+  phase?: 'fire' | 'result';
+  /** Optional human-readable result summary for the run. */
+  result?: string;
+  /** Optional artifact path produced by the run. */
+  artifact?: string;
 }
 
 export interface OrgContext {
@@ -822,6 +1069,12 @@ export interface IPCResponse {
   success: boolean;
   data?: unknown;
   error?: string;
+  /**
+   * Structured error code for failed responses. Lets operators distinguish
+   * "agent does not exist" (NOT_FOUND) from "request collapsed against an
+   * in-flight identical op" (DEDUPED). See issue #346.
+   */
+  code?: 'NOT_FOUND' | 'DEDUPED' | 'INVALID_INPUT' | 'NOT_RUNNING';
 }
 
 // Agent Discovery Types
@@ -855,6 +1108,7 @@ export interface AgentStatus {
   sessionStart?: string;
   crashCount?: number;
   model?: string;
+  healthStatus?: 'healthy' | 'degraded' | 'unknown';
 }
 
 export type { Workflow, WorkflowStep } from './workflow.js';

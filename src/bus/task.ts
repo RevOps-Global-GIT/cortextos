@@ -1,12 +1,19 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync, unlinkSync, appendFileSync } from 'fs';
 import { dirname, join } from 'path';
-import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport } from '../types/index.js';
+import { sendMessage } from './message.js';
+import type { Task, Priority, TaskStatus, BusPaths, StaleTaskReport, ArchiveReport, LinkedGoal, LinkedLoop } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomDigits } from '../utils/random.js';
 import { validatePriority } from '../utils/validate.js';
-import { mirrorTaskToRgos } from './rgos-mirror.js';
+import { mirrorTaskToRgos, mirrorTaskRunToRgos, uuidv5, isUuid } from './rgos-mirror.js';
 import { logEvent } from './event.js';
+import { snapshotSessionCost } from './task-cost.js';
+import { autoEmitStatusUpdate } from './agent-task-events.js';
+
+function isTaskJsonFile(file: string): boolean {
+  return !file.startsWith('.') && file.endsWith('.json');
+}
 
 // ---------------------------------------------------------------------------
 // Per-task read-modify-write lock
@@ -45,6 +52,52 @@ function withTaskLock<T>(taskDir: string, taskId: string, fn: () => T): T {
 // Task CRUD
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Goal / loop binding heuristics
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true for tasks where a missed success condition has high impact:
+ * urgent/high priority, or tasks that require human approval before execution.
+ */
+function isHighStakes(priority: Priority, needsApproval: boolean): boolean {
+  return priority === 'urgent' || priority === 'high' || needsApproval;
+}
+
+const POLLING_RE = /\b(poll|watch|monitor|every\s+\d+\s*(min(ute)?s?|hour?s?)|until\s+(merged?|green|pass(ed)?|done|complet))\b/i;
+
+/**
+ * Infer a suggested loop cron from the task title+description.
+ * Returns a cron expression if polling language is detected, null otherwise.
+ * Defaults to every-15-minutes when the interval is not explicit.
+ */
+function inferPollingCron(text: string): string | null {
+  if (!POLLING_RE.test(text)) return null;
+  // Try to extract "every N min(utes)" from text.
+  const m = text.match(/every\s+(\d+)\s*min/i);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (n > 0 && n < 60) return `*/${n} * * * *`;
+  }
+  return '*/15 * * * *'; // default
+}
+
+function resetCompletionFieldsForReopen(task: Task): void {
+  task.completed_at = null;
+  delete task.result;
+  if (task.linked_goal?.status === 'met') {
+    task.linked_goal = { ...task.linked_goal, status: 'active' };
+  }
+  if (task.linked_loop?.status === 'completed') {
+    task.linked_loop = { ...task.linked_loop, status: 'active' };
+  }
+  task.meta = {
+    ...(task.meta ?? {}),
+    reopened_at: task.updated_at,
+    reopened_from_completed: true,
+  };
+}
+
 /**
  * Create a new task. Identical JSON format to bash create-task.sh.
  */
@@ -63,6 +116,31 @@ export function createTask(
     blockedBy?: string[];
     blocks?: string[];
     meta?: Record<string, unknown>;
+    /** Machine-checkable condition proving task is done. */
+    successCriteria?: string;
+    /** What this task explicitly will NOT do. Brief contract field 2 of 4. */
+    outOfScope?: string;
+    /** Conditions that should trigger escalation to a human. Brief contract field 3 of 4. */
+    escalationTriggers?: string;
+    /** Who assigned this task (e.g. "orchestrator", "greg", "self-directed"). Brief contract field 4 of 8. */
+    sourceHierarchy?: string;
+    /** Tools/access/permissions needed to complete this task. Brief contract field 5 of 8. */
+    requiredCapabilities?: string;
+    /** How to verify the task if the primary artifact is unavailable. Brief contract field 6 of 8. */
+    fallbackProof?: string;
+    /** What output/file/PR/result is expected from this task. Brief contract field 7 of 8. */
+    artifactExpectations?: string;
+    /** Which org goal this task traces back to. Brief contract field 8 of 8. */
+    goalAncestry?: string;
+    /** Skip all 8-field brief validation (for backward-compatible call sites and tests). */
+    skipBriefValidation?: boolean;
+    /** Explicit loop config. If omitted, inferred from description when polling language is found. */
+    linkedLoop?: { cron: string; prompt: string };
+    /** Batch dispatch grouping — set by `cortextos bus dispatch-batch`. */
+    dispatchBatchId?: string;
+    parallelCount?: number;
+    /** Initial status override — batch dispatch creates tasks already in_progress. */
+    initialStatus?: TaskStatus;
   } = {},
 ): string {
   const {
@@ -75,7 +153,40 @@ export function createTask(
     blockedBy = [],
     blocks = [],
     meta,
+    successCriteria,
+    outOfScope,
+    escalationTriggers,
+    sourceHierarchy,
+    requiredCapabilities,
+    fallbackProof,
+    artifactExpectations,
+    goalAncestry,
+    skipBriefValidation = false,
+    linkedLoop: explicitLoop,
+    dispatchBatchId,
+    parallelCount,
+    initialStatus,
   } = options;
+
+  // Brief-contract validation: all 8 fields required unless bypassed.
+  if (!skipBriefValidation) {
+    const briefChecks: Array<[string, string | undefined, string]> = [
+      ['--success-criteria', successCriteria, 'Provide a machine-checkable condition that proves this task is done.'],
+      ['--out-of-scope', outOfScope, 'Declare what this task explicitly will NOT do.'],
+      ['--escalation-triggers', escalationTriggers, 'List conditions that should trigger escalation to a human.'],
+      ['--source-hierarchy', sourceHierarchy, 'State who assigned this task (orchestrator / greg / self-directed).'],
+      ['--required-capabilities', requiredCapabilities, 'List the tools/access/permissions needed to complete this task.'],
+      ['--fallback-proof', fallbackProof, 'Describe how to verify the task if the primary artifact is unavailable.'],
+      ['--artifact-expectations', artifactExpectations, 'Specify what output/file/PR/result is expected from this task.'],
+      ['--goal-ancestry', goalAncestry, 'Identify which org goal this task traces back to.'],
+    ];
+    const errors = briefChecks
+      .filter(([, val]) => !val || (typeof val === 'string' && val.trim() === ''))
+      .map(([flag, , explanation]) => `Error: ${flag} is required. ${explanation}`);
+    if (errors.length > 0) {
+      throw new Error(errors.join('\n'));
+    }
+  }
 
   validatePriority(priority);
 
@@ -101,13 +212,27 @@ export function createTask(
     for (const downId of blocks) detectCycleOrThrow(paths, downId, [taskId], virtualTask);
   }
 
+  // Auto-bind goal guard when task is high-stakes and has a success condition.
+  const linkedGoal: LinkedGoal | undefined =
+    successCriteria && isHighStakes(priority, needsApproval)
+      ? { status: 'active', created_at: now }
+      : undefined;
+
+  // Auto-suggest a polling loop if explicit config given or inferred from text.
+  const inferredCron = !explicitLoop ? inferPollingCron(`${title} ${description}`) : null;
+  const linkedLoop: LinkedLoop | undefined = explicitLoop
+    ? { ...explicitLoop, status: 'suggested', created_at: now }
+    : inferredCron
+      ? { cron: inferredCron, prompt: `Check task ${taskId}: ${title}`, status: 'suggested', created_at: now }
+      : undefined;
+
   const task: Task = {
     id: taskId,
     title,
     description,
     type: 'agent',
     needs_approval: needsApproval,
-    status: 'pending',
+    status: initialStatus ?? 'pending',
     assigned_to: assignee,
     created_by: agentName,
     org,
@@ -122,6 +247,18 @@ export function createTask(
     ...(blockedBy.length ? { blocked_by: [...blockedBy] } : {}),
     ...(blocks.length ? { blocks: [...blocks] } : {}),
     ...(meta && Object.keys(meta).length ? { meta } : {}),
+    ...(successCriteria ? { success_criteria: successCriteria } : {}),
+    ...(outOfScope ? { out_of_scope: outOfScope } : {}),
+    ...(escalationTriggers ? { escalation_triggers: escalationTriggers } : {}),
+    ...(sourceHierarchy ? { source_hierarchy: sourceHierarchy } : {}),
+    ...(requiredCapabilities ? { required_capabilities: requiredCapabilities } : {}),
+    ...(fallbackProof ? { fallback_proof: fallbackProof } : {}),
+    ...(artifactExpectations ? { artifact_expectations: artifactExpectations } : {}),
+    ...(goalAncestry ? { goal_ancestry: goalAncestry } : {}),
+    ...(linkedGoal ? { linked_goal: linkedGoal } : {}),
+    ...(linkedLoop ? { linked_loop: linkedLoop } : {}),
+    ...(dispatchBatchId ? { dispatch_batch_id: dispatchBatchId } : {}),
+    ...(typeof parallelCount === 'number' ? { parallel_count: parallelCount } : {}),
   };
 
   ensureDir(paths.taskDir);
@@ -137,7 +274,7 @@ export function createTask(
   for (const depId of blockedBy) addSymmetricEdge(paths, depId, 'blocks', taskId);
   for (const downId of blocks) addSymmetricEdge(paths, downId, 'blocked_by', taskId);
 
-  appendTaskAudit(paths, taskId, { event: 'create', agent: agentName, to: 'pending', note: title });
+  appendTaskAudit(paths, taskId, { event: 'create', agent: agentName, to: task.status, note: title });
 
   return taskId;
 }
@@ -239,6 +376,28 @@ export function checkTaskDependencies(
 }
 
 /**
+ * List all tasks whose `blocked_by` array includes the given task ID.
+ * Scans the local task dir (same-org only — matches listTasks scoping contract).
+ * Returns tasks in created_at DESC order.
+ */
+export function listBlockedBy(paths: BusPaths, blockerId: string): Task[] {
+  let files: string[];
+  try {
+    files = readdirSync(paths.taskDir).filter(isTaskJsonFile);
+  } catch {
+    return [];
+  }
+  const result: Task[] = [];
+  for (const file of files) {
+    try {
+      const task = JSON.parse(readFileSync(join(paths.taskDir, file), 'utf-8')) as Task;
+      if (task.blocked_by?.includes(blockerId)) result.push(task);
+    } catch { /* skip corrupt */ }
+  }
+  return result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+}
+
+/**
  * Find the on-disk path of a task file by ID, supporting cross-org lookup.
  *
  * cortextOS's standard dispatch pattern is an orchestrator in one org
@@ -250,13 +409,17 @@ export function checkTaskDependencies(
  * cross-org assignment required a manual workaround dance where the filer
  * ran update/complete on behalf of the assignee.
  *
- * This helper fixes that by using a two-tier lookup:
+ * This helper fixes that by using a three-tier lookup:
  *
  *   1. Fast path: check the caller's OWN org tasks dir first. Most tasks
  *      live there and this check pays zero scan cost when it hits.
  *   2. Fallback: scan every sibling org under `<ctxRoot>/orgs/*` for a
  *      matching task file. Only runs when the fast path missed, so
  *      same-org operations take no perf hit.
+ *   3. Instance-root fallback: check `<ctxRoot>/tasks/` for tasks created
+ *      without an org (e.g. by daemon-level agents that run at instance
+ *      root rather than under an org subdirectory). This prevents
+ *      complete-task from throwing "not found in any org" for system tasks.
  *
  * Task IDs are generated as `task_<epoch_ms>_<3digit_random>` so real
  * collisions are effectively impossible — but if the scan ever finds the
@@ -296,7 +459,12 @@ export function findTaskFile(paths: BusPaths, taskId: string): string | null {
     return null; // orgs/ missing or unreadable
   }
 
-  if (matches.length === 0) return null;
+  if (matches.length === 0) {
+    // Instance-root fallback: tasks created without an org land directly at
+    // <ctxRoot>/tasks/ rather than <ctxRoot>/orgs/<org>/tasks/.
+    const instanceRoot = join(paths.ctxRoot, 'tasks', `${taskId}.json`);
+    return existsSync(instanceRoot) ? instanceRoot : null;
+  }
   if (matches.length > 1) {
     const orgList = matches.map((m) => m.org).join(', ');
     console.warn(
@@ -317,6 +485,7 @@ export function updateTask(
   paths: BusPaths,
   taskId: string,
   status: TaskStatus,
+  metaMerge?: Record<string, unknown>,
 ): void {
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) {
@@ -325,16 +494,48 @@ export function updateTask(
     );
   }
   const actualTaskDir = dirname(filePath);
+  // Snapshot outside the lock — file I/O, but no shared state
+  const costSnapshot = status === 'in_progress' ? snapshotSessionCost() : undefined;
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
+  let taskTitle: string = taskId;
   try {
     withTaskLock(actualTaskDir, taskId, () => {
       const content = readFileSync(filePath, 'utf-8');
       const task: Task = JSON.parse(content);
       prevStatus = task.status;
       assignee = task.assigned_to;
+      taskTitle = task.title ?? taskId;
+
+      // Merge optional meta fields atomically before validation.
+      if (metaMerge && Object.keys(metaMerge).length > 0) {
+        task.meta = { ...(task.meta ?? {}), ...metaMerge };
+      }
+
+      // Stamp cost baseline when starting work so completeTask can compute delta.
+      if (status === 'in_progress' && costSnapshot !== undefined) {
+        task.meta = { ...(task.meta ?? {}), cost_snapshot_start: costSnapshot };
+      }
+
+      // Require blocker context when transitioning to blocked.
+      if (status === 'blocked') {
+        const blocker = task.meta?.blocker as Record<string, unknown> | undefined;
+        const reason = typeof blocker?.blocker_reason === 'string' ? blocker.blocker_reason.trim() : '';
+        const proof = typeof blocker?.next_proof_required === 'string' ? blocker.next_proof_required.trim() : '';
+        if (!reason || !proof) {
+          throw new Error(
+            `Task ${taskId} cannot transition to blocked without blocker context.\n` +
+            `Set both fields in one command:\n` +
+            `  cortextos bus update-task ${taskId} blocked --blocker-reason "<what is blocking>" --next-proof "<observable proof it resolved>"`,
+          );
+        }
+      }
+
       task.status = status;
       task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      if (prevStatus === 'completed' && status !== 'completed') {
+        resetCompletionFieldsForReopen(task);
+      }
       atomicWriteSync(filePath, JSON.stringify(task));
       // Mirror to Supabase (fire-and-forget)
       if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
@@ -345,6 +546,9 @@ export function updateTask(
     throw new Error(`Task ${taskId} update failed: ${err}`);
   }
   appendTaskAudit(paths, taskId, { event: 'update', agent: assignee || 'unknown', from: prevStatus, to: status }, actualTaskDir);
+  // Auto-emit per-task event so the task panel event stream reflects status changes
+  // without agents having to manually call emit-task-event.
+  autoEmitStatusUpdate(taskId, taskTitle, prevStatus, status, metaMerge?.blocker_reason as string | undefined);
 }
 
 /**
@@ -384,7 +588,7 @@ function appendTaskAudit(
       ts: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
       ...entry,
     };
-    appendFileSync(join(auditDir, `${taskId}.jsonl`), JSON.stringify(line) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    appendFileSync(join(auditDir, `${taskId}.jsonl`), JSON.stringify(line) + '\n', { encoding: 'utf-8', mode: 0o644 });
   } catch {
     // Never block a real operation on audit-log write failure.
   }
@@ -408,7 +612,14 @@ export function readTaskAudit(
   for (const line of readFileSync(path, 'utf-8').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    try { entries.push(JSON.parse(trimmed) as TaskAuditEntry); } catch { /* skip corrupt */ }
+    try {
+      const raw = JSON.parse(trimmed) as Record<string, unknown>;
+      // Entries written by external tools (e.g. monitor scripts) may omit
+      // `agent` or use `source` instead. Normalise to avoid downstream crashes
+      // from code that calls `entry.agent.padEnd()` without null-checking.
+      if (!raw['agent']) raw['agent'] = (raw['source'] as string | undefined) ?? 'unknown';
+      entries.push(raw as unknown as TaskAuditEntry);
+    } catch { /* skip corrupt */ }
   }
   return entries;
 }
@@ -510,7 +721,17 @@ export function claimTask(
   // so this safely inserts the row if the createTask mirror previously failed.
   if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
     mirrorTaskToRgos(task, 'update').catch(() => undefined);
+    // Insert an execution run row so the Execution Log page has data.
+    const taskUuid = isUuid(taskId) ? taskId : uuidv5(taskId);
+    mirrorTaskRunToRgos({
+      runId: uuidv5(`task_run:${taskId}`),
+      taskId: taskUuid,
+      agentName: agent,
+      status: 'running',
+      startedAt: now,
+    }).catch(() => undefined);
   }
+  autoEmitStatusUpdate(taskId, task.title ?? taskId, prevStatus, 'in_progress');
   return task;
 }
 
@@ -538,9 +759,13 @@ export function completeTask(
     );
   }
   const actualTaskDir = dirname(filePath);
+  const endCost = snapshotSessionCost();
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
   let taskOrg: string = '';
+  let taskTitle: string = taskId;
+  let completedAt: string | undefined;
+  let sessionCostUsd: number | undefined;
   try {
     withTaskLock(actualTaskDir, taskId, () => {
       const content = readFileSync(filePath, 'utf-8');
@@ -548,11 +773,28 @@ export function completeTask(
       prevStatus = task.status;
       assignee = task.assigned_to;
       taskOrg = task.org || '';
+      taskTitle = task.title ?? taskId;
       task.status = 'completed';
       task.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
       task.completed_at = task.updated_at;
+      completedAt = task.completed_at;
       if (result) {
         task.result = result;
+      }
+      // Compute session cost delta if a start snapshot was recorded.
+      const startCost = typeof task.meta?.cost_snapshot_start === 'number'
+        ? task.meta.cost_snapshot_start
+        : undefined;
+      if (startCost !== undefined) {
+        sessionCostUsd = Math.max(0, endCost - startCost);
+        task.meta = { ...(task.meta ?? {}), session_cost_usd: sessionCostUsd };
+      }
+      // Lifecycle binding: close linked goal and loop when task completes.
+      if (task.linked_goal?.status === 'active') {
+        task.linked_goal = { ...task.linked_goal, status: 'met' };
+      }
+      if (task.linked_loop && (task.linked_loop.status === 'active' || task.linked_loop.status === 'suggested')) {
+        task.linked_loop = { ...task.linked_loop, status: 'completed' };
       }
       atomicWriteSync(filePath, JSON.stringify(task));
       // Mirror to Supabase (fire-and-forget)
@@ -564,6 +806,20 @@ export function completeTask(
     throw new Error(`Task ${taskId} complete failed: ${err}`);
   }
   appendTaskAudit(paths, taskId, { event: 'complete', agent: assignee || 'unknown', from: prevStatus, to: 'completed', note: result }, actualTaskDir);
+  // Update the execution run row with completion data.
+  if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+    const taskUuid = isUuid(taskId) ? taskId : uuidv5(taskId);
+    mirrorTaskRunToRgos({
+      runId: uuidv5(`task_run:${taskId}`),
+      taskId: taskUuid,
+      agentName: assignee ?? null,
+      status: 'completed',
+      startedAt: completedAt ?? new Date().toISOString(), // fallback; real start is in the INSERT
+      completedAt: completedAt ?? null,
+      costUsd: sessionCostUsd,
+    }).catch(() => undefined);
+  }
+  autoEmitStatusUpdate(taskId, taskTitle, prevStatus, 'completed', result);
 
   // Activity-feed event. Best-effort — the task is already persisted.
   if (assignee) {
@@ -574,6 +830,117 @@ export function completeTask(
       });
     } catch {
       // Never let observability break task completion.
+    }
+  }
+
+  // Auto-unblock: scan all tasks that declare this task as a blocker and
+  // flip them to pending (ready) if ALL their blockers are now completed.
+  // Best-effort — a failing unblock never rolls back the completion above.
+  try {
+    autoUnblockChildren(paths, taskId);
+  } catch {
+    // Never let auto-unblock break task completion.
+  }
+}
+
+/**
+ * After a task completes, scan every task whose `blocked_by` includes the
+ * completed task ID. For each such child task:
+ *   1. Check if ALL entries in child's `blocked_by` array are now `completed`.
+ *   2. If yes: flip the child from its current status to `pending`, stamp
+ *      `meta.unblocked_at` with the current ISO timestamp, and enqueue an
+ *      inbox message to the child's assignee notifying them it's ready.
+ *
+ * Uses cross-org lookup (findTaskFile) for the child itself so that tasks
+ * filed across org boundaries are properly unblocked. The initial scan uses
+ * the local taskDir (same-org scope), consistent with listTasks / listBlockedBy.
+ *
+ * Best-effort: individual child failures are swallowed so one bad task file
+ * cannot prevent the remaining children from being unblocked.
+ */
+function autoUnblockChildren(paths: BusPaths, completedTaskId: string): void {
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  // Scan local task dir for children that reference the completed task.
+  let files: string[];
+  try {
+    files = readdirSync(paths.taskDir).filter(isTaskJsonFile);
+  } catch {
+    return;
+  }
+
+  for (const file of files) {
+    let child: Task;
+    try {
+      child = JSON.parse(readFileSync(join(paths.taskDir, file), 'utf-8')) as Task;
+    } catch {
+      continue;
+    }
+
+    if (!child.blocked_by?.includes(completedTaskId)) continue;
+    // Only unblock tasks that are still pending or blocked (not cancelled/completed).
+    if (child.status === 'completed' || child.status === 'cancelled') continue;
+
+    // Check if ALL blockers are now completed.
+    const allResolved = child.blocked_by.every((depId) => {
+      if (depId === completedTaskId) return true; // we just completed it
+      const depPath = findTaskFile(paths, depId);
+      if (!depPath) return true; // missing dep treated as resolved (dangling ref)
+      try {
+        const dep = JSON.parse(readFileSync(depPath, 'utf-8')) as Task;
+        return dep.status === 'completed';
+      } catch {
+        return true; // unreadable dep treated as resolved
+      }
+    });
+
+    if (!allResolved) continue;
+
+    // All blockers satisfied — flip child to pending and stamp unblocked_at.
+    const childFilePath = findTaskFile(paths, child.id);
+    if (!childFilePath) continue;
+    const childTaskDir = dirname(childFilePath);
+
+    try {
+      withTaskLock(childTaskDir, child.id, () => {
+        const fresh = JSON.parse(readFileSync(childFilePath, 'utf-8')) as Task;
+        // Guard: re-check status inside the lock to avoid TOCTOU races.
+        if (fresh.status === 'completed' || fresh.status === 'cancelled') return;
+        fresh.status = 'pending';
+        fresh.updated_at = now;
+        fresh.meta = { ...(fresh.meta ?? {}), unblocked_at: now, unblocked_by: completedTaskId };
+        atomicWriteSync(childFilePath, JSON.stringify(fresh));
+        // Mirror to Supabase (fire-and-forget)
+        if (!process.env.VITEST && process.env.NODE_ENV !== 'test') {
+          mirrorTaskToRgos(fresh, 'update').catch(() => undefined);
+        }
+      });
+
+      // Enqueue inbox notification to the child's assignee.
+      const childAssignee = child.assigned_to;
+      if (childAssignee) {
+        try {
+          sendMessage(
+            paths,
+            'cortextos',
+            childAssignee,
+            'normal',
+            `Task ${child.id} unblocked — ${completedTaskId} completed. Pick it up when ready.`,
+          );
+        } catch {
+          // Inbox ping is best-effort — never block unblock logic.
+        }
+      }
+
+      appendTaskAudit(paths, child.id, {
+        event: 'update',
+        agent: 'cortextos',
+        from: child.status,
+        to: 'pending',
+        note: `auto-unblocked by ${completedTaskId}`,
+      }, childTaskDir);
+    } catch {
+      // Individual child failure is swallowed — process remaining children.
     }
   }
 }
@@ -594,11 +961,15 @@ export function listTasks(
   const { taskDir } = paths;
   let files: string[];
   try {
-    files = readdirSync(taskDir).filter(
-      f => f.startsWith('task_') && f.endsWith('.json'),
-    );
-  } catch {
-    return [];
+    files = readdirSync(taskDir).filter(isTaskJsonFile);
+  } catch (err: unknown) {
+    // Surface directory-not-found so callers know the path is wrong,
+    // not just that there happen to be zero tasks.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      throw new Error(`list-tasks: task directory not found: ${taskDir}`);
+    }
+    throw err;
   }
 
   const tasks: Task[] = [];
@@ -652,9 +1023,7 @@ export function listTasks(
 function readAllTasks(taskDir: string): Task[] {
   let files: string[];
   try {
-    files = readdirSync(taskDir).filter(
-      f => f.startsWith('task_') && f.endsWith('.json'),
-    );
+    files = readdirSync(taskDir).filter(isTaskJsonFile);
   } catch {
     return [];
   }
@@ -811,7 +1180,7 @@ export function compactTasks(
   const { taskDir } = paths;
   let files: string[];
   try {
-    files = readdirSync(taskDir).filter(f => f.startsWith('task_') && f.endsWith('.json'));
+    files = readdirSync(taskDir).filter(isTaskJsonFile);
   } catch {
     return report;
   }
@@ -876,7 +1245,7 @@ export function compactTasks(
 
     if (!dryRun) {
       try {
-        appendFileSync(archivePath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o600 });
+        appendFileSync(archivePath, JSON.stringify(entry) + '\n', { encoding: 'utf-8', mode: 0o644 });
         unlinkSync(join(taskDir, `${task.id}.json`));
       } catch (err) {
         report.skipped.push({ id: task.id, reason: `archive write failed: ${err}` });

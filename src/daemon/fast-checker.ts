@@ -54,6 +54,7 @@ export class FastChecker {
   // Poll-cycle stall watchdog + circuit breaker
   private pollCycleWatchdog: NodeJS.Timeout | null = null;
   private lastPollCycleCompletedAt: number = 0;
+  private lastWatchdogTickAt: number = 0;
   private watchdogRestarts: number[] = [];
   private watchdogCircuitBroken: boolean = false;
   private watchdogCircuitBrokenAt: number = 0;
@@ -189,10 +190,30 @@ export class FastChecker {
     // If pollCycle hasn't completed in 90s the loop is wedged — hard-restart.
     // A circuit breaker halts auto-restart after 3 trips in 15 min (upstream likely down).
     this.lastPollCycleCompletedAt = Date.now();
+    this.lastWatchdogTickAt = Date.now();
     const WATCHDOG_INTERVAL_MS = 30_000;
     const STALL_THRESHOLD_MS = 90_000;
     this.pollCycleWatchdog = setInterval(() => {
       const now = Date.now();
+
+      // System-sleep guard: this interval is scheduled for every 30s. If it
+      // fires far later than that, wall-clock jumped while the process was
+      // suspended (macOS sleep / SIGSTOP) — the poll loop and the pollCycle
+      // timeout were frozen too, so the apparent stall is a clock artifact,
+      // not a wedged loop. Reset the stall baselines and skip this tick; a
+      // genuine post-wake stall is still caught on the next tick 30s later.
+      const tickGap = now - this.lastWatchdogTickAt;
+      this.lastWatchdogTickAt = now;
+      if (tickGap > STALL_THRESHOLD_MS) {
+        this.log(
+          `Watchdog: ${Math.round(tickGap / 1000)}s wall-clock gap since last tick ` +
+          `(system sleep/suspend) — resetting stall baseline, not restarting`,
+        );
+        this.lastPollCycleCompletedAt = now;
+        this.stdoutLastChangeAt = now;
+        return;
+      }
+
       if (this.bootstrappedAt === 0) return;
       if (now - this.bootstrappedAt < STALL_THRESHOLD_MS) return;
 

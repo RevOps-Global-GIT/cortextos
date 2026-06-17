@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { spawnSync, execSync } from 'child_process';
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync, utimesSync } from 'fs';
 import { rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -400,6 +400,66 @@ describe('hook-crash-alert smoke', () => {
       expect(content).toMatch(/type=user-stop/);
       // Marker file should be consumed (deleted) by the hook
       expect(existsSync(join(stateDir, '.user-stop'))).toBe(false);
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves fresh .daemon-stop marker for parent daemon shutdown handling', () => {
+    const tmpHome = mkdtempSync(join(tmpdir(), 'ctx-crash-alert-daemon-stop-'));
+    try {
+      const stateDir = join(tmpHome, '.cortextos', 'default', 'state', 'test-agent');
+      mkdirSync(stateDir, { recursive: true });
+      const markerPath = join(stateDir, '.daemon-stop');
+      writeFileSync(markerPath, 'daemon shutdown (SIGTERM)', 'utf-8');
+
+      const result = runHook(
+        'hook-crash-alert',
+        {},
+        {
+          CTX_AGENT_NAME: 'test-agent',
+          CTX_INSTANCE_ID: 'default',
+          HOME: tmpHome,
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+
+      const crashLog = join(tmpHome, '.cortextos', 'default', 'logs', 'test-agent', 'crashes.log');
+      const content = readFileSync(crashLog, 'utf-8');
+      expect(content).toMatch(/type=daemon-stop/);
+      expect(existsSync(markerPath)).toBe(true);
+    } finally {
+      rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores and removes stale .daemon-stop marker before classifying a real crash', () => {
+    const tmpHome = mkdtempSync(join(tmpdir(), 'ctx-crash-alert-daemon-stop-stale-'));
+    try {
+      const stateDir = join(tmpHome, '.cortextos', 'default', 'state', 'test-agent');
+      mkdirSync(stateDir, { recursive: true });
+      const markerPath = join(stateDir, '.daemon-stop');
+      writeFileSync(markerPath, 'old daemon shutdown', 'utf-8');
+      const old = new Date(Date.now() - 5 * 60 * 1000);
+      utimesSync(markerPath, old, old);
+
+      const result = runHook(
+        'hook-crash-alert',
+        {},
+        {
+          CTX_AGENT_NAME: 'test-agent',
+          CTX_INSTANCE_ID: 'default',
+          HOME: tmpHome,
+        },
+      );
+
+      expect(result.exitCode).toBe(0);
+
+      const crashLog = join(tmpHome, '.cortextos', 'default', 'logs', 'test-agent', 'crashes.log');
+      const content = readFileSync(crashLog, 'utf-8');
+      expect(content).toMatch(/type=crash/);
+      expect(existsSync(markerPath)).toBe(false);
     } finally {
       rmSync(tmpHome, { recursive: true, force: true });
     }

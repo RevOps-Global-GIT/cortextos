@@ -1,6 +1,7 @@
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { join } from 'path';
-import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths } from '../types/index.js';
+import type { Approval, ApprovalCategory, ApprovalStatus, BusPaths, EmailMeta } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { parseEnvFile } from '../utils/env.js';
 import { randomString } from '../utils/random.js';
@@ -98,65 +99,79 @@ function postApprovalToActivityChannel(
 }
 
 /**
- * Best-effort: ping the requesting agent's own Telegram chat (the operator's
- * 1:1 conversation with the agent's bot) when a new approval is created.
- * The activity-channel post handles "Approve / Deny" inline routing for the
- * operator-via-orchestrator UX, but operators on a per-agent bot would
- * otherwise miss approvals entirely — that's the source of the observed
- * 50h+ Repo-B-style stalls. This pings them on the bot they're actually
- * watching so they can hop to the orchestrator chat or dashboard to act.
+ * Best-effort: send the approval notification WITH inline Approve/Deny buttons
+ * directly to the orchestrator's primary Telegram chat.
  *
- * Reads BOT_TOKEN + CHAT_ID from `<agentDir>/.env`. Skips silently with a
- * single warn line when either is missing — approvals from a bot-less
- * agent (e.g. a hermes runtime, or pre-onboarding) must still succeed.
+ * The activity-channel post (above) also carries buttons, but that is a
+ * separate bot/chat that operators may not be watching. The orchestrator's
+ * own bot chat is the primary surface Greg uses — this ensures inline buttons
+ * appear there so he can tap Approve/Deny without leaving the conversation.
  *
- * Errors from the network round-trip are suppressed: a Telegram outage
- * must not block approval creation.
+ * Skips silently when:
+ *   - frameworkRoot is not available (cannot resolve orchestrator agent dir)
+ *   - org is empty (multi-org ambiguity)
+ *   - orchestratorName resolves to the requesting agent (would duplicate pingAgentChatId)
+ *   - BOT_TOKEN or CHAT_ID missing from orchestrator .env
+ *
+ * Errors from the network round-trip are suppressed — Telegram outage must
+ * not block approval creation.
  */
-function pingAgentChatId(
-  agentDir: string | undefined,
+function pingOrchestratorChat(
+  frameworkRoot: string | undefined,
+  org: string,
+  orchestratorName: string,
+  requestingAgent: string,
   approvalId: string,
   title: string,
   category: ApprovalCategory,
-  agentName: string,
   context: string | undefined,
 ): Promise<void> {
-  if (!agentDir) {
-    console.warn(
-      `[approval] No agentDir available for ${approvalId} — skipping agent-bot Telegram ping.`,
-    );
+  if (!frameworkRoot || !org) return Promise.resolve();
+  // Don't duplicate if the orchestrator itself created the approval
+  if (orchestratorName === requestingAgent) return Promise.resolve();
+
+  const orchEnvPath = join(frameworkRoot, 'orgs', org, 'agents', orchestratorName, '.env');
+  if (!existsSync(orchEnvPath)) {
+    console.warn(`[approval] Orchestrator .env not found at ${orchEnvPath} — skipping orchestrator chat ping for ${approvalId}.`);
     return Promise.resolve();
   }
-  const envPath = join(agentDir, '.env');
-  if (!existsSync(envPath)) {
-    return Promise.resolve();
-  }
-  const env = parseEnvFile(envPath);
+  const env = parseEnvFile(orchEnvPath);
   const botToken = env.BOT_TOKEN;
   const chatId = env.CHAT_ID;
   if (!botToken || !chatId) {
-    console.warn(
-      `[approval] BOT_TOKEN or CHAT_ID missing in ${envPath} — skipping agent-bot Telegram ping for ${approvalId}.`,
-    );
+    console.warn(`[approval] BOT_TOKEN or CHAT_ID missing in orchestrator .env — skipping orchestrator chat ping for ${approvalId}.`);
     return Promise.resolve();
+  }
+
+  // Dedup guard: if the orchestrator's bot+chat match the activity channel's
+  // bot+chat, postApprovalToActivityChannel already sent a message with
+  // Approve/Deny buttons to this exact chat. Sending again produces the
+  // double-approval-buttons bug Greg reported.
+  const activityEnvPath = join(frameworkRoot, 'orgs', org, 'activity-channel.env');
+  if (existsSync(activityEnvPath)) {
+    try {
+      const activityEnv = parseEnvFile(activityEnvPath);
+      if (activityEnv.ACTIVITY_BOT_TOKEN === botToken && activityEnv.ACTIVITY_CHAT_ID === chatId) {
+        return Promise.resolve();
+      }
+    } catch {
+      // Unreadable activity-channel.env — proceed with orchestrator ping.
+    }
   }
 
   const lines = [
     `🔔 Approval needed: ${title}`,
     `Category: ${category}`,
-    `Requested by: ${agentName}`,
+    `Requested by: ${requestingAgent}`,
   ];
-  if (context) {
-    lines.push('', context);
-  }
+  if (context) lines.push('', context);
   lines.push('', `id: ${approvalId}`);
-  lines.push('', 'Approve via the orchestrator chat (Approve/Deny buttons) or the dashboard.');
   const message = lines.join('\n');
 
   const api = new TelegramAPI(botToken);
-  return api.sendMessage(chatId, message, undefined, { parseMode: null })
+  return api.sendMessage(chatId, message, buildApprovalKeyboard(approvalId), { parseMode: null })
     .then(() => undefined)
-    .catch(() => undefined); // Telegram outage must not fail approval creation.
+    .catch(() => undefined); // Telegram outage must not block approval creation.
 }
 
 /**
@@ -184,6 +199,8 @@ export async function createApproval(
   context?: string,
   frameworkRoot?: string,
   agentDir?: string,
+  emailMeta?: EmailMeta,
+  linkedOrchApprovalId?: string,
 ): Promise<string> {
   validateApprovalCategory(category);
 
@@ -204,6 +221,8 @@ export async function createApproval(
     updated_at: now,
     resolved_at: null,
     resolved_by: null,
+    ...(emailMeta ? { email_meta: emailMeta } : {}),
+    ...(linkedOrchApprovalId ? { linked_orch_approval_id: linkedOrchApprovalId } : {}),
   };
 
   const pendingDir = join(paths.approvalDir, 'pending');
@@ -219,11 +238,13 @@ export async function createApproval(
   // daemon/agent-manager.ts).
   await postApprovalToActivityChannel(paths, org, approvalId, title, category, agentName, context, frameworkRoot);
 
-  // Best-effort ping to the requesting agent's own Telegram bot (the
-  // operator's 1:1 conversation with the agent). Closes the gap where
-  // operators not in the activity channel would miss approvals entirely
-  // (the 50h+ Repo-B-style stall). Errors suppressed — see helper.
-  await pingAgentChatId(agentDir, approvalId, title, category, agentName, context);
+  // Best-effort: send inline Approve/Deny buttons directly to the orchestrator's
+  // primary Telegram chat. The operator expects to act from the orchestrator
+  // conversation — without this, the message text says "Approve via orchestrator
+  // chat" but no buttons are present there. The orchestrator fast-checker's
+  // handleCallback already handles appr_allow|deny_* so callbacks route correctly.
+  const orchName = process.env.CTX_ORCHESTRATOR || 'orchestrator';
+  await pingOrchestratorChat(frameworkRoot, org, orchName, agentName, approvalId, title, category, context);
 
   return approvalId;
 }
@@ -322,4 +343,190 @@ export function listPendingApprovals(paths: BusPaths): Approval[] {
   return approvals.sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   );
+}
+
+/**
+ * Reconcile local pending approvals against orch_approvals in Supabase.
+ *
+ * For each pending approval with a linked_orch_approval_id, queries the
+ * orch_approvals table. Any row whose status is no longer 'pending'
+ * (i.e. resolved via the dashboard) is written to the local resolved/
+ * directory so that listPendingApprovals stops surfacing it as pending.
+ *
+ * This fixes the approval state drift where dashboard-resolved approvals
+ * remain visible as pending in `cortextos bus list-approvals`.
+ *
+ * No-ops gracefully if Supabase credentials are unavailable or the network
+ * call fails — local state is left unchanged.
+ */
+export async function reconcileOrchApprovals(
+  paths: BusPaths,
+  opts?: { supabaseUrl?: string; supabaseKey?: string },
+): Promise<void> {
+  const url = opts?.supabaseUrl
+    || process.env.SUPABASE_RGOS_URL
+    || process.env.SUPABASE_URL
+    || '';
+  const key = opts?.supabaseKey
+    || process.env.SUPABASE_RGOS_SERVICE_KEY
+    || process.env.SUPABASE_SERVICE_ROLE_KEY
+    || '';
+  if (!url || !key) return;
+
+  const pending = listPendingApprovals(paths);
+  const linked = pending.filter(a => a.linked_orch_approval_id);
+  if (linked.length === 0) return;
+
+  // Batch GET: fetch statuses for all linked IDs in one request
+  const ids = linked.map(a => a.linked_orch_approval_id!);
+  const orFilter = ids.map(id => `id.eq.${id}`).join(',');
+
+  let rows: Array<{ id: string; status: string }>;
+  try {
+    const res = await fetch(
+      `${url}/rest/v1/orch_approvals?or=(${encodeURIComponent(orFilter)})&select=id,status`,
+      {
+        headers: { apikey: key, Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(8000),
+      },
+    );
+    if (!res.ok) return;
+    rows = await res.json() as Array<{ id: string; status: string }>;
+  } catch {
+    return; // Network failure — leave local state unchanged
+  }
+
+  // Identify rows resolved in Supabase (status != 'pending')
+  const resolvedInTable = new Map(
+    rows.filter(r => r.status !== 'pending').map(r => [r.id, r.status]),
+  );
+  if (resolvedInTable.size === 0) return;
+
+  const resolvedDir = join(paths.approvalDir, 'resolved');
+  ensureDir(resolvedDir);
+
+  for (const approval of linked) {
+    const orchStatus = resolvedInTable.get(approval.linked_orch_approval_id!);
+    if (!orchStatus) continue;
+    // Write to resolved/ — listPendingApprovals already filters pending entries
+    // that also exist in resolved/, so this suppresses the phantom pending without
+    // re-sending an inbox notification (the dashboard already handled delivery).
+    const resolvedPath = join(resolvedDir, `${approval.id}.json`);
+    if (!existsSync(resolvedPath)) {
+      const now = new Date().toISOString();
+      atomicWriteSync(resolvedPath, JSON.stringify({
+        ...approval,
+        status: orchStatus as ApprovalStatus,
+        resolved_at: now,
+        resolved_by: 'dashboard',
+        updated_at: now,
+      }));
+    }
+  }
+}
+
+/**
+ * Read a single approval by id. Searches resolved/ first, then pending/.
+ * Returns null if not found.
+ */
+export function readApproval(paths: BusPaths, approvalId: string): Approval | null {
+  const resolvedPath = join(paths.approvalDir, 'resolved', `${approvalId}.json`);
+  const pendingPath = join(paths.approvalDir, 'pending', `${approvalId}.json`);
+  for (const p of [resolvedPath, pendingPath]) {
+    if (existsSync(p)) {
+      try {
+        return JSON.parse(readFileSync(p, 'utf-8')) as Approval;
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Build a base64url-encoded RFC 2822 email message suitable for the Gmail
+ * API `users.messages.send` body: `{ "raw": "<base64url>" }`.
+ */
+function buildRawEmail(opts: {
+  from: string;
+  to: string;
+  subject: string;
+  body: string;
+  replyTo?: string;
+  cc?: string;
+}): string {
+  const headers: string[] = [
+    `From: ${opts.from}`,
+    `To: ${opts.to}`,
+    `Subject: ${opts.subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset="UTF-8"',
+  ];
+  if (opts.replyTo) headers.push(`Reply-To: ${opts.replyTo}`);
+  if (opts.cc) headers.push(`Cc: ${opts.cc}`);
+  const raw = `${headers.join('\r\n')}\r\n\r\n${opts.body}`;
+  return Buffer.from(raw).toString('base64url');
+}
+
+/**
+ * Send an approved email by approval id.
+ *
+ * Validates:
+ *   - approval exists and status === 'approved'
+ *   - approval has email_meta (to, subject, body)
+ *
+ * Sends via `gws gmail users messages send` using the configured
+ * GOOGLE_REFRESH_TOKEN / gws credentials.
+ *
+ * The `from` address defaults to the AGENT_EMAIL env var, falling back to
+ * support@revopsglobal.ai — override in email_meta.from if needed.
+ *
+ * Writes a send-audit entry to approvals/resolved/<id>-sent.json.
+ */
+export function sendApprovedEmail(
+  paths: BusPaths,
+  approvalId: string,
+  opts: { dryRun?: boolean } = {},
+): { id: string; threadId?: string } {
+  const approval = readApproval(paths, approvalId);
+  if (!approval) {
+    throw new Error(`Approval ${approvalId} not found`);
+  }
+  if (approval.status !== 'approved') {
+    throw new Error(`Approval ${approvalId} is ${approval.status}, not approved`);
+  }
+  if (!approval.email_meta) {
+    throw new Error(`Approval ${approvalId} has no email_meta — use create-approval with --email-meta`);
+  }
+
+  const { to, subject, body, reply_to, cc, from } = approval.email_meta;
+  const fromAddress = from || process.env.AGENT_EMAIL || 'support@revopsglobal.ai';
+
+  const raw = buildRawEmail({ from: fromAddress, to, subject, body, replyTo: reply_to, cc });
+
+  if (opts.dryRun) {
+    return { id: 'dry-run' };
+  }
+
+  const result = execFileSync('gws', [
+    'gmail', 'users', 'messages', 'send',
+    '--json', JSON.stringify({ raw }),
+    '--format', 'json',
+  ], { encoding: 'utf-8' });
+
+  const parsed = JSON.parse(result) as { id: string; threadId?: string };
+
+  // Write audit record so the approval is traceable
+  const auditPath = join(paths.approvalDir, 'resolved', `${approvalId}-sent.json`);
+  writeFileSync(auditPath, JSON.stringify({
+    approval_id: approvalId,
+    sent_at: new Date().toISOString(),
+    message_id: parsed.id,
+    thread_id: parsed.threadId ?? null,
+    to,
+    subject,
+  }));
+
+  return parsed;
 }

@@ -42,6 +42,8 @@ const SSH_CONNECTION_ERRORS = [
   'ssh: connect to host gregs-mac port 22: No route to host',
   'ssh: connect to host gregs-mac port 22: Network is unreachable',
   'ssh: connect to host gregs-mac port 22: Operation timed out',
+  'ssh: Could not resolve hostname gregs-mac: nodename nor servname provided, or not known',
+  'ssh: Could not resolve hostname gregs-macbook-air: Name or service not known',
   'ConnectTimeout: connection timed out',
   'Connection timed out after 10 seconds',
   'No such host: gregs-mac',
@@ -52,10 +54,17 @@ const SSH_CONNECTION_ERRORS = [
   'kex_exchange_identification: Connection closed by remote host',
 ];
 
-// SSH non-connection errors — should NOT trigger fallback
+// SSH non-connection task errors — should NOT trigger fallback
 const SSH_TASK_ERRORS = [
-  'Permission denied (publickey)',
   'Process exited with code 1',
+];
+
+// SSH auth/trust errors — should NOT trigger fallback or be labeled unreachable
+const SSH_AUTH_OR_HOST_KEY_ERRORS = [
+  'Permission denied (publickey)',
+  'Permission denied, please try again.\nReceived disconnect from 100.84.86.6 port 22:2: Too many authentication failures',
+  'Host key verification failed.',
+  'WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!',
 ];
 
 // Helper: set up a connection-error SSH throw + consume the log-event call
@@ -102,6 +111,16 @@ describe('computerUse — SSH success path', () => {
     // TOFU host key checking (not =no)
     expect(args).toContain('StrictHostKeyChecking=accept-new');
     expect(args).not.toContain('StrictHostKeyChecking=no');
+  });
+
+  it('defaults to the current Mac Tailscale SSH target', async () => {
+    mockExecFileSync.mockReturnValueOnce('done\n');
+
+    await computerUse('do something', { noPlugin: true });
+
+    const [cmd, args] = mockExecFileSync.mock.calls[0];
+    expect(cmd).toBe('ssh');
+    expect(args).toContain('gregharned@gregs-macbook-air');
   });
 
   it('passes --workdir flag to dispatch script (embedded in command string)', async () => {
@@ -159,6 +178,24 @@ describe('computerUse — SSH task-level failure (no fallback)', () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain(errorMsg);
       // Only the SSH call — task errors don't trigger log-event or fallback
+      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    },
+  );
+});
+
+describe('computerUse — SSH auth and host-key failures (no fallback)', () => {
+  beforeEach(() => vi.resetAllMocks());
+
+  it.each(SSH_AUTH_OR_HOST_KEY_ERRORS)(
+    'returns an explicit auth/host-key error without fallback: %s',
+    async (errorMsg) => {
+      mockExecFileSync.mockImplementationOnce(() => { throw new Error(errorMsg); });
+
+      const result = await computerUse('some task', { noPlugin: true });
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/Mac SSH authentication\/host-key failure/i);
+      expect(result.usedFallback).toBe(false);
       expect(mockExecFileSync).toHaveBeenCalledTimes(1);
     },
   );

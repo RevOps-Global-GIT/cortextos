@@ -72,7 +72,7 @@ export function isEnabled(): boolean {
 // ---------------------------------------------------------------------------
 
 export interface RetryEntry {
-  table: 'orch_tasks' | 'cortex_messages' | 'orch_events';
+  table: 'orch_tasks' | 'cortex_messages' | 'orch_events' | 'orch_reviews' | 'orch_task_runs';
   row: Record<string, unknown>;
   ts: string;
   retries_remaining?: number;
@@ -156,7 +156,7 @@ export class PostgRESTError extends Error {
 // ---------------------------------------------------------------------------
 
 async function postgrestUpsert(
-  table: 'orch_tasks' | 'cortex_messages' | 'orch_events',
+  table: RetryEntry['table'],
   row: Record<string, unknown>,
 ): Promise<void> {
   const url = process.env.SUPABASE_RGOS_URL!;
@@ -218,6 +218,131 @@ async function postgrestUpsert(
   }
 }
 
+/**
+ * Look up an existing mirrored RGOS task row by the canonical local bus task ID
+ * preserved in metadata.bus_task_id.
+ *
+ * Early mirror versions and dashboard-side writers could create random-UUID
+ * orch_tasks rows before the UUIDv5 id convention was universal. Reusing that
+ * existing row ID prevents a later status update from creating a second
+ * deterministic UUID shadow row for the same local task.
+ *
+ * Dual-write dedup: when an agent calls both cortex_create_task (source=null)
+ * AND bus create-task for the same work, two rows would otherwise appear. If the
+ * primary bus_task_id lookup finds nothing, a secondary proximity query matches
+ * source=null rows with the same title created within ±5 minutes, and reuses
+ * their ID so the bus mirror upserts onto the existing row instead of inserting
+ * a duplicate.
+ */
+export async function resolveExistingTaskMirrorId(
+  busTaskId: string,
+  fallbackId: string,
+  title?: string,
+  createdAt?: string,
+): Promise<string> {
+  const url = process.env.SUPABASE_RGOS_URL!;
+  const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
+  const headers = {
+    'apikey': serviceKey,
+    'Authorization': `Bearer ${serviceKey}`,
+    'Accept': 'application/json',
+  };
+
+  // Primary lookup: find rows where metadata.bus_task_id matches the bus ID.
+  const primaryEp = new URL(`${url}/rest/v1/orch_tasks`);
+  primaryEp.searchParams.set('select', 'id,updated_at');
+  primaryEp.searchParams.set('metadata->>bus_task_id', `eq.${busTaskId}`);
+  primaryEp.searchParams.set('order', 'updated_at.desc');
+  primaryEp.searchParams.set('limit', '5');
+
+  let primaryRes: Response;
+  try {
+    primaryRes = await fetch(primaryEp.toString(), {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch {
+    // Network error — treat as no existing row found.
+    return fallbackId;
+  }
+
+  // Primary request failed — return deterministic ID without attempting proximity lookup.
+  if (!primaryRes.ok) return fallbackId;
+
+  const primaryRows = typeof primaryRes.json === 'function'
+    ? await primaryRes.json().catch(() => []) as Array<{ id?: unknown }>
+    : [];
+  const primaryIds = primaryRows
+    .map(row => row.id)
+    .filter((id): id is string => typeof id === 'string' && isUuid(id));
+
+  if (primaryIds.length > 0) {
+    return primaryIds.find(id => id === fallbackId) ?? primaryIds[0];
+  }
+
+  // Secondary lookup: catch cortex_create_task rows (source=null) for the same
+  // title within a ±5-minute window. This prevents dual-write duplicates when an
+  // agent calls both cortex_create_task and bus create-task for the same task.
+  if (title && createdAt) {
+    try {
+      const anchor = new Date(createdAt);
+      if (!isNaN(anchor.getTime())) {
+        const windowMs = 5 * 60 * 1000;
+        const lower = new Date(anchor.getTime() - windowMs).toISOString();
+        const upper = new Date(anchor.getTime() + windowMs).toISOString();
+
+        const proximityEp = new URL(`${url}/rest/v1/orch_tasks`);
+        proximityEp.searchParams.set('select', 'id,created_at');
+        proximityEp.searchParams.set('title', `eq.${title}`);
+        proximityEp.searchParams.set('source', 'is.null');
+        proximityEp.searchParams.append('created_at', `gte.${lower}`);
+        proximityEp.searchParams.append('created_at', `lte.${upper}`);
+        proximityEp.searchParams.set('order', 'created_at.desc');
+        proximityEp.searchParams.set('limit', '1');
+
+        const proximityRes = await fetch(proximityEp.toString(), {
+          method: 'GET',
+          headers,
+          signal: AbortSignal.timeout(10_000),
+        });
+
+        if (proximityRes.ok) {
+          const rows = typeof proximityRes.json === 'function'
+            ? await proximityRes.json().catch(() => []) as Array<{ id?: unknown }>
+            : [];
+          const match = rows
+            .map(row => row.id)
+            .find((id): id is string => typeof id === 'string' && isUuid(id));
+          if (match) return match;
+        }
+      }
+    } catch {
+      // Proximity lookup is best-effort; fall through to deterministic ID.
+    }
+  }
+
+  return fallbackId;
+}
+
+async function resolveTaskMirrorRow(row: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const metadata = row.metadata as Record<string, unknown> | undefined;
+  const busTaskId = metadata?.bus_task_id;
+  const fallbackId = row.id;
+  if (
+    typeof busTaskId !== 'string' ||
+    typeof fallbackId !== 'string' ||
+    !isUuid(fallbackId)
+  ) {
+    return row;
+  }
+
+  const title = typeof row.title === 'string' ? row.title : undefined;
+  const createdAt = typeof row.created_at === 'string' ? row.created_at : undefined;
+  const resolvedId = await resolveExistingTaskMirrorId(busTaskId, fallbackId, title, createdAt);
+  return resolvedId === fallbackId ? row : { ...row, id: resolvedId };
+}
+
 // ---------------------------------------------------------------------------
 // Retry drain (async, module-level concurrency lock)
 // ---------------------------------------------------------------------------
@@ -251,7 +376,10 @@ export async function drainRetryQueue(): Promise<void> {
       }
 
       try {
-        await postgrestUpsert(entry.table, entry.row);
+        const row = entry.table === 'orch_tasks'
+          ? await resolveTaskMirrorRow(entry.row)
+          : entry.row;
+        await postgrestUpsert(entry.table, row);
         countProcessed++;
       } catch (err) {
         if (err instanceof PostgRESTError && err.isPermanent) {
@@ -328,13 +456,15 @@ export function migrateRetryQueueConstraints(): void {
 
     const needsPriority = priority !== undefined && !RGOS_VALID_PRIORITIES.has(priority);
     const needsStatus = status !== undefined && !RGOS_VALID_STATUSES.has(status);
+    const needsBlockerStatus = status !== 'blocked' && status !== 'completed' && status !== 'cancelled' && isRowBlockerLike(entry.row);
 
-    if (!needsPriority && !needsStatus) return entry;
+    if (!needsPriority && !needsStatus && !needsBlockerStatus) return entry;
 
     changed = true;
     const newRow = { ...entry.row };
     if (needsPriority) newRow.priority = mapPriority(priority!);
     if (needsStatus) newRow.status = mapStatus(status!);
+    if (needsBlockerStatus) newRow.status = 'blocked';
     return { ...entry, row: newRow };
   });
 
@@ -445,8 +575,11 @@ const PRIORITY_MAP: Record<string, string> = {
 };
 
 // RGOS orch_tasks.status accepts: proposed | approved | in_progress | completed | cancelled | blocked | review
+// Bus `pending` maps to `proposed` (not `approved`) so Hub can distinguish newly-created
+// tasks from explicitly approved ones. Reverse sync maps `proposed` → `pending` in bus.
 const STATUS_MAP: Record<string, string> = {
-  pending: 'approved',
+  pending: 'proposed',
+  approved: 'approved',
   in_progress: 'in_progress',
   completed: 'completed',
   cancelled: 'cancelled',
@@ -459,7 +592,44 @@ export function mapPriority(p: string): string {
 }
 
 export function mapStatus(s: string): string {
-  return STATUS_MAP[s] ?? 'approved';
+  return STATUS_MAP[s] ?? 'proposed';
+}
+
+function isTaskBlockerLike(task: Task): boolean {
+  const assignedTo = task.assigned_to ?? '';
+  return task.project === 'human-tasks'
+    || assignedTo === 'human'
+    || assignedTo === 'user'
+    || task.title.startsWith('[HUMAN]')
+    || (Array.isArray(task.blocked_by) && task.blocked_by.length > 0);
+}
+
+function rowValue(row: Record<string, unknown>, key: string): unknown {
+  return row[key];
+}
+
+function isRowBlockerLike(row: Record<string, unknown>): boolean {
+  const metadata = rowValue(row, 'metadata') as Record<string, unknown> | undefined;
+  const title = String(rowValue(row, 'title') ?? '');
+  const assignedTo = String(rowValue(row, 'assigned_to') ?? '');
+  const project = String(metadata?.project ?? '');
+  const blockedBy = rowValue(row, 'blocked_by') ?? metadata?.blocked_by;
+  return project === 'human-tasks'
+    || assignedTo === 'human'
+    || assignedTo === 'user'
+    || title.startsWith('[HUMAN]')
+    || (Array.isArray(blockedBy) && blockedBy.length > 0);
+}
+
+function mapTaskStatus(task: Task): string {
+  if (
+    isTaskBlockerLike(task)
+    && task.status !== 'completed'
+    && task.status !== 'cancelled'
+  ) {
+    return 'blocked';
+  }
+  return mapStatus(task.status);
 }
 
 // ---------------------------------------------------------------------------
@@ -468,11 +638,11 @@ export function mapStatus(s: string): string {
 
 export function buildTaskRow(task: Task): Record<string, unknown> {
   return {
-    id: uuidv5(task.id),
+    id: isUuid(task.id) ? task.id : uuidv5(task.id),
     org_id: ORG_ID,
     title: task.title,
     description: task.description || null,
-    status: mapStatus(task.status),
+    status: mapTaskStatus(task),
     priority: mapPriority(task.priority),
     assigned_to: task.assigned_to,
     created_by: task.created_by,
@@ -480,12 +650,15 @@ export function buildTaskRow(task: Task): Record<string, unknown> {
     result: task.result ?? null,
     result_links: null,
     goal_ancestry: null,
+    blocked_by: task.blocked_by && task.blocked_by.length > 0 ? task.blocked_by : null,
     tokens_cost: null,
     created_at: task.created_at,
     updated_at: task.updated_at,
     completed_at: task.completed_at ?? null,
     due_date: task.due_date ?? null,
     project_id: null,
+    ...(task.dispatch_batch_id ? { dispatch_batch_id: task.dispatch_batch_id } : {}),
+    ...(typeof task.parallel_count === 'number' ? { parallel_count: task.parallel_count } : {}),
     metadata: {
       bus_task_id: task.id,
       org: task.org,
@@ -523,6 +696,87 @@ export function buildMessageRow(msg: InboxMessage): Record<string, unknown> {
   };
 }
 
+export interface ReviewMirrorInput {
+  runId: string;
+  org: string;
+  type: 'morning' | 'evening' | 'weekly';
+  periodStart: string;
+  periodEnd: string;
+  summary: Record<string, unknown>;
+  createdAt?: string;
+}
+
+export function buildReviewRow(review: ReviewMirrorInput): Record<string, unknown> {
+  return {
+    id: uuidv5(`orch_review:${review.org}:${review.type}:${review.runId}`),
+    org_id: review.org,
+    type: review.type,
+    period_start: review.periodStart,
+    period_end: review.periodEnd,
+    summary_json: review.summary,
+    slack_ts: null,
+    created_at: review.createdAt ?? review.periodEnd,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Realtime presence broadcast (STACK-11)
+// ---------------------------------------------------------------------------
+
+// Hub (hub.revopsglobal.com) subscribes to the "agent-presence" channel.
+// The local cortextos/dashboard SSE proxy (presence/stream) also uses this channel.
+const PRESENCE_CHANNEL = 'agent-presence';
+
+export interface AgentPresencePayload {
+  // Hub-compatible fields (useFleetTaskPresence → normalizeBroadcast expects these)
+  agent_id: string;
+  current_action: string;
+  current_task_id: string | null;
+  cursor_position_hint: string | null;
+  ts: string;
+  // Cursor anchor: task ID the agent is currently focused on. Cursor layer
+  // uses this to position the floating cursor near the matching task card.
+  anchor_task_id?: string | null;
+  // Legacy cortextos-bus fields kept for local dashboard compat
+  actor_id: string;
+  kind: 'agent';
+  name: string;
+  avatar_url: string | null;
+  task_id: string | null;
+  task_title: string | null;
+  status: 'task_created' | 'task_updated' | 'task_completed' | 'idle';
+  action_label: string | null;
+  updated_at: string;
+  source: 'cortextos-bus';
+}
+
+/**
+ * Broadcast agent presence via Supabase Realtime REST API. Fire-and-forget —
+ * never throws, never retries. Presence is ephemeral; gaps are acceptable.
+ * Hub side subscribes to the "agent-presence" channel for `presence_update` events.
+ */
+export async function broadcastPresence(payload: AgentPresencePayload): Promise<void> {
+  if (!isEnabled()) return;
+  const url = process.env.SUPABASE_RGOS_URL!;
+  const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
+  try {
+    await fetch(`${url}/realtime/v1/api/broadcast`, {
+      method: 'POST',
+      headers: {
+        'apikey': serviceKey,
+        'Authorization': `Bearer ${serviceKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messages: [{ topic: PRESENCE_CHANNEL, event: 'presence_update', payload }],
+      }),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch {
+    // Presence is best-effort; swallow all errors silently
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -533,10 +787,43 @@ export function buildMessageRow(msg: InboxMessage): Record<string, unknown> {
  */
 export async function mirrorTaskToRgos(
   task: Task,
-  _event: 'create' | 'update' | 'complete',
+  event: 'create' | 'update' | 'complete',
 ): Promise<void> {
   if (!isEnabled()) return;
   const row = buildTaskRow(task);
+  // Always resolve the existing mirror row ID — not just on update/complete.
+  // A retried create from the retry queue must land on the same row, not
+  // insert a second shadow row that inflates the completed-task count.
+  row.id = await resolveExistingTaskMirrorId(task.id, row.id as string, task.title, task.created_at);
+  const agentId = task.assigned_to ?? process.env.CTX_AGENT_NAME ?? 'unknown';
+  const action = event === 'create' ? 'task_created'
+    : event === 'complete' ? 'task_completed'
+    : 'task_updated';
+  const actionLabel = event === 'create' ? `Creating: ${task.title.slice(0, 60)}`
+    : event === 'complete' ? `Completed: ${task.title.slice(0, 60)}`
+    : `Working: ${task.title.slice(0, 60)}`;
+  const ts = new Date().toISOString();
+  setImmediate(() => broadcastPresence({
+    // Hub-compatible fields
+    agent_id: agentId,
+    current_action: action,
+    current_task_id: task.id,
+    cursor_position_hint: actionLabel,
+    ts,
+    // Cursor layer: anchor to this task card on the kanban board
+    anchor_task_id: event === 'complete' ? null : task.id,
+    // Local dashboard fields
+    actor_id: agentId,
+    kind: 'agent',
+    name: agentId,
+    avatar_url: null,
+    task_id: task.id,
+    task_title: task.title.slice(0, 80),
+    status: action,
+    action_label: actionLabel,
+    updated_at: ts,
+    source: 'cortextos-bus',
+  }).catch(() => { /* already swallowed inside broadcastPresence */ }));
   try {
     await postgrestUpsert('orch_tasks', row);
     // Async drain: never await, never block the write path
@@ -549,6 +836,59 @@ export async function mirrorTaskToRgos(
       enqueueRetry({ table: 'orch_tasks', row, ts: new Date().toISOString() });
     }
   }
+}
+
+/**
+ * Patch pr_url into an existing orch_tasks mirror row's metadata. Best-effort — never throws.
+ * Looks up the row by metadata.bus_task_id, merges pr_url, PATCHes back.
+ */
+export async function mirrorPrUrlToRgos(busTaskId: string, prUrl: string): Promise<void> {
+  if (!isEnabled()) return;
+  const url = process.env.SUPABASE_RGOS_URL!;
+  const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
+
+  // Locate the bus_mirror row for this task.
+  const findEp = new URL(`${url}/rest/v1/orch_tasks`);
+  findEp.searchParams.set('select', 'id,metadata');
+  findEp.searchParams.set('metadata->>bus_task_id', `eq.${busTaskId}`);
+  findEp.searchParams.set('source', `eq.${MIRROR_SOURCE}`);
+  findEp.searchParams.set('limit', '1');
+
+  let rowId: string | undefined;
+  let existingMeta: Record<string, unknown> = {};
+  try {
+    const findRes = await fetch(findEp.toString(), {
+      method: 'GET',
+      headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (findRes.ok) {
+      const rows = await findRes.json().catch(() => []) as Array<{ id?: string; metadata?: Record<string, unknown> }>;
+      if (rows.length > 0 && typeof rows[0].id === 'string') {
+        rowId = rows[0].id;
+        existingMeta = (rows[0].metadata && typeof rows[0].metadata === 'object') ? rows[0].metadata : {};
+      }
+    }
+  } catch { return; }
+
+  if (!rowId) return; // no mirror row found — skip silently
+
+  // PATCH metadata with pr_url merged in.
+  const patchEp = new URL(`${url}/rest/v1/orch_tasks`);
+  patchEp.searchParams.set('id', `eq.${rowId}`);
+  try {
+    await fetch(patchEp.toString(), {
+      method: 'PATCH',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({ metadata: { ...existingMeta, pr_url: prUrl } }),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch { /* best-effort */ }
 }
 
 /**
@@ -586,9 +926,13 @@ export async function mirrorEventToRgos(event: {
   metadata: Record<string, unknown>;
 }): Promise<void> {
   if (!isEnabled()) return;
+  // ID unification: accept both RGOS UUIDs (passthrough) and raw bus task IDs
+  // (convert to the same uuidv5 the task row uses) so orch_events.task_id always
+  // resolves to the canonical RGOS UUID for the task, enabling drawer history lookups.
+  const rawTaskId = event.metadata.task_id;
   const taskId =
-    typeof event.metadata.task_id === 'string' && isUuid(event.metadata.task_id)
-      ? (event.metadata.task_id as string)
+    typeof rawTaskId === 'string' && rawTaskId.length > 0
+      ? (isUuid(rawTaskId) ? rawTaskId : uuidv5(rawTaskId))
       : null;
   const row = {
     id: uuidv5(event.id),
@@ -608,6 +952,87 @@ export async function mirrorEventToRgos(event: {
     } else {
       console.warn(`[bus-mirror] orch_events upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
       enqueueRetry({ table: 'orch_events', row, ts: new Date().toISOString(), retries_remaining: EVENT_RETRY_MAX });
+    }
+  }
+}
+
+/**
+ * Mirror a daemon-fired spawn-codex review into RGOS orch_reviews so daemon
+ * and Supabase pg_cron reviews share the same Reviews feed.
+ */
+export async function mirrorReviewToRgos(review: ReviewMirrorInput): Promise<void> {
+  if (!isEnabled()) return;
+  const row = buildReviewRow(review);
+  try {
+    await postgrestUpsert('orch_reviews', row);
+    setImmediate(() => drainRetryQueue().catch(err => escalateCritical('bus-mirror drain loop (review)', err, { queue: 'reviews' })));
+  } catch (err) {
+    if (err instanceof PostgRESTError && err.isPermanent) {
+      console.error(`[bus-mirror] orch_reviews upsert permanent error (HTTP ${err.status}) — discarding: ${err.message}`);
+    } else {
+      console.warn(`[bus-mirror] orch_reviews upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
+      enqueueRetry({ table: 'orch_reviews', row, ts: new Date().toISOString(), retries_remaining: EVENT_RETRY_MAX });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// orch_task_runs — execution run lifecycle writes
+// ---------------------------------------------------------------------------
+
+export interface TaskRunInput {
+  /** Deterministic run ID: uuidv5 of 'task_run:<busTaskId>') */
+  runId: string;
+  /** The mirrored RGOS task UUID (uuidv5 of bus task ID) */
+  taskId: string;
+  /** Agent name — will be converted to uuidv5 for the agent_id FK */
+  agentName: string | null;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startedAt: string;
+  completedAt?: string | null;
+  tokensInput?: number;
+  tokensOutput?: number;
+  costUsd?: number;
+  errorMessage?: string | null;
+  traceId?: string | null;
+}
+
+export function buildTaskRunRow(input: TaskRunInput): Record<string, unknown> {
+  return {
+    id: input.runId,
+    task_id: input.taskId,
+    agent_id: input.agentName ? uuidv5(input.agentName) : null,
+    trace_id: input.traceId ?? null,
+    status: input.status,
+    started_at: input.startedAt,
+    completed_at: input.completedAt ?? null,
+    tokens_input: input.tokensInput ?? 0,
+    tokens_output: input.tokensOutput ?? 0,
+    cost_usd: input.costUsd ?? 0,
+    error_message: input.errorMessage ?? null,
+  };
+}
+
+/**
+ * Mirror a task run start or completion to Supabase orch_task_runs.
+ * Fire-and-forget — never throws. Failures are queued for retry.
+ *
+ * On task claim/start: INSERT with status='running', started_at=now().
+ * On task complete: UPDATE (upsert) with status='completed', completed_at,
+ *   tokens_input/output/cost_usd when available from session cost snapshot.
+ */
+export async function mirrorTaskRunToRgos(input: TaskRunInput): Promise<void> {
+  if (!isEnabled()) return;
+  const row = buildTaskRunRow(input);
+  try {
+    await postgrestUpsert('orch_task_runs', row);
+    setImmediate(() => drainRetryQueue().catch(err => escalateCritical('bus-mirror drain loop (task_run)', err, { queue: 'task_runs' })));
+  } catch (err) {
+    if (err instanceof PostgRESTError && err.isPermanent) {
+      console.error(`[bus-mirror] orch_task_runs upsert permanent error (HTTP ${err.status}) — discarding: ${err.message}`);
+    } else {
+      console.warn(`[bus-mirror] orch_task_runs upsert failed — queuing for retry: ${err instanceof Error ? err.message : String(err)}`);
+      enqueueRetry({ table: 'orch_task_runs', row, ts: new Date().toISOString() });
     }
   }
 }

@@ -450,6 +450,34 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(text).toContain('Do not reply through the codex channel.');
   });
 
+  it('handles app-server exit while turn/start is still pending', async () => {
+    let resolveTurnStart: ((value: unknown) => void) | null = null;
+    requestMock.mockImplementation((method: string) => {
+      if (method === 'turn/start') {
+        return new Promise((resolve) => {
+          resolveTurnStart = resolve;
+        });
+      }
+      return Promise.resolve({ result: {} });
+    });
+    const pty = makeReadyPty();
+    const startTurn = (pty as unknown as {
+      startTurn(input: unknown[]): Promise<void>;
+      rejectTurnCompletion(err: Error): void;
+    }).startTurn.bind(pty);
+    const rejectTurnCompletion = (pty as unknown as {
+      rejectTurnCompletion(err: Error): void;
+    }).rejectTurnCompletion.bind(pty);
+
+    const turn = startTurn([{ type: 'text', text: 'hello', text_elements: [] }]);
+    await Promise.resolve();
+    rejectTurnCompletion(new Error('Codex app-server exited'));
+    await Promise.resolve();
+    resolveTurnStart?.({ result: {} });
+
+    await expect(turn).rejects.toThrow('Codex app-server exited');
+  });
+
   it('routes Telegram-delivered /heartbeat through the slash rewrite', async () => {
     requestMock
       .mockResolvedValueOnce({
@@ -500,6 +528,7 @@ Reply using: cortextos bus send-telegram 7940429114 '<your reply>'
     expect(requestMock).toHaveBeenCalledTimes(1);
 
     internals.handleRpcMessage({ method: 'turn/completed', params: {} });
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
     expect(requestMock).toHaveBeenCalledTimes(2);

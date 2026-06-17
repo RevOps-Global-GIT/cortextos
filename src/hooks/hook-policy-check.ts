@@ -56,11 +56,59 @@ function checkP1(command: string, agent: string): void {
 }
 
 /**
- * P2: All git pushes must target 'fork' remote, never 'origin'.
- * origin = grandamenium public repo with 77 external PRs.
+ * Best-effort check: does the git repo containing `cwd` have any remote that
+ * resolves to grandamenium/* on github.com? That is the precise definition of
+ * the public-fork relationship the P2 policy is designed to protect.
  *
- * Strips heredoc content (<<'EOF'...EOF) before matching so that
- * commit messages containing "git push" in their body don't false-positive.
+ * Returns false on any failure (not a git repo, git not on PATH, command
+ * times out). Fail-open is intentional here: P2 should only fire on the
+ * cortextos repo. If we cannot identify the repo, the safer default is to
+ * allow the push and let the developer notice an accidental wrong-target
+ * push themselves, rather than blanket-blocking pushes from every repo.
+ */
+function repoHasGrandameniumRemote(cwd?: string): boolean {
+  try {
+    const out = execFileSync('git', ['remote', '-v'], {
+      cwd,
+      timeout: 1500,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return /github\.com[/:]grandamenium\//i.test(out);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extract a leading `cd <path> && ...` (or `cd <path>; ...`) target from a
+ * Bash command. Returns the path or null if there is no cd prefix.
+ *
+ * The hook process inherits its cwd from the Claude Code session, which for
+ * agent runners is typically inside the cortextos repo. The actual git push
+ * may happen in a different repo entered via an explicit `cd <path> &&`
+ * prefix. Honoring that prefix is what makes P2 truly repo-aware.
+ */
+function extractCdTarget(command: string): string | null {
+  const m = command.match(
+    /^\s*cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*(?:&&|;)/,
+  );
+  if (!m) return null;
+  return m[1] ?? m[2] ?? m[3] ?? null;
+}
+
+/**
+ * P2: Pushes from the cortextos repo must target 'fork' remote, never the
+ * public grandamenium/cortextos upstream.
+ *
+ * This check is repo-aware: it only fires when the git repo containing the
+ * push has a remote pointing at grandamenium/*. Other repos (ob1-app, rgos,
+ * etc.) have origin pointing at the canonical target and no parallel `fork`
+ * remote — blanket-blocking pushes there was an over-fire that this fix
+ * addresses.
+ *
+ * Strips heredoc content (<<'EOF'...EOF) before matching so commit messages
+ * containing "git push" in their body don't false-positive.
  */
 function checkP2(command: string, agent: string): void {
   // Strip heredoc content — everything from <<'MARKER' or <<MARKER onward.
@@ -75,6 +123,11 @@ function checkP2(command: string, agent: string): void {
 
   // Allow --delete on any remote (branch deletion is low-risk)
   if (/git push\s+\S+\s+--delete/.test(skeleton) || /git push\s+--delete/.test(skeleton)) return;
+
+  // Repo-aware gate. Honor an explicit `cd <path> &&` prefix so the remote
+  // lookup happens in the repo where the push will actually land.
+  const cwd = extractCdTarget(skeleton) ?? process.cwd();
+  if (!repoHasGrandameniumRemote(cwd)) return;
 
   blockCall('P2', `Push target must be 'fork' (RevOps-Global-GIT), not origin (grandamenium — public repo). Use: git push fork <branch>. Agent: "${agent}"`);
 }
