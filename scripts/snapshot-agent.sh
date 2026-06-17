@@ -69,6 +69,40 @@ MEMORY_FILE="$AGENT_DIR/memory/$TODAY.md"
 # The marker tells the post-restart session it came out of an auto-snapshot so
 # it does not have to guess where the previous session left off.
 mkdir -p "$AGENT_DIR/memory" 2>/dev/null
+
+# Cap / auto-rotate ON WRITE — kills the context-bloat boot-loop failure class.
+# A daily memory file that balloons (mostly self-inflicted AUTO-SNAPSHOT/Session-Start
+# spam) gets re-read on every boot; once it pushes boot context past an agent's
+# ctx_autoreset_threshold the daemon force-restarts, which appends ANOTHER snapshot
+# and re-reads — a 2-3min restart loop (hit orchestrator + codex-3 on 2026-06-17).
+# Before appending, if today's file already exceeds the cap, archive the FULL file
+# (history is preserved, never deleted) and replace it with a lean stub (rotation
+# pointer + recent tail). The cap is well under the lowest agent ctx_autoreset_threshold
+# so a freshly-rotated file can never re-trigger a boot-time force-restart.
+# Override with DAILY_MEMORY_CAP_BYTES (default 32768 = 32KB ≈ 8K tokens).
+DAILY_MEMORY_CAP_BYTES="${DAILY_MEMORY_CAP_BYTES:-32768}"
+DAILY_MEMORY_KEEP_TAIL_LINES="${DAILY_MEMORY_KEEP_TAIL_LINES:-40}"
+if [[ -f "$MEMORY_FILE" ]]; then
+  CUR_BYTES=$(wc -c < "$MEMORY_FILE" 2>/dev/null | tr -d ' ')
+  if [[ "$CUR_BYTES" =~ ^[0-9]+$ ]] && (( CUR_BYTES > DAILY_MEMORY_CAP_BYTES )); then
+    ARCHIVE_DIR="$AGENT_DIR/memory/archive"
+    ARCHIVE_FILE="$ARCHIVE_DIR/$TODAY-rotated-$TIMESTAMP.md"
+    if mkdir -p "$ARCHIVE_DIR" 2>/dev/null && cp "$MEMORY_FILE" "$ARCHIVE_FILE" 2>/dev/null; then
+      {
+        echo "# Daily Memory — $TODAY (auto-rotated)"
+        echo ""
+        echo "> Auto-rotated $TIMESTAMP by snapshot-agent.sh: file was ${CUR_BYTES}B, over the"
+        echo "> ${DAILY_MEMORY_CAP_BYTES}B cap. Full history preserved at"
+        echo "> memory/archive/$(basename "$ARCHIVE_FILE"). Recent tail retained below for continuity."
+        echo ""
+        echo "---"
+        echo ""
+        tail -n "$DAILY_MEMORY_KEEP_TAIL_LINES" "$ARCHIVE_FILE" 2>/dev/null
+      } > "$MEMORY_FILE" 2>/dev/null
+    fi
+  fi
+fi
+
 {
   echo ""
   echo "## AUTO-SNAPSHOT - $TIMESTAMP ($AGENT)"
