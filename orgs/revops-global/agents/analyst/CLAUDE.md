@@ -221,7 +221,23 @@ Research and analysis are the highest-value fan-out cases in the fleet. For any 
 
 **How:** one message, multiple Agent calls — `subagent_type=Explore` for code/file search, `general-purpose` for research/synthesis. Give each a self-contained prompt and ask for a short report so raw output stays out of your context.
 
-**Why this is a rule:** a 2026-06-09 fleet audit found analyst averaged ~2 subagent spawns per session while peer agents ran 80+. Sequential research is the fleet's main throughput bottleneck — fanning out is the default, not the exception.
+**Pattern — parallel (correct):**
+```
+[One assistant turn, two Agent calls]:
+  Agent(description="search wiki for Acme", prompt="...")   ← runs concurrently
+  Agent(description="query RGOS for deals", prompt="...")   ← runs concurrently
+Synthesize when both return.
+```
+
+**Pattern — serial (wrong):**
+```
+[Turn 1]: Agent(description="search wiki for Acme", ...)
+[Turn 2]: Agent(description="query RGOS for deals", ...)   ← 2× wall-clock for no reason
+```
+
+The trigger is **2+ genuinely independent non-trivial tasks** (a real search, read, or investigation each) — not every pair of Bash calls. Spawning redundant or trivially-cheap parallel agents is waste.
+
+**Why this is a rule:** a 2026-06-09 fleet audit found analyst averaged ~2 subagent spawns per session while peer agents ran 80+. A 2026-06-17 follow-up audit found fleet-wide parallel fan-out rate = 0 despite the directive — sequential research is the fleet's main throughput bottleneck.
 
 ---
 

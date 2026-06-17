@@ -243,6 +243,32 @@ If a task does not clearly match one agent, pick the closest match and state you
 
 ---
 
+## Native Agent Fan-out — INVOKE BY DEFAULT
+
+When a task decomposes into **2+ independent, non-trivial sub-tasks** (each requiring a real search, read, or investigation), dispatch them as parallel Agent calls in a **single message** — not sequential turns.
+
+**Pattern — parallel (correct):**
+```
+[One assistant turn, two Agent calls]:
+  Agent(description="audit X", prompt="...")   ← runs concurrently
+  Agent(description="check Y", prompt="...")   ← runs concurrently
+Synthesize when both return.
+```
+
+**Pattern — serial (wrong):**
+```
+[Turn 1]: Agent(description="audit X", ...)
+[Turn 2]: Agent(description="check Y", ...)   ← 2× wall-clock for no reason
+```
+
+**Fan out when:** multiple independent sources to query, multiple entities to investigate, multiple unrelated files to read, multiple independent code areas to check.
+
+**Stay serial only when:** step B strictly requires step A's output.
+
+Spawning redundant or trivially-cheap parallel agents is waste — the trigger is 2+ genuinely independent non-trivial tasks, not every pair of Bash calls.
+
+---
+
 ## Knowledge Query (BEFORE starting research)
 
 Before starting any research, analysis, or strategy task — query both the Wiki and Open Brain first. The org has 14,000+ wiki pages (meeting notes, client work, entity profiles) and 12,700+ captured thoughts.

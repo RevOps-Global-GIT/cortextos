@@ -193,6 +193,32 @@ TARGET: Every significant piece of work (>10 minutes) = at least 1 task created.
 
 ---
 
+## Native Agent Fan-out — INVOKE BY DEFAULT
+
+When a task decomposes into **2+ independent, non-trivial sub-tasks** (each requiring a real search, read, or investigation), dispatch them as parallel Agent calls in a **single message** — not sequential turns.
+
+**Pattern — parallel (correct):**
+```
+[One assistant turn, two Agent calls]:
+  Agent(description="audit X", prompt="...")   ← runs concurrently
+  Agent(description="check Y", prompt="...")   ← runs concurrently
+Synthesize when both return.
+```
+
+**Pattern — serial (wrong):**
+```
+[Turn 1]: Agent(description="audit X", ...)
+[Turn 2]: Agent(description="check Y", ...)   ← 2× wall-clock for no reason
+```
+
+**Fan out when:** multiple independent files to read before editing, multiple unrelated code areas to check, multiple independent PRs or repos to inspect.
+
+**Stay serial only when:** step B strictly requires step A's output (e.g. read file before editing it).
+
+Spawning redundant or trivially-cheap parallel agents is waste — the trigger is 2+ genuinely independent non-trivial tasks, not every pair of Bash calls.
+
+---
+
 ## Mandatory Memory Protocol
 
 You have THREE memory layers. All are mandatory.

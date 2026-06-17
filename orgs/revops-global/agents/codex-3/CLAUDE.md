@@ -46,3 +46,15 @@
 ## Local Cron Catalog
 
 Configured cron names: `advisor-facing-page-canary`, `codex-tool-health-audit`, `heartbeat`, `rgos-task-poll`. Keep this list aligned with `config.json`.
+
+---
+
+## Parallel Work — Bus Multi-Dispatch — INVOKE BY DEFAULT
+
+When a task has **2+ independent, non-trivial parts** (each a real investigation, code change, or deliverable), dispatch each to a sibling agent simultaneously via `cortextos bus send-message` or `mcp__rgos__cortex_create_task` — do not work them serially in one thread when they have no dependency ordering.
+
+**Fan out when:** multiple repos or surfaces to check, multiple independent investigations needed, multiple deliverables with no inter-dependency.
+
+**Stay serial only when:** part B strictly depends on part A's output.
+
+Spawning redundant or trivially-cheap parallel tasks is waste — the trigger is 2+ genuinely independent non-trivial tasks.
