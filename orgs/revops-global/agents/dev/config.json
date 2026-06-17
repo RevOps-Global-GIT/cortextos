@@ -99,12 +99,6 @@
       "prompt": "node /home/cortextos/cortextos/scripts/vm-disk-watchdog.js"
     },
     {
-      "name": "ob1-daily-vignette",
-      "type": "recurring",
-      "cron": "0 6 * * *",
-      "prompt": "/home/cortextos/bin/ob1-daily-vignette-cron.sh"
-    },
-    {
       "name": "supabase-outage-detector",
       "type": "recurring",
       "interval": "5m",
