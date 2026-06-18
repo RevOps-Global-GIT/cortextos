@@ -839,11 +839,10 @@ def main() -> int:
 
     if not items and _last_source_activity_count:
         print(
-            "[scanner] ERROR: zero_items_with_source_activity — "
+            "[scanner] no outstanding items after suppression — "
             f"source_activity_count={_last_source_activity_count}",
             file=sys.stderr,
         )
-        return 4
 
     snapshot = write_snapshot(items, on_demand=args.on_demand)
 
