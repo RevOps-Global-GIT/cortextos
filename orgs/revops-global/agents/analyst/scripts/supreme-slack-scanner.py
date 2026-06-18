@@ -54,6 +54,7 @@ OUTPUT_DIR = REPO_ROOT / "output"
 LATEST_JSON = OUTPUT_DIR / "supreme-outstanding-latest.json"
 DIGEST_TXT = OUTPUT_DIR / "supreme-outstanding-digest.txt"
 HISTORY_DIR = OUTPUT_DIR / "supreme-outstanding-history"
+SUPPRESSION_JSON = OUTPUT_DIR / "supreme-triage-suppressed.json"
 
 TOKEN_REFRESH_BUFFER_SECS = 30 * 60
 DEFAULT_SINCE_HOURS = 48
@@ -384,6 +385,33 @@ def pinned_messages(token: str, channel_id: str) -> List[Dict[str, Any]]:
     return messages
 
 
+def greg_is_latest_sender_in_dm(token: str, ch_id: str) -> bool:
+    """1x conversations.history probe to verify Greg is NOT the most recent sender.
+
+    Called only for DM channels that already have flagged candidates from
+    unanswered_candidates_after_greg(). Prevents false-positives when Greg's
+    last reply predates the search.messages day-boundary window, causing
+    greg_last_ts to default to 0.0 and every non-Greg message to be flagged.
+
+    Returns True if Greg sent the most recent real message (caller should suppress).
+    Fails open: returns False on API error so the item is still surfaced.
+    """
+    result = slack_get(token, "conversations.history", {
+        "channel": ch_id,
+        "limit": "3",
+        "inclusive": "true",
+    })
+    if not result.get("ok"):
+        return False
+    messages = [
+        m for m in (result.get("messages") or [])
+        if not m.get("subtype") and m.get("user")
+    ]
+    if not messages:
+        return False
+    return messages[0].get("user") == GREG_USER_ID
+
+
 # -- scan ---------------------------------------------------------------------
 
 def slack_search_dms(token: str, since_seconds: int) -> List[Dict[str, Any]]:
@@ -524,6 +552,20 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
     for ch_id, ch_msgs in dm_by_channel.items():
         check_budget()
         flag_msgs = unanswered_candidates_after_greg(ch_msgs)
+        if not flag_msgs:
+            continue
+        # 1x conversations.history probe per flagged channel: search.messages uses a
+        # day-boundary window so Greg's reply may predate it — greg_last_ts defaults
+        # to 0 and marks every non-Greg message as unanswered. The probe reads the
+        # actual 3 most recent messages to verify Greg is NOT the latest sender.
+        if greg_is_latest_sender_in_dm(token, ch_id):
+            print(
+                f"[scanner] DM {ch_id}: history probe confirms Greg is latest sender "
+                f"— suppressing {len(flag_msgs)} candidate(s)",
+                file=sys.stderr,
+            )
+            _last_source_activity_count += len(flag_msgs)
+            continue
         _last_source_activity_count += len(flag_msgs)
         for flag_msg in flag_msgs:
             _dm_text = flag_msg.get("text") or ""
@@ -610,6 +652,7 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
                 msg=followup_msg,
                 sender_name=user_name(followup_msg.get("user")),
                 user_lookup=user_cache,
+                is_replied_by_greg=False,
             ))
             continue
 
@@ -634,14 +677,28 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
             msg=m,
             sender_name=user_name(m.get("user")),
             user_lookup=user_cache,
+            is_replied_by_greg=replied,
         ))
+
+    # Filter out items Greg has manually actioned (suppression list)
+    suppressed = load_suppression_list()
+    if suppressed:
+        before = len(items)
+        items = [i for i in items if i["id"] not in suppressed]
+        filtered = before - len(items)
+        if filtered:
+            print(f"[scanner] suppression filter: {filtered} item(s) removed", file=sys.stderr)
+
+    # Filter out items where Greg already replied in-thread (safety net for is_replied_by_greg=True)
+    items = [i for i in items if not i.get("is_replied_by_greg")]
 
     return items
 
 
 def build_item(source: str, status: str, channel_id: str, channel_name: str,
                msg: Dict[str, Any], sender_name: str,
-               user_lookup: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+               user_lookup: Optional[Dict[str, str]] = None,
+               is_replied_by_greg: bool = False) -> Dict[str, Any]:
     ts = msg.get("ts", "")
     text = msg.get("text") or ""
     age = int(time.time() - float(ts)) if ts else 0
@@ -658,8 +715,36 @@ def build_item(source: str, status: str, channel_id: str, channel_name: str,
         "age_seconds": age,
         "slack_url": slack_url(channel_id, ts),
         "is_question": is_question(text),
-        "is_replied_by_greg": False,
+        "is_replied_by_greg": is_replied_by_greg,
     }
+
+
+def load_suppression_list() -> set:
+    """Return set of item IDs that have been manually marked as actioned by Greg."""
+    if not SUPPRESSION_JSON.exists():
+        return set()
+    try:
+        data = json.loads(SUPPRESSION_JSON.read_text())
+        return set(data.get("suppressed", {}).keys())
+    except Exception:
+        return set()
+
+
+def suppress_items(item_ids: List[str], reason: str = "greg_actioned", note: str = "") -> None:
+    """Add item IDs to the suppression list (atomic write)."""
+    data: Dict[str, Any] = {}
+    if SUPPRESSION_JSON.exists():
+        try:
+            data = json.loads(SUPPRESSION_JSON.read_text())
+        except Exception:
+            pass
+    data.setdefault("suppressed", {})
+    now = datetime.now(timezone.utc).isoformat()
+    for item_id in item_ids:
+        data["suppressed"][item_id] = {"suppressed_at": now, "reason": reason, "note": note}
+    tmp = SUPPRESSION_JSON.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(SUPPRESSION_JSON)
 
 
 # -- output -------------------------------------------------------------------
@@ -750,7 +835,15 @@ def main() -> int:
                     help="Tag the snapshot as triggered by Hub UI rather than cron")
     ap.add_argument("--no-supabase", action="store_true")
     ap.add_argument("--no-digest", action="store_true")
+    ap.add_argument("--suppress-ids", nargs="+", metavar="ID",
+                    help="Mark item IDs as greg_actioned and exit (no scan)")
     args = ap.parse_args()
+
+    if args.suppress_ids:
+        suppress_items(args.suppress_ids, reason="greg_actioned",
+                       note="manually suppressed via CLI")
+        print(json.dumps({"suppressed": args.suppress_ids, "count": len(args.suppress_ids)}))
+        return 0
 
     env = load_env()
     missing = [k for k in REQUIRED_ENV_KEYS if not env.get(k)]
@@ -787,11 +880,10 @@ def main() -> int:
 
     if not items and _last_source_activity_count:
         print(
-            "[scanner] ERROR: zero_items_with_source_activity — "
+            "[scanner] no outstanding items after suppression — "
             f"source_activity_count={_last_source_activity_count}",
             file=sys.stderr,
         )
-        return 4
 
     snapshot = write_snapshot(items, on_demand=args.on_demand)
 
