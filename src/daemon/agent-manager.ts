@@ -28,6 +28,8 @@ import { parseEnvFile, resolveEnv } from '../utils/env.js';
 import { recordInboundTelegram, cacheLastSent, logOutboundMessage, buildRecentHistory } from '../telegram/logging.js';
 import { logEvent } from '../bus/event.js';
 import { mirrorAgentStatusToRgos } from '../bus/rgos-mirror.js';
+import { fetchInProgressRgosTasks, resetRgosTaskToApproved } from '../bus/rgos-tasks.js';
+import { shouldRequeue } from './task-reconciliation.js';
 import { collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
@@ -43,6 +45,20 @@ type LogFn = (msg: string) => void;
  * heartbeat grace path.
  */
 const STALE_MARKER_SWEEP_MS = 300_000; // 5 minutes — matches the hook TTL
+
+/**
+ * Cadence of the daemon's task-reconciliation tick. Every pass scans RGOS for
+ * in_progress orch_tasks rows whose owning agent has no live process and
+ * re-queues the stale ones to `approved`.
+ */
+const RECONCILIATION_INTERVAL_MS = 5 * 60_000; // 5 minutes
+
+/**
+ * Grace window before an orphaned in_progress orch_tasks row is re-queued. A
+ * row updated more recently than this is left alone so a mid-restart session
+ * gets a chance to re-claim it before reconciliation yanks it away.
+ */
+const ORPHAN_STALE_MS = 15 * 60_000; // 15 minutes
 
 /**
  * Manages all agents in a cortextOS instance.
@@ -103,6 +119,14 @@ export class AgentManager {
    * agent; oauthLastRecoveryAt enforces a per-agent cooldown against loops.
    */
   private oauthSelfHealTimer: NodeJS.Timeout | null = null;
+  /**
+   * Daemon-level task-reconciliation timer (Pattern 1). A single unref'd
+   * interval scans RGOS for orphaned in_progress orch_tasks claims — rows whose
+   * assignee has no live AgentProcess — and re-queues the stale ones to
+   * `approved` so the next rgos-task-poll re-claims them. Started in
+   * discoverAndStart(), cleared in stopAll().
+   */
+  private reconciliationTimer: ReturnType<typeof setInterval> | null = null;
   private oauthRecoveryInProgress: Set<string> = new Set();
   private oauthLastRecoveryAt: Map<string, number> = new Map();
   private instanceId: string;
@@ -284,6 +308,79 @@ export class AgentManager {
     // are normal operation and should fire the real BUG-011 alarm if a
     // race ever does leak through PR #11's protection.
     this.clearDaemonCrashMarkers();
+
+    // Start the task-reconciliation tick now that the agent registry is
+    // populated. Pattern 1: periodically re-queue orphaned in_progress RGOS
+    // claims whose owning agent has no live process.
+    this.startReconciliationTick();
+  }
+
+  /**
+   * Start the daemon-level task-reconciliation interval (Pattern 1). Disabled
+   * with CORTEXTOS_TASK_RECONCILIATION=0. A single unref'd timer covers every
+   * registered agent. Idempotent — a second call is a no-op while a timer is
+   * already running.
+   */
+  private startReconciliationTick(): void {
+    if (process.env.CORTEXTOS_TASK_RECONCILIATION === '0') return;
+    if (this.reconciliationTimer) return;
+    const intervalMs = parsePositiveInt(
+      process.env.CORTEXTOS_TASK_RECONCILIATION_INTERVAL_MS,
+      RECONCILIATION_INTERVAL_MS,
+    );
+    this.reconciliationTimer = setInterval(() => {
+      this.runReconciliationPass().catch((err) => {
+        console.error(`[task-reconciliation] pass failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, intervalMs);
+    this.reconciliationTimer.unref?.();
+  }
+
+  /**
+   * One reconciliation pass (Pattern 1). Fetch every in_progress orch_tasks
+   * row, and for each one whose assignee has NO live AgentProcess and whose row
+   * is stale (updated_at older than ORPHAN_STALE_MS), reset it to `approved`.
+   *
+   * Liveness is the daemon process map, NOT heartbeat freshness — see
+   * shouldRequeue() and task-reconciliation.ts for why. The whole body is
+   * guarded so a transient RGOS error never throws out of the timer.
+   */
+  private async runReconciliationPass(): Promise<void> {
+    try {
+      const staleMs = parsePositiveInt(process.env.CORTEXTOS_TASK_RECONCILIATION_STALE_MS, ORPHAN_STALE_MS);
+      const now = Date.now();
+      const rows = await fetchInProgressRgosTasks({ limit: 500 });
+      if (rows.length === 0) return;
+
+      let requeued = 0;
+      for (const row of rows) {
+        const assignedAgent = row.assigned_to;
+        if (!assignedAgent) continue; // unassigned in_progress row — leave it alone
+
+        // Authoritative liveness: do we hold a running process for this agent?
+        const entry = this.agents.get(assignedAgent);
+        const hasLiveProcess = !!entry && entry.process.isRunning();
+
+        if (!shouldRequeue({ hasLiveProcess, taskUpdatedAt: row.updated_at, now, staleMs })) {
+          continue;
+        }
+
+        const ok = await resetRgosTaskToApproved(row.id, `reconciliation: orphaned claim by ${assignedAgent}`);
+        if (ok) {
+          requeued++;
+          console.log(
+            `[task-reconciliation] re-queued orphaned task ${row.id} ("${row.title}") ` +
+            `previously assigned to ${assignedAgent} (no live process, stale) → approved`,
+          );
+        }
+      }
+
+      if (requeued > 0) {
+        console.log(`[task-reconciliation] pass complete: re-queued ${requeued}/${rows.length} in_progress task(s)`);
+      }
+    } catch (err) {
+      console.error(`[task-reconciliation] pass error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -1323,6 +1420,10 @@ export class AgentManager {
     if (this.oauthSelfHealTimer) {
       clearInterval(this.oauthSelfHealTimer);
       this.oauthSelfHealTimer = null;
+    }
+    if (this.reconciliationTimer) {
+      clearInterval(this.reconciliationTimer);
+      this.reconciliationTimer = null;
     }
 
     const names = [...this.agents.keys()];

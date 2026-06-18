@@ -20,6 +20,7 @@ import { resolveAgentCwd, resolvePaths } from '../utils/paths.js';
 import type { CronScheduler, ManagedAgent } from './cron-scheduler.js';
 import { detectContextCap, archiveCappedSession } from './context-cap-detect.js';
 import { rotateOversizedDailyMemory } from './daily-memory-guard.js';
+import { fetchInProgressRgosTasks, resetRgosTaskToApproved } from '../bus/rgos-tasks.js';
 
 type LogFn = (msg: string) => void;
 
@@ -912,6 +913,24 @@ export class AgentProcess implements ManagedAgent {
       return;
     }
 
+    // Stall-recovery (Pattern 2): we are past every "the agent resumes cleanly"
+    // early-return above — NOT a daemon shutdown, intentional stop, rate-limit
+    // pause, pre-bootstrap spawn-retry, planned restart, halted zombie, or
+    // ctx_autoreset handoff. So this is a genuine crash / premature-voluntary
+    // exit: the session is gone and will NOT resume its current context. If it
+    // was holding RGOS-native task claims (cortex_claim_task → orch_tasks rows
+    // with no local bus file, Pattern B), those rows orphan in_progress forever.
+    // Reset every in_progress orch_tasks row assigned to this agent back to
+    // `approved` so the next rgos-task-poll (this agent on restart, or another)
+    // re-claims it. FIRE-AND-FORGET: non-blocking, all errors swallowed, never
+    // interferes with crash recovery (same contract as writeRotationEvent).
+    // Placed here, NOT before the early-returns, so a resuming session never has
+    // its in-flight work yanked away (that false-positive class is what the
+    // reconciliation-tick's 15-min + live-process guard also protects against).
+    setImmediate(() => {
+      this.recoverOrphanedRgosClaims().catch(() => { /* never break crash recovery */ });
+    });
+
     // Premature-voluntary-exit guard.
     //
     // Symptom: a claude session exits with code 0 (no signal) within a short
@@ -1467,6 +1486,30 @@ export class AgentProcess implements ManagedAgent {
     const agentId = rows[0]?.id;
     if (!agentId) return null;
     return [url, key, agentId];
+  }
+
+  /**
+   * Stall-recovery: reset every in_progress orch_tasks row assigned to this
+   * agent back to `approved` so a future rgos-task-poll re-claims it. Called
+   * fire-and-forget from handleExit. Fail-open in every branch — a missing
+   * Supabase config returns [] (no throw), and resetRgosTaskToApproved swallows
+   * its own HTTP failures. This method must NEVER throw or block.
+   */
+  private async recoverOrphanedRgosClaims(): Promise<void> {
+    try {
+      const rows = await fetchInProgressRgosTasks({ agent: this.name, limit: 200 });
+      if (rows.length === 0) return;
+      let reset = 0;
+      for (const row of rows) {
+        const ok = await resetRgosTaskToApproved(row.id, `stall-recovery: ${this.name} session exit`);
+        if (ok) reset++;
+      }
+      if (reset > 0) {
+        this.log(`Stall-recovery: re-queued ${reset}/${rows.length} orphaned in_progress RGOS task(s) to approved`);
+      }
+    } catch {
+      /* swallow — must never break crash recovery */
+    }
   }
 
   private async writeRotationEvent(rotationType: string, reason: string): Promise<void> {

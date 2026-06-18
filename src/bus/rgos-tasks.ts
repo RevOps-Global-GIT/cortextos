@@ -223,6 +223,80 @@ export async function reconcileCompletedRgosTasks(
   return { reconciled, skipped, rows: rows.length };
 }
 
+/**
+ * Fetch every orch_tasks row currently in_progress in RGOS (optionally scoped
+ * to a single assignee). Used by the daemon's reconciliation tick to find
+ * orphaned claims — RGOS-native (Pattern B) rows that an agent claimed and
+ * then died holding, leaving the row stuck in_progress forever.
+ *
+ * Returns [] when Supabase is not configured (never throws on missing config),
+ * matching importApprovedRgosTasks' fail-soft behavior.
+ */
+export async function fetchInProgressRgosTasks(
+  options: { agent?: string; limit?: number } = {},
+): Promise<Array<{ id: string; assigned_to: string | null; updated_at: string | null; title: string }>> {
+  const config = supabaseConfig();
+  if (!config) return [];
+  const params = new URLSearchParams({
+    status: 'eq.in_progress',
+    select: 'id,title,assigned_to,updated_at',
+    order: 'updated_at.asc',
+    limit: String(options.limit ?? 200),
+  });
+  if (options.agent) params.set('assigned_to', `eq.${options.agent}`);
+  const rows = await fetchRows(`${config.url}/rest/v1/orch_tasks?${params.toString()}`, config);
+  return rows.map((row) => ({
+    id: row.id,
+    title: row.title || row.id,
+    assigned_to: row.assigned_to ?? null,
+    updated_at: row.updated_at ?? null,
+  }));
+}
+
+/**
+ * Reset a single orch_tasks row back to `approved` so the next rgos-task-poll
+ * re-claims it. Deliberately does NOT clobber assigned_to — the next claim
+ * reassigns it. `approved` is the correct claimable target (importApprovedRgosTasks
+ * queries status=eq.approved).
+ *
+ * Returns false when Supabase is not configured or on any failure — never
+ * throws, so a reconciliation tick or a handleExit hook can call it
+ * fire-and-forget without risk of an unhandled rejection.
+ */
+export async function resetRgosTaskToApproved(id: string, note?: string): Promise<boolean> {
+  const config = supabaseConfig();
+  if (!config) return false;
+  try {
+    const res = await withRetry(
+      () => fetch(`${config.url}/rest/v1/orch_tasks?id=eq.${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: {
+          apikey: config.key,
+          Authorization: `Bearer ${config.key}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({ status: 'approved' }),
+        signal: AbortSignal.timeout(15_000),
+      }),
+      {
+        maxAttempts: 3,
+        baseDelayMs: 500,
+        maxDelayMs: 10_000,
+        isRetryable: isTransientError,
+      },
+    );
+    if (!res.ok) {
+      console.warn(`[rgos-tasks] resetRgosTaskToApproved(${id}) failed: HTTP ${res.status}${note ? ` (${note})` : ''}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[rgos-tasks] resetRgosTaskToApproved(${id}) error: ${err instanceof Error ? err.message : String(err)}${note ? ` (${note})` : ''}`);
+    return false;
+  }
+}
+
 export function readImportedRgosTask(paths: BusPaths, id: string): Task | null {
   const file = taskPath(paths, id);
   if (!existsSync(file)) return null;
