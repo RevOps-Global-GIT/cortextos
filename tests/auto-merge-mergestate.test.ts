@@ -11,7 +11,7 @@
  */
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
-const { mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES } = require('../scripts/auto-merge-pr.js');
+const { mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES } = require('../scripts/auto-merge-pr.js');
 import { describe, it, expect } from 'vitest';
 
 describe('mergeStateBlocksMerge — auto-merge mergeState gate', () => {
@@ -35,5 +35,26 @@ describe('mergeStateBlocksMerge — auto-merge mergeState gate', () => {
     expect(mergeStateBlocksMerge('')).toBe(false);
     expect(mergeStateBlocksMerge(null)).toBe(false);
     expect(mergeStateBlocksMerge(undefined)).toBe(false);
+  });
+});
+
+describe('mergeableBlocksMerge — auto-merge mergeable gate (#879 follow-up)', () => {
+  it('blocks only CONFLICTING (genuine base-branch conflicts)', () => {
+    expect(mergeableBlocksMerge('CONFLICTING')).toBe(true);
+    expect(HARD_BLOCK_MERGEABLE_STATES).toEqual(['CONFLICTING']);
+  });
+
+  it('does NOT block MERGEABLE or lazily-computed UNKNOWN — the #1713/#878 root cause', () => {
+    // GitHub returns mergeable=UNKNOWN from batch GraphQL for genuinely-green
+    // PRs until a `gh pr view` forces recompute to MERGEABLE. The old
+    // `!== MERGEABLE` gate skipped those green UNKNOWN PRs every cycle.
+    expect(mergeableBlocksMerge('MERGEABLE')).toBe(false);
+    expect(mergeableBlocksMerge('UNKNOWN')).toBe(false);  // the lazy-compute case
+  });
+
+  it('treats unrecognised/empty mergeable as non-blocking (let ciPassed + gh pr merge decide)', () => {
+    expect(mergeableBlocksMerge('')).toBe(false);
+    expect(mergeableBlocksMerge(null)).toBe(false);
+    expect(mergeableBlocksMerge(undefined)).toBe(false);
   });
 });
