@@ -81,6 +81,12 @@ describe('page-health staleness detection', () => {
   describe('operator-console route policy (false-positive guard for by-design item badges)', () => {
     const OPS = { operatorConsole: true } as const;
 
+    it('does NOT flag old conversation text on operator activity feeds', () => {
+      const feedText = '42h stale) — worth checking the analyst agent on the CortextOS VM. '
+        + "Sleep well — it's all waiting for you, green. about 8 hours ago system assistant";
+      expect(detectStaleness([], feedText, OPS).stale).toBe(false);
+    });
+
     it('does NOT flag a bare "Stale" badge (Voice Bridge idle / task work-state)', () => {
       // Same input that DOES flag on a data-list route (asserted above) must NOT flag here.
       expect(detectStaleness(['Stale'], FLEET_TASKS_BODY).stale).toBe(true); // data-list (default)

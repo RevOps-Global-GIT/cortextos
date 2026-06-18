@@ -10,7 +10,7 @@ describe('Hub QA activity feed freshness', () => {
 
   it('prefers relative age tokens as fresh evidence', () => {
     const verdict = evaluateActivityFreshness([
-      { source: 'absolute-text', label: 'Jun 11, 18:41:53' },
+      { source: 'absolute-text', label: 'Jun 12, 01:41:53' },
       { source: 'relative', label: '2m ago' },
     ], nowMs);
 
@@ -20,13 +20,23 @@ describe('Hub QA activity feed freshness', () => {
     expect(verdict.evidence).toContain('via relative "2m ago"');
   });
 
-  it('parses rendered PT absolute timestamps instead of treating them as UTC', () => {
-    const parsed = parseActivityAbsoluteTimestamp('Jun 11, 18:41:53', nowMs);
+  it('parses rendered UTC absolute timestamps from the activity feed', () => {
+    const parsed = parseActivityAbsoluteTimestamp('Jun 12, 01:41:53', nowMs);
 
     expect(parsed).toBe(Date.parse('2026-06-12T01:41:53Z'));
     expect(evaluateActivityFreshness([
-      { source: 'absolute-text', label: 'Jun 11, 18:41:53' },
+      { source: 'absolute-text', label: 'Jun 12, 01:41:53' },
     ], nowMs).fresh).toBe(true);
+  });
+
+  it('treats current UTC absolute timestamps as fresh', () => {
+    const currentNowMs = Date.parse('2026-06-18T15:37:30Z');
+    const verdict = evaluateActivityFreshness([
+      { source: 'absolute-text', label: 'Jun 18, 15:37' },
+    ], currentNowMs);
+
+    expect(verdict.fresh).toBe(true);
+    expect(verdict.evidence).toContain('Jun 18, 15:37');
   });
 
   it('still fails a genuinely stale feed', () => {

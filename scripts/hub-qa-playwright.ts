@@ -38,7 +38,7 @@ const targetPage   = getArg('--page', '/time');
 // staleness. The page-health DOM stale-badge heuristic is route-scoped off for these
 // (see detectStaleness `operatorConsole`); fleet heartbeat health is monitored separately
 // via orch_agents and surface freshness by carded CHECK 5 Timestamp freshness.
-const OPERATOR_CONSOLE_ROUTES = new Set<string>(['/app/orchestrator']);
+const OPERATOR_CONSOLE_ROUTES = new Set<string>(['/app/orchestrator', '/app/fleet/activity']);
 const userEmail    = getArg('--user', 'greg@revopsglobal.com');
 const noSend       = argv.includes('--no-send');
 const sessionFile  = getArg('--session-file', '');
@@ -127,7 +127,7 @@ export interface ActivityFreshnessVerdict {
 }
 
 const ACTIVITY_FRESH_MS = 4 * 60 * 60 * 1000;
-const ACTIVITY_UI_TIME_ZONE = 'America/Los_Angeles';
+const ACTIVITY_UI_TIME_ZONE = 'UTC';
 
 export function activityRelativeAgeMs(label: string): number | null {
   const value = label.trim();
@@ -5161,8 +5161,12 @@ async function collectPageHealthIssues(
   return issues;
 }
 
-function pageHealthStatus(issues: PageHealthIssue[]): 'healthy' | 'warning' | 'error' {
+function pageHealthStatus(issues: PageHealthIssue[], mode = pageHealthMode): 'healthy' | 'warning' | 'error' {
   if (issues.some((issue) => issue.severity === 'error')) return 'error';
+  // Report-only probes should preserve findings in the row's issues array without
+  // feeding Warden attention state. Only real render/API errors should turn a
+  // report-only page red; warnings/deferred checks stay visible but non-blocking.
+  if (mode === 'report-only') return 'healthy';
   if (issues.length > 0) return 'warning';
   return 'healthy';
 }
