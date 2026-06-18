@@ -12,6 +12,8 @@ b) RGOS: mcp__rgos__rgos_dashboard and mcp__rgos__rgos_pipeline_summary. Flag at
 
 c) Fathom action items: python3 $CTX_FRAMEWORK_ROOT/scripts/fathom-brief-digest.py — include the output in the Delivery section.
 
+f) RGOS project health: call mcp__rgos__rgos_list_projects. For each active project, check for: (1) any milestone with due_date before today and status != completed (overdue milestone), or (2) budget utilization >90% (total_spent / budget > 0.90). Collect up to 2 flagged projects (project name + flag reason). If nothing fires, omit entirely — never manufacture a project health callout.
+
 d) Open Brain: search for high-signal captures from the last 7 days. Queries: "product idea", "client pain", "market signal". Include only if genuinely novel.
 
 e) Today's external meetings (ABSORBED FROM RETIRED MEETING-PREP AGENT):
@@ -40,7 +42,7 @@ STYLE RULE (kept experiment exp_1780033998_ezz4d): NO em-dashes or en-dashes any
 
 *Growth Angles* — [One GTM or positioning angle worth Greg's consideration]
 
-*Delivery* — [Fathom meeting follow-ups if any. Specific client risk or opportunity only if real.]
+*Delivery* — [Fathom meeting follow-ups if any. If STEP 1f project health flags fired: one line max, format "Project watch: [Name] ([reason])" for up to 2 projects. Omit if nothing fired. Specific client risk or opportunity only if real.]
 
 STEP 2.5 — COMPETITOR LINK VALIDATION (fail-closed, mandatory before send):
 

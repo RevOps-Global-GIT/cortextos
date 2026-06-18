@@ -303,6 +303,7 @@ function summarizeAdvisorCanary() {
 
 function summarizeTeamBrainWiki() {
   const roots = [TEAM_BRAIN_ROOT, TEAM_BRAIN_FALLBACK_ROOT].filter(Boolean);
+  const candidates = [];
 
   for (const root of roots) {
     if (!fs.existsSync(root)) continue;
@@ -324,7 +325,17 @@ function summarizeTeamBrainWiki() {
       // fall through to lastSync
     }
 
-    const updatedAt = gitUpdatedAt || lastSync;
+    let updatedAt = gitUpdatedAt || lastSync;
+
+    if (!updatedAt) {
+      const wikiFiles = listFiles(root)
+        .filter((p) => p.endsWith('.md'))
+        .map((p) => ({ path: p, mtime: safeIsoFromMtime(p) }))
+        .filter((f) => Boolean(f.mtime))
+        .sort((a, b) => new Date(b.mtime).getTime() - new Date(a.mtime).getTime());
+      if (wikiFiles.length > 0) updatedAt = wikiFiles[0].mtime;
+    }
+
     const age = minutesSince(updatedAt);
     const status =
       age == null
@@ -345,7 +356,7 @@ function summarizeTeamBrainWiki() {
           ? 'Team Brain git/wiki stale'
           : 'Team Brain git/wiki state unknown';
 
-    return {
+    const summary = {
       source: 'team_brain_wiki',
       status,
       label,
@@ -358,6 +369,17 @@ function summarizeTeamBrainWiki() {
         git_updated_at: gitUpdatedAt,
       },
     };
+
+    candidates.push(summary);
+  }
+
+  if (candidates.length > 0) {
+    candidates.sort((a, b) => {
+      const aTime = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+      const bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
+      return bTime - aTime;
+    });
+    return candidates[0];
   }
 
   return {

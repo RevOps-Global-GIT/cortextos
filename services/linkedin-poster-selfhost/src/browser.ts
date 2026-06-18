@@ -6,6 +6,7 @@ import type { PosterConfig } from './types.js';
 const LOGIN_PATTERN = /log.?in|sign.?in|authwall/i;
 const RESTRICTION_PATTERN =
   /temporarily restricted|software that automates activity|security verification|checkpoint\/challenge/i;
+const CHROME_EXECUTABLE_ENV = 'POSTER_CHROME_EXECUTABLE';
 
 export interface BrowserHealthSnapshot {
   healthy: boolean;
@@ -38,6 +39,14 @@ export class BrowserManager {
     if (proxyServer) {
       console.log(`[browser] Using upstream proxy: ${proxyServer}`);
     }
+    const executablePath = process.env[CHROME_EXECUTABLE_ENV];
+    if (!executablePath) {
+      throw new Error(`${CHROME_EXECUTABLE_ENV} is required in LinkedIn browser mode; refusing Playwright-managed Chromium`);
+    }
+    if (!existsSync(executablePath)) {
+      throw new Error(`${CHROME_EXECUTABLE_ENV} does not exist: ${executablePath}`);
+    }
+    console.log(`[browser] Using Chrome executable: ${executablePath}`);
     console.log(`[browser] Launching persistent context: ${this.config.profileDir}`);
     // Use headed mode when a virtual display is available (Xvfb :99).
     // LinkedIn detects and degrades headless Chrome, returning no feed content.
@@ -47,16 +56,18 @@ export class BrowserManager {
     if (!headless) {
       console.log(`[browser] Headed mode enabled (DISPLAY=${process.env['DISPLAY']})`);
     }
+    await this.killLingeringProfileProcesses();
     this.context = await chromium.launchPersistentContext(this.config.profileDir, {
       headless,
+      executablePath,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-blink-features=AutomationControlled',
+        ...(proxyServer ? [`--proxy-server=${proxyServer}`] : []),
       ],
       viewport: { width: 1280, height: 900 },
-      ...(proxyServer ? { proxy: { server: proxyServer } } : {}),
     });
 
     const pages = this.context.pages();

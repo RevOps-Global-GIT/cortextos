@@ -227,6 +227,11 @@ const DEFAULT_DISCOVERY_KEYWORDS = [
 let lastBatchWindow = '';
 let batchRunning = false;
 
+function envFlagEnabled(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
+
 async function pickBatchKeywords(supabaseUrl: string, supabaseKey: string, n: number): Promise<string[]> {
   const shuffle = <T>(arr: T[]): T[] => [...arr].sort(() => Math.random() - 0.5);
   try {
@@ -251,6 +256,15 @@ async function pickBatchKeywords(supabaseUrl: string, supabaseKey: string, n: nu
 }
 
 function startEngageBatchScheduler(): void {
+  if (envFlagEnabled('POSTER_KILL_SWITCH')) {
+    console.error('[engage-batch-sched] POSTER_KILL_SWITCH is set — scheduler disabled');
+    return;
+  }
+  if (envFlagEnabled('POSTER_DISABLE_BATCH_SCHEDULER')) {
+    console.error('[engage-batch-sched] POSTER_DISABLE_BATCH_SCHEDULER is set — scheduler disabled');
+    return;
+  }
+
   const BATCH_HOURS_PT = [6, 12];
   const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 

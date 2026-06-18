@@ -94,6 +94,16 @@ For `rgos-task-poll` and `codex-task-poll`, use a minimal no-op path when the as
 - Keep heartbeat crons compliant with `HEARTBEAT.md`, but if inbox, pending, and approved queues are empty, write the heartbeat/memory entry and stop instead of doing exploratory goal work.
 - Preserve the unified exec process budget during empty cron cycles: prefer one-shot commands, close/poll any yielded process handles, and defer deeper investigation until new work or a due time-gated task exists.
 
+## Approved Queue Pickup
+
+When inbox, pending, and in-progress queues are empty, check assigned `approved` tasks before creating fallback work or returning to standby.
+
+- Claim only explicit codex-lane approved tasks; do not claim ambiguous, stale, cross-lane, or OB1-lane work. OB1 belongs to `codex-2`/`codex-3` unless fresh orchestrator routing explicitly says otherwise.
+- Before claiming, check current standing directives and lane ownership. If the directive gate does not clearly pass, leave the task unclaimed and report or log the blocker instead of claiming first and releasing later.
+- Execute bounded no-side-effect evaluation or triage tasks immediately when they can be closed with an artifact, test, or decision record.
+- If an approved task would require merge, deploy, data mutation, external comms, or broad repo changes, capture the approval/blocker state instead of expanding scope.
+- After completion, link the output artifact to the existing task and return to standby unless another explicit approved task remains.
+
 ## Idle Goal Fallback
 
 Direct orchestrator/dev routing always wins. When inbox plus pending/approved/in_progress queues are empty, check the current GOALS.md fallback before idling. If the last Hub real-user-flow QA pass is older than 4h, dedupe against open QA tasks first; if none exists, create exactly one bounded internal QA task aligned to that goal, run it with no-send rules, complete/log it, then return to standby. Do not create more than one fallback QA task per idle decision. The generated task must be internal QA only: never external comms, deploys, merges, or production-impacting actions.

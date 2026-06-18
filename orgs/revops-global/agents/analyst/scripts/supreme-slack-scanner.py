@@ -54,6 +54,7 @@ OUTPUT_DIR = REPO_ROOT / "output"
 LATEST_JSON = OUTPUT_DIR / "supreme-outstanding-latest.json"
 DIGEST_TXT = OUTPUT_DIR / "supreme-outstanding-digest.txt"
 HISTORY_DIR = OUTPUT_DIR / "supreme-outstanding-history"
+SUPPRESSION_JSON = OUTPUT_DIR / "supreme-triage-suppressed.json"
 
 TOKEN_REFRESH_BUFFER_SECS = 30 * 60
 DEFAULT_SINCE_HOURS = 48
@@ -610,6 +611,7 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
                 msg=followup_msg,
                 sender_name=user_name(followup_msg.get("user")),
                 user_lookup=user_cache,
+                is_replied_by_greg=False,
             ))
             continue
 
@@ -634,14 +636,28 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
             msg=m,
             sender_name=user_name(m.get("user")),
             user_lookup=user_cache,
+            is_replied_by_greg=replied,
         ))
+
+    # Filter out items Greg has manually actioned (suppression list)
+    suppressed = load_suppression_list()
+    if suppressed:
+        before = len(items)
+        items = [i for i in items if i["id"] not in suppressed]
+        filtered = before - len(items)
+        if filtered:
+            print(f"[scanner] suppression filter: {filtered} item(s) removed", file=sys.stderr)
+
+    # Filter out items where Greg already replied in-thread (safety net for is_replied_by_greg=True)
+    items = [i for i in items if not i.get("is_replied_by_greg")]
 
     return items
 
 
 def build_item(source: str, status: str, channel_id: str, channel_name: str,
                msg: Dict[str, Any], sender_name: str,
-               user_lookup: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+               user_lookup: Optional[Dict[str, str]] = None,
+               is_replied_by_greg: bool = False) -> Dict[str, Any]:
     ts = msg.get("ts", "")
     text = msg.get("text") or ""
     age = int(time.time() - float(ts)) if ts else 0
@@ -658,8 +674,36 @@ def build_item(source: str, status: str, channel_id: str, channel_name: str,
         "age_seconds": age,
         "slack_url": slack_url(channel_id, ts),
         "is_question": is_question(text),
-        "is_replied_by_greg": False,
+        "is_replied_by_greg": is_replied_by_greg,
     }
+
+
+def load_suppression_list() -> set:
+    """Return set of item IDs that have been manually marked as actioned by Greg."""
+    if not SUPPRESSION_JSON.exists():
+        return set()
+    try:
+        data = json.loads(SUPPRESSION_JSON.read_text())
+        return set(data.get("suppressed", {}).keys())
+    except Exception:
+        return set()
+
+
+def suppress_items(item_ids: List[str], reason: str = "greg_actioned", note: str = "") -> None:
+    """Add item IDs to the suppression list (atomic write)."""
+    data: Dict[str, Any] = {}
+    if SUPPRESSION_JSON.exists():
+        try:
+            data = json.loads(SUPPRESSION_JSON.read_text())
+        except Exception:
+            pass
+    data.setdefault("suppressed", {})
+    now = datetime.now(timezone.utc).isoformat()
+    for item_id in item_ids:
+        data["suppressed"][item_id] = {"suppressed_at": now, "reason": reason, "note": note}
+    tmp = SUPPRESSION_JSON.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(SUPPRESSION_JSON)
 
 
 # -- output -------------------------------------------------------------------
@@ -750,7 +794,15 @@ def main() -> int:
                     help="Tag the snapshot as triggered by Hub UI rather than cron")
     ap.add_argument("--no-supabase", action="store_true")
     ap.add_argument("--no-digest", action="store_true")
+    ap.add_argument("--suppress-ids", nargs="+", metavar="ID",
+                    help="Mark item IDs as greg_actioned and exit (no scan)")
     args = ap.parse_args()
+
+    if args.suppress_ids:
+        suppress_items(args.suppress_ids, reason="greg_actioned",
+                       note="manually suppressed via CLI")
+        print(json.dumps({"suppressed": args.suppress_ids, "count": len(args.suppress_ids)}))
+        return 0
 
     env = load_env()
     missing = [k for k in REQUIRED_ENV_KEYS if not env.get(k)]
