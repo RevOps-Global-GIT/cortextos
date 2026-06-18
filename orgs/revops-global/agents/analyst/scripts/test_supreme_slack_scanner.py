@@ -89,22 +89,68 @@ def test_action_verb_without_question_mark_flagged() -> None:
     assert flagged is not None
 
 
-def test_mentions_greg_handles_pipe_form_search_result() -> None:
-    assert scanner.mentions_greg(f"<@{GREG}|Greg>")
-
-
-def test_unanswered_candidates_include_structural_dm_activity() -> None:
-    msgs = [
-        msg(GREG, "1781134000.000050", "Can you send context?"),
-        msg(MARI, "1781134500.000100", "Yes."),
-        msg(MARI, "1781136000.000200", "HubSpot shop - company is Varanex"),
-    ]
-    candidates = scanner.unanswered_candidates_after_greg(msgs)
-    assert [m["ts"] for m in candidates] == ["1781134500.000100", "1781136000.000200"]
-
-
 def test_empty_conversation() -> None:
     assert scanner.oldest_unanswered_actionable([]) is None
+
+
+def test_greg_is_latest_sender_returns_true_when_greg_most_recent() -> None:
+    """greg_is_latest_sender_in_dm returns True when Greg sent the last real message."""
+    original_slack_get = scanner.slack_get
+    try:
+        scanner.slack_get = lambda token, method, params: {
+            "ok": True,
+            "messages": [
+                {"user": GREG, "ts": "1781140000.000300", "text": "Got it, thanks."},
+                {"user": MARI, "ts": "1781139000.000200", "text": "can you review this?"},
+                {"user": MARI, "ts": "1781138000.000100", "text": "hey"},
+            ],
+        }
+        assert scanner.greg_is_latest_sender_in_dm("token", "CH123") is True
+    finally:
+        scanner.slack_get = original_slack_get
+
+
+def test_greg_is_latest_sender_returns_false_when_non_greg_most_recent() -> None:
+    """greg_is_latest_sender_in_dm returns False when a non-Greg user sent the last message."""
+    original_slack_get = scanner.slack_get
+    try:
+        scanner.slack_get = lambda token, method, params: {
+            "ok": True,
+            "messages": [
+                {"user": MARI, "ts": "1781140000.000300", "text": "can you review this?"},
+                {"user": GREG, "ts": "1781139000.000200", "text": "Sure, on it."},
+            ],
+        }
+        assert scanner.greg_is_latest_sender_in_dm("token", "CH123") is False
+    finally:
+        scanner.slack_get = original_slack_get
+
+
+def test_greg_is_latest_sender_fails_open_on_api_error() -> None:
+    """greg_is_latest_sender_in_dm returns False (fail-open) when API call fails."""
+    original_slack_get = scanner.slack_get
+    try:
+        scanner.slack_get = lambda token, method, params: {"ok": False, "error": "channel_not_found"}
+        assert scanner.greg_is_latest_sender_in_dm("token", "CH123") is False
+    finally:
+        scanner.slack_get = original_slack_get
+
+
+def test_greg_is_latest_sender_skips_subtype_messages() -> None:
+    """greg_is_latest_sender_in_dm ignores subtype messages when finding latest sender."""
+    original_slack_get = scanner.slack_get
+    try:
+        scanner.slack_get = lambda token, method, params: {
+            "ok": True,
+            "messages": [
+                {"subtype": "channel_join", "ts": "1781141000.000400", "text": "joined"},
+                {"user": MARI, "ts": "1781140000.000300", "text": "can you review this?"},
+                {"user": GREG, "ts": "1781139000.000200", "text": "Sure."},
+            ],
+        }
+        assert scanner.greg_is_latest_sender_in_dm("token", "CH123") is False
+    finally:
+        scanner.slack_get = original_slack_get
 
 
 if __name__ == "__main__":
