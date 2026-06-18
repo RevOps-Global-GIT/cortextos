@@ -966,6 +966,87 @@ export async function mirrorPrUrlToRgos(busTaskId: string, prUrl: string): Promi
 }
 
 /**
+ * Transition the linked orch_tasks mirror row to status='completed' when a bus
+ * task completes. Best-effort — never throws.
+ *
+ * WHY THIS EXISTS (lifecycle-drift gap): an orch_tasks mirror row that a human
+ * approved on the Hub sits at status='approved' (or 'proposed' for un-approved
+ * proposals). When the work finishes, bus complete-task flips the local task to
+ * 'completed' and fires mirrorTaskToRgos(task,'complete') — but that path is a
+ * PK-keyed upsert that resolves the row id via metadata.bus_task_id and merges.
+ * If the approved row's id is not the row the upsert lands on (or it was created
+ * Hub-side with a different lifecycle), the approved/proposed row never moved to
+ * completed and inflated the Fleet Tasks pending mirror count forever.
+ *
+ * This is the SYMMETRIC counterpart to the create-mirror path: it locates the
+ * row by the same metadata.bus_task_id correlation create-task writes, and PATCHes
+ * its status (plus result/completed_at when provided) to completed.
+ *
+ * Safety:
+ *   - Only the row linked by metadata.bus_task_id is touched — never unrelated rows.
+ *   - The lookup excludes rows already in a terminal status (completed/cancelled),
+ *     so a completed/cancelled mirror is left alone and other statuses are not
+ *     disturbed.
+ *   - No-op when creds are absent / mirror disabled (isEnabled gate) or when no
+ *     linked row exists. Local completion never depends on this succeeding.
+ */
+export async function mirrorTaskCompletionToRgos(
+  busTaskId: string,
+  opts: { result?: string | null; completedAt?: string | null } = {},
+): Promise<void> {
+  if (!isEnabled()) return;
+  const url = process.env.SUPABASE_RGOS_URL!;
+  const serviceKey = process.env.SUPABASE_RGOS_SERVICE_KEY!;
+
+  // Locate the linked mirror row by the same correlation create-task writes.
+  // Exclude rows already terminal so we never re-touch completed/cancelled rows.
+  const findEp = new URL(`${url}/rest/v1/orch_tasks`);
+  findEp.searchParams.set('select', 'id,status');
+  findEp.searchParams.set('metadata->>bus_task_id', `eq.${busTaskId}`);
+  findEp.searchParams.set('status', 'not.in.(completed,cancelled)');
+  findEp.searchParams.set('limit', '1');
+
+  let rowId: string | undefined;
+  try {
+    const findRes = await fetch(findEp.toString(), {
+      method: 'GET',
+      headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (findRes.ok) {
+      const rows = typeof findRes.json === 'function'
+        ? await findRes.json().catch(() => []) as Array<{ id?: string }>
+        : [];
+      if (rows.length > 0 && typeof rows[0].id === 'string') {
+        rowId = rows[0].id;
+      }
+    }
+  } catch { return; }
+
+  if (!rowId) return; // no linked non-terminal row — nothing to transition.
+
+  // PATCH only the linked row's status (+ result/completed_at when provided).
+  const patchEp = new URL(`${url}/rest/v1/orch_tasks`);
+  patchEp.searchParams.set('id', `eq.${rowId}`);
+  const patchBody: Record<string, unknown> = { status: 'completed' };
+  if (opts.result != null) patchBody.result = opts.result;
+  if (opts.completedAt != null) patchBody.completed_at = opts.completedAt;
+  try {
+    await fetch(patchEp.toString(), {
+      method: 'PATCH',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify(patchBody),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch { /* best-effort */ }
+}
+
+/**
  * Mirror a message write to Supabase cortex_messages. Fire-and-forget.
  */
 export async function mirrorMessageToRgos(msg: InboxMessage): Promise<void> {

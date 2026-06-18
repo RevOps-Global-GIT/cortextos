@@ -6,7 +6,7 @@ import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomDigits } from '../utils/random.js';
 import { validateAgentName, validatePriority } from '../utils/validate.js';
-import { mirrorTaskToRgos, mirrorTaskRunToRgos, uuidv5, isUuid } from './rgos-mirror.js';
+import { mirrorTaskToRgos, mirrorTaskRunToRgos, mirrorTaskCompletionToRgos, uuidv5, isUuid } from './rgos-mirror.js';
 import { logEvent } from './event.js';
 import { snapshotSessionCost } from './task-cost.js';
 import { autoEmitStatusUpdate } from './agent-task-events.js';
@@ -827,6 +827,15 @@ export function completeTask(
       startedAt: completedAt ?? new Date().toISOString(), // fallback; real start is in the INSERT
       completedAt: completedAt ?? null,
       costUsd: sessionCostUsd,
+    }).catch(() => undefined);
+    // Symmetric counterpart to the create-mirror path: explicitly transition the
+    // linked orch_tasks mirror row (located by metadata.bus_task_id) to completed.
+    // The mirrorTaskToRgos(task,'complete') upsert above is PK-keyed and can leave
+    // an approved/proposed Hub-side row stuck; this PATCH closes that drift gap.
+    // Best-effort — never blocks the already-persisted local completion.
+    mirrorTaskCompletionToRgos(taskId, {
+      result: result ?? null,
+      completedAt: completedAt ?? null,
     }).catch(() => undefined);
   }
   autoEmitStatusUpdate(taskId, taskTitle, prevStatus, 'completed', result);
