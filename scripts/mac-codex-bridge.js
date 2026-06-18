@@ -192,9 +192,13 @@ function execOnMac(prompt) {
     `do shell script "pbcopy < ${tmpPrompt}"`,
     // Snapshot MAX(created_at) BEFORE triggering new chat — race-fix anchor (fix a).
     // Any thread with created_at strictly greater is guaranteed to be the new one.
-    // Resolve the active Codex state DB on the Mac (build 149+ moved it to ~/.codex/sqlite/).
-    `set codexDb to do shell script "d=\\"$HOME/.codex/sqlite/state_5.sqlite\\"; [ -f \\"$d\\" ] || d=\\"$HOME/.codex/state_5.sqlite\\"; printf %s \\"$d\\""`,
-    `set snapshotTs to do shell script "sqlite3 " & quoted form of codexDb & " \\"SELECT COALESCE(MAX(created_at), '1970-01-01 00:00:00') FROM threads;\\""`,
+    // Resolve the active Codex state DB. Builds have shipped state_5.sqlite at BOTH
+    // ~/.codex/state_5.sqlite (flat) and ~/.codex/sqlite/state_5.sqlite (nested), and a
+    // stale copy of the other path can linger. A hardcoded preference polls the dead DB →
+    // new threads never appear → 30s timeout. Pick whichever candidate was modified most
+    // recently (the one Codex.app is actively writing). stat -f %m is BSD/macOS syntax.
+    `set codexDb to do shell script "best=\\"\\"; bestm=0; for d in \\"$HOME/.codex/state_5.sqlite\\" \\"$HOME/.codex/sqlite/state_5.sqlite\\"; do [ -f \\"$d\\" ] || continue; m=$(stat -f %m \\"$d\\"); if [ \\"$m\\" -gt \\"$bestm\\" ]; then bestm=$m; best=\\"$d\\"; fi; done; printf %s \\"$best\\""`,
+    `set snapshotTs to do shell script "sqlite3 " & quoted form of codexDb & " \\"SELECT COALESCE(MAX(created_at), 0) FROM threads;\\""`,
     'tell application "Codex" to activate',
     'delay 1.5',
     'tell application "System Events"',
@@ -221,7 +225,7 @@ function execOnMac(prompt) {
     // Replaces the old fixed delay-2 + DESC LIMIT 1 that raced against Codex.app writes.
     'set threadId to ""',
     'repeat 60 times',
-    `  set threadId to do shell script "sqlite3 " & quoted form of codexDb & " \\"SELECT id FROM threads WHERE created_at > '" & snapshotTs & "' ORDER BY created_at ASC LIMIT 1;\\""`,
+    `  set threadId to do shell script "sqlite3 " & quoted form of codexDb & " \\"SELECT id FROM threads WHERE created_at > " & snapshotTs & " ORDER BY created_at ASC LIMIT 1;\\""`,
     '  if threadId is not "" then exit repeat',
     '  delay 0.5',
     'end repeat',
