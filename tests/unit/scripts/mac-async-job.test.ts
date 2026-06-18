@@ -5,6 +5,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { createRequire } from 'module';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 const require = createRequire(import.meta.url);
 const {
@@ -14,6 +17,9 @@ const {
   buildStatusRemoteCmd,
   parseLaunchOutput,
   parseStatusOutput,
+  failureReasonForStatus,
+  buildProofRecord,
+  writeProofRecord,
 } = require('../../../scripts/mac-async-job.js');
 
 describe('sanitizePrefix', () => {
@@ -78,6 +84,11 @@ describe('buildLaunchRemoteCmd', () => {
     const b64 = Buffer.from(tricky, 'utf8').toString('base64');
     expect(cmd).toContain(b64);
   });
+
+  it('does not produce zsh-invalid "& &&" after the background launch', () => {
+    const cmd = buildLaunchRemoteCmd(jobId, 'echo hi');
+    expect(cmd).not.toContain('& &&');
+  });
 });
 
 describe('buildStatusRemoteCmd', () => {
@@ -136,5 +147,51 @@ describe('parseStatusOutput', () => {
   });
   it('defaults to unknown on empty input', () => {
     expect(parseStatusOutput('').state).toBe('unknown');
+  });
+});
+
+describe('local proof records', () => {
+  it('captures failure reason and remote proof paths for nonzero exits', () => {
+    const record = buildProofRecord('status', {
+      jobId: 'mac-ob1-flow-hero-20260615214512-abcdef',
+      state: 'done',
+      exitCode: 2,
+      pid: 4567,
+    });
+
+    expect(record.failureReason).toBe('remote command exited 2');
+    expect(record.remote.logPath).toBe('~/.mac-async-jobs/mac-ob1-flow-hero-20260615214512-abcdef/log');
+    expect(record.remote.exitCodePath).toBe('~/.mac-async-jobs/mac-ob1-flow-hero-20260615214512-abcdef/exit_code');
+  });
+
+  it('maps missing and unknown states to actionable failure reasons', () => {
+    expect(failureReasonForStatus({ state: 'missing', exitCode: null, pid: null }))
+      .toBe('remote job directory missing');
+    expect(failureReasonForStatus({ state: 'unknown', exitCode: null, pid: 4567 }))
+      .toMatch(/exit_code is missing/);
+    expect(failureReasonForStatus({ state: 'running', exitCode: null, pid: 4567 }))
+      .toBeNull();
+  });
+
+  it('writes latest.json plus a per-job proof record', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mac-async-job-proof-'));
+    try {
+      const record = buildProofRecord('launch', {
+        jobId: 'mac-ob1-flow-hero-20260615214512-abcdef',
+        pid: 4567,
+      });
+
+      const paths = writeProofRecord(record, dir);
+
+      expect(paths.latestPath).toBe(join(dir, 'latest.json'));
+      expect(paths.jobPath).toBe(join(dir, 'mac-ob1-flow-hero-20260615214512-abcdef.json'));
+
+      const latest = JSON.parse(readFileSync(paths.latestPath, 'utf8'));
+      const perJob = JSON.parse(readFileSync(paths.jobPath, 'utf8'));
+      expect(latest.jobId).toBe('mac-ob1-flow-hero-20260615214512-abcdef');
+      expect(perJob.remote.pidPath).toContain('/pid');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
