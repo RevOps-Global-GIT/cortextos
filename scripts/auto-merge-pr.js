@@ -60,6 +60,19 @@ function mergeStateBlocksMerge(mergeStateStatus) {
   return HARD_BLOCK_MERGE_STATES.includes(mergeStateStatus);
 }
 
+// GitHub's `mergeable` field is the GraphQL MergeableState enum: MERGEABLE,
+// CONFLICTING, UNKNOWN. Like mergeStateStatus, it is computed LAZILY — batch
+// GraphQL returns UNKNOWN for genuinely-green PRs until a `gh pr view` forces
+// recompute to MERGEABLE (PRs #1713/#878 only merged once an external poll
+// forced that recompute). So the old `!== MERGEABLE` gate silently skipped
+// green UNKNOWN PRs. Gate ONLY on the DEFINITE-block value CONFLICTING; allow
+// MERGEABLE and UNKNOWN through — ciPassed and `gh pr merge` (which errors
+// safely if GitHub still rejects) are the authoritative gates.
+const HARD_BLOCK_MERGEABLE_STATES = ['CONFLICTING'];
+function mergeableBlocksMerge(mergeable) {
+  return HARD_BLOCK_MERGEABLE_STATES.includes(mergeable);
+}
+
 const CTX_ROOT = process.env.CTX_ROOT || `${process.env.HOME}/.cortextos/default`;
 const CTX_AGENT_NAME = process.env.CTX_AGENT_NAME || 'dev';
 const CTX_ORG = process.env.CTX_ORG || 'revops-global';
@@ -498,8 +511,12 @@ async function main() {
         console.log(`[auto-merge] SKIP #${number} ${repo} — linked approval pending (${heldByApproval})`);
         continue;
       }
-      if (mergeable !== 'MERGEABLE') {
-        console.log(`[auto-merge] SKIP #${number} ${repo} — mergeable=${mergeable}`);
+      // mergeable is computed LAZILY by GitHub (see mergeableBlocksMerge);
+      // batch GraphQL returns UNKNOWN for green PRs until a `gh pr view` forces
+      // recompute. Gate only on the DEFINITE-block value CONFLICTING — allow
+      // MERGEABLE + UNKNOWN; ciPassed and gh pr merge are the real gates.
+      if (mergeableBlocksMerge(mergeable)) {
+        console.log(`[auto-merge] SKIP #${number} ${repo} — mergeable=${mergeable} (hard block)`);
         continue;
       }
       // mergeStateStatus is computed LAZILY by GitHub; batch GraphQL often
@@ -606,6 +623,6 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
+  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
 }
 
