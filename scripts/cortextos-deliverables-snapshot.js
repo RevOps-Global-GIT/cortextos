@@ -179,12 +179,13 @@ function summarizeHubQa() {
     };
   }
 
+  // Deferred checks remain visible in the label/payload, but they are often
+  // non-authoritative follow-ups. Only failed checks or age should change the
+  // source health away from healthy.
   const status =
     failed > 0
       ? 'error'
-      : deferred > 0
-        ? 'warning'
-        : age != null && age > 6 * 60
+      : age != null && age > 6 * 60
           ? 'stale'
           : 'healthy';
   const stale_reason =
@@ -192,9 +193,7 @@ function summarizeHubQa() {
       ? `${failed} failing check(s) in ${path.basename(artifact.path)}`
       : age != null && age > 6 * 60
         ? `${age}m old; threshold 360m`
-        : deferred > 0
-          ? `${deferred} follow-up check(s) need attention`
-          : null;
+        : null;
 
   return {
     source: 'hub_qa',
