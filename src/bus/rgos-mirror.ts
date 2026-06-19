@@ -133,12 +133,13 @@ function clearRetryQueue(qPath: string): void {
  * Permanent HTTP status codes — errors that will never resolve by retrying.
  *
  * - 400 Bad Request: malformed payload / schema mismatch
+ * - 401 Unauthorized: missing or invalid auth token — re-queuing loops forever
  * - 403 Forbidden: service-key auth failure (wrong key or RLS policy)
  * - 422 Unprocessable Entity: constraint violation (bad enum value, etc.)
  *
  * 500 / 503 / network errors / 409 FK violations are transient — re-queue.
  */
-const PERMANENT_HTTP_STATUSES = new Set([400, 403, 422]);
+const PERMANENT_HTTP_STATUSES = new Set([400, 401, 403, 422]);
 
 export class PostgRESTError extends Error {
   constructor(
