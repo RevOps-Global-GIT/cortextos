@@ -821,12 +821,17 @@ export class CodexAppServerPTY {
       ? tokenUsage.modelContextWindow
       : null;
     const cap = modelContextWindow ?? this._config.codex_context_cap ?? 256000;
-    const usedPct = cap > 0 ? Math.min(100, (inputTokens / cap) * 100) : null;
+    // cachedInputTokens are prefix-cached from prior sessions and do not consume
+    // the per-turn context budget — use only the fresh (non-cached) portion for
+    // fill estimation. Without this, a session with a large prefix cache pins
+    // used_percentage at 100% even when the real per-turn fill is <20%.
+    const freshInputTokens = Math.max(0, inputTokens - cachedInputTokens);
+    const usedPct = cap > 0 ? Math.min(100, (freshInputTokens / cap) * 100) : null;
 
     const payload = JSON.stringify({
       used_percentage: usedPct,
       context_window_size: cap,
-      exceeds_200k_tokens: inputTokens > 200000,
+      exceeds_200k_tokens: freshInputTokens > 200000,
       current_usage: {
         input_tokens: inputTokens,
         output_tokens: outputTokens,
