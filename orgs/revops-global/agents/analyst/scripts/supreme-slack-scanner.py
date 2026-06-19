@@ -928,8 +928,11 @@ def main() -> int:
     snapshot = write_snapshot(items, on_demand=args.on_demand)
 
     if not args.no_supabase and not args.dry_run:
-        upsert_supabase(env, snapshot)
-        print(f"[scanner] upserted {snapshot['total_count']} rows to supreme_outstanding_items", file=sys.stderr)
+        try:
+            upsert_supabase(env, snapshot)
+            print(f"[scanner] upserted {snapshot['total_count']} rows to supreme_outstanding_items", file=sys.stderr)
+        except Exception as e:
+            print(f"[scanner] WARN: supabase upsert failed (non-fatal): {e}", file=sys.stderr)
 
     if not args.no_digest:
         digest = write_digest(snapshot)
