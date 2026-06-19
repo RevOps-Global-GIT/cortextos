@@ -677,6 +677,7 @@ export function buildTaskRow(task: Task): Record<string, unknown> {
       kpi_key: task.kpi_key,
       type: task.type,
       needs_approval: task.needs_approval,
+      pr_url: task.pr_url ?? null,
     },
     source: MIRROR_SOURCE,
     source_thread_ref: null,

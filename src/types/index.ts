@@ -158,6 +158,11 @@ export interface Task {
    * records the cron_id.
    */
   linked_loop?: LinkedLoop;
+  /**
+   * PR URL for this task's associated pull request. Set by `bus set-pr-url`
+   * and mirrored into orch_tasks.metadata.pr_url for the pr_cycle_minutes metric.
+   */
+  pr_url?: string;
 }
 
 /**
