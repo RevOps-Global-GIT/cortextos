@@ -91,17 +91,27 @@ const nonOwnerEnv = (home: string): NodeJS.ProcessEnv => {
   };
   delete env.CTX_SESSION_OWNER_PID;
   delete env.CTX_LOCKED_DRAIN;
+  // Disable RGOS mirror — isEnabled() gates on SUPABASE_RGOS_URL, so stripping
+  // these prevents any live-store writes while keeping full local write coverage.
+  delete env.SUPABASE_RGOS_URL;
+  delete env.SUPABASE_RGOS_SERVICE_KEY;
   return env;
 };
 
-const ownerEnv = (home: string, ownerPid: number): NodeJS.ProcessEnv => ({
-  ...process.env,
-  HOME: home,
-  CTX_AGENT_NAME: AGENT,
-  CTX_INSTANCE_ID: INSTANCE,
-  CTX_ORG: ORG,
-  CTX_SESSION_OWNER_PID: String(ownerPid),
-});
+const ownerEnv = (home: string, ownerPid: number): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    CTX_AGENT_NAME: AGENT,
+    CTX_INSTANCE_ID: INSTANCE,
+    CTX_ORG: ORG,
+    CTX_SESSION_OWNER_PID: String(ownerPid),
+  };
+  // Disable RGOS mirror — same isolation rationale as nonOwnerEnv.
+  delete env.SUPABASE_RGOS_URL;
+  delete env.SUPABASE_RGOS_SERVICE_KEY;
+  return env;
+};
 
 const CREATE_TASK_ARGS = [
   'bus', 'create-task', 'Queued scheduled task',
