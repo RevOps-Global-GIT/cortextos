@@ -493,6 +493,15 @@ function isLocalVoiceEndpoint(target: string): boolean {
   return target === 'voice-orch-talk' || target.startsWith('voice-session-');
 }
 
+// Explicit allowlist of internal pseudo-identities that route like agents
+// (skip the externalEmail gate) even though they have no agent directory.
+// MUST remain an explicit allowlist — unknown targets must NOT be assumed internal.
+const INTERNAL_PSEUDO_IDENTITIES: ReadonlySet<string> = new Set(['root', 'system', 'director']);
+
+export function isInternalPseudoIdentity(target: string): boolean {
+  return INTERNAL_PSEUDO_IDENTITIES.has(target);
+}
+
 // Extensions that are safe to publish to {ctxRoot}/dashboard-uploads so the
 // dashboard bus channel can link or render them. Media types render inline
 // (image/audio/video); document types render as a download chip. We avoid
@@ -566,7 +575,7 @@ busCommand
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
 
     const projectRoot = env.projectRoot || env.frameworkRoot || process.cwd();
-    const agentExists = isRegisteredAgent(projectRoot, to) || isLocalVoiceEndpoint(to);
+    const agentExists = isRegisteredAgent(projectRoot, to) || isLocalVoiceEndpoint(to) || isInternalPseudoIdentity(to);
     if (!agentExists) {
       // If target isn't a known agent, it's the user (dashboard/Telegram identity).
       // Fall through to user-destination handling below — no warning.
