@@ -408,12 +408,15 @@ function fleetTaskCountIdentity(task: FleetTaskCountRow): string {
   const cortexTaskId = metadataString(task, 'cortex_task_id', 'cortexTaskId', 'cortex_id', 'task_id');
   if (cortexTaskId) return `cortex:${cortexTaskId}`;
 
+  // No twin-linkage metadata → this is a standalone task; key on its own id.
+  // Dedup must collapse ONLY bus<->cortex twin pairs (a bus task + its RGOS
+  // mirror, linked above by bus_task_id/cortex_task_id), NEVER two distinct bus
+  // ids. The previous `logical:title|status|created_at[:19]` fallback merged
+  // distinct tasks that merely shared a title, status, and creation *second* —
+  // over-collapsing burst-created rows (e.g. "Queued scheduled task") into a
+  // CHECK 6 false-FAIL (rendered 18 vs deduped 15) on 2026-06-19.
   const title = (task.title ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
-  const createdAt = (task.created_at ?? '').slice(0, 19);
-  const status = (task.status ?? '').toLowerCase();
-  if (title && createdAt) return `logical:${title}|${status}|${createdAt}`;
-
-  return `id:${task.id ?? title ?? ''}`;
+  return `id:${task.id ?? title}`;
 }
 
 export function dedupeFleetTaskCountRows(tasks: FleetTaskCountRow[]): FleetTaskCountRow[] {
