@@ -18,6 +18,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { detectStaleness, STATUS_LABEL_SELECTORS } from './page-health-staleness';
+import { VALID_TASK_STATUSES } from './page-health-task-statuses';
 
 // ---------------------------------------------------------------------------
 // Args
@@ -3140,11 +3141,11 @@ async function runFleetTasksChecks(page: Page, serviceKey?: string): Promise<Che
           results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'DEFERRED', evidence: 'No tasks in orch_tasks — nothing to assert' });
         } else {
           // Source of truth: TaskStatus union in rgos orchestrator.ts (proposed, awaiting_approval,
-          // approved, scheduled, in_progress, review, completed, rejected, cancelled, blocked,
-          // needs_person, waiting_approval) plus bus-side mirror values (pending, failed) that also
-          // land in orch_tasks. Keep this superset aligned with orchestrator.ts when statuses change.
-          const VALID_STATUSES = new Set(['pending', 'in_progress', 'review', 'completed', 'approved', 'proposed', 'cancelled', 'failed', 'blocked', 'needs_person', 'awaiting_approval', 'scheduled', 'rejected', 'waiting_approval']);
-          const invalid = rows.filter(r => !r.status || !VALID_STATUSES.has(r.status));
+          // Allow-set is the shared single source of truth (scripts/page-health-task-statuses.ts),
+          // a superset of the live orch_tasks_status_check DB constraint. A unit/integration test
+          // asserts that superset relationship so a too-narrow regression (CHECK 5's repeated
+          // false-positive failure mode) can't silently return.
+          const invalid = rows.filter(r => !r.status || !VALID_TASK_STATUSES.has(r.status));
           if (invalid.length > 0) {
             const sample = invalid.slice(0, 5).map(r => `${r.id}:${r.status}`).join(', ');
             results.push({ check: '[CORRECTNESS] CHECK 5 Task status enum valid', status: 'FAIL', evidence: `${invalid.length}/${rows.length} tasks have invalid/null status. Sample: ${sample}` });
