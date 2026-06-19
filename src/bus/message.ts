@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, renameSync, statSync, existsSync } from 'fs'
 import { join } from 'path';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { InboxMessage, Priority, BusPaths } from '../types/index.js';
-import { PRIORITY_MAP } from '../types/index.js';
+import { PRIORITY_MAP, VALID_PRIORITIES } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 import { acquireLock, releaseLock } from '../utils/lock.js';
 import { randomString } from '../utils/random.js';
@@ -59,6 +59,7 @@ export function sendMessage(
   text: string,
   replyTo?: string,
   traceId?: string,
+  supersedes?: Priority,
 ): string {
   validateAgentName(from);
   validateAgentName(to);
@@ -81,6 +82,7 @@ export function sendMessage(
     text,
     reply_to: replyTo || null,
     ...(traceId ? { trace_id: traceId } : {}),
+    ...(supersedes ? { supersedes } : {}),
     ...(signingKey ? { sig: hmacSign(signingKey, signPayload(msgId, from, to, text)) } : {}),
   };
 
@@ -132,7 +134,8 @@ export function checkInbox(paths: BusPaths): InboxMessage[] {
     // Security (H10): Load signing key for HMAC verification.
     const signingKey = loadSigningKey(paths.ctxRoot);
 
-    const messages: InboxMessage[] = [];
+    // Collect {filename, msg} pairs so we can track files for supersede moves.
+    const pairs: Array<{ filename: string; msg: InboxMessage }> = [];
     for (const file of files) {
       const srcPath = join(inbox, file);
       try {
@@ -157,7 +160,7 @@ export function checkInbox(paths: BusPaths): InboxMessage[] {
         // Move to inflight
         const destPath = join(inflight, file);
         renameSync(srcPath, destPath);
-        messages.push(msg);
+        pairs.push({ filename: file, msg });
       } catch {
         // Move corrupt files to .errors/
         const errDir = join(inbox, '.errors');
@@ -170,7 +173,46 @@ export function checkInbox(paths: BusPaths): InboxMessage[] {
       }
     }
 
-    return messages;
+    // ---------------------------------------------------------------------------
+    // Supersede logic: for each message with a `supersedes` field, discard all
+    // OTHER messages from the same sender whose priority is <= the threshold
+    // (i.e., numerically >= in PRIORITY_MAP terms — lower urgency).
+    // The supersede message itself is always kept and returned.
+    // Messages from OTHER senders are never affected.
+    // ---------------------------------------------------------------------------
+    const supersedePairs = pairs.filter(
+      p => p.msg.supersedes && VALID_PRIORITIES.includes(p.msg.supersedes),
+    );
+
+    let supersededFilenames: Set<string> = new Set();
+    for (const { msg: supersedeMsg } of supersedePairs) {
+      const threshold = PRIORITY_MAP[supersedeMsg.supersedes!];
+      for (const { filename, msg } of pairs) {
+        // Only messages from the same sender, not the supersede msg itself
+        if (
+          msg.from === supersedeMsg.from &&
+          msg.id !== supersedeMsg.id &&
+          PRIORITY_MAP[msg.priority] >= threshold
+        ) {
+          supersededFilenames.add(filename);
+        }
+      }
+    }
+
+    if (supersededFilenames.size > 0) {
+      ensureDir(paths.processed);
+      for (const filename of supersededFilenames) {
+        try {
+          renameSync(join(inflight, filename), join(paths.processed, filename));
+        } catch {
+          // Ignore move errors — message may have already been moved
+        }
+      }
+    }
+
+    return pairs
+      .filter(p => !supersededFilenames.has(p.filename))
+      .map(p => p.msg);
   } finally {
     releaseLock(inbox);
   }

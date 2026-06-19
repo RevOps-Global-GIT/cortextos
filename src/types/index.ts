@@ -25,6 +25,18 @@ export interface InboxMessage {
   /** OTel-style trace ID for correlating messages across a multi-agent workflow. */
   trace_id?: string;
   sig?: string; // Security (H10): HMAC-SHA256 signature — optional for backwards compat
+  /**
+   * When set, all queued messages in the recipient's inbox from this sender
+   * with priority <= (numerically >=) the specified value are discarded before
+   * this message is returned. Use with `priority: 'urgent'` so this message
+   * sorts first and the superseded messages are never delivered.
+   *
+   * Example: an orchestrator sends a new directive with `supersedes: 'normal'`
+   * and `priority: 'urgent'`. checkInbox() will discard all normal and low
+   * messages from that orchestrator that are still queued, so the agent
+   * never acts on stale direction.
+   */
+  supersedes?: Priority;
 }
 
 // Task Types
