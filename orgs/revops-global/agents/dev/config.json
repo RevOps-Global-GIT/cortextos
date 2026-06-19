@@ -67,6 +67,12 @@
       "type": "recurring",
       "cron": "0 8 * * *",
       "prompt": "Read prompts/cron-daily-hero-watchdog.md and execute exactly one bounded hero trigger pass; check latest.json, dispatch to mac-codex if missing, log result and exit."
+    },
+    {
+      "name": "dist-rebuild-check",
+      "type": "recurring",
+      "interval": "1h",
+      "prompt": "node /home/cortextos/cortextos/scripts/cortextos-dist-rebuild.js"
     }
   ],
   "ctx_autoreset_threshold": 85,
