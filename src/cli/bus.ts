@@ -1139,6 +1139,22 @@ busCommand
   .argument('<pr-url>', 'PR URL to record in orch_tasks mirror row metadata')
   .description('Best-effort: patches pr_url into the orch_tasks mirror row for a bus task (enables pr_cycle_minutes metric).')
   .action(async (taskId: string, prUrl: string) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    // Persist pr_url to local task JSON so buildTaskRow propagates it on the
+    // next upsert, even if the mirror row doesn't exist yet (race-condition fix).
+    const taskPath = findTaskFile(paths, taskId);
+    if (taskPath && existsSync(taskPath)) {
+      try {
+        const task = JSON.parse(readFileSync(taskPath, 'utf-8')) as Task;
+        task.pr_url = prUrl;
+        task.updated_at = new Date().toISOString();
+        atomicWriteSync(taskPath, JSON.stringify(task, null, 2));
+      } catch {
+        // best-effort; proceed to mirror attempt regardless
+      }
+    }
+    // Best-effort RGOS patch — may fail if mirror row isn't yet materialized.
     await mirrorPrUrlToRgos(taskId, prUrl).catch(() => {});
     process.exit(0);
   });
