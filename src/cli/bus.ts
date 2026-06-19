@@ -555,12 +555,17 @@ busCommand
   .option('--reply-to <id>', 'Reply to message ID')
   .option('--trace-id <id>', 'OTel-style trace ID to correlate this message with a workflow or task')
   .option('--policy-approval-id <id>', 'Approval ID authorizing a policy-gated live user send')
-  .action(async (to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string; traceId?: string; policyApprovalId?: string }) => {
+  .option('--supersede <priority>', 'Supersede all queued messages from this sender at or below the given priority level (urgent, high, normal, low)')
+  .action(async (to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string; traceId?: string; policyApprovalId?: string; supersede?: string }) => {
     // Accept reply-to as either positional arg or --reply-to flag (P2 fix #9)
     const effectiveReplyTo = opts.replyTo ?? replyToArg;
     const validPriorities: Priority[] = ['urgent', 'high', 'normal', 'low'];
     if (!validPriorities.includes(priority as Priority)) {
       console.error(`Invalid priority '${priority}'. Must be one of: ${validPriorities.join(', ')}`);
+      process.exit(1);
+    }
+    if (opts.supersede !== undefined && !validPriorities.includes(opts.supersede as Priority)) {
+      console.error(`Invalid --supersede value '${opts.supersede}'. Must be one of: ${validPriorities.join(', ')}`);
       process.exit(1);
     }
     // Security (H9): Validate agent name before any filesystem access.
@@ -618,7 +623,7 @@ busCommand
       }
     }
 
-    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, bodyText, effectiveReplyTo, opts.traceId);
+    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, bodyText, effectiveReplyTo, opts.traceId, opts.supersede as Priority | undefined);
     try {
       logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null, trace_id: opts.traceId ?? null, mode: agentExists ? null : mode }));
     } catch { /* non-fatal */ }
