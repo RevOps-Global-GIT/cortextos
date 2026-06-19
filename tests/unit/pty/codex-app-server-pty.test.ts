@@ -936,8 +936,9 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
   it('writes context_status.json with used_percentage from per-turn last.inputTokens', () => {
     const pty = new CodexAppServerPTY(mockEnv, {});
     (pty as unknown as { _threadId: string })._threadId = 'thread-9';
-    // total is cumulative (would pin to 35%+ and climb unbounded); the real
-    // window fill is last.inputTokens (the full prompt sent this turn) = 70000.
+    // total is cumulative (would pin high and climb unbounded); the real window
+    // fill is the FRESH (non-cached) portion of last.inputTokens, i.e.
+    // inputTokens - cachedInputTokens = 70000 - 5000 = 65000 (= 32.5% of 200000).
     feedTokenUsage(pty, {
       last: { cachedInputTokens: 5000, inputTokens: 70000, outputTokens: 4000, reasoningOutputTokens: 1000, totalTokens: 75000 },
       total: { cachedInputTokens: 50000, inputTokens: 600000, outputTokens: 40000, reasoningOutputTokens: 10000, totalTokens: 700000 },
@@ -948,7 +949,7 @@ describe('CodexAppServerPTY thread/tokenUsage/updated → context_status.json', 
     const [path] = atomicWriteSyncMock.mock.calls[0];
     expect(path).toBe('/tmp/ctx/state/codex-app-agent/context_status.json');
     const payload = lastWrittenPayload()!;
-    expect(payload.used_percentage).toBeCloseTo(35, 5);
+    expect(payload.used_percentage).toBeCloseTo(32.5, 5);
     expect(payload.context_window_size).toBe(200000);
     expect(payload.exceeds_200k_tokens).toBe(false);
     expect(payload.session_id).toBe('thread-9');
