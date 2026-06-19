@@ -45,6 +45,34 @@ const SKIP_BODY_PATTERNS = [
 // concluded FAILURE 8s after the merge). Defer such PRs to the next cycle.
 const SETTLE_WINDOW_MS = 90 * 1000;
 
+// mergeStateStatus values that mean the PR genuinely cannot be merged now:
+//   DIRTY   = conflicts with the base branch.
+//   BLOCKED = a REQUIRED check is failing or a required review is missing.
+// Every other value (CLEAN / UNSTABLE / UNKNOWN / BEHIND / HAS_HOOKS) is either
+// mergeable or just lazily-uncomputed by GitHub, and must NOT block: the real
+// gates are mergeable===MERGEABLE + ciPassed, and `gh pr merge` is the final
+// guard (it errors safely if GitHub rejects). GitHub returns UNKNOWN/UNSTABLE
+// from batch GraphQL for green MERGEABLE PRs until a `gh pr view` forces
+// recompute to CLEAN — which is why the old `=== CLEAN` gate silently skipped
+// green CLEAN PRs (#1713, #878) until a human manually merged them.
+const HARD_BLOCK_MERGE_STATES = ['DIRTY', 'BLOCKED'];
+function mergeStateBlocksMerge(mergeStateStatus) {
+  return HARD_BLOCK_MERGE_STATES.includes(mergeStateStatus);
+}
+
+// GitHub's `mergeable` field is the GraphQL MergeableState enum: MERGEABLE,
+// CONFLICTING, UNKNOWN. Like mergeStateStatus, it is computed LAZILY — batch
+// GraphQL returns UNKNOWN for genuinely-green PRs until a `gh pr view` forces
+// recompute to MERGEABLE (PRs #1713/#878 only merged once an external poll
+// forced that recompute). So the old `!== MERGEABLE` gate silently skipped
+// green UNKNOWN PRs. Gate ONLY on the DEFINITE-block value CONFLICTING; allow
+// MERGEABLE and UNKNOWN through — ciPassed and `gh pr merge` (which errors
+// safely if GitHub still rejects) are the authoritative gates.
+const HARD_BLOCK_MERGEABLE_STATES = ['CONFLICTING'];
+function mergeableBlocksMerge(mergeable) {
+  return HARD_BLOCK_MERGEABLE_STATES.includes(mergeable);
+}
+
 const CTX_ROOT = process.env.CTX_ROOT || `${process.env.HOME}/.cortextos/default`;
 const CTX_AGENT_NAME = process.env.CTX_AGENT_NAME || 'dev';
 const CTX_ORG = process.env.CTX_ORG || 'revops-global';
@@ -124,6 +152,9 @@ const FILE_ROUTE_MAP = [
   [/^src\/pages\/Projects\.[tj]sx?$/, '/projects'],
   [/^src\/pages\/Reports\.[tj]sx?$/, '/reports'],
   [/^src\/pages\/MyDay\.[tj]sx?$/, '/my-day'],
+  [/^src\/pages\/LinkedInEngage\.[tj]sx?$/, '/linkedin-engage'],
+  [/^src\/components\/engage\//, '/linkedin-engage'],
+  [/^src\/hooks\/useLinkedInEngagementQueue\.[tj]sx?$/, '/linkedin-engage'],
 ];
 
 // High-traffic pages to fall back to when no specific route can be inferred
@@ -483,12 +514,20 @@ async function main() {
         console.log(`[auto-merge] SKIP #${number} ${repo} — linked approval pending (${heldByApproval})`);
         continue;
       }
-      if (mergeable !== 'MERGEABLE') {
-        console.log(`[auto-merge] SKIP #${number} ${repo} — mergeable=${mergeable}`);
+      // mergeable is computed LAZILY by GitHub (see mergeableBlocksMerge);
+      // batch GraphQL returns UNKNOWN for green PRs until a `gh pr view` forces
+      // recompute. Gate only on the DEFINITE-block value CONFLICTING — allow
+      // MERGEABLE + UNKNOWN; ciPassed and gh pr merge are the real gates.
+      if (mergeableBlocksMerge(mergeable)) {
+        console.log(`[auto-merge] SKIP #${number} ${repo} — mergeable=${mergeable} (hard block)`);
         continue;
       }
-      if (mergeStateStatus !== 'CLEAN') {
-        console.log(`[auto-merge] SKIP #${number} ${repo} — mergeState=${mergeStateStatus}`);
+      // mergeStateStatus is computed LAZILY by GitHub; batch GraphQL often
+      // returns UNKNOWN/UNSTABLE for MERGEABLE all-green PRs. Gate only on
+      // DEFINITE hard-block states (see mergeStateBlocksMerge) — mergeable and
+      // ciPassed are the authoritative gates, gh pr merge the final guard.
+      if (mergeStateBlocksMerge(mergeStateStatus)) {
+        console.log(`[auto-merge] SKIP #${number} ${repo} — mergeState=${mergeStateStatus} (hard block)`);
         continue;
       }
       if (!ciPassed) {
@@ -587,6 +626,5 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
+  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
 }
-

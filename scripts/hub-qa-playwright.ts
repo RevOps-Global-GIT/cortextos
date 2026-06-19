@@ -4466,6 +4466,113 @@ async function runLinkedInPresenceChecks(page: Page): Promise<CheckResult[]> {
 }
 
 // ---------------------------------------------------------------------------
+// /linkedin-engage checks
+// Validates the LinkedIn Engage review queue shell and tabbed queue controls.
+// ---------------------------------------------------------------------------
+async function runLinkedInEngageChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'linkedin-engage';
+
+  // CHECK 1: Page load
+  try {
+    const load = await checkLoad(page, sp);
+    const bodyText = await page.locator('body').innerText({ timeout: 5000 }).catch(() => '');
+    const hasHeading = /LinkedIn Engage/i.test(bodyText);
+    if (load.status === 'PASS' && !hasHeading) {
+      results.push({
+        check: '[LIVENESS] CHECK 1 Page load',
+        status: 'FAIL',
+        evidence: `Page loaded but LinkedIn Engage heading/text was not visible. URL: ${page.url()}`,
+      });
+    } else {
+      results.push(load.status === 'PASS'
+        ? { ...load, evidence: `${load.evidence}; LinkedIn Engage heading/text visible.` }
+        : load);
+    }
+  } catch (e) {
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-1-load-fail.png`) }).catch(() => {});
+    results.push({ check: '[LIVENESS] CHECK 1 Page load', status: 'FAIL', evidence: `Did not load: ${(e as Error).message?.split('\n')[0]}` });
+    return results;
+  }
+
+  // CHECK 2: No undefined/null literals
+  try {
+    const undefinedHits = await page.getByText('undefined', { exact: false }).count();
+    const nullLiterals = await page.locator('text="null"').count();
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-2-undefined-check.png`), fullPage: false });
+    if (undefinedHits > 0 || nullLiterals > 0) {
+      results.push({ check: '[CORRECTNESS] CHECK 2 No undefined/null literals', status: 'FAIL', evidence: `${undefinedHits} "undefined" + ${nullLiterals} "null" literal(s) visible.` });
+    } else {
+      results.push({ check: '[CORRECTNESS] CHECK 2 No undefined/null literals', status: 'PASS', evidence: 'No "undefined" or "null" literals on page.' });
+    }
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 2 No undefined/null literals', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 3: Queue tabs render
+  try {
+    const tabLabels = await page.evaluate(() => Array.from(
+      document.querySelectorAll('[role="tab"], button'),
+      (el) => (el.textContent ?? '').replace(/\s+/g, ' ').trim(),
+    ).filter(Boolean));
+    const required = ['Queue', 'Approved', 'Posted'];
+    const missing = required.filter((label) => !tabLabels.some((text) => text.toLowerCase().startsWith(label.toLowerCase())));
+    await page.screenshot({ path: path.join(OUTPUT_DIR, `${sp}-3-tabs.png`), fullPage: false });
+    results.push({
+      check: '[LIVENESS] CHECK 3 Queue tabs render',
+      status: missing.length === 0 ? 'PASS' : 'FAIL',
+      evidence: missing.length === 0
+        ? `Tabs visible: ${required.join(', ')}.`
+        : `Missing tab(s): ${missing.join(', ')}. Visible controls: ${tabLabels.slice(0, 12).join(' | ') || '(none)'}`,
+    });
+  } catch (e) {
+    results.push({ check: '[LIVENESS] CHECK 3 Queue tabs render', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 4: Queue filter controls stay reachable, including empty personal queues.
+  try {
+    const controls = await page.evaluate(() => Array.from(
+      document.querySelectorAll('button, [role="button"], [role="tab"]'),
+      (el) => (el.textContent ?? '').replace(/\s+/g, ' ').trim(),
+    ).filter(Boolean));
+    const hasMine = controls.some((text) => /^My Queue$/i.test(text));
+    const hasAll = controls.some((text) => /^All$/i.test(text));
+    results.push({
+      check: '[CORRECTNESS] CHECK 4 Sender filter controls visible',
+      status: hasMine && hasAll ? 'PASS' : 'FAIL',
+      evidence: hasMine && hasAll
+        ? 'My Queue and All controls are visible on the queue tab.'
+        : `Missing filter control(s): My Queue=${hasMine}, All=${hasAll}. Visible controls: ${controls.slice(0, 12).join(' | ') || '(none)'}`,
+    });
+  } catch (e) {
+    results.push({ check: '[CORRECTNESS] CHECK 4 Sender filter controls visible', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  // CHECK 5: Loaded queue state is coherent, not stuck at spinner only.
+  try {
+    const bodyText = (await page.locator('body').innerText({ timeout: 5000 }).catch(() => '')).replace(/\s+/g, ' ').trim();
+    const stillLoading = /Loading engagement queue/i.test(bodyText);
+    const hasLoadedQueueSignal =
+      /\bpending\b/i.test(bodyText) ||
+      /queue is clear/i.test(bodyText) ||
+      /your queue is clear/i.test(bodyText) ||
+      /approved item/i.test(bodyText) ||
+      /Nothing in the approved queue/i.test(bodyText);
+    results.push({
+      check: '[LIVENESS] CHECK 5 Queue state resolved',
+      status: !stillLoading && hasLoadedQueueSignal ? 'PASS' : 'FAIL',
+      evidence: !stillLoading && hasLoadedQueueSignal
+        ? 'Queue tab resolved to pending counts, empty state, or approved-item context.'
+        : `Queue did not resolve cleanly. loading=${stillLoading}, loadedSignal=${hasLoadedQueueSignal}, text="${bodyText.slice(0, 220)}"`,
+    });
+  } catch (e) {
+    results.push({ check: '[LIVENESS] CHECK 5 Queue state resolved', status: 'FAIL', evidence: `Error: ${(e as Error).message?.split('\n')[0]}` });
+  }
+
+  return results;
+}
+
+// ---------------------------------------------------------------------------
 // /app/signals checks
 // ---------------------------------------------------------------------------
 async function runSignalsChecks(page: Page): Promise<CheckResult[]> {
@@ -5460,6 +5567,7 @@ async function main() {
       'cortex-theta': '/app/cortex/theta',
       'cortex-experiments': '/app/cortex/experiments',
       'linkedin-presence': '/app/presence',
+      'linkedin-engage': '/linkedin-engage',
       '/analytics': '/app/analytics',
       '/fleet': '/app/fleet',
       '/app/fleet-sessions': '/app/fleet/agents?tab=sessions',
@@ -5588,6 +5696,8 @@ async function main() {
       results = await runWithTimeout(() => runCortexExperimentsChecks(page, serviceKey), [{ check: '[LIVENESS] CHECK 1 Experiments tab loads', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/presence' || targetPage === 'linkedin-presence') {
       results = await runWithTimeout(() => runLinkedInPresenceChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/linkedin-engage' || targetPage === 'linkedin-engage') {
+      results = await runWithTimeout(() => runLinkedInEngageChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/signals' || targetPage === '/signals') {
       results = await runWithTimeout(() => runSignalsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout — page alive but JS engine busy (real-time subscriptions); manual check recommended' }]);
     } else if (targetPage === '/app/supreme-outstanding' || targetPage === '/supreme-outstanding') {
@@ -5617,7 +5727,7 @@ async function main() {
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /app/fleet-board, /app/fleet/agents?tab=board, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/cortex/experiments, cortex-experiments, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /app/fleet-board, /app/fleet/agents?tab=board, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/cortex/experiments, cortex-experiments, /app/presence, linkedin-presence, /linkedin-engage, linkedin-engage, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);

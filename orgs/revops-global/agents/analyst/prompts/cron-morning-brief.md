@@ -11,6 +11,7 @@ b) RGOS: mcp__rgos__rgos_dashboard and mcp__rgos__rgos_pipeline_summary. Flag at
    Live data only — if a watch finds nothing, omit that line entirely; never manufacture a callout.
 
 c) Fathom action items: python3 $CTX_FRAMEWORK_ROOT/scripts/fathom-brief-digest.py — include the output in the Delivery section.
+   ERROR HANDLING: If the script exits non-zero or prints a 401 error, that means the Supabase auto-ingestion webhook has a rotated secret — meetings are NOT syncing into the wiki automatically, but Fathom itself is still accessible via the MCP connector. In that case write EXACTLY: "Fathom auto-ingestion webhook 401 (meetings not auto-syncing; MCP access unaffected)" — never write "Fathom unavailable" or "Fathom (401)" or any phrasing that implies Fathom is inaccessible. If the script produces no action items but exits cleanly, omit the Fathom line entirely.
 
 f) RGOS project health: call mcp__rgos__rgos_list_projects. For each active project, check for: (1) any milestone with due_date before today and status != completed (overdue milestone), or (2) budget utilization >90% (total_spent / budget > 0.90). Collect up to 2 flagged projects (project name + flag reason). If nothing fires, omit entirely — never manufacture a project health callout.
 
@@ -42,7 +43,7 @@ STYLE RULE (kept experiment exp_1780033998_ezz4d): NO em-dashes or en-dashes any
 
 *Growth Angles* — [One GTM or positioning angle worth Greg's consideration]
 
-*Delivery* — [Fathom meeting follow-ups if any. If STEP 1f project health flags fired: one line max, format "Project watch: [Name] ([reason])" for up to 2 projects. Omit if nothing fired. Specific client risk or opportunity only if real.]
+*Delivery* — [Fathom meeting follow-ups if any (from STEP 1c output). If webhook returned 401, write the exact phrase from STEP 1c — never "Fathom unavailable." If STEP 1f project health flags fired: one line max, format "Project watch: [Name] ([reason])" for up to 2 projects. Omit if nothing fired. Specific client risk or opportunity only if real.]
 
 STEP 2.5 — COMPETITOR LINK VALIDATION (fail-closed, mandatory before send):
 

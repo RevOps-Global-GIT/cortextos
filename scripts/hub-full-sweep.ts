@@ -383,6 +383,7 @@ async function main() {
     ['/app/clients', 'clients-list', interactTable],
     // LinkedIn Presence Engine v0 (#710)
     ['/app/presence', 'linkedin-presence', undefined],
+    ['/linkedin-engage', 'linkedin-engage', interactTabs],
     // Wiki (confirmed /app/ prefix)
     ['/app/wiki', 'wiki', undefined],
     // Root-level routes (confirmed no /app/ prefix from previous QA reports)

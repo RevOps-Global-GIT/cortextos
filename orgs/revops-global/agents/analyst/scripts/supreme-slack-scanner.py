@@ -385,6 +385,33 @@ def pinned_messages(token: str, channel_id: str) -> List[Dict[str, Any]]:
     return messages
 
 
+def greg_is_latest_sender_in_dm(token: str, ch_id: str) -> bool:
+    """1x conversations.history probe to verify Greg is NOT the most recent sender.
+
+    Called only for DM channels that already have flagged candidates from
+    unanswered_candidates_after_greg(). Prevents false-positives when Greg's
+    last reply predates the search.messages day-boundary window, causing
+    greg_last_ts to default to 0.0 and every non-Greg message to be flagged.
+
+    Returns True if Greg sent the most recent real message (caller should suppress).
+    Fails open: returns False on API error so the item is still surfaced.
+    """
+    result = slack_get(token, "conversations.history", {
+        "channel": ch_id,
+        "limit": "3",
+        "inclusive": "true",
+    })
+    if not result.get("ok"):
+        return False
+    messages = [
+        m for m in (result.get("messages") or [])
+        if not m.get("subtype") and m.get("user")
+    ]
+    if not messages:
+        return False
+    return messages[0].get("user") == GREG_USER_ID
+
+
 # -- scan ---------------------------------------------------------------------
 
 def slack_search_dms(token: str, since_seconds: int) -> List[Dict[str, Any]]:
@@ -525,6 +552,20 @@ def scan(token: str, since_seconds: int) -> List[Dict[str, Any]]:
     for ch_id, ch_msgs in dm_by_channel.items():
         check_budget()
         flag_msgs = unanswered_candidates_after_greg(ch_msgs)
+        if not flag_msgs:
+            continue
+        # 1x conversations.history probe per flagged channel: search.messages uses a
+        # day-boundary window so Greg's reply may predate it — greg_last_ts defaults
+        # to 0 and marks every non-Greg message as unanswered. The probe reads the
+        # actual 3 most recent messages to verify Greg is NOT the latest sender.
+        if greg_is_latest_sender_in_dm(token, ch_id):
+            print(
+                f"[scanner] DM {ch_id}: history probe confirms Greg is latest sender "
+                f"— suppressing {len(flag_msgs)} candidate(s)",
+                file=sys.stderr,
+            )
+            _last_source_activity_count += len(flag_msgs)
+            continue
         _last_source_activity_count += len(flag_msgs)
         for flag_msg in flag_msgs:
             _dm_text = flag_msg.get("text") or ""
@@ -706,6 +747,45 @@ def suppress_items(item_ids: List[str], reason: str = "greg_actioned", note: str
     tmp.replace(SUPPRESSION_JSON)
 
 
+_SOURCE_PRIORITY = {
+    "dm": 1,
+    "channel_mention": 2,
+    "thread_mention": 3,
+    "action_item": 4,
+}
+
+
+def dedupe_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse duplicate Slack-message ids before snapshot/upsert.
+
+    The scanner can classify one MPDM message through multiple paths, for example
+    as both a generic dm candidate and a channel_mention. Supabase upsert batches
+    cannot contain duplicate primary keys, so keep the most specific
+    classification for each stable item id.
+    """
+    by_id: Dict[str, Dict[str, Any]] = {}
+    duplicates = 0
+    for item in items:
+        item_id = item.get("id")
+        if not item_id:
+            continue
+        previous = by_id.get(item_id)
+        if previous is None:
+            by_id[item_id] = item
+            continue
+        duplicates += 1
+        previous_rank = _SOURCE_PRIORITY.get(str(previous.get("source")), 0)
+        item_rank = _SOURCE_PRIORITY.get(str(item.get("source")), 0)
+        if item_rank > previous_rank:
+            by_id[item_id] = item
+    if duplicates:
+        print(
+            f"[scanner] de-duped {duplicates} duplicate item id(s) before snapshot/upsert",
+            file=sys.stderr,
+        )
+    return list(by_id.values())
+
+
 # -- output -------------------------------------------------------------------
 
 def write_snapshot(items: List[Dict[str, Any]], on_demand: bool) -> Dict[str, Any]:
@@ -835,6 +915,7 @@ def main() -> int:
         # Exit 3 = rate_limited_budget_exceeded — distinct from wall-clock timeout (2).
         print(f"[scanner] ERROR: rate_limited_budget_exceeded — {e}", file=sys.stderr)
         return 3
+    items = dedupe_items(items)
     print(f"[scanner] found {len(items)} outstanding items", file=sys.stderr)
 
     if not items and _last_source_activity_count:

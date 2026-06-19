@@ -11,6 +11,17 @@ The daily vignette is the Estate App home hero — a generated stop-motion still
 
 ---
 
+## ⚠️ STATUS (2026-06-18, Greg directive): Codex now owns generation
+
+As of 2026-06-18 the daily vignette generation is being moved to **Codex ownership**. The two prior automated paths are **DISABLED** to avoid them fighting the Codex approach:
+
+- **6am VM system cron** (`scripts/ob1-daily-vignette.mjs` nano-banana/Gemini still) — **DISABLED** (crontab line commented out, reversible).
+- **hero-publish-watchdog** (orchestrator, 9/11/13 PT) — converted to **MONITOR-ONLY**: it checks if today's hero published and pings Greg once (1pm PT) if missing; it **no longer auto-re-kicks mac-codex Flow**.
+
+The exact Codex generation command/lane is **pending Greg's confirmation** ("I'll tell you what I did after it's fully done"). Once known, repoint the watchdog to dispatch that Codex lane and update the "Engine" sections below to reflect the Codex path as canonical. Until then, the engine descriptions below are HISTORICAL — do not auto-run them.
+
+---
+
 ## Engine: Primary — generate-daily-vignette.mjs
 
 `ob1-app/scripts/generate-daily-vignette.mjs` is the canonical daily generator.

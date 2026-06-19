@@ -43,7 +43,7 @@ const KNOWN_QA_ROUTES = new Set([
   '/companies', '/projects', '/reports', '/pipeline',
   '/app/fleet/tasks', '/app/fleet/agents', '/app/fleet/agents?tab=sessions', '/social-content',
   '/attribution-deployer', '/content-attribution', '/content-review', '/app/wiki', '/app/cortex/theta', '/app/presence',
-  '/app/signals', '/app/supreme-outstanding',
+  '/app/signals', '/app/supreme-outstanding', '/linkedin-engage', '/linked-in-engage',
   '/assessment-detail', '/assessment-rubric', '/assessments',
   '/clients', '/company-detail', '/contact-detail', '/contacts', '/deal-room', '/deal-rooms',
   '/cortext-osguide', '/database-hygiene', '/detailed-report',
@@ -129,11 +129,12 @@ const KNOWN_QA_ROUTES = new Set([
   '/app/play-history', '/app/play-output', '/app/play-runner', '/app/play-running',
   '/app/signal-triggers', '/app/signal-watchers', '/app/skills', '/app/strategy', '/app/voice',
   '/app/wiki-concepts-page', '/app/wiki-health', '/app/wiki-page',
-  // Tab sub-components of /app/wiki (src/pages/portal/wiki/{EvalTab,GovernanceTab}.tsx),
+  // Tab sub-components of /app/wiki (src/pages/portal/wiki/{EvalTab,GovernanceTab,ReviewTab}.tsx),
   // not standalone routes — exercised by the /app/wiki harness checks
   // (hub-qa-playwright.ts). Listed here so the filename→route discovery stops
-  // flagging them as blind spots (2026-06-16 sweep).
-  '/app/wiki/eval-tab', '/app/wiki/governance-tab',
+  // flagging them as blind spots (2026-06-16 sweep). ReviewTab renders inside
+  // WikiHealth.tsx (<ReviewTab />), same class as eval-tab/governance-tab.
+  '/app/wiki/eval-tab', '/app/wiki/governance-tab', '/app/wiki/review-tab',
   '/app/work-approvals', '/app/work-comms', '/app/work-inbox', '/app/work-reviews',
   '/app/workflow-execution-history', '/app/workflow-health',
   // ob1-parents routes (2026-05-24 sweep)

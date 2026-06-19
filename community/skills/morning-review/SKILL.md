@@ -333,6 +333,10 @@ MEMEOF
 
 <!-- Dated entries: **YYYY-MM-DD — <one-line context>** followed by what worked + why. Keep additive; don't delete prior entries unless they were proven wrong. -->
 
+**2026-06-18 — Decision-first briefing instead of open-ended "what's the focus?"**
+
+When infra hygiene is already shipped overnight, the high-value morning briefing is not "what should we work on" but a tight surface of (1) resolved wins as FYI, (2) genuine Greg-only decisions (external client comms, deal follow-up, BotFather delete), and (3) a proposed default focus that runs unless he redirects. Folded the analyst's pre-built `output/YYYY-MM-DD-morning-brief.md` (pipeline pulse, over-budget projects) directly into the briefing rather than re-deriving it. Cascaded goals from current routing reality (codex-3 decommissioned → codex/codex-2 idle-overflow) without pinging standby code lanes that had no routed work — avoids inbox churn. Two consolidated Telegram messages, not 3+, respects the send-gate.
+
 ### Calibrations
 
 <!-- Subtle preferences Greg consistently nudges — pre-apply these next time. -->
