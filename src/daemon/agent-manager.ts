@@ -69,7 +69,7 @@ const ORPHAN_STALE_MS = 15 * 60_000; // 15 minutes
  * the 2026-06-19 dev-2 12h-dead incident where the daemon itself was restarted
  * but an agent slipped through.
  */
-const AGENT_PRESENCE_INTERVAL_MS = 5 * 60_000; // 5 minutes
+const AGENT_PRESENCE_INTERVAL_MS = 60_000; // 1 minute (was 5 min — too slow to catch boot drops within the 1-2 min window)
 
 /**
  * Manages all agents in a cortextOS instance.
@@ -426,6 +426,15 @@ export class AgentManager {
       });
     }, intervalMs);
     this.agentPresenceTimer.unref?.();
+    // Fire one pass ~30s after boot to catch agents that failed to start.
+    // setInterval's first fire is at t+interval (now 60s), but boot drops
+    // typically happen within 1-2s of daemon startup, so without this
+    // initial pass orchestrator must intervene manually every restart.
+    setTimeout(() => {
+      this.runAgentPresencePass().catch((err) => {
+        console.error(`[agent-presence] initial pass failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, 30_000).unref?.();
   }
 
   /**
