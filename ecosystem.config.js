@@ -37,6 +37,12 @@ module.exports = {
         // then watch the operator chat for "🚨 CRITICAL: daemon crash-looping"
         // after 3 crashes in 15 min.
         CTX_DEBUG_ALLOW_CRASH_TRIGGER: '0',
+        // Disable the upstream #643 OAuth self-heal watchdog: it targets
+        // claude-profile accounts.json (auth model we do not use), so it can
+        // never succeed and only spams the operator Telegram on any >15min
+        // heartbeat-stale agent. Disabled 2026-06-20 after repeated Greg-facing
+        // false alerts. Re-enable only if the self-heal is adapted to our auth.
+        CORTEXTOS_OAUTH_SELF_HEAL: '0',
       },
       // max_restarts + restart_delay is the ultimate crash-storm circuit
       // breaker. If the daemon dies 10 times faster than 5s apart, PM2
