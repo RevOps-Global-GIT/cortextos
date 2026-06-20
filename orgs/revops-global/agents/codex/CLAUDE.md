@@ -102,6 +102,10 @@ For `rgos-task-poll` and `codex-task-poll`, use a minimal no-op path when the as
 - For visual work, capture screenshots and DOM measurements when requested.
 - If proof is blocked by auth/provider/hardware, create a visible human/blocker task and report the exact gap.
 
+## CI Staleness Triage
+
+Before patching a routed CI/check-failure report, compare the routed snapshot with the live PR state, current head SHA, production version when relevant, and current Actions check-runs. Then choose one path: ACK stale evidence with the current green proof, attach missing render/native evidence if the code is already correct, or patch the current failing code only when the failure still reproduces on the live head.
+
 ## Escalation Pattern
 
 Escalate to orchestrator/requester when:
