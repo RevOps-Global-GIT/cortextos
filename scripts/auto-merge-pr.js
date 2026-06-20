@@ -9,7 +9,8 @@
  * Carve-outs (never touched): charlie-holstine, grandamenium repos.
  * Skip signals in PR body (case-insensitive): 'do not merge', 'feature branch only',
  *   'do_not_merge', 'greg merges'.
- * Skip if: mergeable != MERGEABLE, any check FAILURE, any CHANGES_REQUESTED review.
+ * Skip if: mergeable is definitely conflicting, any latest check-run is
+ * in-flight/failing, or any review requests changes.
  */
 
 'use strict';
@@ -391,13 +392,23 @@ function preMergeFreshnessCheck(repo, number, evalHeadSha) {
   return evaluateCheckRuns(runs);
 }
 
+function checkRunGateForHead(repo, headSha) {
+  if (!headSha) return { ok: false, reason: 'missing head SHA' };
+  const runs = JSON.parse(gh(['api', `repos/${repo}/commits/${headSha}/check-runs?per_page=100`])).check_runs || [];
+  return evaluateCheckRuns(runs);
+}
+
 function isCarvedOut(repo) {
   return CARVE_OUTS.some(co => repo.includes(co));
 }
 
 /**
- * Fetch open PRs for a repo with merge + CI state via GitHub CLI GraphQL.
- * Returns array of { number, title, body, mergeable, mergeStateStatus, ciPassed, hasChangesRequested }
+ * Fetch open PRs for a repo with merge state via GitHub CLI GraphQL, then
+ * evaluate CI from REST Actions check-runs for the PR head SHA. Do not use
+ * commits/status or legacy status contexts as the auto-merge gate: repos that
+ * only use Actions can report stale/pending legacy status while check-runs are
+ * already terminal.
+ * Returns array of { number, title, body, mergeable, mergeStateStatus, ciPassed, ciReason, hasChangesRequested }
  */
 function fetchPRs(repo) {
   const query = `
@@ -416,21 +427,6 @@ function fetchPRs(repo) {
             mergeStateStatus
             autoMergeRequest { mergeMethod }
             reviews(last: 10, states: [CHANGES_REQUESTED]) { totalCount }
-            commits(last: 1) {
-              nodes {
-                commit {
-                  statusCheckRollup {
-                    state
-                    contexts(first: 20) {
-                      nodes {
-                        ... on CheckRun { conclusion name }
-                        ... on StatusContext { state context }
-                      }
-                    }
-                  }
-                }
-              }
-            }
           }
         }
       }
@@ -448,16 +444,13 @@ function fetchPRs(repo) {
   const nodes = data?.data?.repository?.pullRequests?.nodes ?? [];
 
   return nodes.map(pr => {
-    const commit = pr.commits?.nodes?.[0]?.commit;
-    const rollup = commit?.statusCheckRollup;
-    const contexts = rollup?.contexts?.nodes ?? [];
-
-    const hasFailure = contexts.some(c =>
-      (c.conclusion && c.conclusion === 'FAILURE') ||
-      (c.state && c.state === 'FAILURE')
-    );
-    const allPassed = rollup ? rollup.state === 'SUCCESS' : true; // no checks = pass
     const hasChangesRequested = (pr.reviews?.totalCount ?? 0) > 0;
+    let ci = { ok: false, reason: 'check-run lookup failed' };
+    try {
+      ci = checkRunGateForHead(repo, pr.headRefOid);
+    } catch (err) {
+      ci = { ok: false, reason: err.message };
+    }
 
     return {
       number: pr.number,
@@ -469,7 +462,8 @@ function fetchPRs(repo) {
       updatedAt: pr.updatedAt ?? '',
       mergeable: pr.mergeable,
       mergeStateStatus: pr.mergeStateStatus,
-      ciPassed: !hasFailure && allPassed,
+      ciPassed: ci.ok,
+      ciReason: ci.reason,
       hasChangesRequested,
     };
   });
@@ -495,7 +489,7 @@ async function main() {
     }
 
     for (const pr of prs) {
-      const { number, title, body, isDraft, headRefName, headSha, updatedAt, mergeable, mergeStateStatus, ciPassed, hasChangesRequested } = pr;
+      const { number, title, body, isDraft, headRefName, headSha, updatedAt, mergeable, mergeStateStatus, ciPassed, ciReason, hasChangesRequested } = pr;
 
       // Skip conditions
       if (isDraft) {
@@ -528,7 +522,7 @@ async function main() {
         continue;
       }
       if (!ciPassed) {
-        console.log(`[auto-merge] SKIP #${number} ${repo} — CI not clean`);
+        console.log(`[auto-merge] SKIP #${number} ${repo} — CI not clean (${ciReason || 'check-runs not clean'})`);
         continue;
       }
       if (hasChangesRequested) {
@@ -623,6 +617,5 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
+  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, checkRunGateForHead, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
 }
-

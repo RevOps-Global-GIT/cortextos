@@ -176,6 +176,16 @@ describe('evaluateCheckRuns', () => {
   });
 });
 
+describe('CI gate source', () => {
+  it('uses Actions check-runs instead of legacy commit status or GraphQL status rollup', () => {
+    const script = fs.readFileSync(path.join(process.cwd(), 'scripts/auto-merge-pr.js'), 'utf8');
+
+    expect(script).toContain('/check-runs?per_page=100');
+    expect(script).not.toMatch(/commits\/[^`'"]+\/status/);
+    expect(script).not.toContain('statusCheckRollup');
+  });
+});
+
 describe('pendingApprovalForPR — approval-gate bypass guard', () => {
   // Regression: 2026-06-16 PR #862 auto-merged while approval_1781598850 was
   // still pending. The cron had no approval-gate awareness. A held PR must be
