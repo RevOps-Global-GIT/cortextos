@@ -61,6 +61,17 @@ const RECONCILIATION_INTERVAL_MS = 5 * 60_000; // 5 minutes
 const ORPHAN_STALE_MS = 15 * 60_000; // 15 minutes
 
 /**
+ * Cadence of the agent-presence reconciliation tick (Pattern 2). Every pass
+ * scans enabled-agents.json and respawns any enabled agent that has no live
+ * process and no .user-stop sentinel. Catches agents that were never registered
+ * (e.g. startAgent silently failed at daemon startup) or whose registry entry
+ * was cleared without a corresponding re-start — the root-cause pattern behind
+ * the 2026-06-19 dev-2 12h-dead incident where the daemon itself was restarted
+ * but an agent slipped through.
+ */
+const AGENT_PRESENCE_INTERVAL_MS = 5 * 60_000; // 5 minutes
+
+/**
  * Manages all agents in a cortextOS instance.
  */
 export class AgentManager {
@@ -127,6 +138,13 @@ export class AgentManager {
    * discoverAndStart(), cleared in stopAll().
    */
   private reconciliationTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Agent-presence reconciliation timer (Pattern 2). A single unref'd interval
+   * scans enabled-agents.json and respawns any enabled agent that has no live
+   * process and no .user-stop sentinel. Started in discoverAndStart(), cleared
+   * in stopAll().
+   */
+  private agentPresenceTimer: ReturnType<typeof setInterval> | null = null;
   private oauthRecoveryInProgress: Set<string> = new Set();
   private oauthLastRecoveryAt: Map<string, number> = new Map();
   private instanceId: string;
@@ -313,6 +331,13 @@ export class AgentManager {
     // populated. Pattern 1: periodically re-queue orphaned in_progress RGOS
     // claims whose owning agent has no live process.
     this.startReconciliationTick();
+
+    // Pattern 2: periodically scan enabled-agents.json and respawn any enabled
+    // agent that has no live process and no .user-stop sentinel. This is the
+    // safety net for agents that slip through discoverAndStart (e.g. a daemon
+    // restart where startAgent silently failed for one agent) — the root-cause
+    // class behind the 2026-06-19 dev-2 12h-dead incident.
+    this.startAgentPresenceTick();
   }
 
   /**
@@ -380,6 +405,68 @@ export class AgentManager {
       }
     } catch (err) {
       console.error(`[task-reconciliation] pass error: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Start the agent-presence reconciliation tick (Pattern 2). Disabled with
+   * CORTEXTOS_AGENT_PRESENCE_RECONCILE=0. Idempotent — a second call is a
+   * no-op while a timer is already running.
+   */
+  private startAgentPresenceTick(): void {
+    if (process.env.CORTEXTOS_AGENT_PRESENCE_RECONCILE === '0') return;
+    if (this.agentPresenceTimer) return;
+    const intervalMs = parsePositiveInt(
+      process.env.CORTEXTOS_AGENT_PRESENCE_INTERVAL_MS,
+      AGENT_PRESENCE_INTERVAL_MS,
+    );
+    this.agentPresenceTimer = setInterval(() => {
+      this.runAgentPresencePass().catch((err) => {
+        console.error(`[agent-presence] pass failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, intervalMs);
+    this.agentPresenceTimer.unref?.();
+  }
+
+  /**
+   * One agent-presence reconciliation pass (Pattern 2). For each agent in
+   * enabled-agents.json with enabled != false: if the daemon has no live
+   * process for it AND there is no .user-stop sentinel, respawn it. Subject to
+   * the same 5-minute cooldown as the stale-heartbeat watcher to prevent
+   * rapid-fire restart loops.
+   */
+  private async runAgentPresencePass(): Promise<void> {
+    const enabledList = this.readInstanceEnableList();
+    const now = Date.now();
+
+    for (const [agentName, entry] of Object.entries(enabledList)) {
+      if (entry.enabled === false) continue;
+
+      // Respect .user-stop sentinel: if the user (or admin) explicitly stopped
+      // this agent, do not auto-respawn it.
+      const userStopPath = join(this.ctxRoot, 'state', agentName, '.user-stop');
+      if (existsSync(userStopPath)) continue;
+
+      const registryEntry = this.agents.get(agentName);
+      const isAlive = !!registryEntry && registryEntry.process.isRunning();
+      if (isAlive) continue;
+
+      // Enforce per-agent cooldown to prevent rapid-fire restarts.
+      const lastRestart = this.lastRestartAt.get(agentName) ?? 0;
+      if (now - lastRestart < AgentManager.HEALTH_RESTART_COOLDOWN_MS) {
+        console.log(`[agent-presence] ${agentName}: absent/dead but cooldown active — skipping`);
+        continue;
+      }
+
+      console.warn(`[agent-presence] ${agentName}: enabled but not running — respawning`);
+      this.lastRestartAt.set(agentName, now);
+      try {
+        // Pass empty agentDir: startAgent auto-discovers via resolveAgentOrg +
+        // filesystem scan (same path used by IPC-triggered enable/start).
+        await this.startAgent(agentName, '', undefined, entry.org);
+      } catch (err) {
+        console.error(`[agent-presence] ${agentName}: respawn failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
@@ -1424,6 +1511,10 @@ export class AgentManager {
     if (this.reconciliationTimer) {
       clearInterval(this.reconciliationTimer);
       this.reconciliationTimer = null;
+    }
+    if (this.agentPresenceTimer) {
+      clearInterval(this.agentPresenceTimer);
+      this.agentPresenceTimer = null;
     }
 
     const names = [...this.agents.keys()];
