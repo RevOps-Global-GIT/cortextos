@@ -222,7 +222,7 @@
       "name": "ob1-daily-vignette",
       "type": "recurring",
       "cron": "0 6 * * *",
-      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.js"
+      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.mjs"
     },
     {
       "name": "daily-hero-verify",
