@@ -27,8 +27,8 @@ const AGENT_NAME = process.env.CTX_AGENT_NAME || 'mac-codex';
 const POLL_INTERVAL_MS = 2_000;
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 const SSH_HOST = 'gregs-mac';
-// Polling loop waits up to 30s for new thread — give SSH 45s headroom
-const SSH_TIMEOUT_MS = 45_000;
+// Polling loop waits up to 90s for new thread — give SSH 20s headroom
+const SSH_TIMEOUT_MS = 110_000;
 
 // SSH connection failure patterns — used to distinguish offline vs execution errors
 const SSH_CONN_ERROR_PATTERNS = [
@@ -221,16 +221,16 @@ function execOnMac(prompt) {
     '    key code 36',
     '  end tell',
     'end tell',
-    // Poll up to 30s (60 × 0.5s) for the new thread to appear.
+    // Poll up to 90s (180 × 0.5s) for the new thread to appear.
     // Replaces the old fixed delay-2 + DESC LIMIT 1 that raced against Codex.app writes.
     'set threadId to ""',
-    'repeat 60 times',
+    'repeat 180 times',
     `  set threadId to do shell script "sqlite3 " & quoted form of codexDb & " \\"SELECT id FROM threads WHERE created_at > " & snapshotTs & " ORDER BY created_at ASC LIMIT 1;\\""`,
     '  if threadId is not "" then exit repeat',
     '  delay 0.5',
     'end repeat',
     `do shell script "rm -f ${tmpScript} ${tmpPrompt}"`,
-    'if threadId is "" then error "Timed out waiting for new Codex.app thread (30s)"',
+    'if threadId is "" then error "Timed out waiting for new Codex.app thread (90s)"',
     'return threadId',
   ].join('\n');
 
@@ -287,28 +287,40 @@ async function processMessage(msg) {
   const start = Date.now();
   let result;
   let ok = false;
+  const DISPATCH_MAX_RETRIES = 2;
 
-  try {
-    const threadId = await execOnMac(text || '');
-    const tid = threadId.trim();
-    const durationMs = Date.now() - start;
-    result = `dispatched — new chat in Codex.app (thread ${tid})`;
-    ok = true;
-    lastDispatch.threadId = tid;
-    lastDispatch.at = Date.now();
-    lastDispatch.from = from;
-    lastDispatch.durationMs = durationMs;
-    log(`Dispatched in ${(durationMs / 1000).toFixed(1)}s — thread ${tid}`);
-    writeMemoryEntry(from, tid, durationMs, text);
-  } catch (e) {
-    result = `mac-codex error: ${e.message.slice(0, 500)}`;
-    log(`Error: ${result}`);
-    if (isConnectionError(e)) {
-      // Alert orchestrator so it can reroute or notify user
-      try {
-        bus('send-message', 'orchestrator', 'high',
-          `mac-codex offline: SSH to ${SSH_HOST} failed. Dispatch for msg ${id} from ${from} dropped.`);
-      } catch { /* non-fatal — orchestrator may itself be down */ }
+  for (let attempt = 0; attempt <= DISPATCH_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      log(`Dispatch timeout — retrying (attempt ${attempt + 1}/${DISPATCH_MAX_RETRIES + 1})...`);
+      await new Promise((r) => setTimeout(r, 3_000));
+    }
+    try {
+      const threadId = await execOnMac(text || '');
+      const tid = threadId.trim();
+      const durationMs = Date.now() - start;
+      result = `dispatched — new chat in Codex.app (thread ${tid})`;
+      ok = true;
+      lastDispatch.threadId = tid;
+      lastDispatch.at = Date.now();
+      lastDispatch.from = from;
+      lastDispatch.durationMs = durationMs;
+      log(`Dispatched in ${(durationMs / 1000).toFixed(1)}s — thread ${tid}`);
+      writeMemoryEntry(from, tid, durationMs, text);
+      break;
+    } catch (e) {
+      const isTimeout = e.message && e.message.toLowerCase().includes('timed out');
+      if (isConnectionError(e) || !isTimeout || attempt >= DISPATCH_MAX_RETRIES) {
+        result = `mac-codex error: ${e.message.slice(0, 500)}`;
+        log(`Error: ${result}`);
+        if (isConnectionError(e)) {
+          // Alert orchestrator so it can reroute or notify user
+          try {
+            bus('send-message', 'orchestrator', 'high',
+              `mac-codex offline: SSH to ${SSH_HOST} failed. Dispatch for msg ${id} from ${from} dropped.`);
+          } catch { /* non-fatal — orchestrator may itself be down */ }
+        }
+        break;
+      }
     }
   }
 
