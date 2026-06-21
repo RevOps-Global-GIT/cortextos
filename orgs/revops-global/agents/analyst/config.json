@@ -183,6 +183,12 @@
       "prompt": "python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/greg-qa-defect-rate.py"
     },
     {
+      "name": "supreme-scanner-triage",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "cd /home/cortextos/cortextos-qa && git fetch fork main --quiet 2>/dev/null && git checkout refs/remotes/fork/main -- orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py 2>/dev/null && git restore --staged orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py 2>/dev/null && python3 orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py --on-demand 2>&1. Then read the output JSON. If total_count > 0 and any item has is_actionable=true OR has text matching triage keywords (unanswered|follow-up|action item|waiting on greg|blocked|needs reply), send a compact summary to orchestrator: cortextos bus send-message orchestrator normal 'Supreme scanner: N actionable items — [brief item summaries]. Full output at analyst/output/supreme-outstanding-latest.json'. If zero actionable items found, do nothing."
+    },
+    {
       "name": "supreme-scanner-correctness-probe",
       "type": "recurring",
       "interval": "4h",
@@ -217,12 +223,6 @@
       "type": "recurring",
       "interval": "6h",
       "prompt": "node /home/cortextos/cortextos/scripts/vm-disk-watchdog.js"
-    },
-    {
-      "name": "ob1-daily-vignette",
-      "type": "recurring",
-      "cron": "0 6 * * *",
-      "prompt": "node /home/cortextos/cortextos/scripts/ob1-daily-vignette.mjs"
     },
     {
       "name": "daily-hero-verify",

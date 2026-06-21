@@ -15,6 +15,13 @@ c) Fathom action items: python3 $CTX_FRAMEWORK_ROOT/scripts/fathom-brief-digest.
 
 f) RGOS project health: call mcp__rgos__rgos_list_projects. For each active project, check for: (1) any milestone with due_date before today and status != completed (overdue milestone), or (2) budget utilization >90% (total_spent / budget > 0.90). Collect up to 2 flagged projects (project name + flag reason). If nothing fires, omit entirely — never manufacture a project health callout.
 
+g) System health pulse (FAIL-CLOSED — include ONLY when ≥1 condition fires; omit entirely otherwise):
+   Run these three checks:
+   - Degraded skills: grep the latest skill-qa output for status=degraded or critical (check output/$(date +%Y-%m-%d)-skill-qa*.md or the most recent file). Count how many skills are degraded/critical.
+   - Stale experiments: read experiments/state.json — if active_experiment.started_at is more than 3 days ago and status != completed, flag it with days_stale.
+   - Zombie agents: run cortextos bus list-agents and check for running=true enabled=true agents with heartbeat_age > 120 minutes.
+   If ≥1 of the above fires, add a *System* section to the brief (see STEP 2 template). If all checks are clean, skip the section entirely — no "all clear" line, no mention.
+
 d) Open Brain: search for high-signal captures from the last 7 days. Queries: "product idea", "client pain", "market signal". Include only if genuinely novel.
 
 e) Today's external meetings (ABSORBED FROM RETIRED MEETING-PREP AGENT):
@@ -42,6 +49,8 @@ STYLE RULE (kept experiment exp_1780033998_ezz4d): NO em-dashes or en-dashes any
 *Product Ideas* — [One specific idea, grounded in a real signal, with source]
 
 *Growth Angles* — [One GTM or positioning angle worth Greg's consideration]
+
+*System* — [ONLY if STEP 1g fired: one line max per alert type, e.g. "skill-qa: 2 degraded (auth-helper, kb-ingest)" or "experiment stale: system-health-pulse at 4d" or "zombie: dev-2 (heartbeat 3.5h)". Never write this section on clean days.]
 
 *Delivery* — [Fathom meeting follow-ups if any (from STEP 1c output). If webhook returned 401, write the exact phrase from STEP 1c — never "Fathom unavailable." If STEP 1f project health flags fired: one line max, format "Project watch: [Name] ([reason])" for up to 2 projects. Omit if nothing fired. Specific client risk or opportunity only if real.]
 
