@@ -30,6 +30,14 @@ const HISTORY_FILE = path.join(OUTPUT_DIR, 'surface-sweep-history.json');
 const ESCALATION_THRESHOLD  = 2;                      // flags in window → escalate
 const ESCALATION_WINDOW_MS  = 7 * 24 * 3600 * 1000;  // 7-day rolling window
 
+// Routes with RCA-on-file that are acknowledged and queued for resolution.
+// Snoozed routes are excluded from Category A, the escalator, and orchestrator notifications.
+// Remove a route from this list once QA coverage is added.
+const SNOOZED_BLIND_SPOTS = new Set([
+  '/linked-in-engage', // rgos — queued for idle QA pass (RCA: 2026-06-20)
+  '/browse',           // ob1-app — Greg/Codex lane (RCA: 2026-06-20)
+]);
+
 const SCAN_REPOS = [
   'RevOps-Global-GIT/rgos',
   'RevOps-Global-GIT/ob1-parents',
@@ -649,7 +657,7 @@ function runRepeatRegressionEscalator(webResult, cronResult) {
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
-function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
+function buildReport(webResult, cronResult, escalations, rcaOnFile = [], snoozedCount = 0) {
   const lines = [];
   const ts = new Date().toISOString();
   lines.push(`# Hub Surface Sweep — ${TODAY}`);
@@ -662,7 +670,8 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
   lines.push(`**Repos scanned:** ${SCAN_REPOS.join(', ')}`);
   lines.push(`**Known QA routes:** ${KNOWN_QA_ROUTES.size}`);
   lines.push(`**Covered:** ${webResult.covered.length}`);
-  lines.push(`**Blind spots (uncovered):** ${webResult.blindSpots.length}`);
+  const snoozedNote = snoozedCount > 0 ? ` (${snoozedCount} snoozed — RCA on file)` : '';
+  lines.push(`**Blind spots (uncovered):** ${webResult.blindSpots.length}${snoozedNote}`);
   lines.push('');
 
   if (webResult.blindSpots.length > 0) {
@@ -833,7 +842,9 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
 
   console.log('[surface-sweep] Scanning web surfaces...');
   const webResult  = await scanWebSurfaces();
-  console.log(`[surface-sweep] Found ${webResult.blindSpots.length} blind spots, ${webResult.covered.length} covered`);
+  const snoozedCount = webResult.blindSpots.filter(b => SNOOZED_BLIND_SPOTS.has(b.route)).length;
+  webResult.blindSpots = webResult.blindSpots.filter(b => !SNOOZED_BLIND_SPOTS.has(b.route));
+  console.log(`[surface-sweep] Found ${webResult.blindSpots.length} blind spots, ${webResult.covered.length} covered (${snoozedCount} snoozed)`);
 
   console.log('[surface-sweep] Scanning crons for zombies...');
   const cronResult = scanZombieCrons();
@@ -843,7 +854,7 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = []) {
   const { escalations, rcaOnFile } = runRepeatRegressionEscalator(webResult, cronResult);
   console.log(`[surface-sweep] ${escalations.length} surface(s) escalated to merge-blocker, ${rcaOnFile.length} suppressed (RCA-on-file)`);
 
-  const report = buildReport(webResult, cronResult, escalations, rcaOnFile);
+  const report = buildReport(webResult, cronResult, escalations, rcaOnFile, snoozedCount);
   fs.writeFileSync(REPORT, report, 'utf8');
   console.log(`[surface-sweep] Report written: ${REPORT}`);
 
