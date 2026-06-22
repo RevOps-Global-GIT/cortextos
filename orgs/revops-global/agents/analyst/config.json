@@ -28,7 +28,7 @@
     {
       "name": "heartbeat",
       "type": "recurring",
-      "interval": "4h",
+      "interval": "30m",
       "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task. Piggyback goal-progress probe: cd /home/cortextos/cortextos && cortextos bus goal-progress-probe --notify-agent orchestrator. Review stale-goal flags in the report; do not create a separate cron for this probe."
     },
     {
@@ -70,7 +70,7 @@
     {
       "name": "rgos-task-poll",
       "type": "recurring",
-      "interval": "15m",
+      "interval": "2h",
       "prompt": "Check for tasks assigned to you in the RGOS kanban: use mcp__rgos__cortex_list_tasks with assigned_to=\"analyst\" and status=\"approved\". If any tasks are found, claim each one with mcp__rgos__cortex_claim_task (agent_id=\"analyst\"), then work them in priority order. If no tasks, do nothing."
     },
     {
@@ -100,7 +100,7 @@
     {
       "name": "activity-sync",
       "type": "recurring",
-      "interval": "15m",
+      "interval": "4h",
       "prompt": "Run the activity sync to push local agent messages and Telegram outbound to RGOS Supabase: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/prototype/sync_activity_to_supabase.py. If output shows >0 synced, do nothing further. If errors, report to orchestrator."
     },
     {
@@ -140,15 +140,9 @@
       "prompt": "Memory-decay sweep. Read all entries in MEMORY.md (auto-memory index). For each entry >30 days old: verify the referenced file/function/config still exists by grepping/globbing. Flag entries where the claim is no longer true. Update or remove stale entries. Write a one-line summary to daily memory noting how many entries checked, how many updated, how many removed."
     },
     {
-      "name": "heartbeat-health-watch",
-      "type": "recurring",
-      "interval": "30m",
-      "prompt": "Run bus inbox/heartbeat health watch: cd /home/cortextos/cortextos && cortextos bus heartbeat-health-watch --threshold-minutes 120 --notify-agent orchestrator. Alert orchestrator if any enabled+running agent has been silent for more than 2h; do not message Greg directly."
-    },
-    {
       "name": "pr-stuck-watcher",
       "type": "recurring",
-      "interval": "1h",
+      "interval": "2h",
       "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-pr-stuck-watcher.md",
       "prompt": "Run PR stuck watcher: cd /home/cortextos/cortextos && cortextos bus pr-stuck-watcher --stuck-hours 2 --alert-hours 2 --auto-merge --notify-agent orchestrator. It watches the 5 RevOps repos, auto-merges eligible green PRs under blanket policy, and notifies orchestrator for stuck PRs that cannot auto-merge."
     },
