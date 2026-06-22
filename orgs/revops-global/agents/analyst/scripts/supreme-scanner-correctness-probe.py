@@ -169,8 +169,15 @@ def count_unanswered_candidates(
     )
 
 
-def should_alert_masking(items_scanned: int, slack_messages: int) -> bool:
-    """Masking-bug signature: scanner found nothing but Slack has unanswered activity."""
+def should_alert_masking(items_scanned: int, slack_messages: int, scanner_error: Optional[str] = None) -> bool:
+    """Masking-bug signature: scanner found nothing but Slack has unanswered activity.
+
+    scanner_error: if the scanner reported a Slack API error in the snapshot, suppress
+    the masking-bug alert — items_scanned==0 is expected on error runs and not a bug.
+    Absent field (current schema) is treated as no error (backwards-compatible).
+    """
+    if scanner_error:
+        return False
     return items_scanned == 0 and slack_messages > 0
 
 
@@ -186,8 +193,11 @@ def should_alert_triage_divergence(divergence_hours: float) -> bool:
 
 # -- I/O -----------------------------------------------------------------------
 
-def read_scanner_output() -> Optional[Tuple[int, datetime]]:
-    """Return (items_scanned, generated_at) from the scanner's latest snapshot, or None.
+def read_scanner_output() -> Optional[Tuple[int, datetime, Optional[str]]]:
+    """Return (items_scanned, generated_at, scanner_error) from the scanner's latest snapshot, or None.
+
+    scanner_error is the value of scan_error/error in the snapshot, or None if absent.
+    Absent means no error (current schema doesn't write this field; future scanner versions may).
 
     Prefers the QA-worktree artifact (written by the scheduled scanner cron which resets
     to fork/main at fire time). Falls back to the main-clone output/ for on-demand runs.
@@ -207,7 +217,8 @@ def read_scanner_output() -> Optional[Tuple[int, datetime]]:
         generated_at = datetime.fromisoformat(str(gen).replace("Z", "+00:00"))
     except ValueError:
         return None
-    return int(total), generated_at
+    scanner_error: Optional[str] = d.get("scan_error") or d.get("error") or None
+    return int(total), generated_at, scanner_error
 
 
 def check_triage_freshness(scanner, env: Dict[str, str]) -> Optional[Dict[str, Any]]:
@@ -441,7 +452,7 @@ def main() -> int:
     if scan_out is None:
         emit({"status": "deferred", "reason": "scanner snapshot missing or unreadable"})
         return 0
-    items_scanned, generated_at = scan_out
+    items_scanned, generated_at, scanner_error = scan_out
 
     age_hours = (datetime.now(timezone.utc) - generated_at).total_seconds() / 3600
 
@@ -482,7 +493,7 @@ def main() -> int:
         emit({"status": "deferred", "reason": "slack search failed"})
         return 0
 
-    masking_alert = should_alert_masking(items_scanned, counts["slack_messages"])
+    masking_alert = should_alert_masking(items_scanned, counts["slack_messages"], scanner_error)
     if masking_alert:
         counts["scanner_version"] = get_scanner_version()
         alert_orchestrator(
