@@ -154,6 +154,8 @@ const KNOWN_QA_ROUTES = new Set([
   '/beehives', '/beehives/langstroth', '/beehives/warre',
   '/cottage', '/farm', '/field', '/grounds', '/mushrooms', '/music', '/orchard',
   '/talk',
+  // 2026-06-22: /journal (ob1-app) — live farm work log, non-auth-gated, confirmed reachable
+  '/journal',
   // 2026-06-06: blind-spot closure — fleet-board is FleetBoard.tsx tab at /app/fleet/agents?tab=board;
   // audit/ios is IOSAuditPage in ob1-app (iOS Audit Bridge)
   '/app/fleet-board', '/audit/ios',
