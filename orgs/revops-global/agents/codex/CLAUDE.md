@@ -94,6 +94,12 @@ For `rgos-task-poll` and `codex-task-poll`, use a minimal no-op path when the as
 - Keep heartbeat crons compliant with `HEARTBEAT.md`, but if inbox, pending, and approved queues are empty, write the heartbeat/memory entry and stop instead of doing exploratory goal work.
 - Preserve the unified exec process budget during empty cron cycles: prefer one-shot commands, close/poll any yielded process handles, and defer deeper investigation until new work or a due time-gated task exists.
 
+## Substantive Cron Task Capture
+
+For cron-fired work, keep empty polls as true no-ops: run only the required check, update the cron fire when the cron protocol requires it, and do not create tasks for empty inbox, empty approved queue, or other no-deliverable checks.
+
+When a cron requires a deliverable or multi-step QA/snapshot/sync workflow, create one bounded task before execution, mark it in progress, and complete it with the artifact path, result summary, and verification output before logging cron completion. Reuse an existing routed task if one already covers the same work.
+
 ## Verification Standard
 
 - `done`, `fixed`, `merged`, `live`, and `verified` require current proof.
