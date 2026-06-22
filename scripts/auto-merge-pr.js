@@ -18,7 +18,7 @@
 const { execSync, execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { checkPR, formatComment, postComment } = require('./memo-conflict-check');
+const { checkPR, formatComment, postCommentOnce } = require('./memo-conflict-check');
 
 // ---------------------------------------------------------------------------
 // Config
@@ -546,7 +546,10 @@ async function main() {
           const criticalCount = conflictResult.conflicts.filter(c => c.critical).length;
           console.log(`[auto-merge] SKIP #${number} ${repo} — memo-conflict (${criticalCount} critical, ${conflictResult.conflicts.length - criticalCount} warnings)`);
           const comment = formatComment(repo, number, conflictResult.conflicts);
-          postComment(repo, number, comment);
+          const commentResult = postCommentOnce(repo, number, comment);
+          if (commentResult.duplicate) {
+            console.log(`[auto-merge] SKIP #${number} ${repo} — memo-conflict comment already present`);
+          }
           continue;
         }
       }
