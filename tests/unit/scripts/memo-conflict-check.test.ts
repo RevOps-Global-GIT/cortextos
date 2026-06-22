@@ -1,8 +1,15 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
-import { describe, test, expect, beforeEach } from 'vitest';
+import { describe, test, expect, beforeEach, vi } from 'vitest';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { checkDiff, formatComment, _test } = require('../../../scripts/memo-conflict-check') as any;
+const {
+  checkDiff,
+  formatComment,
+  postCommentOnce,
+  commentBodiesContain,
+  parseGhCommentBodiesOutput,
+  _test,
+} = require('../../../scripts/memo-conflict-check') as any;
 
 beforeEach(() => {
   _test.clearCache();
@@ -98,5 +105,55 @@ describe('formatComment', () => {
     expect(comment).toContain('Warnings');
     expect(comment).toContain('popup-listener');
     expect(comment).toContain('memo-conflict-ok');
+  });
+});
+
+describe('memo-conflict comment dedup', () => {
+  test('detects an existing identical memo-conflict comment', () => {
+    const body = formatComment('RevOps-Global-GIT/cortextos', 99, [
+      { pattern: 'gpt-5-codex', description: 'Invalid slug', line: "+const m = 'gpt-5-codex'", lineNum: 5, critical: true },
+    ]);
+
+    expect(commentBodiesContain(['noise', body], body)).toBe(true);
+    expect(commentBodiesContain(['noise'], body)).toBe(false);
+  });
+
+  test('parses gh comment body json-lines without losing multiline bodies', () => {
+    const first = 'plain comment';
+    const second = '## Memo-Conflict Check\n\nmultiline body';
+    const parsed = parseGhCommentBodiesOutput(`${JSON.stringify(first)}\n${JSON.stringify(second)}\n`);
+
+    expect(parsed).toEqual([first, second]);
+  });
+
+  test('posts memo-conflict comment when no identical comment exists', () => {
+    const body = formatComment('RevOps-Global-GIT/cortextos', 99, [
+      { pattern: 'popup-listener', description: 'Retired LaunchAgent', line: '+load popup-listener', lineNum: 10, critical: false },
+    ]);
+    const postComment = vi.fn(() => true);
+
+    const result = postCommentOnce('RevOps-Global-GIT/cortextos', 99, body, {
+      listCommentBodies: () => ['unrelated comment'],
+      postComment,
+    });
+
+    expect(result).toEqual({ posted: true, duplicate: false });
+    expect(postComment).toHaveBeenCalledTimes(1);
+    expect(postComment).toHaveBeenCalledWith('RevOps-Global-GIT/cortextos', 99, body);
+  });
+
+  test('does not post a duplicate memo-conflict comment when identical body already exists', () => {
+    const body = formatComment('RevOps-Global-GIT/cortextos', 99, [
+      { pattern: 'popup-listener', description: 'Retired LaunchAgent', line: '+load popup-listener', lineNum: 10, critical: false },
+    ]);
+    const postComment = vi.fn(() => true);
+
+    const result = postCommentOnce('RevOps-Global-GIT/cortextos', 99, body, {
+      listCommentBodies: () => [body],
+      postComment,
+    });
+
+    expect(result).toEqual({ posted: false, duplicate: true });
+    expect(postComment).not.toHaveBeenCalled();
   });
 });

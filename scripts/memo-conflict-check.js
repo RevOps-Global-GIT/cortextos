@@ -244,6 +244,62 @@ function postComment(repo, prNumber, body) {
   }
 }
 
+function normalizeCommentBody(body) {
+  return String(body || '').replace(/\r\n/g, '\n').trim();
+}
+
+function parseGhCommentBodiesOutput(output) {
+  return String(output || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return line;
+      }
+    });
+}
+
+function commentBodiesContain(commentBodies, body) {
+  const expected = normalizeCommentBody(body);
+  return commentBodies.some(existing => normalizeCommentBody(existing) === expected);
+}
+
+function listCommentBodies(repo, prNumber) {
+  const [owner, repoName] = repo.split('/');
+  if (!owner || !repoName) return [];
+
+  try {
+    const output = execFileSync('gh', [
+      'api',
+      `repos/${owner}/${repoName}/issues/${prNumber}/comments?per_page=100`,
+      '--paginate',
+      '--jq',
+      '.[] | .body | @json',
+    ], {
+      encoding: 'utf-8',
+      timeout: 15000,
+    });
+    return parseGhCommentBodiesOutput(output);
+  } catch {
+    return [];
+  }
+}
+
+function postCommentOnce(repo, prNumber, body, options = {}) {
+  const listBodies = options.listCommentBodies || listCommentBodies;
+  const post = options.postComment || postComment;
+  const existingBodies = listBodies(repo, prNumber);
+
+  if (commentBodiesContain(existingBodies, body)) {
+    return { posted: false, duplicate: true };
+  }
+
+  return { posted: post(repo, prNumber, body), duplicate: false };
+}
+
 // ---------------------------------------------------------------------------
 // Exports + cache management for testing
 // ---------------------------------------------------------------------------
@@ -258,6 +314,10 @@ module.exports = {
   checkPR,
   formatComment,
   postComment,
+  postCommentOnce,
+  listCommentBodies,
+  commentBodiesContain,
+  parseGhCommentBodiesOutput,
   extractMemoryPatterns,
   CRITICAL_PATTERNS,
   MEMORY_ROOT,
