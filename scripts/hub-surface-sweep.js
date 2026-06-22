@@ -670,10 +670,10 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = [], snoozed
   lines.push('## Category A: Web Surface Coverage');
   lines.push('');
   lines.push(`**Repos scanned:** ${SCAN_REPOS.join(', ')}`);
-  lines.push(`**Known QA routes:** ${KNOWN_QA_ROUTES.size}`);
-  lines.push(`**Covered:** ${webResult.covered.length}`);
+  lines.push(`**Registered routes (known set):** ${KNOWN_QA_ROUTES.size} _(acknowledged by human — not all have active Playwright tests)_`);
+  lines.push(`**In known set:** ${webResult.covered.length}`);
   const snoozedNote = snoozedCount > 0 ? ` (${snoozedCount} snoozed — RCA on file)` : '';
-  lines.push(`**Blind spots (uncovered):** ${webResult.blindSpots.length}${snoozedNote}`);
+  lines.push(`**Blind spots (not in known set):** ${webResult.blindSpots.length}${snoozedNote}`);
   lines.push('');
 
   if (webResult.blindSpots.length > 0) {
@@ -686,12 +686,12 @@ function buildReport(webResult, cronResult, escalations, rcaOnFile = [], snoozed
     }
     lines.push('');
   } else {
-    lines.push('All discovered routes are covered by the QA harness.');
+    lines.push('All discovered routes are in the known set (registered). Note: registration ≠ active test coverage.');
     lines.push('');
   }
 
   if (webResult.covered.length > 0) {
-    lines.push('<details><summary>Covered routes</summary>');
+    lines.push('<details><summary>Routes in known set (registered — not all actively tested)</summary>');
     lines.push('');
     for (const { route, repo } of webResult.covered) {
       lines.push(`- \`${route}\` (${repo.split('/')[1]})`);
