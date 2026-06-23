@@ -3,6 +3,7 @@ import { listAgents } from './agents.js';
 import { readCrons } from './crons.js';
 import { listTasks } from './task.js';
 import { isEnabled, mapStatus, mirrorAgentStatusToRgos, mirrorTaskToRgos, uuidv5 } from './rgos-mirror.js';
+import { discoverTaskDirs, isAgentActive, latestAgentActivityAt } from './metrics.js';
 
 type DriftKind = 'task_missing' | 'task_status' | 'agent_missing' | 'agent_active';
 
@@ -185,10 +186,16 @@ export async function reconcileAgentOpsMirror(
   );
 
   const liveAgents = await listAgents(paths.ctxRoot, options?.org);
+  const taskDirs = discoverTaskDirs(paths.ctxRoot);
   for (const agent of liveAgents) {
     const roleId = `cortextos-${agent.name}`;
     const mirror = mirrorAgentsByRoleId.get(roleId);
-    const liveActive = agent.enabled !== false && agent.running === true;
+    const recentActivityAt = latestAgentActivityAt(paths.ctxRoot, options?.org, agent.name, taskDirs);
+    const liveActive = isAgentActive(
+      agent.enabled !== false,
+      agent.last_heartbeat ?? null,
+      recentActivityAt,
+    );
     if (!mirror) {
       pushDrift({
         kind: 'agent_missing',
@@ -260,6 +267,7 @@ export async function repairAgentOpsMirror(
   const before = await reconcileAgentOpsMirror(paths, options);
   const liveTasks = listTasks(paths);
   const liveAgents = await listAgents(paths.ctxRoot, options?.org);
+  const taskDirs = discoverTaskDirs(paths.ctxRoot);
   const crons = auditCrons(liveAgents.map(agent => agent.name));
   const dryRun = options?.dryRun === true;
   const verifyDelayMs = dryRun ? 0 : Math.max(0, options?.verifyDelayMs ?? 0);
@@ -312,7 +320,11 @@ export async function repairAgentOpsMirror(
   for (const agent of liveAgents) {
     try {
       await mirrorAgentStatusToRgos(agent.name, {
-        isActive: agent.enabled !== false && agent.running === true,
+        isActive: isAgentActive(
+          agent.enabled !== false,
+          agent.last_heartbeat ?? null,
+          latestAgentActivityAt(paths.ctxRoot, options?.org, agent.name, taskDirs),
+        ),
         currentTask: agent.current_task ?? null,
         lastHeartbeat: agent.last_heartbeat ?? null,
         mode: agent.mode ?? null,
