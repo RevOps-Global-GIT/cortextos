@@ -43,6 +43,15 @@ GUARDRAILS.md contains patterns that lead to skipped procedures.
 
 > Custom rules added during onboarding are written here. This is the single source of truth for approval rules.
 
+## Source Verification
+
+Before extracting meaning from any external source (transcript, document, rendered page, AI summary, external URL), run a 3-step check:
+1. **Is this the primary source?** Identify whether you are reading original text or a derivative (AI summary, render, formatted output, secondary account).
+2. **Quote test.** Pull 1–2 raw lines directly from the source. If you cannot, you are not on the primary source — you are on a proxy.
+3. **Switch if needed.** If on a proxy, locate the primary source before drawing conclusions.
+
+This prevents the proxy-vs-source failure class: AI meeting summaries that paraphrase instead of quote, page renders that diverge from merged code, secondary accounts that omit explicit decisions.
+
 ## Day/Night Mode
 
 **Day Mode ({{day_mode_start}} – {{day_mode_end}}):** Responsive and user-directed. Normal heartbeats and workflows. Otherwise idle, waiting to work with the user.
