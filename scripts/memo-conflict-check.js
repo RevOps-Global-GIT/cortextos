@@ -130,6 +130,18 @@ function fetchDiff(repo, prNumber) {
 // Core checker
 // ---------------------------------------------------------------------------
 
+// Files matching these patterns contain test fixtures with intentional
+// blocked-pattern strings and must not trigger memo-conflict checks.
+const TEST_FIXTURE_RE = /(?:^|\/)(tests?|__tests__|fixtures?|mocks?|__mocks__)\/|\.(?:test|spec)\.[jt]sx?$/;
+
+/**
+ * Returns true if a diff file path belongs to a test fixture that should be
+ * excluded from memo-conflict scanning.
+ */
+function isTestFixturePath(filePath) {
+  return TEST_FIXTURE_RE.test(filePath);
+}
+
 /**
  * Check a PR diff against all known blocked patterns.
  * Returns { hasConflict: boolean, conflicts: ConflictEntry[] }
@@ -139,10 +151,15 @@ function checkDiff(diff) {
 
   const addedLines = [];
   let lineNum = 0;
+  let currentFile = '';
   for (const raw of diff.split('\n')) {
     lineNum++;
-    // Only check additions (lines starting with +, not ++)
-    if (raw.startsWith('+') && !raw.startsWith('+++')) {
+    // Track current file from unified diff header lines
+    if (raw.startsWith('+++ b/')) {
+      currentFile = raw.slice(6);
+    }
+    // Only check additions (lines starting with +, not ++) outside test fixtures
+    if (raw.startsWith('+') && !raw.startsWith('+++') && !isTestFixturePath(currentFile)) {
       addedLines.push({ text: raw.slice(1), lineNum });
     }
   }
@@ -319,6 +336,7 @@ module.exports = {
   commentBodiesContain,
   parseGhCommentBodiesOutput,
   extractMemoryPatterns,
+  isTestFixturePath,
   CRITICAL_PATTERNS,
   MEMORY_ROOT,
   _test: exportedForTest,
