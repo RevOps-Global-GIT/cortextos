@@ -3,7 +3,7 @@
  * Node.js equivalent of bash collect-metrics.sh, scrape-usage.sh, check-upstream.sh
  */
 
-import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, mkdirSync, statSync } from 'fs';
 import { join, basename, dirname } from 'path';
 import { execSync } from 'child_process';
 import { ensureDir } from '../utils/atomic.js';
@@ -17,11 +17,15 @@ export interface AgentMetrics {
   tasks_in_progress: number;
   errors_today: number;
   heartbeat_stale: boolean;
+  heartbeat_at: string | null;
+  recent_activity_at: string | null;
+  is_active: boolean;
 }
 
 export interface SystemMetrics {
   total_tasks_completed: number;
   agents_healthy: number;
+  agents_active: number;
   agents_total: number;
   approvals_pending: number;
 }
@@ -98,28 +102,172 @@ function isErrorEvent(line: string): boolean {
   return evt.severity === 'error' || evt.severity === 'critical';
 }
 
-export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
-  const timestamp = new Date().toISOString();
-  const today = timestamp.split('T')[0];
+const ACTIVE_WINDOW_MS = 120 * 60 * 1000;
 
-  const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
-  let agentNames: string[] = [];
-  if (existsSync(enabledFile)) {
+function timestampMs(value: unknown): number | null {
+  if (typeof value !== 'string' || !value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function maxIso(a: string | null, b: string | null): string | null {
+  const aMs = timestampMs(a);
+  const bMs = timestampMs(b);
+  if (aMs === null) return bMs === null ? null : b;
+  if (bMs === null) return a;
+  return bMs > aMs ? b : a;
+}
+
+function readJsonTimestamp(file: string, keys: string[]): string | null {
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf-8')) as Record<string, unknown>;
+    for (const key of keys) {
+      const value = parsed[key];
+      if (timestampMs(value) !== null) return value as string;
+    }
+  } catch {
+    // Fall through to mtime.
+  }
+  try {
+    return statSync(file).mtime.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function readTaskTimestamp(file: string): string | null {
+  try {
+    const task = JSON.parse(readFileSync(file, 'utf-8')) as Record<string, unknown>;
+    return (
+      (timestampMs(task.updated_at) !== null ? task.updated_at as string : null) ||
+      (timestampMs(task.completed_at) !== null ? task.completed_at as string : null) ||
+      (timestampMs(task.created_at) !== null ? task.created_at as string : null)
+    );
+  } catch {
+    return null;
+  }
+}
+
+function latestEventActivity(ctxRoot: string, org: string | undefined, agent: string): string | null {
+  const dirs = [
+    join(ctxRoot, 'analytics', 'events', agent),
+    org ? join(ctxRoot, 'orgs', org, 'analytics', 'events', agent) : '',
+  ].filter(Boolean);
+
+  let latest: string | null = null;
+  for (const dir of dirs) {
+    if (!existsSync(dir)) continue;
     try {
-      agentNames = Object.keys(JSON.parse(readFileSync(enabledFile, 'utf-8')));
-    } catch { /* empty */ }
+      for (const file of readdirSync(dir)) {
+        if (!file.endsWith('.jsonl')) continue;
+        const path = join(dir, file);
+        const lines = readFileSync(path, 'utf-8').split('\n').filter(Boolean);
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const evt = JSON.parse(lines[i]) as { timestamp?: string };
+            if (timestampMs(evt.timestamp) !== null) {
+              latest = maxIso(latest, evt.timestamp ?? null);
+              break;
+            }
+          } catch {
+            // Skip malformed lines.
+          }
+        }
+      }
+    } catch {
+      // Skip unreadable dirs.
+    }
+  }
+  return latest;
+}
+
+function latestTaskActivity(taskDirs: string[], agent: string): string | null {
+  let latest: string | null = null;
+  for (const taskDir of taskDirs) {
+    try {
+      for (const file of readdirSync(taskDir)) {
+        if (!file.endsWith('.json')) continue;
+        const path = join(taskDir, file);
+        try {
+          const task = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+          if (task.assigned_to !== agent) continue;
+          latest = maxIso(latest, readTaskTimestamp(path));
+        } catch {
+          // Skip bad files.
+        }
+      }
+    } catch {
+      // Skip bad dirs.
+    }
+  }
+  return latest;
+}
+
+function latestMessageActivity(ctxRoot: string, agent: string): string | null {
+  const roots = ['inbox', 'inflight', 'processed', 'outbox', 'archive'];
+  let latest: string | null = null;
+
+  const visit = (dir: string, depth: number) => {
+    if (depth < 0 || !existsSync(dir)) return;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(path, depth - 1);
+        continue;
+      }
+      if (!entry.name.endsWith('.json')) continue;
+      const isAgentMailbox = path.includes(`/${agent}/`);
+      const isFromAgent = entry.name.includes(`from-${agent}-`);
+      if (!isAgentMailbox && !isFromAgent) continue;
+      latest = maxIso(latest, readJsonTimestamp(path, ['timestamp', 'created_at', 'updated_at']));
+    }
+  };
+
+  for (const root of roots) {
+    visit(join(ctxRoot, root), root === 'archive' ? 3 : 2);
   }
 
-  const agents: Record<string, AgentMetrics> = {};
-  let totalCompleted = 0;
-  let agentsHealthy = 0;
-  const agentsTotal = agentNames.length;
+  return latest;
+}
 
-  // Gather task directories
+export function latestAgentActivityAt(
+  ctxRoot: string,
+  org: string | undefined,
+  agent: string,
+  taskDirs: string[],
+): string | null {
+  return [
+    latestEventActivity(ctxRoot, org, agent),
+    latestMessageActivity(ctxRoot, agent),
+    latestTaskActivity(taskDirs, agent),
+  ].reduce((latest, value) => maxIso(latest, value), null as string | null);
+}
+
+export function isAgentActive(
+  enabled: boolean,
+  heartbeatAt: string | null,
+  recentActivityAt: string | null,
+  nowMs = Date.now(),
+): boolean {
+  if (!enabled) return false;
+  const heartbeatMs = timestampMs(heartbeatAt);
+  const activityMs = timestampMs(recentActivityAt);
+  return (
+    (heartbeatMs !== null && nowMs - heartbeatMs < ACTIVE_WINDOW_MS) ||
+    (activityMs !== null && nowMs - activityMs < ACTIVE_WINDOW_MS)
+  );
+}
+
+export function discoverTaskDirs(ctxRoot: string): string[] {
   const taskDirs: string[] = [];
   const tasksDir = join(ctxRoot, 'tasks');
   if (existsSync(tasksDir)) taskDirs.push(tasksDir);
-  // Org-scoped tasks
   const orgsDir = join(ctxRoot, 'orgs');
   if (existsSync(orgsDir)) {
     try {
@@ -129,8 +277,34 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
           if (existsSync(orgTasks)) taskDirs.push(orgTasks);
         }
       }
-    } catch { /* ignore */ }
+    } catch {
+      // Ignore org scan errors.
+    }
   }
+  return taskDirs;
+}
+
+export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
+  const timestamp = new Date().toISOString();
+  const today = timestamp.split('T')[0];
+
+  const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
+  let agentNames: string[] = [];
+  let enabledAgents: Record<string, { enabled?: boolean }> = {};
+  if (existsSync(enabledFile)) {
+    try {
+      enabledAgents = JSON.parse(readFileSync(enabledFile, 'utf-8'));
+      agentNames = Object.keys(enabledAgents);
+    } catch { /* empty */ }
+  }
+
+  const agents: Record<string, AgentMetrics> = {};
+  let totalCompleted = 0;
+  let agentsHealthy = 0;
+  let agentsActive = 0;
+  const agentsTotal = agentNames.length;
+
+  const taskDirs = discoverTaskDirs(ctxRoot);
 
   for (const agent of agentNames) {
     let completed = 0, pending = 0, inProgress = 0;
@@ -180,12 +354,14 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
 
     // Check heartbeat staleness (stale if >5 hours old)
     let heartbeatStale = true;
+    let heartbeatAt: string | null = null;
     const hbFile = join(ctxRoot, 'state', agent, 'heartbeat.json');
     if (existsSync(hbFile)) {
       try {
         const hb = JSON.parse(readFileSync(hbFile, 'utf-8'));
-        if (hb.last_heartbeat) {
-          const hbTime = new Date(hb.last_heartbeat).getTime();
+        heartbeatAt = hb.last_heartbeat || hb.timestamp || null;
+        if (heartbeatAt) {
+          const hbTime = new Date(heartbeatAt).getTime();
           const age = Date.now() - hbTime;
           if (age < 5 * 60 * 60 * 1000) {
             heartbeatStale = false;
@@ -195,12 +371,20 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
       } catch { /* stale by default */ }
     }
 
+    const recentActivityAt = latestAgentActivityAt(ctxRoot, org, agent, taskDirs);
+    const enabled = enabledAgents[agent]?.enabled !== false;
+    const active = isAgentActive(enabled, heartbeatAt, recentActivityAt);
+    if (active) agentsActive++;
+
     agents[agent] = {
       tasks_completed: completed,
       tasks_pending: pending,
       tasks_in_progress: inProgress,
       errors_today: errorsToday,
       heartbeat_stale: heartbeatStale,
+      heartbeat_at: heartbeatAt,
+      recent_activity_at: recentActivityAt,
+      is_active: active,
     };
   }
 
@@ -216,6 +400,7 @@ export function collectMetrics(ctxRoot: string, org?: string): MetricsReport {
     system: {
       total_tasks_completed: totalCompleted,
       agents_healthy: agentsHealthy,
+      agents_active: agentsActive,
       agents_total: agentsTotal,
       approvals_pending: approvalsPending,
     },
