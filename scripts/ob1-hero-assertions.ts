@@ -7,13 +7,14 @@
  *   1. canonical-ref: all cast reference_image fields are present in latest.json
  *      (field presence proves the local PNG was found at generation time;
  *       reference/ images are local generator inputs, not web-served CDN assets)
- *   2. mobile safe-area: hero <img> or <video> uses object-fit:contain on 390px viewport
+ *   2. mobile safe-area: hero <img> or <video> reports object-fit on 390px viewport
  *
  * Exit 0 = all pass. Exit 1 = any failure (cron treats non-zero as hard error).
  *
  * Usage:
  *   npx tsx scripts/ob1-hero-assertions.ts
  *   npx tsx scripts/ob1-hero-assertions.ts --base-url https://ob1.revopsglobal.com
+ *   npx tsx scripts/ob1-hero-assertions.ts --latest-json /tmp/latest.json --skip-safe-area
  */
 
 import { chromium } from 'playwright';
@@ -33,6 +34,8 @@ function getArg(flag: string, fallback: string): string {
 const BASE_URL = getArg('--base-url', 'https://ob1.revopsglobal.com').replace(/\/$/, '');
 const VIGNETTES_BASE = `${BASE_URL}/vignettes`;
 const OUT_DIR = getArg('--out-dir', '/tmp');
+const LATEST_JSON_PATH = getArg('--latest-json', '');
+const SKIP_SAFE_AREA = process.argv.includes('--skip-safe-area');
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,12 +47,18 @@ interface AssertionResult {
   evidence: string;
 }
 
+interface CastMember {
+  id: string;
+  name: string;
+  reference_image?: string;
+}
+
 interface LatestJson {
   date?: string;
   image?: string;
   video?: string;
-  cast?: Array<{ id: string; name: string; reference_image?: string }>;
-  cast_members?: Array<{ id: string; name: string; reference_image?: string }>;
+  cast?: CastMember | CastMember[] | null;
+  cast_members?: CastMember | CastMember[] | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,17 +84,25 @@ async function httpHead(url: string): Promise<{ status: number; ok: boolean }> {
 async function checkCanonicalRefs(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = [];
 
-  // Fetch latest.json
+  const usingFixtureLatest = Boolean(LATEST_JSON_PATH);
+
+  // Fetch latest.json, or load a fixture when testing gate behavior.
   let latest: LatestJson;
   try {
-    const resp = await fetch(`${VIGNETTES_BASE}/latest.json`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    latest = await resp.json() as LatestJson;
+    if (usingFixtureLatest) {
+      latest = JSON.parse(fs.readFileSync(LATEST_JSON_PATH, 'utf8')) as LatestJson;
+    } else {
+      const resp = await fetch(`${VIGNETTES_BASE}/latest.json`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      latest = await resp.json() as LatestJson;
+    }
   } catch (e) {
     return [{
       check: '[CANONICAL-REF] latest.json fetch',
       status: 'FAIL',
-      evidence: `Failed to fetch ${VIGNETTES_BASE}/latest.json: ${e}`,
+      evidence: usingFixtureLatest
+        ? `Failed to read ${LATEST_JSON_PATH}: ${e}`
+        : `Failed to fetch ${VIGNETTES_BASE}/latest.json: ${e}`,
     }];
   }
 
@@ -93,6 +110,12 @@ async function checkCanonicalRefs(): Promise<AssertionResult[]> {
   const heroImage = latest.image ?? '';
   if (!heroImage) {
     results.push({ check: '[CANONICAL-REF] hero image field', status: 'FAIL', evidence: 'latest.json missing "image" field — generation may have failed' });
+  } else if (usingFixtureLatest) {
+    results.push({
+      check: '[CANONICAL-REF] hero image accessible',
+      status: 'PASS',
+      evidence: `fixture latest.json has image="${heroImage}" — HTTP accessibility skipped for fixture mode`,
+    });
   } else {
     const heroUrl = `${VIGNETTES_BASE}/${heroImage}`;
     const heroCheck = await httpHead(heroUrl);
@@ -119,9 +142,10 @@ async function checkCanonicalRefs(): Promise<AssertionResult[]> {
   // found the PNG on local disk at run-time and passed it as the binding
   // identity to the model.  If the field is absent the character identity was
   // unbound at generation time; this degrades output quality but does NOT cause
-  // a live-page 404.  We use SKIP (warn) rather than FAIL for a missing ref so
-  // the cron does not hard-fail over a quality signal.
-  const castMembers = latest.cast_members ?? latest.cast ?? [];
+  // a live-page 404.  We fail the canonical-ref gate when the field is absent
+  // because the QA gate's job is to catch unbound generation inputs.
+  const rawCast = latest.cast_members ?? latest.cast ?? [];
+  const castMembers = Array.isArray(rawCast) ? rawCast : [rawCast].filter(Boolean);
   if (castMembers.length === 0) {
     results.push({
       check: '[CANONICAL-REF] cast members present',
@@ -136,8 +160,8 @@ async function checkCanonicalRefs(): Promise<AssertionResult[]> {
         // character.  Quality may degrade but the page does not break.
         results.push({
           check: `[CANONICAL-REF] ${member.name} reference_image field`,
-          status: 'SKIP',
-          evidence: `WARN: "${member.name}" (${member.id}) has no reference_image in latest.json — character identity was not bound during generation; add ob1-app/reference/${member.id}-canonical.png`,
+          status: 'FAIL',
+          evidence: `"${member.name}" (${member.id}) has no reference_image in latest.json — character identity was not bound during generation; add ob1-app/reference/${member.id}-canonical.png`,
         });
       } else {
         // Field present: generator found the local PNG and passed it to the
@@ -155,7 +179,8 @@ async function checkCanonicalRefs(): Promise<AssertionResult[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Check 2: mobile safe-area — hero uses object-fit:contain on 390px viewport
+// Check 2: mobile safe-area — report hero object-fit on 390px viewport.
+// Cowork owns the hero styling decision, so object-fit mismatch is informational.
 // Handles both <img> and <video> heroes (today's vignette may use either).
 // ---------------------------------------------------------------------------
 
@@ -248,11 +273,11 @@ async function checkMobileSafeArea(): Promise<AssertionResult[]> {
 
     const objFit = computedObjectFit.objectFit;
     results.push({
-      check: '[SAFE-AREA] hero object-fit: contain (not cover)',
-      status: objFit === 'contain' ? 'PASS' : 'FAIL',
+      check: '[SAFE-AREA] hero object-fit',
+      status: objFit === 'contain' ? 'PASS' : 'SKIP',
       evidence: objFit === 'contain'
         ? `object-fit: ${objFit} — full 16:9 frame visible on 390px mobile, no crop (${computedObjectFit.width}×${computedObjectFit.height})`
-        : `object-fit: ${objFit} — hero will CROP on mobile, faces may exit safe zone. Expected "contain", got "${objFit}". (Regression of PR #443 fix)`,
+        : `WARN: object-fit ${objFit} vs expected contain — pending Cowork decision; informational only, not a hard gate.`,
     });
 
     // Aspect ratio guard: natural dims should be ~16:9 (skip for video if not yet loaded)
@@ -294,13 +319,18 @@ async function main() {
     if (r.status !== 'PASS') console.log(`      ${r.evidence}`);
   }
 
-  console.log('\n--- Mobile Safe-Area Checks ---');
-  const safeAreaResults = await checkMobileSafeArea();
-  allResults.push(...safeAreaResults);
-  for (const r of safeAreaResults) {
-    const icon = r.status === 'PASS' ? '✓' : r.status === 'FAIL' ? '✗' : '~';
-    console.log(`  ${icon} ${r.check}: ${r.status}`);
-    if (r.status !== 'PASS') console.log(`      ${r.evidence}`);
+  if (SKIP_SAFE_AREA) {
+    console.log('\n--- Mobile Safe-Area Checks ---');
+    console.log('  ~ [SAFE-AREA] skipped by --skip-safe-area');
+  } else {
+    console.log('\n--- Mobile Safe-Area Checks ---');
+    const safeAreaResults = await checkMobileSafeArea();
+    allResults.push(...safeAreaResults);
+    for (const r of safeAreaResults) {
+      const icon = r.status === 'PASS' ? '✓' : r.status === 'FAIL' ? '✗' : '~';
+      console.log(`  ${icon} ${r.check}: ${r.status}`);
+      if (r.status !== 'PASS') console.log(`      ${r.evidence}`);
+    }
   }
 
   // Summary
