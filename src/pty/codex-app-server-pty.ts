@@ -457,15 +457,31 @@ export class CodexAppServerPTY {
     });
   }
 
-  private async waitForEndpoint(timeoutMs = 10000): Promise<void> {
+  private async waitForEndpoint(timeoutMs = 45000): Promise<void> {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       if (this._endpoint.transport === 'unix') {
-        if (this._endpoint.socketPath && existsSync(this._endpoint.socketPath)) return;
-      } else if (this._endpoint.port && await this.canConnectTcp(DEFAULT_WS_HOST, this._endpoint.port)) {
-        return;
+        if (this._endpoint.socketPath && existsSync(this._endpoint.socketPath)) {
+          const probe = new WsUnixJsonRpcClient(this._endpoint.rpcTarget);
+          try {
+            await probe.connect();
+            probe.close();
+            return;
+          } catch {
+            probe.close();
+          }
+        }
+      } else if (this._endpoint.port) {
+        const probe = new WsUnixJsonRpcClient(this._endpoint.rpcTarget);
+        try {
+          await probe.connect();
+          probe.close();
+          return;
+        } catch {
+          probe.close();
+        }
       }
-      await sleep(100);
+      await sleep(250);
     }
     throw new Error(`Timed out waiting for app-server endpoint: ${this._endpoint.listenArg}`);
   }
@@ -507,17 +523,25 @@ export class CodexAppServerPTY {
         }
       }
 
-      const latest = await this.findLatestThreadForCwd();
-      if (latest) {
-        const resumed = await this.request<ThreadResponse>('thread/resume', {
-          threadId: latest,
-          cwd: this._cwd,
-          ...THREAD_PERMISSION_OVERRIDES,
-          excludeTurns: true,
-          persistExtendedHistory: true,
-        });
-        this.setThreadId(resumed.result?.thread.id || latest);
-        return;
+      try {
+        const latest = await this.findLatestThreadForCwd();
+        if (latest) {
+          try {
+            const resumed = await this.request<ThreadResponse>('thread/resume', {
+              threadId: latest,
+              cwd: this._cwd,
+              ...THREAD_PERMISSION_OVERRIDES,
+              excludeTurns: true,
+              persistExtendedHistory: true,
+            });
+            this.setThreadId(resumed.result?.thread.id || latest);
+            return;
+          } catch (err) {
+            this._outputBuffer.push(`[codex-app-server] latest resume failed; starting fresh: ${err}\n`);
+          }
+        }
+      } catch (err) {
+        this._outputBuffer.push(`[codex-app-server] thread list failed; starting fresh: ${err}\n`);
       }
     }
 
