@@ -8,6 +8,7 @@ const {
   postCommentOnce,
   commentBodiesContain,
   parseGhCommentBodiesOutput,
+  isTestFixturePath,
   _test,
 } = require('../../../scripts/memo-conflict-check') as any;
 
@@ -155,5 +156,58 @@ describe('memo-conflict comment dedup', () => {
 
     expect(result).toEqual({ posted: false, duplicate: true });
     expect(postComment).not.toHaveBeenCalled();
+  });
+});
+
+describe('isTestFixturePath — fixture exclusion', () => {
+  test('excludes .test.ts files', () => {
+    expect(isTestFixturePath('scripts/memo-conflict-check.test.ts')).toBe(true);
+  });
+
+  test('excludes .spec.js files', () => {
+    expect(isTestFixturePath('src/utils/helper.spec.js')).toBe(true);
+  });
+
+  test('excludes files under tests/ directory', () => {
+    expect(isTestFixturePath('tests/unit/scripts/memo-conflict-check.test.ts')).toBe(true);
+  });
+
+  test('excludes files under fixtures/ directory', () => {
+    expect(isTestFixturePath('tests/fixtures/sample-diff.txt')).toBe(true);
+  });
+
+  test('passes production source files', () => {
+    expect(isTestFixturePath('scripts/memo-conflict-check.js')).toBe(false);
+    expect(isTestFixturePath('src/bus/index.ts')).toBe(false);
+  });
+});
+
+describe('checkDiff — test fixture exclusion', () => {
+  test('does not flag blocked patterns in test fixture files', () => {
+    // The test file itself contains gpt-5-codex as a fixture string — must not trigger
+    const diff = [
+      '--- a/tests/unit/scripts/memo-conflict-check.test.ts',
+      '+++ b/tests/unit/scripts/memo-conflict-check.test.ts',
+      "@@ -1 +1 @@",
+      "+    const diff = `+const model = 'gpt-5-codex';`;",
+    ].join('\n');
+    const result = checkDiff(diff);
+    expect(result.hasConflict).toBe(false);
+  });
+
+  test('still flags blocked patterns in production files after a fixture file in the same diff', () => {
+    const diff = [
+      '--- a/tests/unit/scripts/check.test.ts',
+      '+++ b/tests/unit/scripts/check.test.ts',
+      '@@ -1 +1 @@',
+      "+    // gpt-5-codex fixture string",
+      '--- a/src/index.ts',
+      '+++ b/src/index.ts',
+      '@@ -1 +1 @@',
+      "+const model = 'gpt-5-codex';",
+    ].join('\n');
+    const result = checkDiff(diff);
+    expect(result.hasConflict).toBe(true);
+    expect(result.conflicts[0].critical).toBe(true);
   });
 });
