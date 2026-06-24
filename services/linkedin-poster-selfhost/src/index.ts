@@ -4,6 +4,7 @@ import type { PosterConfig } from './types.js';
 import type {
   PostCommentRequest,
   SendConnectionRequest,
+  LikePostRequest,
   SendDmRequest,
   PublishPostRequest,
 } from './types.js';
@@ -11,6 +12,7 @@ import { BrowserManager } from './browser.js';
 import {
   postLinkedInComment,
   sendConnectionRequest,
+  likeLinkedInPost,
   sendDM,
   publishLinkedInPost,
   discoverLinkedInPosts,
@@ -116,20 +118,48 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
   const method = req.method ?? 'GET';
 
   // Health / readiness
+  if (url === '/ready' && method === 'GET') {
+    const busy = inFlight || batchRunning;
+    const browserStatus = browser.getLastHealthStatus();
+    const ready = browser.isReady() && lastBrowserHealthy && !busy;
+    send(res, ready ? 200 : 503, {
+      ok: ready,
+      userId: config.userId,
+      busy,
+      browser: {
+        healthy: lastBrowserHealthy,
+        status: busy ? 'busy' : browserStatus.status,
+        title: browserStatus.title,
+        url: browserStatus.url,
+        message: browserStatus.message,
+      },
+    });
+    return;
+  }
+
   if (url === '/health' && method === 'GET') {
     if (inFlight || batchRunning) {
       send(res, 200, {
         ok: true,
         userId: config.userId,
         busy: true,
-        browserHealthy: lastBrowserHealthy,
+        browser: {
+          ...browser.getLastHealthStatus(),
+          healthy: lastBrowserHealthy,
+          status: 'busy',
+        },
         healthCheckSkipped: 'browser_action_in_flight',
       });
       return;
     }
-    const healthy = await browser.checkHealth();
-    lastBrowserHealthy = healthy;
-    send(res, healthy ? 200 : 503, { ok: healthy, userId: config.userId });
+    const browserStatus = await browser.getHealthStatus();
+    lastBrowserHealthy = browserStatus.healthy;
+    send(res, browserStatus.healthy ? 200 : 503, {
+      ok: browserStatus.healthy,
+      userId: config.userId,
+      mode: 'browser',
+      browser: browserStatus,
+    });
     return;
   }
 
@@ -157,6 +187,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
     case '/connect': {
       const { profileUrl, noteText } = body as SendConnectionRequest;
       await withActionGuard(res, () => sendConnectionRequest(page, profileUrl, noteText));
+      break;
+    }
+    case '/like': {
+      const { postUrl } = body as LikePostRequest;
+      await withActionGuard(res, () => likeLinkedInPost(page, postUrl));
       break;
     }
     case '/dm': {
@@ -244,6 +279,12 @@ async function pickBatchKeywords(supabaseUrl: string, supabaseKey: string, n: nu
 }
 
 function startEngageBatchScheduler(): void {
+  const disabled = process.env['POSTER_DISABLE_BATCH_SCHEDULER'];
+  if (disabled === 'true' || disabled === '1') {
+    console.log('[engage-batch-sched] POSTER_DISABLE_BATCH_SCHEDULER is set — scheduler disabled');
+    return;
+  }
+
   const BATCH_HOURS_PT = [6, 12];
   const CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -388,8 +429,6 @@ async function runHeartbeatLoop(): Promise<void> {
 async function main(): Promise<void> {
   await browser.init();
 
-  const queue = startQueueConsumer();
-
   const server = createServer((req, res) => {
     handleRequest(req, res).catch((err) => {
       console.error('[server] Unhandled error:', err);
@@ -397,12 +436,17 @@ async function main(): Promise<void> {
     });
   });
 
-  server.listen(config.port, () => {
-    console.log(`[server] linkedin-poster-selfhost listening on :${config.port}`);
-    console.log(`[server] userId=${config.userId} profileDir=${config.profileDir}`);
+  await new Promise<void>((resolve) => {
+    server.listen(config.port, () => {
+      console.log(`[server] linkedin-poster-selfhost listening on :${config.port}`);
+      console.log(`[server] userId=${config.userId} profileDir=${config.profileDir}`);
+      resolve();
+    });
   });
 
   await runHeartbeatLoop();
+
+  const queue = startQueueConsumer();
 
   // Engagement batch scheduler — replaces engage-batch-local.mjs on Mac
   startEngageBatchScheduler();

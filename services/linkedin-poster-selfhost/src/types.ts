@@ -23,6 +23,8 @@ export interface ActionResult {
   reason?: string;
   error?: string;
   note?: string;
+  /** LinkedIn comment permalink or best-effort URL captured after a successful comment read-back. */
+  comment_permalink?: string;
   /** LinkedIn post URN or permalink URL returned after a successful publish_post action. */
   linkedin_post_id?: string;
 }
@@ -35,6 +37,10 @@ export interface PostCommentRequest {
 export interface SendConnectionRequest {
   profileUrl: string;
   noteText?: string;
+}
+
+export interface LikePostRequest {
+  postUrl: string;
 }
 
 export interface SendDmRequest {

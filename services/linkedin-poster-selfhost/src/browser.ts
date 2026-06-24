@@ -5,10 +5,24 @@ import type { PosterConfig } from './types.js';
 
 const LOGIN_PATTERN = /log.?in|sign.?in|authwall/i;
 
+export interface BrowserHealthStatus {
+  healthy: boolean;
+  status: 'not_initialized' | 'healthy' | 'session_expired' | 'error';
+  title?: string;
+  url?: string;
+  message?: string;
+}
+
 export class BrowserManager {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private config: PosterConfig;
+  private healthCheck: Promise<boolean> | null = null;
+  private lastHealthStatus: BrowserHealthStatus = {
+    healthy: false,
+    status: 'not_initialized',
+    message: 'BrowserManager not initialized',
+  };
 
   constructor(config: PosterConfig) {
     this.config = config;
@@ -57,6 +71,14 @@ export class BrowserManager {
     return this.page;
   }
 
+  isReady(): boolean {
+    return !!this.context && !!this.page && !this.page.isClosed();
+  }
+
+  getLastHealthStatus(): BrowserHealthStatus {
+    return { ...this.lastHealthStatus };
+  }
+
   private async killLingeringProfileProcesses(): Promise<void> {
     const profileDir = this.config.profileDir;
     await new Promise<void>((resolve) => {
@@ -89,20 +111,63 @@ export class BrowserManager {
   }
 
   async checkHealth(): Promise<boolean> {
-    if (!this.page) return false;
+    if (this.healthCheck) return this.healthCheck;
+    this.healthCheck = this.runHealthCheck().finally(() => {
+      this.healthCheck = null;
+    });
+    return this.healthCheck;
+  }
+
+  async getHealthStatus(): Promise<BrowserHealthStatus> {
+    await this.checkHealth();
+    return this.getLastHealthStatus();
+  }
+
+  private async runHealthCheck(): Promise<boolean> {
+    if (!this.page) {
+      this.lastHealthStatus = {
+        healthy: false,
+        status: 'not_initialized',
+        message: 'BrowserManager not initialized',
+      };
+      return false;
+    }
     try {
-      await this.page.goto('https://www.linkedin.com/feed/', {
-        waitUntil: 'domcontentloaded',
-        timeout: 15_000,
-      });
+      if (this.page.isClosed()) {
+        throw new Error('Browser page is closed');
+      }
+
+      const initialUrl = this.page.url();
+      const initialLinkedInPage = /^https:\/\/([a-z]+\.)?linkedin\.com\//i.test(initialUrl);
+      if (!initialLinkedInPage) {
+        await this.page.goto('https://www.linkedin.com/feed/', {
+          waitUntil: 'domcontentloaded',
+          timeout: 15_000,
+        });
+      }
+
       const title = await this.page.title();
-      const healthy = !LOGIN_PATTERN.test(title);
+      const url = this.page.url();
+      const linkedinPage = /^https:\/\/([a-z]+\.)?linkedin\.com\//i.test(url);
+      const healthy = linkedinPage && !LOGIN_PATTERN.test(`${title} ${url}`);
+      this.lastHealthStatus = {
+        healthy,
+        status: healthy ? 'healthy' : 'session_expired',
+        title,
+        url,
+      };
       if (!healthy) {
         console.error(`[browser] Session expired — page title: "${title}"`);
       }
       return healthy;
     } catch (err) {
-      console.error('[browser] Health check failed:', (err as Error).message.split('\n')[0]);
+      const message = (err as Error).message.split('\n')[0];
+      this.lastHealthStatus = {
+        healthy: false,
+        status: 'error',
+        message,
+      };
+      console.error('[browser] Health check failed:', message);
       try {
         await this.recoverAfterCrash();
       } catch (recoverErr) {

@@ -48,6 +48,7 @@ export class QueueConsumer {
   private jobProcessing = false;
   private engagementTimer: ReturnType<typeof setInterval> | null = null;
   private jobTimer: ReturnType<typeof setInterval> | null = null;
+  private engagementCount = 0;
   // Fix 4: session publish counter — capped by POSTER_MAX_PUBLISH_PER_SESSION
   private publishCount = 0;
 
@@ -70,9 +71,12 @@ export class QueueConsumer {
     this.engagementTimer = setInterval(() => this.processEngagementQueue(), 15_000);
     this.jobTimer = setInterval(() => this.processJobQueue(), 5_000);
 
-    // Immediate first tick (staggered 2s apart to avoid double-fire on startup)
-    setTimeout(() => this.processEngagementQueue(), 2_000);
-    setTimeout(() => this.processJobQueue(), 4_000);
+    // Do not consume while the browser is still recovering after process start.
+    const initialDelay = process.env['POSTER_QUEUE_INITIAL_DELAY_MS']
+      ? parseInt(process.env['POSTER_QUEUE_INITIAL_DELAY_MS'], 10)
+      : 30_000;
+    setTimeout(() => this.processEngagementQueue(), initialDelay);
+    setTimeout(() => this.processJobQueue(), initialDelay + 2_000);
   }
 
   stop(): void {
@@ -85,17 +89,41 @@ export class QueueConsumer {
   // Engagement queue — linkedin_engagement_queue
   // ---------------------------------------------------------------------------
 
+  private async isPosterReady(): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.baseUrl}/ready`);
+      const body = await res.json().catch(() => ({})) as {
+        ok?: boolean;
+        busy?: boolean;
+        browser?: { healthy?: boolean; status?: string };
+      };
+      if (!res.ok || !body.ok || body.busy) {
+        console.log(
+          `[queue] Poster not ready — ready status=${res.status} ok=${body.ok ?? false} busy=${body.busy ?? false} browser=${body.browser?.healthy ?? false}/${body.browser?.status ?? 'unknown'}`,
+        );
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.log(`[queue] Poster readiness check failed: ${(err as Error).message}`);
+      return false;
+    }
+  }
+
   private async processEngagementQueue(): Promise<void> {
     if (this.engagementProcessing) return;
     this.engagementProcessing = true;
 
     try {
+      if (!(await this.isPosterReady())) return;
+
       // Claim one approved item scoped to this sender UUID (or unscoped items).
       // sender_id is a UUID column — pass senderUuid, not the human userId string.
       const { data: items, error } = await this.supabase
         .from('linkedin_engagement_queue')
         .select('id,status,sender_id,author_name,author_profile_url,post_url,actions,draft_comment,connection_note')
         .eq('status', 'approved')
+        .match(process.env['POSTER_QUEUE_ONLY_ITEM_ID'] ? { id: process.env['POSTER_QUEUE_ONLY_ITEM_ID'] } : {})
         .or(`sender_id.eq.${this.config.senderUuid},sender_id.is.null`)
         .order('created_at', { ascending: true })
         .limit(1);
@@ -107,6 +135,15 @@ export class QueueConsumer {
       if (!items || items.length === 0) return;
 
       const item = items[0] as EngagementQueueItem;
+
+      const maxEngagements = process.env['POSTER_MAX_ENGAGEMENT_PER_SESSION']
+        ? parseInt(process.env['POSTER_MAX_ENGAGEMENT_PER_SESSION'], 10)
+        : Infinity;
+      if (this.engagementCount >= maxEngagements) {
+        console.log(`[queue/engagement] Session engagement cap reached (${this.engagementCount}/${maxEngagements}) — not consuming`);
+        return;
+      }
+
       console.log(`[queue/engagement] Processing: ${item.author_name} actions=${item.actions?.join('+')}`);
 
       const today = new Date().toISOString().slice(0, 10);
@@ -133,13 +170,38 @@ export class QueueConsumer {
         if (item.actions.length > 1) await sleep(30_000);
       }
 
+      // Like
+      if (item.actions?.includes('like') && item.post_url) {
+        const res = await this.dispatch('/like', { postUrl: item.post_url });
+        if (res.skipped) {
+          console.log(`[queue/engagement] Like skipped: ${res.reason}`);
+          actionsTaken.push('like_skipped');
+        } else if (res.success) {
+          await this.supabase.from('linkedin_engagements').insert({
+            queue_item_id: item.id,
+            author_name: item.author_name,
+            author_linkedin_url: item.author_profile_url || item.post_url,
+            post_url: item.post_url,
+            action_type: 'liked',
+            session_date: today,
+          });
+          actionsTaken.push('liked');
+        } else {
+          console.error(`[queue/engagement] Like failed: ${res.error}`);
+        }
+        if (item.actions.includes('connect')) await sleep(30_000);
+      }
+
       // Connect
       if (item.actions?.includes('connect') && item.author_profile_url) {
         const res = await this.dispatch('/connect', {
           profileUrl: item.author_profile_url,
           noteText: item.connection_note ?? undefined,
         });
-        if (res.success) {
+        if (res.skipped) {
+          console.log(`[queue/engagement] Connect skipped: ${res.reason}`);
+          actionsTaken.push('connect_skipped');
+        } else if (res.success) {
           await this.supabase.from('linkedin_engagements').insert({
             queue_item_id: item.id,
             author_name: item.author_name,
@@ -149,9 +211,6 @@ export class QueueConsumer {
             session_date: today,
           });
           actionsTaken.push('connected');
-        } else if (res.skipped) {
-          console.log(`[queue/engagement] Connect skipped: ${res.reason}`);
-          actionsTaken.push('connect_skipped');
         } else {
           console.error(`[queue/engagement] Connect failed: ${res.error}`);
         }
@@ -165,6 +224,7 @@ export class QueueConsumer {
         .update({ status: newStatus, ...(newStatus === 'skipped' ? { skip_reason: 'all_actions_failed_or_skipped' } : {}) })
         .eq('id', item.id);
 
+      this.engagementCount++;
       console.log(`[queue/engagement] ${item.author_name}: ${actionsTaken.join('+') || 'none'} -> ${newStatus}`);
     } catch (err) {
       console.error('[queue/engagement] Error:', (err as Error).message);
@@ -182,6 +242,8 @@ export class QueueConsumer {
     this.jobProcessing = true;
 
     try {
+      if (!(await this.isPosterReady())) return;
+
       // Claim one pending job. Identity-scoped kinds (publish_*) require
       // requested_by to match this user; fetch_profile_posts is sender-agnostic.
       const SENDER_SCOPED_KINDS = ['publish_post', 'publish_post_with_image', 'publish_post_with_images'];
@@ -349,16 +411,36 @@ export class QueueConsumer {
   // ---------------------------------------------------------------------------
 
   private async dispatch(path: string, body: unknown): Promise<Record<string, unknown>> {
-    try {
-      const res = await fetch(`${this.baseUrl}${path}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      return (await res.json()) as Record<string, unknown>;
-    } catch (err) {
-      return { success: false, error: (err as Error).message };
+    const maxAttempts = 4;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const res = await fetch(`${this.baseUrl}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const payload = (await res.json()) as Record<string, unknown>;
+
+        if (res.status !== 429 || attempt === maxAttempts) {
+          return payload;
+        }
+
+        const error = typeof payload.error === 'string' ? payload.error : '';
+        const waitMatch = error.match(/wait\s+(\d+)s/i);
+        const waitMs = waitMatch ? (parseInt(waitMatch[1], 10) + 1) * 1000 : 10_000;
+        console.log(`[queue] ${path} rate-limited (${error || '429'}); retrying in ${Math.ceil(waitMs / 1000)}s`);
+        await sleep(waitMs);
+      } catch (err) {
+        if (attempt === maxAttempts) {
+          return { success: false, error: (err as Error).message };
+        }
+        console.log(`[queue] ${path} dispatch failed (${(err as Error).message}); retrying`);
+        await sleep(5_000);
+      }
     }
+
+    return { success: false, error: 'dispatch retry exhausted' };
   }
 
   private async downloadStorageImage(jobId: string, storagePath: string, idx: number): Promise<string> {
