@@ -160,6 +160,83 @@ async function waitForCommentReadback(page: Page, commentText: string): Promise<
   throw new Error(`Comment read-back failed — posted text did not render in live comment list. editorText="${editorText}"`);
 }
 
+async function editorStillContainsComment(page: Page, commentText: string): Promise<boolean> {
+  const preview = normalizeText(commentText).slice(0, 80);
+  if (!preview) return false;
+  return page.evaluate((needle: string) =>
+    Array.from(document.querySelectorAll('[contenteditable="true"]'))
+      .some(el => (el.textContent ?? '').replace(/\s+/g, ' ').trim().includes(needle))
+  , preview);
+}
+
+async function submitComment(page: Page, commentText: string): Promise<string> {
+  const preview = normalizeText(commentText).slice(0, 80);
+  const clickResult = await page.evaluate((needle: string) => {
+    const visible = (el: Element): boolean => {
+      const rect = (el as HTMLElement).getBoundingClientRect();
+      const style = window.getComputedStyle(el as HTMLElement);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const buttonText = (button: HTMLButtonElement): string =>
+      `${button.textContent ?? ''} ${button.getAttribute('aria-label') ?? ''}`.replace(/\s+/g, ' ').trim();
+    const isSubmit = (button: HTMLButtonElement): boolean => {
+      const text = buttonText(button);
+      return /\b(Comment|Post|Send)\b/i.test(text) && !/add a comment/i.test(text);
+    };
+
+    const editors = Array.from(document.querySelectorAll('[contenteditable="true"]')) as HTMLElement[];
+    const editor = editors.find(el => (el.textContent ?? '').replace(/\s+/g, ' ').trim().includes(needle)) ?? editors[0];
+    if (!editor) return 'no-editor-for-submit';
+
+    const editorRect = editor.getBoundingClientRect();
+    let node: HTMLElement | null = editor;
+    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+      const scoped = Array.from(node.querySelectorAll('button')) as HTMLButtonElement[];
+      const button = scoped.find(btn =>
+        visible(btn) &&
+        !btn.disabled &&
+        isSubmit(btn) &&
+        btn.getBoundingClientRect().top >= editorRect.top - 8
+      );
+      if (button) {
+        button.scrollIntoView({ block: 'center', inline: 'center' });
+        button.click();
+        return `clicked-scoped:${buttonText(button).slice(0, 80)}`;
+      }
+    }
+
+    const globalCandidates = (Array.from(document.querySelectorAll('button')) as HTMLButtonElement[])
+      .filter(btn => visible(btn) && !btn.disabled && isSubmit(btn))
+      .map(btn => {
+        const rect = btn.getBoundingClientRect();
+        const dx = rect.left - editorRect.left;
+        const dy = rect.top - editorRect.top;
+        return { btn, rect, score: Math.abs(dx) + Math.abs(dy), text: buttonText(btn) };
+      })
+      .filter(candidate => candidate.rect.top >= editorRect.top - 8)
+      .sort((a, b) => a.score - b.score);
+    const button = globalCandidates[0]?.btn;
+    if (button) {
+      button.scrollIntoView({ block: 'center', inline: 'center' });
+      button.click();
+      return `clicked-nearest:${buttonText(button).slice(0, 80)}`;
+    }
+
+    return 'no-submit-button';
+  }, preview);
+
+  await page.waitForTimeout(1400);
+  if (await editorStillContainsComment(page, commentText)) {
+    await page.keyboard.press('Meta+Enter');
+    await page.waitForTimeout(900);
+  }
+  if (await editorStillContainsComment(page, commentText)) {
+    await page.keyboard.press('Control+Enter');
+    await page.waitForTimeout(1200);
+  }
+  return clickResult as string;
+}
+
 async function readLikeState(page: Page): Promise<'active' | 'inactive' | 'missing'> {
   return page.evaluate(() => {
     const buttons = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
@@ -266,24 +343,9 @@ export async function postLinkedInComment(
   }
   console.log('[actions] Comment verified in editor.');
 
-  // Click the "Comment" submit button (inline TipTap button, not hidden Submit)
-  const commentBtnFound = await page.evaluate(() => {
-    const btns = Array.from(document.querySelectorAll('button'));
-    const commentBtn = btns.find(b => {
-      const text = b.textContent?.trim() ?? '';
-      const label = b.getAttribute('aria-label') ?? '';
-      return (text === 'Comment' || label === 'Comment') && !/add a comment/i.test(text);
-    });
-    if (commentBtn) { commentBtn.click(); return true; }
-    return false;
-  });
+  const submitResult = await submitComment(page, commentText);
+  console.log(`[actions] Comment submit result: ${submitResult}`);
 
-  if (!commentBtnFound) {
-    console.log('[actions] Comment button not found, using Meta+Return');
-    await page.keyboard.press('Meta+Return');
-  }
-
-  await page.waitForTimeout(2500);
   const readback = await waitForCommentReadback(page, commentText);
   console.log(`[actions] Comment posted and read-back verified: ${readback.matchedSnippet.slice(0, 60)}`);
   return {
