@@ -9,6 +9,7 @@
  * Usage:
  *   npx tsx scripts/hub-qa-parallel.ts
  *   npx tsx scripts/hub-qa-parallel.ts --pages /time,/my-day,/companies
+ *   npx tsx scripts/hub-qa-parallel.ts --pages /time,/my-day --allow-partial
  *   npx tsx scripts/hub-qa-parallel.ts --batch-size 3
  *   npx tsx scripts/hub-qa-parallel.ts --dry-run   (print plan, don't run)
  *
@@ -35,10 +36,11 @@ const getArg = (flag: string, def = '') => {
 };
 
 const DRY_RUN    = argv.includes('--dry-run');
+const ALLOW_PARTIAL = argv.includes('--allow-partial');
 const BATCH_SIZE = parseInt(getArg('--batch-size', '4'), 10);
 const USER_EMAIL = getArg('--user', 'greg@revopsglobal.com');
 
-const ALL_PAGES = [
+const ROUTE_MANIFEST = [
   '/',
   '/time',
   '/my-day',
@@ -46,6 +48,8 @@ const ALL_PAGES = [
   '/companies',
   '/projects',
   '/reports',
+  '/pipeline',
+  '/clients',
   '/app/orchestrator',
   '/app/fleet/activity',
   '/app/work/inbox',
@@ -61,7 +65,32 @@ const ALL_PAGES = [
 ];
 
 const customPages = getArg('--pages', '');
-const PAGES = customPages ? customPages.split(',').map(p => p.trim()) : ALL_PAGES;
+const PAGES = customPages ? customPages.split(',').map(p => p.trim()).filter(Boolean) : ROUTE_MANIFEST;
+
+function slug(str: string) {
+  return str.replace(/\//g, '-').replace(/^-/, '') || 'root';
+}
+
+function assertRouteManifest(routes: string[]) {
+  const duplicates = routes.filter((route, idx) => routes.indexOf(route) !== idx);
+  if (duplicates.length > 0) {
+    throw new Error(`Route manifest has duplicate route(s): ${[...new Set(duplicates)].join(', ')}`);
+  }
+}
+
+function incompleteMessage(executedRoutes: string[], missingReports: string[], staleReports: string[]) {
+  const expected = ROUTE_MANIFEST.length;
+  const executed = executedRoutes.length;
+  const missingRoutes = ROUTE_MANIFEST.filter(route => !executedRoutes.includes(route));
+  const details = [
+    `FAILED/INCOMPLETE: executed ${executed}/${expected} route(s) from route manifest.`,
+  ];
+  if (missingRoutes.length > 0) details.push(`Missing route executions: ${missingRoutes.join(', ')}`);
+  if (missingReports.length > 0) details.push(`Missing fresh report files: ${missingReports.join(', ')}`);
+  if (staleReports.length > 0) details.push(`Stale report files: ${staleReports.join(', ')}`);
+  details.push('Use --allow-partial only for intentional targeted debugging.');
+  return details.join('\n');
+}
 
 // ---------------------------------------------------------------------------
 // Single-page runner — spawns hub-qa-playwright.ts as child process
@@ -129,6 +158,13 @@ function extractSummary(stdout: string): string {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
+  assertRouteManifest(ROUTE_MANIFEST);
+
+  if (PAGES.length < ROUTE_MANIFEST.length && !ALLOW_PARTIAL) {
+    console.error(incompleteMessage(PAGES, [], []));
+    process.exit(1);
+  }
+
   const batches: string[][] = [];
   for (let i = 0; i < PAGES.length; i += BATCH_SIZE) {
     batches.push(PAGES.slice(i, i + BATCH_SIZE));
@@ -136,6 +172,7 @@ async function main() {
 
   console.log(`\n╔══ hub-qa-parallel ═══════════════════════════════╗`);
   console.log(`║  Pages:      ${PAGES.length} total`);
+  console.log(`║  Manifest:   ${ROUTE_MANIFEST.length} expected`);
   console.log(`║  Batch size: ${BATCH_SIZE}`);
   console.log(`║  Batches:    ${batches.length}`);
   console.log(`║  Mode:       ${DRY_RUN ? 'dry-run (no execution)' : 'live'}`);
@@ -234,6 +271,7 @@ async function main() {
 
   console.log(`\n╔══ Results ════════════════════════════════════════╗`);
   console.log(`║  Pages: ${PAGES.length}  ✓ ${passed}  ✗ ${failed}  ? ${errored}`);
+  console.log(`║  Manifest routes: ${ROUTE_MANIFEST.length}`);
   console.log(`║  Parallel time:    ${fmtMs(totalMs)}`);
   console.log(`║  Sequential est.:  ${fmtMs(totalSerialMs)}`);
   const speedup = totalSerialMs / totalMs;
@@ -247,6 +285,25 @@ async function main() {
   );
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   const today = new Date().toISOString().slice(0, 10);
+  const missingReports: string[] = [];
+  const staleReports: string[] = [];
+  for (const route of ROUTE_MANIFEST) {
+    const reportPath = path.join(OUTPUT_DIR, `${slug(route)}-qa-${today}.md`);
+    if (!fs.existsSync(reportPath)) {
+      missingReports.push(route);
+      continue;
+    }
+    const stat = fs.statSync(reportPath);
+    if (stat.mtimeMs < totalStart - 1000) staleReports.push(route);
+  }
+  const executedRoutes = allResults.map(result => result.page);
+  const incomplete =
+    !ALLOW_PARTIAL &&
+    (executedRoutes.length < ROUTE_MANIFEST.length ||
+      ROUTE_MANIFEST.some(route => !executedRoutes.includes(route)) ||
+      missingReports.length > 0 ||
+      staleReports.length > 0);
+
   const timingPath = path.join(OUTPUT_DIR, `parallel-timing-${today}.md`);
   const lines = [
     `# Parallel QA Timing — ${today}`,
@@ -262,15 +319,24 @@ async function main() {
     `**Speedup**: ${speedup.toFixed(1)}x`,
     `**Batch size**: ${BATCH_SIZE}`,
     `**Batches**: ${batches.length}`,
+    `**Manifest routes**: ${ROUTE_MANIFEST.length}`,
+    `**Executed routes**: ${executedRoutes.length}`,
+    `**Completeness**: ${incomplete ? 'FAILED/INCOMPLETE' : 'complete'}`,
+    ...(missingReports.length > 0 ? [`**Missing fresh reports**: ${missingReports.join(', ')}`] : []),
+    ...(staleReports.length > 0 ? [`**Stale reports**: ${staleReports.join(', ')}`] : []),
   ];
   fs.writeFileSync(timingPath, lines.join('\n'));
   console.log(`Timing log: ${timingPath}`);
+
+  if (incomplete) {
+    console.error(incompleteMessage(executedRoutes, missingReports, staleReports));
+  }
 
   if (sessionFilePath && fs.existsSync(sessionFilePath)) {
     fs.unlinkSync(sessionFilePath);
   }
 
-  process.exit(failed + errored > 0 ? 1 : 0);
+  process.exit(failed + errored > 0 || incomplete ? 1 : 0);
 }
 
 main().catch(err => { console.error(err); process.exit(2); });
