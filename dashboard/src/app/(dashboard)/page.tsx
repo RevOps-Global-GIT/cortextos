@@ -90,6 +90,7 @@ export default async function OverviewPage({
       <MetricCards
         agentsOnline={healthSummary.healthy}
         agentsTotal={healthSummary.healthy + healthSummary.stale + healthSummary.down}
+        runningSessions={healthSummary.healthy}
         tasksCompleted={completedToday.length}
         tasksInProgress={inProgressTasks}
         tasksPending={pendingTasks}
