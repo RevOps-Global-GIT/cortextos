@@ -658,7 +658,9 @@ export function buildTaskRow(task: Task): Record<string, unknown> {
     result: task.result ?? null,
     result_links: null,
     goal_ancestry: null,
-    blocked_by: task.blocked_by && task.blocked_by.length > 0 ? task.blocked_by : null,
+    blocked_by: task.blocked_by && task.blocked_by.length > 0
+      ? task.blocked_by.map((id) => (isUuid(id) ? id : uuidv5(id)))
+      : null,
     tokens_cost: null,
     created_at: task.created_at,
     updated_at: task.updated_at,
