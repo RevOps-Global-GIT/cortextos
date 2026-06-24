@@ -47,6 +47,7 @@ function MetricCard({ label, value, sublabel, icon, href }: MetricCardProps) {
 interface MetricCardsProps {
   agentsOnline: number;
   agentsTotal: number;
+  runningSessions: number;
   tasksCompleted: number;
   tasksInProgress: number;
   tasksPending: number;
@@ -57,6 +58,7 @@ interface MetricCardsProps {
 export function MetricCards({
   agentsOnline,
   agentsTotal,
+  runningSessions,
   tasksCompleted,
   tasksInProgress,
   tasksPending,
@@ -75,7 +77,7 @@ export function MetricCards({
       <MetricCard
         label="Tasks Today"
         value={tasksCompleted}
-        sublabel={`${tasksInProgress} active, ${tasksPending} queued`}
+        sublabel={`${runningSessions} running / ${tasksInProgress} in progress, ${tasksPending} queued`}
         icon={<IconChecklist size={18} className="text-primary" />}
         href="/tasks"
       />
