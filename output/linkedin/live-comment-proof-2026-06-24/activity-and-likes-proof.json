@@ -1,0 +1,118 @@
+{
+  "checked_at": "2026-06-24T19:39:46.389Z",
+  "own_activity": [
+    {
+      "engagement_id": "23f1f97e-072c-4d3a-8df4-4a85d612e689",
+      "queue_item_id": "62ee2dee-45c4-4c84-91f2-80405082f3be",
+      "author_name": "Jon Miller",
+      "live_in_own_activity": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/greg-comments-activity-after-scroll.png"
+    },
+    {
+      "engagement_id": "8b524a9e-e7d8-43b8-9170-cc5ed2e0c7ee",
+      "queue_item_id": "6dc79198-c39e-4a8a-b415-159c6edf32a0",
+      "author_name": "Sara McNamara",
+      "live_in_own_activity": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/greg-comments-activity-after-scroll.png"
+    },
+    {
+      "engagement_id": "f1752fc8-19b5-4256-91f4-a793f9c7144c",
+      "queue_item_id": "87cd6c03-3e33-4ee0-8d22-dbc02dc43899",
+      "author_name": "Jeff Ignacio",
+      "live_in_own_activity": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/greg-comments-activity-after-scroll.png"
+    },
+    {
+      "engagement_id": "e2a5a4c1-7383-483a-9328-0f8cf8921d7e",
+      "queue_item_id": "619e5614-aa94-4aa8-94af-34537c0bd5a5",
+      "author_name": "Muzammil Khalfey",
+      "live_in_own_activity": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/greg-comments-activity-after-scroll.png"
+    },
+    {
+      "engagement_id": "af88c61a-b176-4ce7-9eca-550bd36404f6",
+      "queue_item_id": "c976136b-70c2-42f5-9010-b70faf101a96",
+      "author_name": "Anton Dobrzhanskiy",
+      "live_in_own_activity": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/greg-comments-activity-after-scroll.png"
+    }
+  ],
+  "likes": [
+    {
+      "engagement_id": "cff2c417-72a9-4d29-a68b-759b55614261",
+      "queue_item_id": "43208945-b1b3-43ba-b9c8-84042d10fda0",
+      "author_name": "Ginelle Powell-Fulton",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472657538035965952/",
+      "live": true,
+      "reaction_state": "active",
+      "button_text": "Like",
+      "button_aria_label": "Unreact Like",
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/like-43208945-ginelle-powell-fulton-active.png"
+    },
+    {
+      "engagement_id": "32741f5a-d331-43ce-8539-e26c70cdca89",
+      "queue_item_id": "62ee2dee-45c4-4c84-91f2-80405082f3be",
+      "author_name": "Jon Miller",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472652451259629568/",
+      "live": true,
+      "reaction_state": "active",
+      "button_text": "Like",
+      "button_aria_label": "Unreact Like",
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/like-62ee2dee-jon-miller-active.png"
+    },
+    {
+      "engagement_id": "7c194c8b-24eb-441d-97c3-d16ac6955e41",
+      "queue_item_id": "6dc79198-c39e-4a8a-b415-159c6edf32a0",
+      "author_name": "Sara McNamara",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472333738220204032/",
+      "live": true,
+      "reaction_state": "active",
+      "button_text": "Like",
+      "button_aria_label": "Unreact Like",
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/like-6dc79198-sara-mcnamara-active.png"
+    },
+    {
+      "engagement_id": "c57b73f5-8dc8-432a-a632-7e2dc2390ede",
+      "queue_item_id": "87cd6c03-3e33-4ee0-8d22-dbc02dc43899",
+      "author_name": "Jeff Ignacio",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7471604864708542464/",
+      "live": true,
+      "reaction_state": "active",
+      "button_text": "Like",
+      "button_aria_label": "Unreact Like",
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/like-87cd6c03-jeff-ignacio-active.png"
+    },
+    {
+      "engagement_id": "c25ac82a-d823-4499-bbed-804843c96de9",
+      "queue_item_id": "619e5614-aa94-4aa8-94af-34537c0bd5a5",
+      "author_name": "Muzammil Khalfey",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7470097441837666305/",
+      "live": true,
+      "reaction_state": "active",
+      "button_text": "Like",
+      "button_aria_label": "Unreact Like",
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/like-619e5614-muzammil-khalfey-active.png"
+    },
+    {
+      "engagement_id": "6276c7ea-e1e3-440b-bcf3-691e1e50ff14",
+      "queue_item_id": "c976136b-70c2-42f5-9010-b70faf101a96",
+      "author_name": "Anton Dobrzhanskiy",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472537211708760065/",
+      "live": true,
+      "reaction_state": "active",
+      "button_text": "Like",
+      "button_aria_label": "Unreact Like",
+      "screenshot": "/home/cortextos/cortextos/output/linkedin/live-comment-proof-2026-06-24/like-c976136b-anton-dobrzhanskiy-active.png"
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "checked_at": "2026-06-24T19:24:51.738Z",
+  "results": [
+    {
+      "engagement_id": "23f1f97e-072c-4d3a-8df4-4a85d612e689",
+      "queue_item_id": "62ee2dee-45c4-4c84-91f2-80405082f3be",
+      "author_name": "Jon Miller",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472652451259629568/",
+      "comment_text_snippet": "The bidirectional framing is right, and the second direction is the one that almost never gets an owner. Shaping the market has a budget line. Bringing the market back usually lives in the CMO's head ",
+      "live": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "permalink": null,
+      "screenshot": "output/linkedin/live-comment-proof-2026-06-24/62ee2dee-jon-miller.png",
+      "final_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472652451259629568/",
+      "title": "Post | Feed | LinkedIn"
+    },
+    {
+      "engagement_id": "8b524a9e-e7d8-43b8-9170-cc5ed2e0c7ee",
+      "queue_item_id": "6dc79198-c39e-4a8a-b415-159c6edf32a0",
+      "author_name": "Sara McNamara",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472333738220204032/",
+      "comment_text_snippet": "The split I'd add for RevOps specifically: does the output write to the system of record? Anything that mutates lifecycle stage, lead score, or routing should stay deterministic, because in six months",
+      "live": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "permalink": null,
+      "screenshot": "output/linkedin/live-comment-proof-2026-06-24/6dc79198-sara-mcnamara.png",
+      "final_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472333738220204032/",
+      "title": "Post | Feed | LinkedIn"
+    },
+    {
+      "engagement_id": "f1752fc8-19b5-4256-91f4-a793f9c7144c",
+      "queue_item_id": "87cd6c03-3e33-4ee0-8d22-dbc02dc43899",
+      "author_name": "Jeff Ignacio",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7471604864708542464/",
+      "comment_text_snippet": "Good model. The trap I'd flag is that the two axes mature at different speeds. NRR lags by 12 to 18 months, so any segment you've sold into for under a year gets plotted on a number that hasn't formed",
+      "live": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "permalink": null,
+      "screenshot": "output/linkedin/live-comment-proof-2026-06-24/87cd6c03-jeff-ignacio.png",
+      "final_url": "https://www.linkedin.com/feed/update/urn:li:activity:7471604864708542464/",
+      "title": "Post | Feed | LinkedIn"
+    },
+    {
+      "engagement_id": "e2a5a4c1-7383-483a-9328-0f8cf8921d7e",
+      "queue_item_id": "619e5614-aa94-4aa8-94af-34537c0bd5a5",
+      "author_name": "Muzammil Khalfey",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7470097441837666305/",
+      "comment_text_snippet": "The portfolio framing is right, and like investing it falls apart if the marks are wrong. You can't reallocate budget across channels when a large share of records are missing original source and the ",
+      "live": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "permalink": null,
+      "screenshot": "output/linkedin/live-comment-proof-2026-06-24/619e5614-muzammil-khalfey.png",
+      "final_url": "https://www.linkedin.com/feed/update/urn:li:activity:7470097441837666305/",
+      "title": "Post | Feed | LinkedIn"
+    },
+    {
+      "engagement_id": "af88c61a-b176-4ce7-9eca-550bd36404f6",
+      "queue_item_id": "c976136b-70c2-42f5-9010-b70faf101a96",
+      "author_name": "Anton Dobrzhanskiy",
+      "target_post_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472537211708760065/",
+      "comment_text_snippet": "This is the clearest version of the point I've seen. The agent stays a day-one rep for the same reason new hires do: the buyer model is never written down. Who can actually sign, which pain belongs to",
+      "live": false,
+      "matched_snippet": null,
+      "matched_text": null,
+      "permalink": null,
+      "screenshot": "output/linkedin/live-comment-proof-2026-06-24/c976136b-anton-dobrzhanskiy.png",
+      "final_url": "https://www.linkedin.com/feed/update/urn:li:activity:7472537211708760065/",
+      "title": "Post | Feed | LinkedIn"
+    }
+  ]
+}

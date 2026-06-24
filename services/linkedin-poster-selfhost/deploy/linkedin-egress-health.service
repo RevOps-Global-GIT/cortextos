@@ -1,0 +1,9 @@
+[Unit]
+Description=Fail-loud health check for LinkedIn egress and poster browser
+After=socks-linkedin-egress.service linkedin-poster@greg.service
+Wants=socks-linkedin-egress.service linkedin-poster@greg.service
+
+[Service]
+Type=oneshot
+User=cortextos
+ExecStart=/usr/local/sbin/linkedin-egress-health

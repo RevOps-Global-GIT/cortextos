@@ -28,6 +28,13 @@ async function checkSession(page: Page): Promise<void> {
   }
 }
 
+async function gotoLinkedInPage(page: Page, url: string): Promise<void> {
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+  await checkSession(page);
+  await page.waitForSelector('body', { state: 'visible', timeout: 15_000 });
+  await page.waitForTimeout(1500);
+}
+
 /** Get button text inventory for debugging when expected button is missing. */
 async function buttonInventory(page: Page): Promise<string> {
   return page.evaluate(() =>
@@ -39,6 +46,136 @@ async function buttonInventory(page: Page): Promise<string> {
   );
 }
 
+async function clickFirstAvailable(
+  page: Page,
+  candidates: Array<{ role: 'button' | 'menuitem'; name: RegExp }>,
+  timeout = 3000,
+): Promise<string | null> {
+  for (const candidate of candidates) {
+    const locator = page.getByRole(candidate.role, { name: candidate.name }).first();
+    const count = await locator.count().catch(() => 0);
+    if (count === 0) continue;
+    try {
+      await locator.click({ timeout });
+      return `${candidate.role}:${candidate.name}`;
+    } catch {
+      // Try next candidate.
+    }
+  }
+  return null;
+}
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function commentNeedles(commentText: string): string[] {
+  const normalized = normalizeText(commentText);
+  return [
+    normalized.slice(0, 140),
+    normalizeText(commentText.split('\n\n')[1] ?? '').slice(0, 140),
+    normalized.slice(0, 90),
+  ].filter((needle, index, values) => needle.length >= 30 && values.indexOf(needle) === index);
+}
+
+async function setCommentsSortToRecent(page: Page): Promise<void> {
+  const sort = page.getByRole('button', { name: /sort order|most relevant|most recent/i }).first();
+  if ((await sort.count().catch(() => 0)) === 0) return;
+
+  try {
+    await sort.click({ timeout: 2500 });
+    await page.waitForTimeout(500);
+    const recent = page.getByRole('menuitem', { name: /most recent|recent/i }).first();
+    if ((await recent.count().catch(() => 0)) > 0) {
+      await recent.click({ timeout: 2500 });
+      await page.waitForTimeout(1000);
+    }
+  } catch {
+    // Sorting is a best-effort read-back assist. The direct DOM check below is authoritative.
+  }
+}
+
+async function expandCommentThread(page: Page): Promise<void> {
+  await setCommentsSortToRecent(page);
+
+  for (let i = 0; i < 4; i++) {
+    for (const name of [/show more/i, /see more/i, /load more/i, /more comments?/i, /previous comments?/i]) {
+      const control = page.getByRole('button', { name }).first();
+      if ((await control.count().catch(() => 0)) > 0) {
+        await control.click({ timeout: 1500 }).catch(() => {});
+        await page.waitForTimeout(500);
+      }
+    }
+    await page.mouse.wheel(0, 450).catch(() => {});
+    await page.waitForTimeout(350);
+  }
+}
+
+async function findRenderedComment(page: Page, commentText: string): Promise<{ permalink?: string; matchedSnippet: string } | null> {
+  const needles = commentNeedles(commentText);
+  for (const needle of needles) {
+    const found = await page.evaluate((text: string) => {
+      const norm = (value: string): string => value.replace(/\s+/g, ' ').trim();
+      const contentEditable = (el: Element): boolean =>
+        el.matches('[contenteditable="true"]') ||
+        !!el.closest('[contenteditable="true"]') ||
+        !!el.querySelector('[contenteditable="true"]');
+
+      const elements = Array.from(document.querySelectorAll('article, .comments-comment-item, [data-id], div, span, p'));
+      for (const element of elements) {
+        if (contentEditable(element)) continue;
+        const body = norm(element.textContent ?? '');
+        if (!body.includes(text)) continue;
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+        const permalink =
+          (element.closest('a') as HTMLAnchorElement | null)?.href ||
+          (element.querySelector('a[href*="comment"]') as HTMLAnchorElement | null)?.href ||
+          (element.closest('[data-id]')?.querySelector('a[href*="comment"]') as HTMLAnchorElement | null)?.href ||
+          undefined;
+        return { permalink };
+      }
+      return null;
+    }, needle);
+    if (found) return { permalink: found.permalink, matchedSnippet: needle };
+  }
+  return null;
+}
+
+async function waitForCommentReadback(page: Page, commentText: string): Promise<{ permalink?: string; matchedSnippet: string }> {
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    const found = await findRenderedComment(page, commentText);
+    if (found) return found;
+    await expandCommentThread(page);
+  }
+
+  const editorText = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('[contenteditable="true"]'))
+      .map(el => el.textContent ?? '')
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 180)
+  );
+  throw new Error(`Comment read-back failed — posted text did not render in live comment list. editorText="${editorText}"`);
+}
+
+async function readLikeState(page: Page): Promise<'active' | 'inactive' | 'missing'> {
+  return page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+    const likeButton = buttons.find((button) => {
+      const text = button.textContent?.trim() ?? '';
+      const label = button.getAttribute('aria-label') ?? '';
+      if (/comment|reply|send|share|repost/i.test(label) || /comment|reply|send|share|repost/i.test(text)) return false;
+      return /^Like$/i.test(text) || /^Like\b/i.test(label) || /\bReact Like\b/i.test(label) || /\bUnreact\b/i.test(label);
+    });
+    if (!likeButton) return 'missing';
+    const label = likeButton.getAttribute('aria-label') ?? '';
+    const active = likeButton.getAttribute('aria-pressed') === 'true' || /\bUnlike\b|\bUnreact\b/i.test(label);
+    return active ? 'active' : 'inactive';
+  });
+}
+
 // ---------------------------------------------------------------------------
 // postLinkedInComment
 // ---------------------------------------------------------------------------
@@ -48,12 +185,30 @@ export async function postLinkedInComment(
   commentText: string,
 ): Promise<ActionResult> {
   console.log(`[actions] Opening post: ${postUrl}`);
-  await page.goto(postUrl, { waitUntil: 'networkidle', timeout: 30_000 });
-  await checkSession(page);
+  await gotoLinkedInPage(page, postUrl);
 
-  // Click the comment area to expand the TipTap editor
+  // Focus or expand the comment editor without clicking the placeholder span.
   console.log('[actions] Expanding comment box…');
-  await page.getByText('Add a comment', { exact: false }).first().click();
+  const expandResult = await page.evaluate(() => {
+    const existing = document.querySelector('[contenteditable="true"]') as HTMLElement | null;
+    if (existing) {
+      existing.focus();
+      existing.click();
+      return 'focused-existing-editor';
+    }
+
+    const placeholder = Array.from(document.querySelectorAll('span,div,p')).find(el =>
+      /Add a comment/i.test(el.textContent ?? '')
+    ) as HTMLElement | undefined;
+    const clickable = placeholder?.closest('[contenteditable="true"],button,[role="button"],.comments-comment-box,form,div') as HTMLElement | null;
+    if (clickable) {
+      clickable.focus();
+      clickable.click();
+      return 'clicked-comment-container';
+    }
+    return 'no-comment-container';
+  });
+  console.log(`[actions] Comment editor expand result: ${expandResult}`);
   await page.waitForTimeout(1500);
 
   // Inject text via shadow DOM eval (same approach as Mac poster)
@@ -129,7 +284,62 @@ export async function postLinkedInComment(
   }
 
   await page.waitForTimeout(2500);
-  console.log('[actions] Comment posted.');
+  const readback = await waitForCommentReadback(page, commentText);
+  console.log(`[actions] Comment posted and read-back verified: ${readback.matchedSnippet.slice(0, 60)}`);
+  return {
+    success: true,
+    note: 'comment_readback_verified',
+    comment_permalink: readback.permalink ?? page.url(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// likeLinkedInPost
+// ---------------------------------------------------------------------------
+export async function likeLinkedInPost(
+  page: Page,
+  postUrl: string,
+): Promise<ActionResult> {
+  console.log(`[actions] Opening post to like: ${postUrl}`);
+  await gotoLinkedInPage(page, postUrl);
+
+  const likeResult = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
+    const likeButton = buttons.find((button) => {
+      const text = button.textContent?.trim() ?? '';
+      const label = button.getAttribute('aria-label') ?? '';
+      if (/comment|reply|send|share|repost/i.test(label) || /comment|reply|send|share|repost/i.test(text)) return false;
+      return /^Like$/i.test(text) || /^Like\b/i.test(label) || /\bReact Like\b/i.test(label);
+    });
+
+    if (!likeButton) {
+      return 'no-like-button';
+    }
+    const pressed = likeButton.getAttribute('aria-pressed') === 'true' ||
+      /\bUnlike\b/i.test(likeButton.getAttribute('aria-label') ?? '');
+    if (pressed) {
+      return 'already-liked';
+    }
+
+    likeButton.scrollIntoView({ block: 'center', inline: 'center' });
+    likeButton.click();
+    return 'liked';
+  });
+
+  console.log(`[actions] Like result: ${likeResult}`);
+  if (likeResult === 'already-liked') {
+    return { success: true, skipped: true, reason: 'already_liked' };
+  }
+  if (likeResult !== 'liked') {
+    throw new Error(`Could not like post: ${likeResult}; buttons=${await buttonInventory(page)}`);
+  }
+
+  await page.waitForTimeout(1500);
+  const readback = await readLikeState(page);
+  if (readback !== 'active') {
+    throw new Error(`Like read-back failed — expected active reaction state, got ${readback}; buttons=${await buttonInventory(page)}`);
+  }
+  console.log('[actions] Like read-back verified.');
   return { success: true };
 }
 
@@ -142,8 +352,8 @@ export async function sendConnectionRequest(
   noteText?: string,
 ): Promise<ActionResult> {
   console.log(`[actions] Opening profile: ${profileUrl}`);
-  await page.goto(profileUrl, { waitUntil: 'networkidle', timeout: 30_000 });
-  await checkSession(page);
+  await gotoLinkedInPage(page, profileUrl);
+  await page.waitForSelector('button,main', { state: 'attached', timeout: 20_000 });
 
   // PRE-CHECK: if "Message" button is visible, we're already connected — skip
   const hasMessage = await page.evaluate(() =>
@@ -157,57 +367,82 @@ export async function sendConnectionRequest(
     return { success: true, skipped: true, reason: 'already_connected' };
   }
 
-  // Find Connect button (may be in a "More" dropdown)
-  let hasConnect = await page.evaluate(() =>
-    Array.from(document.querySelectorAll('button')).some(b => /\bConnect\b/.test(b.textContent ?? ''))
-  );
+  // Click the profile-header Connect control. Avoid global More menus from
+  // nav, posts, recommendations, and sidebars.
+  const profileClick = await page.evaluate(() => {
+    const isVisible = (el: Element): boolean => {
+      const rect = (el as HTMLElement).getBoundingClientRect();
+      const style = window.getComputedStyle(el as HTMLElement);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const textOf = (el: Element): string =>
+      `${el.textContent ?? ''} ${el.getAttribute('aria-label') ?? ''}`.trim();
 
-  if (!hasConnect) {
-    // Try opening the "More" dropdown
-    const moreClicked = await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find(b => /\bMore\b/i.test(b.getAttribute('aria-label') ?? b.textContent ?? ''));
-      if (btn) { btn.click(); return true; }
-      return false;
-    });
-    if (moreClicked) {
-      await page.waitForTimeout(800);
-      hasConnect = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('button,[role="menuitem"]')).some(b => /\bConnect\b/.test(b.textContent ?? ''))
-      );
+    const h1 = document.querySelector('h1');
+    const section = h1?.closest('section') ?? h1?.closest('main') ?? document.querySelector('main');
+    if (!section) return 'no-profile-section';
+
+    const buttons = Array.from(section.querySelectorAll('button')).filter(isVisible);
+    const connect = buttons.find((button) => /\bConnect\b/i.test(textOf(button)));
+    if (connect) {
+      (connect as HTMLElement).click();
+      return 'profile-connect';
     }
+
+    const more = buttons.find((button) => /\bMore\b/i.test(textOf(button)));
+    if (more) {
+      (more as HTMLElement).click();
+      return 'profile-more';
+    }
+
+    return `no-profile-connect:${buttons.map(textOf).filter(Boolean).slice(0, 12).join(' | ')}`;
+  }) as string;
+
+  let connectClick: string | null = null;
+  if (profileClick === 'profile-connect') {
+    connectClick = profileClick;
+  } else if (profileClick === 'profile-more') {
+    await page.waitForTimeout(800);
+    connectClick = await clickFirstAvailable(page, [
+      { role: 'menuitem', name: /\bConnect\b/i },
+      { role: 'button', name: /^Connect$/i },
+    ], 5000);
+  } else {
+    console.log(`[actions] No profile Connect control found: ${profileClick}`);
+    return { success: true, skipped: true, reason: 'no_profile_connect_control' };
   }
 
-  if (!hasConnect) {
-    console.log('[actions] No Connect button found. Recording as already connected.');
-    return { success: true, skipped: true, reason: 'already_connected' };
+  if (!connectClick) {
+    console.log(`[actions] Profile More opened but no Connect item found. buttons=${await buttonInventory(page)}`);
+    return { success: true, skipped: true, reason: 'no_connect_menu_item' };
   }
-
-  // Click Connect
-  await page.evaluate(() => {
-    const btn = Array.from(document.querySelectorAll('button,[role="menuitem"]')).find(b => /\bConnect\b/.test(b.textContent ?? ''));
-    (btn as HTMLElement | undefined)?.click();
-  });
+  console.log(`[actions] Connect click result: ${connectClick}`);
   await page.waitForTimeout(1000);
 
   // Modal opens — click "Add a note" if available
-  const addNoteClicked = await page.evaluate(() => {
-    const btn = Array.from(document.querySelectorAll('button')).find(b => /Add a note/i.test(b.textContent ?? ''));
-    if (btn) { btn.click(); return true; }
-    return false;
-  });
+  const addNoteClicked = !!(await clickFirstAvailable(page, [
+    { role: 'button', name: /Add a note/i },
+  ], 2500));
 
   if (!addNoteClicked) {
-    // No note option — just send
-    const sendClicked = await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find(b => /^Send$/.test(b.textContent?.trim() ?? ''));
-      if (btn) { btn.click(); return true; }
-      return false;
-    });
-    if (sendClicked) {
+    // No note option — send/connect from the modal if a submit button is shown.
+    const submitClicked = await clickFirstAvailable(page, [
+      { role: 'button', name: /^Send$/i },
+      { role: 'button', name: /^Send now$/i },
+      { role: 'button', name: /^Send invitation$/i },
+      { role: 'button', name: /^Connect$/i },
+    ], 3000);
+    if (submitClicked) {
       await page.waitForTimeout(1500);
+      console.log(`[actions] Connection request sent without note via ${submitClicked}.`);
       return { success: true, note: 'Sent without note (Add a note not available)' };
     }
-    throw new Error("Could not find 'Add a note' or 'Send' in connection modal.");
+
+    const textarea = page.locator('textarea').first();
+    if ((await textarea.count().catch(() => 0)) === 0) {
+      console.log(`[actions] Connect click did not open a sendable modal. buttons=${await buttonInventory(page)}`);
+      return { success: true, skipped: true, reason: 'connect_modal_not_sendable' };
+    }
   }
 
   await page.waitForTimeout(800);
@@ -236,15 +471,16 @@ export async function sendConnectionRequest(
   }
 
   // Click Send
-  const sendClicked = await page.evaluate(() => {
-    const btn = Array.from(document.querySelectorAll('button')).find(b => /^Send$/.test(b.textContent?.trim() ?? ''));
-    if (btn) { btn.click(); return true; }
-    return false;
-  });
-  if (!sendClicked) throw new Error('Could not find Send button in connection modal.');
+  const sendClicked = await clickFirstAvailable(page, [
+    { role: 'button', name: /^Send$/i },
+    { role: 'button', name: /^Send now$/i },
+    { role: 'button', name: /^Send invitation$/i },
+    { role: 'button', name: /^Connect$/i },
+  ], 5000);
+  if (!sendClicked) throw new Error(`Could not find Send button in connection modal. buttons=${await buttonInventory(page)}`);
 
   await page.waitForTimeout(2000);
-  console.log('[actions] Connection request sent.');
+  console.log(`[actions] Connection request sent via ${sendClicked}.`);
   return { success: true };
 }
 

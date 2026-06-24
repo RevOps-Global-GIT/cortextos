@@ -1,0 +1,24 @@
+[Unit]
+Description=SOCKS5 tunnel through linkedin-egress VM (LinkedIn poster egress)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cortextos
+Environment=AUTOSSH_GATETIME=0
+Environment=AUTOSSH_PORT=0
+ExecStart=/usr/bin/autossh -M 0 -NT \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=3 \
+  -o ExitOnForwardFailure=yes \
+  -o BatchMode=yes \
+  -o StrictHostKeyChecking=accept-new \
+  -i /home/cortextos/.ssh/id_ed25519 \
+  -D 127.0.0.1:1080 \
+  linkedin-egress@5.78.204.57
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

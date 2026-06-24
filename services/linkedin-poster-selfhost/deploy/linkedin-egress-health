@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+POSTER_HEALTH_URL=${POSTER_HEALTH_URL:-http://127.0.0.1:3747/health}
+LINKEDIN_URL=${LINKEDIN_URL:-https://www.linkedin.com/login/}
+
+if ! curl -fsS --max-time 20 --socks5-hostname 127.0.0.1:1080 -I "$LINKEDIN_URL" >/tmp/linkedin-egress-linkedin.headers; then
+  cortextos bus log-event error linkedin_egress_health_failed error --meta '{"check":"linkedin_via_socks","socks":"127.0.0.1:1080"}' >/dev/null 2>&1 || true
+  echo "linkedin_via_socks_failed"
+  exit 1
+fi
+
+health=$(curl -fsS --max-time 15 "$POSTER_HEALTH_URL")
+if ! jq -e '.ok == true and .browser.healthy == true' >/dev/null <<<"$health"; then
+  printf '%s\n' "$health" >/tmp/linkedin-egress-poster-health.json
+  cortextos bus log-event error linkedin_egress_health_failed error --meta '{"check":"poster_health","url":"http://127.0.0.1:3747/health"}' >/dev/null 2>&1 || true
+  echo "poster_health_failed"
+  exit 1
+fi
+
+echo "linkedin_egress_health_ok"
