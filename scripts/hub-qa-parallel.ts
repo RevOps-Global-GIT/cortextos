@@ -84,6 +84,7 @@ function incompleteMessage(executedRoutes: string[], missingReports: string[], s
   const missingRoutes = ROUTE_MANIFEST.filter(route => !executedRoutes.includes(route));
   const details = [
     `FAILED/INCOMPLETE: executed ${executed}/${expected} route(s) from route manifest.`,
+    `Manifest: ${expected} expected`,
   ];
   if (missingRoutes.length > 0) details.push(`Missing route executions: ${missingRoutes.join(', ')}`);
   if (missingReports.length > 0) details.push(`Missing fresh report files: ${missingReports.join(', ')}`);
