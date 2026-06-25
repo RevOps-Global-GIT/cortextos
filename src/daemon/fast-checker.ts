@@ -1622,7 +1622,7 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
    * `autoreset` is 0 when disabled (absent or explicit 0). Any value > 0 arms the
    * Tier 0 silent auto-reset path.
    */
-  private getCtxThresholds(): { warn: number; handoff: number; autoreset: number } {
+  private getCtxThresholds(): { warn: number; handoff: number; autoreset: number; handoffWindowMs: number } {
     try {
       const configPath = join(this.agent.getAgentDir(), 'config.json');
       const mtime = statSync(configPath).mtimeMs;
@@ -1631,6 +1631,7 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
         const config = this.agent.getConfig();
         config.ctx_warning_threshold = cfg.ctx_warning_threshold;
         config.ctx_handoff_threshold = cfg.ctx_handoff_threshold;
+        config.ctx_handoff_window_ms = cfg.ctx_handoff_window_ms;
         config.ctx_autoreset_threshold = cfg.ctx_autoreset_threshold;
         this.ctxConfigMtime = mtime;
       }
@@ -1644,10 +1645,12 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
     // their context will rarely reach 70-80% before a natural session boundary.
     const warnRaw = config.ctx_warning_threshold;
     const handoffRaw = config.ctx_handoff_threshold;
+    const windowRaw = config.ctx_handoff_window_ms;
     return {
       warn: typeof warnRaw === 'number' && warnRaw > 0 ? warnRaw : 70,
       handoff: typeof handoffRaw === 'number' && handoffRaw > 0 ? handoffRaw : 80,
       autoreset,
+      handoffWindowMs: typeof windowRaw === 'number' && windowRaw > 0 ? windowRaw : 5 * 60_000,
     };
   }
 
@@ -1762,7 +1765,7 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
       return;
     }
 
-    const { warn, handoff, autoreset } = this.getCtxThresholds();
+    const { warn, handoff, autoreset, handoffWindowMs } = this.getCtxThresholds();
 
     // No threshold configured — observe-only mode (log but don't act). Any of
     // the three thresholds being explicitly set arms the monitor; an agent
@@ -1803,7 +1806,7 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
         this.log(`Handoff deadline expired at ${Math.round(effectivePct)}% but session is rate-limited — deferring restart ${Math.round(RATE_LIMIT_HANDOFF_BACKOFF_MS / 60_000)}min`);
         return;
       }
-      this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%) — force restarting`);
+      this.log(`Handoff deadline exceeded (${Math.round(effectivePct)}%, window=${Math.round(handoffWindowMs / 60_000)}min) — force restarting`);
       this.ctxHandoffDeadlineAt = 0;
       this.forceContextRestart(`ctx ${Math.round(effectivePct)}% — handoff not completed within 5min`);
       return;
@@ -1940,7 +1943,7 @@ Reply using: cortextos bus send-message ${msg.from} normal '<your reply>' ${msg.
         }
       } catch { /* non-fatal — proceed to Tier 2 if guard check fails */ }
       this.ctxHandoffFiredAt = now;
-      this.ctxHandoffDeadlineAt = now + 5 * 60_000; // 5min grace for agent to cooperate
+      this.ctxHandoffDeadlineAt = now + handoffWindowMs; // grace window for agent to cooperate (configurable via ctx_handoff_window_ms)
       // Reset context_status.json so the new session doesn't re-trigger immediately
       const statusPath = join(this.paths.stateDir, 'context_status.json');
       try {

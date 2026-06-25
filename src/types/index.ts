@@ -470,6 +470,13 @@ export interface AgentConfig {
   /** Context window % at which to inject handoff prompt and hard-restart. Default: 80. */
   ctx_handoff_threshold?: number;
   /**
+   * Grace window (ms) the agent has to write a handoff doc and call hard-restart after
+   * the Tier 2 handoff prompt is injected. Default: 300000 (5 min). Increase for agents
+   * that run long tool calls — e.g. 600000 (10 min) prevents force-restarts when the agent
+   * is mid-operation at handoff time.
+   */
+  ctx_handoff_window_ms?: number;
+  /**
    * Context window % at which to snapshot memory and silently force-restart the agent,
    * BEFORE the graceful-handoff threshold. 0 or absent = disabled (no auto-reset).
    * Typical: 55. Never-Telegram, never-interactive, used to keep agents from hitting 80%+.

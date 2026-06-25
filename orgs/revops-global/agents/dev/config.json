@@ -75,8 +75,9 @@
       "prompt": "node /home/cortextos/cortextos/scripts/cortextos-dist-rebuild.js"
     }
   ],
-  "ctx_handoff_threshold": 65,
   "ctx_autoreset_threshold": 85,
+  "ctx_handoff_threshold": 65,
+  "ctx_handoff_window_ms": 600000,
   "ecosystem": {
     "local_version_control": {
       "enabled": true
