@@ -5360,6 +5360,38 @@ async function runWikiGraphChecks(page: Page): Promise<CheckResult[]> {
   }
   return results;
 }
+// ---------------------------------------------------------------------------
+// /concepts checks (real URL: /app/concepts via PAGE_URL_MAP)
+// ---------------------------------------------------------------------------
+async function runConceptsChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'concepts';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Concepts list visible',
+    '[class*="concept"],[class*="Concept"],[class*="card"],[class*="tile"],table tbody tr,[class*="library"],[class*="Library"]',
+    /no concepts|no results|empty/i));
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// /app/reports checks (real URL: /client-reports via PAGE_URL_MAP)
+// ---------------------------------------------------------------------------
+async function runAppReportsChecks(page: Page): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sp = 'app-reports';
+  const loadResult = await checkLoad(page, sp);
+  results.push(loadResult);
+  if (loadResult.status === 'FAIL') return results;
+  await new Promise<void>(r => setTimeout(r, 1500));
+  results.push(await checkDataOrEmpty(page, sp, '[MIXED] CHECK 2 Reports list visible',
+    '[class*="report"],[class*="Report"],[class*="card"],[class*="folder"],[class*="Folder"],table tbody tr',
+    /no reports|no results|empty/i));
+  return results;
+}
+
 async function main() {
   const env = loadEnv(SECRETS_ENV);
   // Use the RGOS-specific service key (project yyizocyaehmqrottmnaz)
@@ -5476,6 +5508,10 @@ async function main() {
       '/app/config-behavior': '/app/config/behavior',
       // Same pattern: RGOS registers "wiki/graph" (slash); wiki-graph (dash) → 404 on agentops
       '/app/wiki-graph': '/app/wiki/graph',
+      // surface-sweep derives /concepts from src/pages/Concepts.tsx; real route is /app/concepts (portal nested)
+      '/concepts': '/app/concepts',
+      // surface-sweep derives /app/reports from src/pages/portal/Reports.tsx; real route is /client-reports
+      '/app/reports': '/client-reports',
     };
     const navPath = PAGE_URL_MAP[targetPage] ?? targetPage;
 
@@ -5620,8 +5656,12 @@ async function main() {
       results = await runWithTimeout(() => runMemoryChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else if (targetPage === '/app/wiki-graph') {
       results = await runWithTimeout(() => runWikiGraphChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/concepts') {
+      results = await runWithTimeout(() => runConceptsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
+    } else if (targetPage === '/app/reports') {
+      results = await runWithTimeout(() => runAppReportsChecks(page), [{ check: '[LIVENESS] CHECK 1 Page load', status: 'DEFERRED', evidence: 'Suite eval timeout' }]);
     } else {
-      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /app/fleet-board, /app/fleet/agents?tab=board, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/cortex/experiments, cortex-experiments, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph`);
+      throw new Error(`Page "${targetPage}" not yet implemented in this harness. Supported: /time, /my-day, /tasks, /, /app/orchestrator, /app/fleet/activity, /app/work/inbox, /app/work/approvals, /companies, /projects, /reports, /pipeline, /app/fleet/tasks, /app/fleet/agents, /app/fleet/agents?tab=sessions, /app/fleet-sessions, /app/fleet-board, /app/fleet/agents?tab=board, /social-content, /content-review, /app/wiki, /app/cortex/theta, /app/cortex/experiments, cortex-experiments, /app/presence, linkedin-presence, /app/signals, /app/supreme-outstanding, /clients, /contacts, /invoices, /settings, /financials, /analytics, /app/analytics, /fleet, /app/fleet, /app/capabilities, /app/config-behavior, /app/fleet/dreams, /app/memory, /app/wiki-graph, /concepts, /app/reports`);
     }
 
     const reportPath = path.join(OUTPUT_DIR, `${slug(targetPage)}-qa-${new Date().toISOString().slice(0, 10)}.md`);
