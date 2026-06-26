@@ -34,6 +34,11 @@ const REPOS = [
 
 const CARVE_OUTS = ['charlie-holstine', 'grandamenium'];
 
+// OB1 repos whose claude/* branches are Cowork-owned — never auto-merge.
+// codex/* branches on these same repos ARE fleet work and must still merge normally.
+// claude/* branches on non-OB1 repos (rgos, cortextos) are also unaffected.
+const OB1_REPOS = new Set(['RevOps-Global-GIT/ob1-app', 'RevOps-Global-GIT/ob1-parents']);
+
 const SKIP_BODY_PATTERNS = [
   /do\s*not\s*merge/i,
   /feature\s*branch\s*only/i,
@@ -496,6 +501,10 @@ async function main() {
         console.log(`[auto-merge] SKIP #${number} ${repo} — draft PR`);
         continue;
       }
+      if (OB1_REPOS.has(repo) && headRefName.startsWith('claude/')) {
+        console.log(`[auto-merge] SKIP #${number} ${repo} — Cowork-owned claude/* OB1 PR`);
+        continue;
+      }
       if (shouldSkipBody(body)) {
         console.log(`[auto-merge] SKIP #${number} ${repo} — body contains skip signal`);
         continue;
@@ -617,5 +626,5 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, checkRunGateForHead, REPOS, CARVE_OUTS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
+  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, checkRunGateForHead, REPOS, CARVE_OUTS, OB1_REPOS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
 }
