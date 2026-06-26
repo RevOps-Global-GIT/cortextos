@@ -69,6 +69,11 @@ function localTwinId(row: RgosTaskRow): string {
 
 function materializeRow(paths: BusPaths, row: RgosTaskRow, agent?: string): boolean {
   if (!row.id || taskExists(paths, row.id)) return false;
+  // Skip if a local twin already exists under the original bus task ID.
+  // Bus-mirror rows use a UUIDv5 row.id but store the original ID in metadata.bus_task_id;
+  // the local file is named by bus_task_id, so taskExists(row.id) misses it.
+  const twinId = localTwinId(row);
+  if (twinId !== row.id && taskExists(paths, twinId)) return false;
   const now = new Date().toISOString();
   const createdAt = row.created_at || now;
   const updatedAt = row.updated_at || createdAt;
@@ -135,6 +140,9 @@ export async function importApprovedRgosTasks(paths: BusPaths, options: { agent?
   if (!config) return { imported: 0, skipped: 0, rows: 0, reason: 'supabase_not_configured' };
   const params = new URLSearchParams({
     status: 'eq.approved',
+    // Exclude CLI-sourced rows (Cowork session messages auto-created by the Claude
+    // CLI that reach orch_tasks as approved cards but are not dispatchable tasks).
+    source: 'neq.cli',
     select: TASK_SELECT,
     order: 'created_at.desc',
     limit: String(options.limit ?? 200),
