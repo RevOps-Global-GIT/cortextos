@@ -4818,7 +4818,7 @@ busCommand
   .option('--ssh-host <host>', 'Explicit SSH host for the guarded Mac Codex fallback (e.g. gregs-mac).')
   .option('--dispatch-script <path>', 'Path to codex-dispatch.sh on the Mac', '/Users/gregharned/work/team-brain/scripts/codex-dispatch.sh')
   .option('--disable-fallback', 'Disable localhost codex exec fallback when Mac SSH is unreachable')
-  .option('--auto-fallback', 'On Codex long_lock (weekly cap), automatically spawn a claude-opus-4-7 spillover worker. Default OFF — do not enable globally.', false)
+  .option('--auto-fallback', 'On Codex long_lock (weekly cap), automatically spawn a claude-opus-4-8 spillover worker. Default OFF — do not enable globally.', false)
   .action(async (
     prompt: string,
     opts: {
@@ -4925,7 +4925,7 @@ busCommand
   .option('--mcp-config <path>', 'MCP config file path — passed as --mcp-config')
   .option('--sandbox <mode>', 'Codex sandbox mode (read-only, workspace-write, danger-full-access)')
   .option('--json-output', 'Print the run metadata JSON instead of only the artifact path')
-  .option('--auto-fallback', 'On Codex long_lock (weekly cap), automatically spawn a claude-opus-4-7 spillover worker. Default OFF — do not enable globally.', false)
+  .option('--auto-fallback', 'On Codex long_lock (weekly cap), automatically spawn a claude-opus-4-8 spillover worker. Default OFF — do not enable globally.', false)
   .action(async (
     promptFile: string,
     opts: {

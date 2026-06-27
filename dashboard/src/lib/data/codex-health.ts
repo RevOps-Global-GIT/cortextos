@@ -9,7 +9,7 @@ const CTX_ROOT = process.env.CTX_ROOT ?? path.join(os.homedir(), '.cortextos', p
 const ALERT_5H_THRESHOLD = 0.80; // page when 5h-band ≥ 80% used (< 20% remaining)
 const ALERT_7D_THRESHOLD = 0.80; // page when weekly burn projects to hit cap in < 48h
 
-// Rough cost per spillover dispatch: claude-opus-4-7 typical short job
+// Rough cost per spillover dispatch: claude-opus-4-8 typical short job
 const SPILLOVER_COST_PER_DISPATCH_USD = 0.40;
 const SPILLOVER_MONTHLY_SOFT_CAP_USD = 400;
 
