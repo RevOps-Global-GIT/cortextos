@@ -169,7 +169,7 @@ export async function handleCodexFallback(
       '--dir', opts.dir,
       '--prompt', workerPrompt,
       '--parent', opts.parentAgent,
-      '--model', 'claude-opus-4-7',
+      '--model', 'claude-opus-4-8',
     ],
     { stdio: 'pipe', timeout: 30000 },
   );
@@ -212,7 +212,7 @@ export async function handleCodexFallback(
         '--dir', opts.dir,
         '--prompt', worker2Prompt,
         '--parent', opts.parentAgent,
-        '--model', 'claude-opus-4-7',
+        '--model', 'claude-opus-4-8',
         '--home', opts.claudeTeamHome,
       ],
       { stdio: 'pipe', timeout: 30000 },

@@ -35,7 +35,7 @@ If the diff is empty, tell the user there is nothing to review and stop.
 
 ## Stage 1: Three Parallel Opus Review Agents
 
-Spawn all three simultaneously using the Agent tool. Use `model: claude-opus-4-7` for each.
+Spawn all three simultaneously using the Agent tool. Use `model: claude-opus-4-8` for each.
 
 Do NOT wait for one to finish before starting the others.
 

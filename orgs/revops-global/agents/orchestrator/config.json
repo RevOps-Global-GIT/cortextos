@@ -176,7 +176,7 @@
   "home": "/home/cortextos",
   "tier": "opus",
   "fallbackModel": [
-    "claude-opus-4-7",
+    "claude-opus-4-8",
     "claude-sonnet-4-6"
   ],
   "model_revert_note": "2026-06-10: Fable-5 pilot (2026-06-09, Greg-approved) reverted to tier:opus per June 15 billing migration plan — orchestrator is the highest-volume 24/7 token consumer and the pilot note pre-authorized revert on cost grounds. Re-evaluate after post-cutover spend data (July 1 review).",
