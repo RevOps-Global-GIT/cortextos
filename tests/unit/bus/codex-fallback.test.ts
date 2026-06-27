@@ -232,7 +232,7 @@ describe('handleCodexFallback', () => {
     expect(args[0]).toBe('bus');
     expect(args[1]).toBe('spawn-worker');
     expect(args).toContain('--model');
-    expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-4-7');
+    expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-4-8');
     expect(args).toContain('--parent');
     expect(args[args.indexOf('--parent') + 1]).toBe('orchestrator');
     expect(args).toContain('--dir');
