@@ -93,7 +93,7 @@ describe('codex-fallback smoke — 429 long_lock path', () => {
     const [cmd, args] = mockSpawnSync.mock.calls[0] as [string, string[]];
     expect(cmd).toBe('cortextos');
     expect(args).toContain('spawn-worker');
-    expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-4-7');
+    expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-4-8');
     expect(args[args.indexOf('--dir') + 1]).toBe('/tmp/task-dir');
     expect(args[args.indexOf('--parent') + 1]).toBe('orchestrator');
 
