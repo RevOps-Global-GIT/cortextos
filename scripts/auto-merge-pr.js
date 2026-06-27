@@ -46,6 +46,11 @@ const SKIP_BODY_PATTERNS = [
   /greg\s*merges/i,
 ];
 
+// Evidence gate: screenshot-evidence-gate must PASS before any visual PR merges.
+// Visual = any file with a .tsx, .css, or .scss extension.
+const EVIDENCE_GATE_NAME = 'screenshot-evidence-gate';
+const VISUAL_EXTS_RE = /\.(tsx|css|scss)$/i;
+
 // A PR updated moments ago may have an event-triggered check re-run that has
 // not yet registered as a check run (#1469: an 'edited'-event gate re-run
 // concluded FAILURE 8s after the merge). Defer such PRs to the next cycle.
@@ -397,10 +402,41 @@ function preMergeFreshnessCheck(repo, number, evalHeadSha) {
   return evaluateCheckRuns(runs);
 }
 
+/**
+ * Inspect the screenshot-evidence-gate check-run result for a set of runs.
+ * Returns 'passed' | 'failed' | 'missing'.
+ * 'missing' means either the gate check was never created or is still in-flight.
+ */
+function getEvidenceGateResult(runs) {
+  if (!runs || runs.length === 0) return 'missing';
+  let latest = null;
+  for (const r of runs) {
+    if (r.name !== EVIDENCE_GATE_NAME) continue;
+    if (!latest || new Date(r.started_at) > new Date(latest.started_at)) latest = r;
+  }
+  if (!latest || latest.status !== 'completed') return 'missing';
+  return latest.conclusion === 'success' ? 'passed' : 'failed';
+}
+
+/**
+ * Return true if the PR touches any .tsx / .css / .scss file.
+ * Fails open (returns false) on API error so a lookup failure never blocks.
+ */
+function prHasVisualFiles(repo, number) {
+  try {
+    const out = gh(['pr', 'view', String(number), '-R', repo, '--json', 'files', '-q', '.files[].path']);
+    const files = out.trim().split('\n').filter(Boolean);
+    return files.some(f => VISUAL_EXTS_RE.test(f));
+  } catch (err) {
+    console.warn(`[auto-merge] Could not fetch files for visual-check PR #${number}: ${err.message}`);
+    return false;
+  }
+}
+
 function checkRunGateForHead(repo, headSha) {
-  if (!headSha) return { ok: false, reason: 'missing head SHA' };
+  if (!headSha) return { ok: false, reason: 'missing head SHA', runs: [] };
   const runs = JSON.parse(gh(['api', `repos/${repo}/commits/${headSha}/check-runs?per_page=100`])).check_runs || [];
-  return evaluateCheckRuns(runs);
+  return { ...evaluateCheckRuns(runs), runs };
 }
 
 function isCarvedOut(repo) {
@@ -450,11 +486,11 @@ function fetchPRs(repo) {
 
   return nodes.map(pr => {
     const hasChangesRequested = (pr.reviews?.totalCount ?? 0) > 0;
-    let ci = { ok: false, reason: 'check-run lookup failed' };
+    let ci = { ok: false, reason: 'check-run lookup failed', runs: [] };
     try {
       ci = checkRunGateForHead(repo, pr.headRefOid);
     } catch (err) {
-      ci = { ok: false, reason: err.message };
+      ci = { ok: false, reason: err.message, runs: [] };
     }
 
     return {
@@ -469,6 +505,7 @@ function fetchPRs(repo) {
       mergeStateStatus: pr.mergeStateStatus,
       ciPassed: ci.ok,
       ciReason: ci.reason,
+      evidenceGate: getEvidenceGateResult(ci.runs),
       hasChangesRequested,
     };
   });
@@ -494,7 +531,7 @@ async function main() {
     }
 
     for (const pr of prs) {
-      const { number, title, body, isDraft, headRefName, headSha, updatedAt, mergeable, mergeStateStatus, ciPassed, ciReason, hasChangesRequested } = pr;
+      const { number, title, body, isDraft, headRefName, headSha, updatedAt, mergeable, mergeStateStatus, ciPassed, ciReason, evidenceGate, hasChangesRequested } = pr;
 
       // Skip conditions
       if (isDraft) {
@@ -533,6 +570,17 @@ async function main() {
       if (!ciPassed) {
         console.log(`[auto-merge] SKIP #${number} ${repo} — CI not clean (${ciReason || 'check-runs not clean'})`);
         continue;
+      }
+      // Evidence gate: a visual PR (touches .tsx/.css/.scss) must pass the
+      // screenshot-evidence-gate check before merging. A failed gate always
+      // blocks, regardless of file types. A missing gate only blocks when the
+      // PR has visual files (non-visual PRs skip the gate entirely).
+      if (evidenceGate !== 'passed') {
+        const hasVisual = evidenceGate === 'failed' || prHasVisualFiles(repo, number);
+        if (hasVisual) {
+          console.log(`[auto-merge] SKIP #${number} ${repo} — screenshot-evidence-gate=${evidenceGate} (visual PR)`);
+          continue;
+        }
       }
       if (hasChangesRequested) {
         console.log(`[auto-merge] SKIP #${number} ${repo} — CHANGES_REQUESTED review`);
@@ -626,5 +674,5 @@ if (require.main === module) {
 
 // Export helpers for unit testing
 if (typeof module !== 'undefined') {
-  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, checkRunGateForHead, REPOS, CARVE_OUTS, OB1_REPOS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS };
+  module.exports = { shouldSkipBody, mergeStateBlocksMerge, HARD_BLOCK_MERGE_STATES, mergeableBlocksMerge, HARD_BLOCK_MERGEABLE_STATES, pendingApprovalForPR, isCarvedOut, inferOwnerAgent, filePathToRoute, apiFileToEndpoint, mapPrFilesToRoutes, isWithinSettleWindow, evaluateCheckRuns, preMergeFreshnessCheck, checkRunGateForHead, getEvidenceGateResult, prHasVisualFiles, REPOS, CARVE_OUTS, OB1_REPOS, FILE_ROUTE_MAP, SETTLE_WINDOW_MS, EVIDENCE_GATE_NAME, VISUAL_EXTS_RE };
 }
