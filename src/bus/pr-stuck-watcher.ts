@@ -198,11 +198,15 @@ function hasAwaitingGregMarker(pr: GhPullRequest): boolean {
 // Greg directive 2026-05-31: Palette/Bolt automated PR streams are
 // manual-review-only across ALL repos — no auto-merge — so the stuck-PR
 // watcher leaves them parked. Detected by title prefix or head ref.
-function isManualReviewOnlyStream(_repo: string, pr: GhPullRequest): boolean {
+function isManualReviewOnlyStream(repo: string, pr: GhPullRequest): boolean {
   const title = pr.title ?? '';
   if (/^(⚡\s*Bolt:|🎨\s*Palette:)/i.test(title)) return true;
   const head = pr.headRefName ?? '';
   if (/^(bolt-|jules-)/i.test(head)) return true;
+  if (
+    (repo === 'RevOps-Global-GIT/ob1-app' || repo === 'RevOps-Global-GIT/ob1-parents') &&
+    /^claude\//i.test(head)
+  ) return true;
   return false;
 }
 
