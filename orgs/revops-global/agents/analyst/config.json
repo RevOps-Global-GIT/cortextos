@@ -119,7 +119,7 @@
       "name": "ai-tooling-watch-daily",
       "type": "recurring",
       "cron": "3 9 * * *",
-      "prompt": "AI Tooling Watch \u2014 daily light scan (~5-10 min). RGOS task 945f065f.\n\nScan these sources for new releases, changes, or announcements from the last 24h:\n1. Claude Code release notes (web search: \"Claude Code release notes site:docs.anthropic.com OR site:github.com/anthropics\")\n2. Anthropic blog/news (web search: \"site:anthropic.com/news OR site:anthropic.com/blog\" last 24h)\n3. OpenAI Codex changelog (web search: \"OpenAI Codex changelog OR codex release notes\")\n4. claude_agent_sdk commits: curl -s 'https://api.github.com/repos/anthropics/claude-code/commits?since=YESTERDAY_ISO&per_page=20'\n5. OpenAI cookbook commits: curl -s 'https://api.github.com/repos/openai/openai-cookbook/commits?since=YESTERDAY_ISO&per_page=20'\n6. Relevant MCP server releases (web search: \"MCP server release 2026\" last 24h)\n\nFor every item found, tag bake-in applicability against our stack:\n- cortextos wrapper (src/pty/codex-app-server-pty.ts, src/bus/, dashboard/)\n- hub.revopsglobal.com (RGOS platform)\n- team-brain wiki pipeline\n- recipe app (ob1-parents)\n- charlie-holstine site\n\nIf actionable: create RGOS task via mcp__rgos__cortex_create_task assigned to codex (or dev for bus internals) with description including tag 'ai-tooling-bake-in'.\n\nWrite summary memo to analyst/output/YYYY-MM-DD-ai-tooling-watch.md. Ingest to shared-revops-global KB.\n\nIf nothing new found, write a one-line 'no new items' memo and skip KB ingest."
+      "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-ai-tooling-watch-daily.md"
     },
     {
       "name": "ai-tooling-watch-weekly",
