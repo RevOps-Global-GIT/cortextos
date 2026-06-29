@@ -57,46 +57,28 @@ cortextos bus create-task "Daily hero assertions failed — ${TODAY}" \
   --goal-ancestry "OB1 daily content reliability"
 ```
 
-## Step 3 — Hero missing at 8 AM: alert orchestrator
+## Step 3 — Hero stale: log FYI only, NO fleet alert
 
-If LIVE_DATE != $TODAY (stale, blank, or unreachable), the hero SLA has been breached.
+**COWORK-OWNED SURFACE (Greg directive 2026-06-22, updated 2026-06-26):**
+Hero/vignette generation and publish is owned exclusively by Claude Cowork (Greg's Mac Claude.app).
+The fleet is OFF this surface. mac-codex, Flow, and ob1-app Vercel for hero are NOT fleet concerns.
 
-Check if a trigger was sent this morning:
+If LIVE_DATE != $TODAY, the last-good hero holds automatically (Vercel graceful degradation). This is
+expected behavior, NOT a fleet incident. Do NOT alert orchestrator as urgent. Do NOT create a task.
+Do NOT reference mac-codex, Flow, or Vercel pipeline as fleet investigation targets.
 
-```bash
-ls /tmp/daily-hero-trigger-${TODAY}.json 2>/dev/null && cat /tmp/daily-hero-trigger-${TODAY}.json || echo "No trigger recorded"
-```
-
-Alert orchestrator immediately:
-
-```bash
-cortextos bus send-message orchestrator urgent "DAILY HERO MISSING: ob1 latest.json still shows ${LIVE_DATE} at 8 AM PT — expected ${TODAY}. Flow run may have failed on mac-codex. The last-good hero is holding but no new vignette is live. Human decision needed: investigate mac-codex, Flow session, or ob1-app Vercel deploy pipeline."
-```
-
-Log the alert:
+Log FYI only:
 
 ```bash
-cortextos bus log-event action daily_hero_status error --meta '{"status":"missing_at_deadline","live_date":"'"$LIVE_DATE"'","expected":"'"$TODAY"'"}'
+cortextos bus log-event action daily_hero_status info --meta '{"status":"stale_cowork_surface","live_date":"'"$LIVE_DATE"'","expected":"'"$TODAY"'","note":"Cowork-owned — graceful degradation, no fleet action"}'
 ```
 
-Create a task for tracking:
-
-```bash
-cortextos bus create-task "Daily hero missing — ${TODAY}" \
-  --desc "Live latest.json shows ${LIVE_DATE} at 8 AM PT deadline; Flow vignette did not deploy on time. Needs investigation." \
-  --priority urgent \
-  --success-criteria "ob1.revopsglobal.com/vignettes/latest.json date == ${TODAY}" \
-  --out-of-scope "Nano-Banana fallback — Flow is the only source" \
-  --escalation-triggers "Hero still missing after manual retry" \
-  --required-capabilities "mac-codex, Vercel, ob1-app GitHub" \
-  --fallback-proof "curl latest.json and check date field" \
-  --artifact-expectations "latest.json with date=today, Vercel READY deploy" \
-  --goal-ancestry "OB1 daily content reliability" \
-  --source-hierarchy "watchdog-cron"
-```
+Orchestrator will surface to Greg at evening review if he wants to trigger a regen via Cowork.
 
 ## Hard constraints
 
 - NEVER invoke `scripts/generate-daily-vignette.mjs` (Nano-Banana / VM generator).
-- Do NOT silently skip — always log either success or the alert path.
+- NEVER alert orchestrator urgent for a stale hero — Cowork owns this surface.
+- NEVER create a fleet task for hero missing — not a fleet incident.
+- Do NOT silently skip — always log either success (Step 2) or the FYI (Step 3).
 - The last-good hero stays live automatically (Vercel serves last deployed) — do not blank the page.
