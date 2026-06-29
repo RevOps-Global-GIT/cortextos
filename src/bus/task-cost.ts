@@ -6,7 +6,6 @@ import { join } from 'path';
 const PRICING: Record<string, { inp: number; out: number; cw: number; cr: number }> = {
   'claude-sonnet-4-6':         { inp: 3.00,  out: 15.00, cw: 3.75,  cr: 0.30 },
   'claude-opus-4-8':           { inp: 15.00, out: 75.00, cw: 18.75, cr: 1.50 },
-  'claude-opus-4-7':           { inp: 15.00, out: 75.00, cw: 18.75, cr: 1.50 },
   'claude-opus-4-6':           { inp: 15.00, out: 75.00, cw: 18.75, cr: 1.50 },
   'claude-haiku-4-5':          { inp: 0.80,  out: 4.00,  cw: 1.00,  cr: 0.08 },
   'claude-haiku-4-5-20251001': { inp: 0.80,  out: 4.00,  cw: 1.00,  cr: 0.08 },
