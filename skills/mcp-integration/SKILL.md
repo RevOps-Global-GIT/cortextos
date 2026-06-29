@@ -53,3 +53,10 @@ server.run();
 - Test servers independently before connecting to agents
 - Set timeouts on server connections
 - Log all MCP calls for debugging
+
+## Skill Notes
+
+### Lessons Learned
+
+**2026-06-27 — final-spec audit for cortextos bus MCP surfaces**
+The examples in this skill are now stale relative to the official `@modelcontextprotocol/sdk` used by the repo MCP servers. For new or audited MCP servers, prefer `@modelcontextprotocol/sdk/server/mcp.js`, `StdioServerTransport`, and `registerTool` examples, and explicitly distinguish stdio auth from Streamable HTTP OAuth/resource-indicator requirements. Also verify tool execution errors return `isError: true`; plain text error content is not enough for clients to reliably self-correct.

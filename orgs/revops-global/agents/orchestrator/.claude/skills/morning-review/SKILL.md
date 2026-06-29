@@ -498,6 +498,10 @@ When the morning-review cron fires without a fresh human daily focus, carrying f
 
 <!-- Subtle preferences Greg consistently nudges — pre-apply these next time. -->
 
+**2026-06-26 — Quiet healthy morning during a Codex usage-cap; do not manufacture decisions**
+
+A genuinely clean overnight (board 0 in_progress, 0 approvals, 0 blockers, main green, nightly stable) calls for a SHORT honest brief, not a padded one. Sent ONE tight Telegram message (overnight shipped + health + focus) and explicitly dispatched ZERO tasks because nothing moved the needle — value-check beats queue-filling. Two traps avoided: (1) did NOT manufacture decisions to make the brief feel substantive — "nothing needs you" is the honest headline; (2) Codex was usage-capped (codex+codex-2, reset ~Jun 27 9:40 PT) and per the standing no-credit-narration rule the cap was kept OUT of the Telegram entirely — framed only as internal goals ("dev is the code lane") for fleet routing. Derived daily_focus from live state since Greg was asleep after a late night; cascaded org/dev/orchestrator goals, retained analyst's already-fresh goals (don't clobber). Full artifacts still produced (md + alias + HTML + wiki upsert) so the dashboard stays fresh even on a low-news day.
+
 **2026-05-27 — Morning review during credit-burn and mirror-trust incident**
 
 When Greg is actively reporting failures in Telegram, do not pause the morning review to ask for daily focus; derive it from the live thread and make that explicit. The useful brief separated useful shipped PR lanes from redundant/overlapping crons and misscoped subagents, then routed concrete follow-ups for dashboard truth, dogfood intake mirroring, and clean-base PR work instead of sending a generic status recap. Fan out correctly-scoped parallel work by default; don't spawn redundant subagents or crons.
