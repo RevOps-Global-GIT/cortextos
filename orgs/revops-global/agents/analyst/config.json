@@ -122,6 +122,30 @@
       "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-ai-tooling-watch-daily.md"
     },
     {
+      "name": "ai-tooling-watch-daily-fallback",
+      "type": "recurring",
+      "cron": "13 9 * * *",
+      "prompt": "Read the Stack Tooling Watch fallback prompt at /home/cortextos/cortextos/orgs/revops-global/agents/analyst/prompts/cron-ai-tooling-watch-daily-fallback.md and execute it. The prompt is a SILENT-FALLBACK: if today's ai-tooling-watch memo already exists, exit immediately. If not (primary codex run failed/silently-dropped), perform the broadened Lane A/B/C scan inline in this analyst session and write the memo with Lane A (AI model/provider news), Lane B (AI-coding tools), and Lane C (Dev infra/deploy) sections."
+    },
+    {
+      "name": "skill-qa-nightly",
+      "type": "recurring",
+      "cron": "15 2 * * *",
+      "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-skill-qa-nightly.md"
+    },
+    {
+      "name": "slack-to-wiki",
+      "type": "recurring",
+      "cron": "0 2 * * *",
+      "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-slack-to-wiki.md"
+    },
+    {
+      "name": "weekly-signal-diff",
+      "type": "recurring",
+      "cron": "0 16 * * 5",
+      "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-weekly-signal-diff.md"
+    },
+    {
       "name": "ai-tooling-watch-weekly",
       "type": "recurring",
       "cron": "7 9 * * 1",
