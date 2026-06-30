@@ -2544,10 +2544,11 @@ busCommand
   .command('check-upstream')
   .description('Check canonical repo for framework updates')
   .option('--apply', 'Merge upstream changes (requires user approval)')
-  .action((opts: { apply?: boolean }) => {
+  .option('--remote <name>', 'Git remote name to compare against (default: $CORTEXTOS_UPSTREAM_REMOTE or "upstream"). Use "fork" when running against the RevOps-Global-GIT/cortextos integration repo instead of the read-only grandamenium mirror.')
+  .action((opts: { apply?: boolean; remote?: string }) => {
     const env = resolveEnv();
     const frameworkRoot = env.frameworkRoot || env.projectRoot || process.cwd();
-    const result = checkUpstream(frameworkRoot, { apply: opts.apply });
+    const result = checkUpstream(frameworkRoot, { apply: opts.apply, remote: opts.remote });
     console.log(JSON.stringify(result, null, 2));
   });
 
