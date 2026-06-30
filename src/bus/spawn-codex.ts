@@ -16,6 +16,9 @@ import {
   mirrorAgentLiveState,
   writeAgentLiveManifest,
 } from './agent-live-state.js';
+import { completeTask, findTaskFile, updateTask } from './task.js';
+import { resolvePaths } from '../utils/paths.js';
+import type { Task } from '../types/index.js';
 
 export interface SpawnCodexOptions {
   workdir?: string;
@@ -31,6 +34,103 @@ export interface SpawnCodexOptions {
   requester?: string;
   replyTo?: string;
   priority?: string;
+  // Controls whether the library auto-closes the originating bus task when
+  // the run finishes. Default: true for spawnCodexAsync (the daemon path —
+  // see applySpawnRunTaskLifecycle), opt-in for spawnCodex (the CLI path
+  // already manages task status via bestEffortTaskStatus and we don't want
+  // a double-write). Set to false to disable.
+  taskAutoComplete?: boolean;
+  // Optional override for the cortextOS instance id when resolving the bus
+  // paths used to update the originating task. Falls back to CTX_INSTANCE_ID
+  // env var, then 'default'.
+  instanceId?: string;
+  // Optional override for the org id when resolving the bus paths. Falls back
+  // to CTX_ORG env var. When neither is set, lifecycle is skipped (no org →
+  // no task dir to update).
+  org?: string;
+}
+
+/**
+ * Auto-close the originating bus task at the end of a scoped spawn-codex run.
+ *
+ * The orphan-task accumulation bug (task_1778985018875_01210010) traced to
+ * the daemon's cron-fire-dispatch path: it calls `spawnCodexAsync` directly,
+ * which used to leave the task in `in_progress` forever because the lifecycle
+ * was only wired in the CLI shim (`bestEffortTaskStatus` in src/cli/bus.ts).
+ *
+ * This helper centralises the lifecycle so both paths converge:
+ *   - On success: completeTask(...) records the result + artifact path,
+ *     computes session cost, and closes any linked goal/loop.
+ *   - On failure / timed_out: updateTask(... 'blocked') with a blocker_reason
+ *     and next_proof_required, matching the schema expected by the dashboard
+ *     and the `cannot transition to blocked without blocker context` guard
+ *     in updateTask.
+ *
+ * Best-effort: every failure is swallowed. A bus-task lifecycle hiccup must
+ * never break the spawn-codex run itself or its artifact persistence.
+ *
+ * Synthetic cron task ids of the form `cron:<agent>:<cron-name>` are markers
+ * for cron metadata, not real bus tasks — we skip them (findTaskFile would
+ * return null and updateTask would throw; the env doesn't need the catch).
+ *
+ * Caller-provided `wasAlreadyHandled` short-circuits the call so the CLI path
+ * (which already flips the task to `completed`/`blocked` via updateTask
+ * before this fires) doesn't get double-written.
+ */
+function applySpawnRunTaskLifecycle(opts: SpawnCodexOptions, metadata: SpawnCodexRunMetadata): void {
+  if (opts.taskAutoComplete === false) return;
+  const taskId = opts.taskId;
+  if (!taskId || taskId.startsWith('cron:')) return;
+
+  const instanceId = opts.instanceId ?? process.env.CTX_INSTANCE_ID ?? 'default';
+  const org = opts.org ?? process.env.CTX_ORG;
+  if (!org) return; // no org → no task dir; lifecycle has no target
+  const agent = opts.agentName ?? process.env.CTX_AGENT_NAME ?? 'codex';
+
+  let paths;
+  try {
+    paths = resolvePaths(agent, instanceId, org);
+  } catch {
+    return;
+  }
+
+  // Only act when the task actually exists on disk — synthetic / external
+  // ids must not blow up the run.
+  if (!findTaskFile(paths, taskId)) return;
+
+  // Skip if the task is already in a terminal state. Otherwise re-running
+  // completeTask would re-stamp completed_at and recompute cost — harmless
+  // but noisy.
+  try {
+    const file = findTaskFile(paths, taskId)!;
+    const task = JSON.parse(readFileSync(file, 'utf-8')) as Task;
+    if (task.status === 'completed' || task.status === 'cancelled') return;
+  } catch {
+    return;
+  }
+
+  try {
+    if (metadata.status === 'success') {
+      const summary = [
+        `spawn-codex run ${metadata.run_id} completed (exit ${metadata.exit_code}, ${(metadata.duration_ms / 1000).toFixed(1)}s).`,
+        `Artifact: ${metadata.artifact_path}.`,
+        `Sidecar: ${metadata.sidecar_path}.`,
+      ].join(' ');
+      completeTask(paths, taskId, summary);
+    } else {
+      const reason = metadata.status === 'timed_out'
+        ? `spawn-codex run ${metadata.run_id} timed out after ${(metadata.duration_ms / 1000).toFixed(1)}s. stderr excerpt: ${metadata.stderr_excerpt || '(none)'}`
+        : `spawn-codex run ${metadata.run_id} failed (exit ${metadata.exit_code}, ${(metadata.duration_ms / 1000).toFixed(1)}s). stderr excerpt: ${metadata.stderr_excerpt || '(none)'}`;
+      updateTask(paths, taskId, 'blocked', {
+        blocker: {
+          blocker_reason: reason,
+          next_proof_required: `Re-run spawn-codex with a fixed prompt or address the underlying ${metadata.status} cause; artifact at ${metadata.artifact_path}.`,
+        },
+      });
+    }
+  } catch {
+    // Best-effort: do not surface lifecycle errors to the spawn caller.
+  }
 }
 
 export interface SpawnCodexRunMetadata {
@@ -298,6 +398,11 @@ export function spawnCodex(promptFileOrDash: string, opts: SpawnCodexOptions = {
     writeAgentLiveManifest(liveState, { status, completed_at: metadata.completed_at });
     void mirrorAgentLiveState(liveState);
   }
+  // CLI shim (src/cli/bus.ts) already flips the task via bestEffortTaskStatus,
+  // so default opt-out here. Callers (e.g. cron-fire-dispatch via the async
+  // variant below) can flip taskAutoComplete on explicitly if they want the
+  // library to own the lifecycle.
+  applySpawnRunTaskLifecycle({ ...opts, taskAutoComplete: opts.taskAutoComplete === true }, metadata);
 
   return {
     ok,
@@ -473,6 +578,11 @@ export async function spawnCodexAsync(promptFileOrDash: string, opts: SpawnCodex
     writeAgentLiveManifest(liveState, { status, completed_at: metadata.completed_at });
     await mirrorAgentLiveState(liveState);
   }
+  // Daemon path default: auto-close the originating task. cron-fire-dispatch
+  // calls this without going through the CLI shim, so the lifecycle MUST be
+  // owned here or the task stays in_progress forever (orphan-accumulation
+  // bug, task_1778985018875_01210010).
+  applySpawnRunTaskLifecycle({ ...opts, taskAutoComplete: opts.taskAutoComplete !== false }, metadata);
 
   return { ok, status, outputPath, sidecarPath, output: stdout.trim(), stderr, exitCode, timedOut, durationMs, metadata };
 }
