@@ -173,7 +173,6 @@
   "ctx_autoreset_note": "Disabled temporarily during 2026-05-25 Orca front-door recovery because Codex app-server tokenUsage reported 100% immediately after fresh start and caused restart churn. Restore after account-pool failover/context metric fix.",
   "codex_runtime_reenabled_note": "2026-05-26T23:54:33Z re-enabled Codex app-server front-door after all three CODEX_HOME lanes reported ChatGPT login status.",
   "codex_frontdoor_restore_note": "2026-05-27T17:00:41.016Z: heartbeat recovery restored runtime=codex-app-server after config drift removed runtime and Telegram update triggered Claude crash loop.",
-  "home": "/home/cortextos",
   "tier": "opus",
   "fallbackModel": [
     "claude-opus-4-8",
