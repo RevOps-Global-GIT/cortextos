@@ -97,7 +97,7 @@
       "name": "idle-overlap-watcher",
       "type": "recurring",
       "interval": "15m",
-      "prompt": "bash /home/cortextos/cortextos/scripts/idle-overlap-watcher.sh"
+      "prompt": "bash $CTX_FRAMEWORK_ROOT/scripts/idle-overlap-watcher.sh"
     },
     {
       "name": "agentops-hourly-dogfood",
@@ -109,7 +109,7 @@
       "name": "deliverables-snapshot",
       "type": "recurring",
       "cron": "0 5,17 * * *",
-      "prompt": "Run: node /home/cortextos/cortextos/scripts/cortextos-deliverables-snapshot.js — pushes the deliverables snapshot to the agentops-deliverables-push edge function so /api/agentops/overview and the Advisor canary stay fresh (threshold 1440m). Twice daily (5am/5pm PT) keeps the canary well under the staleness window. This is a cron-triggered turn: do NOT reschedule any loop. Silent unless the script errors."
+      "prompt": "Run: node $CTX_FRAMEWORK_ROOT/scripts/cortextos-deliverables-snapshot.js — pushes the deliverables snapshot to the agentops-deliverables-push edge function so /api/agentops/overview and the Advisor canary stay fresh (threshold 1440m). Twice daily (5am/5pm PT) keeps the canary well under the staleness window. This is a cron-triggered turn: do NOT reschedule any loop. Silent unless the script errors."
     }
   ],
   "ctx_warning_threshold": 0,
