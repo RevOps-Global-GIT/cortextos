@@ -60,9 +60,9 @@ Before sending, grep the entire brief text against these blocked domains: skaled
 
 STEP 3 — SEND via Slack DM using the Analyst bot identity:
 
-cortextos bus send-slack $GREG_SLACK_USER_ID "<the brief text>"
+cortextos bus send-slack ${GREG_SLACK_USER_ID:-UA23TU4T0} "<the brief text>"
 
-The send-slack CLI uses the Analyst app's own bot token — the DM will appear from @Analyst in Greg's Slack. If GREG_SLACK_USER_ID is not set in env, fall back to Telegram: cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "<the brief text>"
+The send-slack CLI uses the Analyst app's own bot token — the DM will appear from @Analyst in Greg's Slack. UA23TU4T0 is Greg's Slack user ID (hardcoded fallback; GREG_SLACK_USER_ID env var may not be set on Mac).
 
 STEP 4 — SAVE output file (required for watchdog + autoresearch scoring):
 
@@ -71,10 +71,10 @@ Use the Write tool with the full brief text as content. Do not skip this step.
 
 STEP 5 — PUBLISH to AgentOps Inbox (additive to Slack; do not skip):
 
-git -C /home/cortextos/cortextos fetch fork main --quiet
-git -C /home/cortextos/cortextos checkout refs/remotes/fork/main -- scripts/publish-briefing.js
-git -C /home/cortextos/cortextos restore --staged scripts/publish-briefing.js
-node /home/cortextos/cortextos/scripts/publish-briefing.js --type morning_brief --title "Morning Brief — $(date '+%b %-d, %Y')" --file output/$(date +%Y-%m-%d)-morning-brief.md --source-agent analyst
+git -C $CTX_FRAMEWORK_ROOT fetch fork main --quiet
+git -C $CTX_FRAMEWORK_ROOT checkout refs/remotes/fork/main -- scripts/publish-briefing.js
+git -C $CTX_FRAMEWORK_ROOT restore --staged scripts/publish-briefing.js
+node $CTX_FRAMEWORK_ROOT/scripts/publish-briefing.js --type morning_brief --title "Morning Brief — $(date '+%b %-d, %Y')" --file output/$(date +%Y-%m-%d)-morning-brief.md --source-agent analyst
 
 Confirm the script prints "published morning_brief ... id=". If it errors, still consider the Slack send complete; report the publish failure in your output file rather than retrying more than once.
 
