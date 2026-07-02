@@ -10,8 +10,10 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const SECRETS = "/home/cortextos/cortextos/orgs/revops-global/secrets.env";
-const WIKI_REPO = "/home/cortextos/work/team-brain";
+const FRAMEWORK_ROOT = process.env.CTX_FRAMEWORK_ROOT || process.env.CTX_PROJECT_ROOT || process.cwd();
+const WORK_ROOT = process.env.CTX_WORK_ROOT || path.join(process.env.HOME || path.dirname(FRAMEWORK_ROOT), "work");
+const SECRETS = process.env.CTX_SECRETS_ENV || path.join(FRAMEWORK_ROOT, "orgs/revops-global/secrets.env");
+const WIKI_REPO = process.env.TEAM_BRAIN_ROOT || path.join(WORK_ROOT, "team-brain");
 const SIGNALS_DIR = path.join(WIKI_REPO, "wiki", "sources", "signals");
 const MAX_AGE_DAYS = 8;
 const TIMEOUT_MS = 15_000;

@@ -9,7 +9,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 
-const REPO = '/home/cortextos/cortextos';
+const REPO = process.env.CTX_FRAMEWORK_ROOT || path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const ORG = path.join(REPO, 'orgs/revops-global');
 const URL = 'https://fidelity-dashboard-five.vercel.app';
 const CANARY_DIR = path.join(ORG, 'agents/codex/output/advisor-facing-page-canary');

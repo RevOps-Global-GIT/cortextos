@@ -20,7 +20,7 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 
 const TARGET_URL = process.env.AGENTOPS_PROBE_URL || "https://agentops.revopsglobal.com";
-const STATE_DIR = path.join(process.env.HOME || "/home/cortextos", ".cortextos");
+const STATE_DIR = path.join(process.env.HOME || process.cwd(), ".cortextos");
 const STATE_FILE = path.join(STATE_DIR, "agentops-uptime-probe.json");
 const FAILURE_THRESHOLD = 3;
 const TIMEOUT_MS = 12_000;

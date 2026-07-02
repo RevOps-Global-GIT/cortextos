@@ -5,7 +5,7 @@
  * (1-25: original surfaces; 26-33: hub /app/orchestrator tabs; 34-35: Skill Notes UI + filesystem)
  *
  * Usage:
- *   cd /home/cortextos/cortextos && npx tsx scripts/hub-agentops-dogfood.ts
+ *   cd "$CTX_FRAMEWORK_ROOT" && npx tsx scripts/hub-agentops-dogfood.ts
  *
  * Failure protocol: FAIL assertions are reported in report.md and surfaced as
  * [HUMAN] tasks via cortextos bus. No direct Telegram.

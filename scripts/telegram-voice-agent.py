@@ -38,7 +38,7 @@ from pytgcalls.types import StreamFrames
 from telethon import TelegramClient
 
 
-DEFAULT_PROJECT_ROOT = Path("/home/cortextos/cortextos")
+DEFAULT_PROJECT_ROOT = Path(os.environ.get("CTX_FRAMEWORK_ROOT", str(Path.home() / "cortextos"))).expanduser()
 DEFAULT_SECRETS_FILE = DEFAULT_PROJECT_ROOT / "orgs/revops-global/secrets.env"
 DEFAULT_SESSION_FILE = Path.home() / ".cortextos/telethon-voice-agent.session"
 DEFAULT_CTX_ROOT = Path.home() / ".cortextos/cortextos1"

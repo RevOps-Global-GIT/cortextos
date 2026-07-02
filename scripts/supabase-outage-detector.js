@@ -11,8 +11,9 @@ const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const SECRETS = "/home/cortextos/cortextos/orgs/revops-global/secrets.env";
-const STATE_DIR = path.join(process.env.HOME || "/home/cortextos", ".cortextos");
+const FRAMEWORK_ROOT = process.env.CTX_FRAMEWORK_ROOT || process.env.CTX_PROJECT_ROOT || process.cwd();
+const SECRETS = process.env.CTX_SECRETS_ENV || path.join(FRAMEWORK_ROOT, "orgs/revops-global/secrets.env");
+const STATE_DIR = path.join(process.env.HOME || path.dirname(FRAMEWORK_ROOT), ".cortextos");
 const STATE_FILE = path.join(STATE_DIR, "supabase-outage-detector.json");
 const FAILURE_THRESHOLD = 3;
 const TIMEOUT_MS = 10_000;

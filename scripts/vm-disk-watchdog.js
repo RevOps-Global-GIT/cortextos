@@ -137,7 +137,7 @@ function main() {
 
   if (freeAfter !== null && freeAfter <= ALERT_FLOOR_GB) {
     const msg = `VM disk CRITICAL: only ${freeAfter}GB free after auto-GC. Manual cleanup needed. ` +
-      `Worktrees removed: ${gcResult.removed}. Check /home/cortextos/work and ~/.cache.`;
+      `Worktrees removed: ${gcResult.removed}. Check $CTX_WORK_ROOT and ~/.cache.`;
     console.log(`[vm-disk-watchdog] ALERT: ${msg}`);
     alertOrchestrator(msg);
   } else if (freeAfter !== null && freeAfter <= GC_TRIGGER_GB) {

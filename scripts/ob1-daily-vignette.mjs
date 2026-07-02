@@ -19,9 +19,11 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const OB1_APP = "/home/cortextos/ob1-app";
-const SECRETS_ENV = path.join(__dirname, "../orgs/revops-global/secrets.env");
-const DEFAULT_ALERT_ENV = path.join(__dirname, "../orgs/revops-global/agents/orchestrator/.env");
+const REPO_ROOT = process.env.CTX_FRAMEWORK_ROOT || path.resolve(__dirname, "..");
+const WORK_ROOT = process.env.CTX_WORK_ROOT || path.resolve(REPO_ROOT, "../work");
+const OB1_APP = process.env.OB1_APP_ROOT || path.join(WORK_ROOT, "ob1-app");
+const SECRETS_ENV = path.join(REPO_ROOT, "orgs/revops-global/secrets.env");
+const DEFAULT_ALERT_ENV = path.join(REPO_ROOT, "orgs/revops-global/agents/orchestrator/.env");
 const OB1_ENV = path.join(OB1_APP, ".env.local");
 
 function log(msg) {
