@@ -4,7 +4,8 @@
 # Runs every 15min via orchestrator cron.
 set -euo pipefail
 
-OUTDIR=/home/cortextos/cortextos/orgs/revops-global/agents/orchestrator/output/idle-overlap-watch
+: "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"
+OUTDIR="$CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/orchestrator/output/idle-overlap-watch"
 mkdir -p "$OUTDIR"
 LOG="$OUTDIR/$(date -u +%Y-%m-%dT%H%M%SZ).md"
 

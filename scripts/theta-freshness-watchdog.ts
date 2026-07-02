@@ -121,9 +121,16 @@ function readEnvFile(path: string): void {
   }
 }
 
+function frameworkRoot(): string {
+  return process.env.CTX_FRAMEWORK_ROOT ?? process.env.CTX_PROJECT_ROOT ?? process.cwd();
+}
+
+function ctxRoot(): string {
+  return process.env.CTX_ROOT ?? join(process.env.HOME ?? process.cwd(), '.cortextos', process.env.CTX_INSTANCE_ID ?? 'cortextos1');
+}
+
 async function fetchLatestThetaRow(): Promise<ThetaRow | null> {
-  const root = process.env.CTX_ROOT ?? '/home/cortextos/cortextos';
-  readEnvFile(join(root, 'orgs/revops-global/secrets.env'));
+  readEnvFile(join(frameworkRoot(), 'orgs/revops-global/secrets.env'));
   const url = process.env.SUPABASE_RGOS_URL ?? process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_RGOS_SERVICE_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) throw new Error('missing SUPABASE_RGOS_URL/SUPABASE_RGOS_SERVICE_KEY');
@@ -146,8 +153,7 @@ async function fetchLatestThetaRow(): Promise<ThetaRow | null> {
 }
 
 function latestCronFire(agent: string, cronName: string): Date | null {
-  const root = process.env.CTX_ROOT ?? '/home/cortextos/cortextos';
-  const logPath = join(root, '.cortextOS/state/agents', agent, 'cron-execution.log');
+  const logPath = join(ctxRoot(), 'state', agent, 'cron-execution.log');
   try {
     const raw = readFileSync(logPath, 'utf8');
     const entries = raw.split(/\r?\n/)

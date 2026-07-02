@@ -561,7 +561,7 @@ interface CreatedFleetTaskRow {
 }
 
 function candidateTaskDirs(): string[] {
-  const home = process.env.HOME || '/home/cortextos';
+  const home = process.env.HOME || process.cwd();
   const roots = new Set([
     process.env.CTX_ROOT,
     path.join(home, '.cortextos', process.env.CTX_INSTANCE_ID || 'cortextos1'),

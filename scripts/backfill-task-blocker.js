@@ -13,8 +13,10 @@
 
 const { readFileSync, writeFileSync, renameSync, readdirSync } = require('fs');
 const { join } = require('path');
+const { homedir } = require('os');
 
-const TASK_DIR = '/home/cortextos/.cortextos/cortextos1/orgs/revops-global/tasks';
+const CTX_ROOT = process.env.CTX_ROOT || join(homedir(), '.cortextos', process.env.CTX_INSTANCE_ID || 'cortextos1');
+const TASK_DIR = process.env.CORTEXTOS_TASK_DIR || join(CTX_ROOT, 'orgs/revops-global/tasks');
 
 function atomicWrite(filePath, content) {
   const tmp = `${filePath}.tmp.${process.pid}`;

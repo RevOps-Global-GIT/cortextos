@@ -21,7 +21,7 @@ Runs safely every 15 min; only new/changed files POST.
 Env:
   SUPABASE_URL                (required)
   INTERNAL_CRON_SECRET        (required)
-  CTX_FRAMEWORK_ROOT          (default: /home/cortextos/cortextos)
+  CTX_FRAMEWORK_ROOT          (default: current working directory)
   ORG                         (default: revops-global)
 
 Exit 0 on success. Nonzero with logged errors on any failure: the cron can
@@ -39,7 +39,7 @@ import urllib.error
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://yyizocyaehmqrottmnaz.supabase.co")
 INTERNAL_CRON_SECRET = os.environ.get("INTERNAL_CRON_SECRET")
-FRAMEWORK_ROOT = pathlib.Path(os.environ.get("CTX_FRAMEWORK_ROOT", "/home/cortextos/cortextos"))
+FRAMEWORK_ROOT = pathlib.Path(os.environ.get("CTX_FRAMEWORK_ROOT", str(pathlib.Path.cwd())))
 ORG = os.environ.get("ORG", "revops-global")
 
 

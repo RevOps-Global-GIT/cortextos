@@ -476,7 +476,7 @@ function scanZombieCrons() {
 
       // Check for success signal in activity log (best-effort)
       const activityLog = path.join(
-        process.env.HOME || '/home/cortextos',
+        process.env.HOME || path.dirname(REPO_ROOT),
         `.cortextos/${process.env.CTX_INSTANCE_ID || ''}/logs/${agent}/activity.log`
       );
       let hasRecentSuccess = false;

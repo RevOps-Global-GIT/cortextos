@@ -12,8 +12,10 @@
 
 const { readdirSync, readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } = require('fs');
 const { join, dirname } = require('path');
+const { homedir } = require('os');
 
-const TASK_DIR = '/home/cortextos/.cortextos/cortextos1/orgs/revops-global/tasks';
+const CTX_ROOT = process.env.CTX_ROOT || join(homedir(), '.cortextos', process.env.CTX_INSTANCE_ID || 'cortextos1');
+const TASK_DIR = process.env.CORTEXTOS_TASK_DIR || join(CTX_ROOT, 'orgs/revops-global/tasks');
 const OPEN_STATUSES = new Set(['pending', 'in_progress', 'blocked']);
 
 // Atomic write: write to .tmp then rename

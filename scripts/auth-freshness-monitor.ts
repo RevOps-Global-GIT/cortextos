@@ -47,7 +47,7 @@ function readEnvFile(filePath: string): void {
 }
 
 function loadEnv(): void {
-  const root = process.env.CTX_ROOT ?? '/home/cortextos/cortextos';
+  const root = process.env.CTX_FRAMEWORK_ROOT ?? process.env.CTX_PROJECT_ROOT ?? process.cwd();
   readEnvFile(join(root, 'orgs/revops-global/secrets.env'));
   // Also try agent .env for TELEGRAM_CHAT_ID fallback
   readEnvFile(join(root, 'orgs/revops-global/agents/orchestrator/.env'));
