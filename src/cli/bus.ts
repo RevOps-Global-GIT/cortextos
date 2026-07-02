@@ -496,7 +496,15 @@ function isLocalVoiceEndpoint(target: string): boolean {
 // Explicit allowlist of internal pseudo-identities that route like agents
 // (skip the externalEmail gate) even though they have no agent directory.
 // MUST remain an explicit allowlist — unknown targets must NOT be assumed internal.
-const INTERNAL_PSEUDO_IDENTITIES: ReadonlySet<string> = new Set(['root', 'system', 'director']);
+const INTERNAL_PSEUDO_IDENTITIES: ReadonlySet<string> = new Set([
+  'root',
+  'system',
+  'director',
+  // Voice bridge reply endpoints are bus-only identities. They are not users,
+  // so replies must not pass through external delivery policy or Telegram mirror.
+  'voice-async-ingest',
+  'voice-orchestrator',
+]);
 
 export function isInternalPseudoIdentity(target: string): boolean {
   return INTERNAL_PSEUDO_IDENTITIES.has(target);
