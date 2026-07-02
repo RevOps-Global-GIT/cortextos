@@ -372,6 +372,16 @@ export interface AgentConfig {
   max_session_seconds?: number;
   max_crashes_per_day?: number;
   /**
+   * Session-level ceiling on context-force-restarts, mirroring max_crashes_per_day
+   * for the crash path. The existing 3-in-15min circuit breaker (fast-checker.ts
+   * ctxCircuitRestarts / ctxCircuitBrokenAt) is only a rate limiter — after the
+   * 30 min pause the counter resets and the loop can trip again indefinitely.
+   * Orchestrator hit 135 force-restarts across 11.5h on 2026-06-30 because of
+   * exactly this. Default: 5. Set to 0 to disable the daily ceiling and rely
+   * solely on the sliding-window breaker (not recommended).
+   */
+  max_force_restarts_per_day?: number;
+  /**
    * Sliding-window crash-loop detector. When N crashes occur within the window,
    * the agent auto-pauses (status: 'halted') instead of retrying. Absent = legacy
    * daily counter only.

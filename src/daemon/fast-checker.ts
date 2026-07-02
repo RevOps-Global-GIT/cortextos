@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, existsSync, writeFileSync, unlinkSync, statSync, openSync, readSync, closeSync } from 'fs';
+import { readdirSync, readFileSync, existsSync, writeFileSync, unlinkSync, statSync, openSync, readSync, closeSync, appendFileSync, mkdirSync } from 'fs';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { execFile, execFileSync, spawn } from 'child_process';
 import { join } from 'path';
@@ -168,6 +168,16 @@ export class FastChecker {
   private sessionRefreshInProgress: boolean = false; // serialise concurrent forceContextRestart calls
   // Persisted to disk so --continue restarts don't reset the circuit breaker
   private ctxCircuitFile: string = '';
+  // Session-day-level ceiling on force-restarts, mirroring the crash-path
+  // max_crashes_per_day breaker in agent-process.ts (crashCount / .crash_count_today).
+  // The existing sliding-window ctxCircuit… above is only a rate limiter — after
+  // its 30 min pause the counter resets and the loop can re-trip indefinitely
+  // (orchestrator: 135 force-restarts in 11.5h on 2026-06-30). This counter is
+  // the hard daily ceiling that logs HALTED and stops responding until the day
+  // rolls or the state file is deleted.
+  private forceRestartCount: number = 0;
+  private forceRestartHaltedLogged: boolean = false; // one HALTED log line per day, not per attempt
+  private forceRestartDailyFile: string = ''; // ${paths.stateDir}/.force-restart-count-today
   // Cascade guard cache: avoids hammering the handoffs dir with readdirSync+statSync
   // on every 1s poll cycle when ctx thresholds are crossed but a recent handoff exists.
   private ctxCascadeGuardCachedAt: number = 0;
@@ -215,6 +225,10 @@ export class FastChecker {
     // Load persisted circuit breaker state so --continue restarts don't reset it
     this.ctxCircuitFile = join(paths.stateDir, '.ctx-circuit.json');
     this.loadCtxCircuit();
+
+    // Load daily force-restart counter (session-lifetime ceiling; rolls with UTC date).
+    this.forceRestartDailyFile = join(paths.stateDir, '.force-restart-count-today');
+    this.loadForceRestartDaily();
   }
 
   /**
@@ -1999,6 +2013,28 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
     this.sessionRefreshInProgress = true;
     const now = Date.now();
 
+    // Daily ceiling check FIRST — mirrors max_crashes_per_day in agent-process.ts.
+    // The sliding-window breaker below only paces the loop; without a daily
+    // ceiling the same session can trip → pause 30 min → trip → pause → repeat
+    // indefinitely (orchestrator 2026-06-30: 135 force-restarts in 11.5h).
+    // Load current-day counter from disk so this survives daemon or --continue
+    // restarts; increment now and log HALTED once when the ceiling is reached.
+    this.rolloverForceRestartDailyIfNewDay();
+    const maxDaily = this.getMaxForceRestartsPerDay();
+    if (maxDaily > 0 && this.forceRestartCount >= maxDaily) {
+      if (!this.forceRestartHaltedLogged) {
+        this.forceRestartHaltedLogged = true;
+        this.appendForceRestartLog('HALTED', reason);
+        const msg = `Context force-restart HALTED for ${this.agent.name}: exceeded ${maxDaily} force-restarts today. Manual intervention required. Check logs/${this.agent.name}/restarts.log; delete ${this.forceRestartDailyFile} to reset.`;
+        this.log(msg);
+        if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
+          this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
+        }
+      }
+      this.sessionRefreshInProgress = false;
+      return;
+    }
+
     // Update and check circuit breaker window (persisted to disk — survives --continue restarts)
     this.ctxCircuitRestarts = this.ctxCircuitRestarts.filter(t => now - t < 15 * 60_000);
     if (this.ctxCircuitRestarts.length >= 3) {
@@ -2009,10 +2045,17 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
       if (this.telegramApi && this.chatId && this.daemonTelegramAlerts) {
         this.telegramApi.sendMessage(this.chatId, msg).catch(() => {});
       }
+      this.sessionRefreshInProgress = false;
       return;
     }
     this.ctxCircuitRestarts.push(now);
     this.saveCtxCircuit();
+
+    // Increment the daily counter AFTER the sliding-window breaker (so a
+    // triggered-but-paused attempt does not consume the daily budget).
+    this.forceRestartCount++;
+    this.saveForceRestartDaily();
+    this.appendForceRestartLog('FORCE_RESTART', reason);
 
     // If the agent wrote a handoff doc in the last 15 minutes but didn't get to call
     // hard-restart --handoff-doc (e.g. Tier 3 force-restart cut it short), pick it up
@@ -2134,6 +2177,114 @@ Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(e
       }), 'utf-8');
     } catch {
       // Non-critical
+    }
+  }
+
+  /**
+   * Configured daily ceiling for force-restarts. Default 5 (per success criteria
+   * on task_1782877440426_47576300). Zero disables the ceiling (rate limiter
+   * only — not recommended; leaves the loop-forever failure mode open).
+   */
+  private getMaxForceRestartsPerDay(): number {
+    const cfg = this.agent.getConfig?.();
+    const raw = cfg?.max_force_restarts_per_day;
+    if (typeof raw === 'number' && raw >= 0) return raw;
+    return 5;
+  }
+
+  /**
+   * Load the persisted force-restart counter for the current UTC day.
+   * File format: `YYYY-MM-DD:<count>`, mirroring agent-process.ts's
+   * .crash_count_today file. Roll over automatically on read if the stored
+   * date is not today's UTC date.
+   */
+  private loadForceRestartDaily(): void {
+    try {
+      if (!existsSync(this.forceRestartDailyFile)) {
+        this.forceRestartCount = 0;
+        this.forceRestartHaltedLogged = false;
+        return;
+      }
+      const raw = readFileSync(this.forceRestartDailyFile, 'utf-8').trim();
+      const [storedDate, countRaw] = raw.split(':');
+      const today = this.todayUtcDate();
+      if (storedDate === today) {
+        const parsed = parseInt(countRaw ?? '0', 10);
+        this.forceRestartCount = Number.isFinite(parsed) ? parsed : 0;
+        // If we boot back into a session already at/over the cap, re-arm the
+        // HALTED log so we log HALTED once on the next trip attempt.
+        const cap = this.getMaxForceRestartsPerDay();
+        this.forceRestartHaltedLogged = false;
+        void cap; // used only to document intent; the log-fire path re-checks
+      } else {
+        // New day → reset
+        this.forceRestartCount = 0;
+        this.forceRestartHaltedLogged = false;
+      }
+    } catch {
+      this.forceRestartCount = 0;
+      this.forceRestartHaltedLogged = false;
+    }
+  }
+
+  /**
+   * Persist the force-restart counter to disk (best-effort). Called after
+   * every increment and after a new-day rollover.
+   */
+  private saveForceRestartDaily(): void {
+    try {
+      writeFileSync(
+        this.forceRestartDailyFile,
+        `${this.todayUtcDate()}:${this.forceRestartCount}`,
+        'utf-8',
+      );
+    } catch {
+      // Non-critical
+    }
+  }
+
+  /**
+   * Roll the counter over to zero if the persisted date is not today's
+   * UTC date. Called at the top of forceContextRestart so each new day
+   * gets a fresh budget without a daemon restart.
+   */
+  private rolloverForceRestartDailyIfNewDay(): void {
+    try {
+      if (!existsSync(this.forceRestartDailyFile)) return;
+      const raw = readFileSync(this.forceRestartDailyFile, 'utf-8').trim();
+      const [storedDate] = raw.split(':');
+      if (storedDate !== this.todayUtcDate()) {
+        this.forceRestartCount = 0;
+        this.forceRestartHaltedLogged = false;
+        this.saveForceRestartDaily();
+      }
+    } catch {
+      // Non-critical — treat as no-op
+    }
+  }
+
+  private todayUtcDate(): string {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  /**
+   * Append a line to logs/<agent>/restarts.log describing a force-restart
+   * event, mirroring the crash breaker's kind='HALTED' logging in
+   * agent-process.ts. Kinds:
+   *   - FORCE_RESTART: a normal attempt (increments counter, restart proceeds).
+   *   - HALTED: daily ceiling hit; restart suppressed; manual reset required.
+   */
+  private appendForceRestartLog(kind: 'FORCE_RESTART' | 'HALTED', reason: string): void {
+    try {
+      const logDir = join(this.paths.ctxRoot, 'logs', this.agent.name);
+      if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
+      const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const details = kind === 'HALTED'
+        ? `force_restart_count=${this.forceRestartCount} max=${this.getMaxForceRestartsPerDay()} reason="${reason.slice(0, 200)}"`
+        : `force_restart_count=${this.forceRestartCount} reason="${reason.slice(0, 200)}"`;
+      appendFileSync(join(logDir, 'restarts.log'), `[${timestamp}] ${kind}: ${details}\n`, 'utf-8');
+    } catch {
+      // Non-critical — never fail a restart on logging error.
     }
   }
 
