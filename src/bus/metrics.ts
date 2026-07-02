@@ -68,6 +68,11 @@ export interface UpstreamResult {
   message?: string;
   error?: string;
   hint?: string;
+  // Echoes the git remote name actually used for the comparison so callers
+  // can confirm they hit the intended canonical line (e.g. `fork` for
+  // RevOps-Global-GIT/cortextos rather than `upstream` for the read-only
+  // grandamenium mirror).
+  remote?: string;
 }
 
 export interface RegisterCommandsResult {
@@ -483,55 +488,84 @@ export function storeUsageData(ctxRoot: string, data: UsageData): void {
 // --- checkUpstream ---
 
 /**
+ * Resolve the canonical-upstream git remote name. Order of precedence:
+ *
+ *   1. Explicit `options.remote` (CLI flag / programmatic caller).
+ *   2. `CORTEXTOS_UPSTREAM_REMOTE` env var.
+ *   3. Default `'upstream'` (back-compat for the historical convention).
+ *
+ * Repo-targeting policy note: for cortextOS itself, `upstream` historically
+ * pointed at `grandamenium/cortextos`, which is now a read-only public mirror
+ * that lags the canonical fork. Configure `CORTEXTOS_UPSTREAM_REMOTE=fork`
+ * (or pass `--remote fork`) when running against `RevOps-Global-GIT/cortextos`
+ * so the behind-count is measured against the real integration line. See
+ * project memory `project-cortextos-repo-targeting`.
+ */
+function resolveUpstreamRemote(explicit?: string): string {
+  const fromArg = explicit?.trim();
+  if (fromArg) return fromArg;
+  const fromEnv = (process.env.CORTEXTOS_UPSTREAM_REMOTE || '').trim();
+  if (fromEnv) return fromEnv;
+  return 'upstream';
+}
+
+/**
  * Check for upstream framework updates.
  * This function performs git operations in the given directory.
  * Returns structured diff information for the agent to present.
  */
 export function checkUpstream(
   frameworkRoot: string,
-  options: { apply?: boolean } = {},
+  options: { apply?: boolean; remote?: string } = {},
 ): UpstreamResult {
   const execOpts = { cwd: frameworkRoot, encoding: 'utf-8' as const, timeout: 30000 };
+  const remote = resolveUpstreamRemote(options.remote);
+  const remoteRef = `${remote}/main`;
 
   // Check if it's a git repo
   try {
     execSync('git rev-parse --is-inside-work-tree', { ...execOpts, stdio: 'pipe' });
   } catch {
-    return { status: 'error', error: 'not a git repository' };
+    return { status: 'error', error: 'not a git repository', remote };
   }
 
   // Check upstream remote
   try {
-    execSync('git remote get-url upstream', { ...execOpts, stdio: 'pipe' });
+    execSync(`git remote get-url ${remote}`, { ...execOpts, stdio: 'pipe' });
   } catch {
-    return { status: 'error', error: 'no upstream remote configured', hint: 'Run: git remote add upstream <canonical-repo-url>' };
+    return {
+      status: 'error',
+      error: `no ${remote} remote configured`,
+      hint: `Run: git remote add ${remote} <canonical-repo-url>`,
+      remote,
+    };
   }
 
   // Fetch upstream
   try {
-    execSync('git fetch upstream main', { ...execOpts, stdio: 'pipe' });
+    execSync(`git fetch ${remote} main`, { ...execOpts, stdio: 'pipe' });
   } catch {
-    return { status: 'error', error: 'failed to fetch upstream', hint: 'Check network and repo access' };
+    return { status: 'error', error: `failed to fetch ${remote}`, hint: 'Check network and repo access', remote };
   }
 
   // Compare heads
   let localHead: string, upstreamHead: string;
   try {
     localHead = execSync('git rev-parse HEAD', { ...execOpts, stdio: 'pipe' }).trim();
-    upstreamHead = execSync('git rev-parse upstream/main', { ...execOpts, stdio: 'pipe' }).trim();
+    upstreamHead = execSync(`git rev-parse ${remoteRef}`, { ...execOpts, stdio: 'pipe' }).trim();
   } catch {
-    return { status: 'error', error: 'failed to resolve HEAD or upstream/main' };
+    return { status: 'error', error: `failed to resolve HEAD or ${remoteRef}`, remote };
   }
 
   if (localHead === upstreamHead) {
-    return { status: 'up_to_date', message: 'No upstream changes available' };
+    return { status: 'up_to_date', message: `No ${remote} changes available`, remote };
   }
 
-  // `commitCount` = commits upstream/main has that HEAD does NOT, i.e. how far
+  // `commitCount` = commits remoteRef has that HEAD does NOT, i.e. how far
   // BEHIND we are. This is the only thing that means "updates available".
   let commitCount = 0;
   try {
-    commitCount = parseInt(execSync('git rev-list HEAD..upstream/main --count', { ...execOpts, stdio: 'pipe' }).trim(), 10);
+    commitCount = parseInt(execSync(`git rev-list HEAD..${remoteRef} --count`, { ...execOpts, stdio: 'pipe' }).trim(), 10);
   } catch { /* default 0 */ }
 
   // Heads differ but upstream has NOTHING we lack → we are not behind, we are
@@ -541,16 +575,16 @@ export function checkUpstream(
   if (commitCount === 0) {
     let aheadCount = 0;
     try {
-      aheadCount = parseInt(execSync('git rev-list upstream/main..HEAD --count', { ...execOpts, stdio: 'pipe' }).trim(), 10);
+      aheadCount = parseInt(execSync(`git rev-list ${remoteRef}..HEAD --count`, { ...execOpts, stdio: 'pipe' }).trim(), 10);
     } catch { /* default 0 */ }
     return aheadCount > 0
-      ? { status: 'local_ahead', commits: aheadCount, message: `Local branch is ${aheadCount} commit(s) ahead of upstream; no upstream updates.` }
-      : { status: 'up_to_date', message: 'No upstream changes available' };
+      ? { status: 'local_ahead', commits: aheadCount, message: `Local branch is ${aheadCount} commit(s) ahead of ${remote}; no ${remote} updates.`, remote }
+      : { status: 'up_to_date', message: `No ${remote} changes available`, remote };
   }
 
   let diffStat = '';
   try {
-    const stat = execSync('git diff HEAD..upstream/main --stat', { ...execOpts, stdio: 'pipe' });
+    const stat = execSync(`git diff HEAD..${remoteRef} --stat`, { ...execOpts, stdio: 'pipe' });
     const lines = stat.trim().split('\n');
     diffStat = lines[lines.length - 1] || '';
   } catch { /* ignore */ }
@@ -558,7 +592,7 @@ export function checkUpstream(
   // Categorize changed files
   let changedFiles: string[] = [];
   try {
-    changedFiles = execSync('git diff HEAD..upstream/main --name-only', { ...execOpts, stdio: 'pipe' })
+    changedFiles = execSync(`git diff HEAD..${remoteRef} --name-only`, { ...execOpts, stdio: 'pipe' })
       .trim().split('\n').filter(Boolean);
   } catch { /* ignore */ }
 
@@ -583,7 +617,7 @@ export function checkUpstream(
   // Commit log
   let commitLog = '';
   try {
-    commitLog = execSync('git log HEAD..upstream/main --oneline', { ...execOpts, stdio: 'pipe' }).trim();
+    commitLog = execSync(`git log HEAD..${remoteRef} --oneline`, { ...execOpts, stdio: 'pipe' }).trim();
   } catch { /* ignore */ }
 
   // Detect new catalog items in upstream vs local
@@ -591,7 +625,7 @@ export function checkUpstream(
     try {
       let raw: string;
       if (source === 'upstream') {
-        raw = execSync('git show upstream/main:community/catalog.json', { ...execOpts, stdio: 'pipe' });
+        raw = execSync(`git show ${remoteRef}:community/catalog.json`, { ...execOpts, stdio: 'pipe' });
       } else {
         const localPath = join(frameworkRoot, 'community', 'catalog.json');
         if (!existsSync(localPath)) return [];
@@ -615,19 +649,20 @@ export function checkUpstream(
     const localItems = getCatalogItems('local');
     const localNames = new Set(localItems.map((i: CatalogAddition) => i.name));
     try {
-      execSync('git merge upstream/main --no-edit', { ...execOpts, stdio: 'pipe' });
+      execSync(`git merge ${remoteRef} --no-edit`, { ...execOpts, stdio: 'pipe' });
       // After merge, read updated catalog and surface new items
       const mergedItems = getCatalogItems('local');
       const catalog_additions = mergedItems.filter((i: CatalogAddition) => !localNames.has(i.name));
       return {
         status: 'merged',
         commits: commitCount,
-        message: 'Upstream changes applied successfully',
+        message: `${remote} changes applied successfully`,
+        remote,
         ...(catalog_additions.length > 0 ? { catalog_additions } : {}),
       };
     } catch {
       try { execSync('git merge --abort', { ...execOpts, stdio: 'pipe' }); } catch { /* ignore */ }
-      return { status: 'conflict', message: 'Merge conflicts detected. Resolve conversationally with user.' };
+      return { status: 'conflict', message: 'Merge conflicts detected. Resolve conversationally with user.', remote };
     }
   }
 
@@ -643,6 +678,7 @@ export function checkUpstream(
     diff_stat: diffStat,
     commit_log: commitLog,
     changes,
+    remote,
     ...(catalog_additions.length > 0 ? { catalog_additions } : {}),
   };
 }
