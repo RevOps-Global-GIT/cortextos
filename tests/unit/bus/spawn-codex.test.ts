@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync, rmSync } from 'fs';
 import { basename, join } from 'path';
-import { tmpdir } from 'os';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { spawnCodex } from '../../../src/bus/spawn-codex.js';
+import { tmpdir, homedir } from 'os';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { spawnCodex, spawnCodexAsync } from '../../../src/bus/spawn-codex.js';
 
 const previousCodexBin = process.env.CODEX_BIN;
 const previousSessionOwnerPid = process.env.CTX_SESSION_OWNER_PID;
@@ -166,5 +166,248 @@ printf 'owner=%s\\n' "$CTX_SESSION_OWNER_PID"
   it('reports missing prompt files before spawning codex', () => {
     makeFakeCodex('#!/usr/bin/env bash\nprintf "should not run\\n"\n');
     expect(() => spawnCodex('/tmp/not-a-real-prompt-file.md')).toThrow(/Prompt file not found/);
+  });
+});
+
+// Lifecycle helper closes the orphan-accumulation gap on the spawnCodexAsync
+// path (cron-fire-dispatch / daemon callers). See applySpawnRunTaskLifecycle
+// in src/bus/spawn-codex.ts for the rationale and the original orphan
+// evidence under task_1778985018875_01210010.
+describe('spawnCodexAsync — bus task auto-lifecycle (orphan-accumulation fix)', () => {
+  let homeOverride: string;
+  let prevHome: string | undefined;
+  let prevInstance: string | undefined;
+  let prevOrg: string | undefined;
+  let prevAgent: string | undefined;
+  let taskDir: string;
+
+  function writeTask(taskId: string, opts: { status?: string; assigned_to?: string } = {}): void {
+    const task = {
+      id: taskId,
+      title: 'spawn-codex lifecycle fixture',
+      description: '',
+      type: 'agent',
+      needs_approval: false,
+      status: opts.status ?? 'in_progress',
+      assigned_to: opts.assigned_to ?? 'codex',
+      created_by: 'orchestrator',
+      org: 'test-org',
+      priority: 'normal',
+      project: '',
+      kpi_key: null,
+      created_at: new Date(Date.now() - 60_000).toISOString(),
+      updated_at: new Date(Date.now() - 60_000).toISOString(),
+      completed_at: null,
+      due_date: null,
+      archived: false,
+      meta: { cost_snapshot_start: 0 },
+    };
+    writeFileSync(join(taskDir, `${taskId}.json`), JSON.stringify(task));
+  }
+
+  function readTask(taskId: string): any {
+    return JSON.parse(readFileSync(join(taskDir, `${taskId}.json`), 'utf-8'));
+  }
+
+  beforeEach(() => {
+    homeOverride = mkdtempSync(join(tmpdir(), 'spawn-codex-home-'));
+    prevHome = process.env.HOME;
+    prevInstance = process.env.CTX_INSTANCE_ID;
+    prevOrg = process.env.CTX_ORG;
+    prevAgent = process.env.CTX_AGENT_NAME;
+    process.env.HOME = homeOverride;
+    process.env.CTX_INSTANCE_ID = 'default';
+    process.env.CTX_ORG = 'test-org';
+    process.env.CTX_AGENT_NAME = 'codex';
+    taskDir = join(homeOverride, '.cortextos', 'default', 'orgs', 'test-org', 'tasks');
+    mkdirSync(taskDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevInstance === undefined) delete process.env.CTX_INSTANCE_ID; else process.env.CTX_INSTANCE_ID = prevInstance;
+    if (prevOrg === undefined) delete process.env.CTX_ORG; else process.env.CTX_ORG = prevOrg;
+    if (prevAgent === undefined) delete process.env.CTX_AGENT_NAME; else process.env.CTX_AGENT_NAME = prevAgent;
+    try { rmSync(homeOverride, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('successful async run auto-completes the originating bus task', async () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "fake codex ok\\n"\n');
+    const { prompt, agentsRoot } = makePrompt();
+    const taskId = 'task_lifecycle_success_001';
+    writeTask(taskId);
+
+    const result = await spawnCodexAsync(prompt, {
+      agentsRoot,
+      agentName: 'codex',
+      taskId,
+      timeout: 5,
+    });
+    expect(result.ok).toBe(true);
+
+    const task = readTask(taskId);
+    expect(task.status).toBe('completed');
+    expect(task.result).toContain('spawn-codex run');
+    expect(task.result).toContain(result.outputPath);
+    expect(task.completed_at).toBeTruthy();
+  });
+
+  it('failed async run transitions the originating bus task to blocked with reason', async () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "boom\\n" >&2\nexit 7\n');
+    const { prompt, agentsRoot } = makePrompt();
+    const taskId = 'task_lifecycle_failure_001';
+    writeTask(taskId);
+
+    const result = await spawnCodexAsync(prompt, {
+      agentsRoot,
+      agentName: 'codex',
+      taskId,
+      timeout: 5,
+    });
+    expect(result.ok).toBe(false);
+
+    const task = readTask(taskId);
+    expect(task.status).toBe('blocked');
+    expect(task.meta?.blocker?.blocker_reason).toContain('spawn-codex run');
+    expect(task.meta?.blocker?.blocker_reason).toContain('exit 7');
+    expect(task.meta?.blocker?.next_proof_required).toBeTruthy();
+  });
+
+  it('synthetic cron:<agent>:<name> task ids are skipped (no real task to update)', async () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "fake codex ok\\n"\n');
+    const { prompt, agentsRoot } = makePrompt();
+
+    // No real task on disk for the synthetic id — lifecycle MUST be a no-op
+    // (not throw) on the well-known cron:<agent>:<name> marker shape.
+    const result = await spawnCodexAsync(prompt, {
+      agentsRoot,
+      agentName: 'codex',
+      taskId: 'cron:codex:probe-loop',
+      timeout: 5,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metadata.task_id).toBe('cron:codex:probe-loop');
+  });
+
+  it('async run without taskId leaves the bus task system untouched', async () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "fake codex ok\\n"\n');
+    const { prompt, agentsRoot } = makePrompt();
+    const result = await spawnCodexAsync(prompt, {
+      agentsRoot,
+      agentName: 'codex',
+      timeout: 5,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.metadata.task_id).toBeNull();
+  });
+
+  it('taskAutoComplete=false disables the lifecycle even when taskId is set', async () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "fake codex ok\\n"\n');
+    const { prompt, agentsRoot } = makePrompt();
+    const taskId = 'task_lifecycle_optout_001';
+    writeTask(taskId);
+
+    const result = await spawnCodexAsync(prompt, {
+      agentsRoot,
+      agentName: 'codex',
+      taskId,
+      taskAutoComplete: false,
+      timeout: 5,
+    });
+    expect(result.ok).toBe(true);
+
+    const task = readTask(taskId);
+    expect(task.status).toBe('in_progress'); // unchanged
+    expect(task.completed_at).toBeNull();
+  });
+
+  it('already-completed task is not re-stamped (idempotent)', async () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "fake codex ok\\n"\n');
+    const { prompt, agentsRoot } = makePrompt();
+    const taskId = 'task_lifecycle_already_done_001';
+    writeTask(taskId, { status: 'completed' });
+    const before = readTask(taskId);
+
+    await spawnCodexAsync(prompt, {
+      agentsRoot,
+      agentName: 'codex',
+      taskId,
+      timeout: 5,
+    });
+
+    const after = readTask(taskId);
+    expect(after.status).toBe('completed');
+    expect(after.updated_at).toBe(before.updated_at); // not re-stamped
+  });
+});
+
+// spawnCodex (sync, CLI path) opts OUT of the auto-lifecycle by default to
+// avoid double-writing what the CLI shim's bestEffortTaskStatus already does.
+describe('spawnCodex — CLI path defaults to no auto-lifecycle (CLI owns it)', () => {
+  let homeOverride: string;
+  let prevHome: string | undefined;
+  let prevInstance: string | undefined;
+  let prevOrg: string | undefined;
+  let prevAgent: string | undefined;
+  let taskDir: string;
+
+  beforeEach(() => {
+    homeOverride = mkdtempSync(join(tmpdir(), 'spawn-codex-home-sync-'));
+    prevHome = process.env.HOME;
+    prevInstance = process.env.CTX_INSTANCE_ID;
+    prevOrg = process.env.CTX_ORG;
+    prevAgent = process.env.CTX_AGENT_NAME;
+    process.env.HOME = homeOverride;
+    process.env.CTX_INSTANCE_ID = 'default';
+    process.env.CTX_ORG = 'test-org';
+    process.env.CTX_AGENT_NAME = 'codex';
+    taskDir = join(homeOverride, '.cortextos', 'default', 'orgs', 'test-org', 'tasks');
+    mkdirSync(taskDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+    if (prevInstance === undefined) delete process.env.CTX_INSTANCE_ID; else process.env.CTX_INSTANCE_ID = prevInstance;
+    if (prevOrg === undefined) delete process.env.CTX_ORG; else process.env.CTX_ORG = prevOrg;
+    if (prevAgent === undefined) delete process.env.CTX_AGENT_NAME; else process.env.CTX_AGENT_NAME = prevAgent;
+    try { rmSync(homeOverride, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('default sync call does NOT auto-complete (CLI shim owns the status flip)', () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "fake codex ok\\n"\n');
+    const { prompt, agentsRoot } = makePrompt();
+    const taskId = 'task_sync_default_optout_001';
+    writeFileSync(join(taskDir, `${taskId}.json`), JSON.stringify({
+      id: taskId, title: 't', description: '', type: 'agent', needs_approval: false,
+      status: 'in_progress', assigned_to: 'codex', created_by: 'orchestrator', org: 'test-org',
+      priority: 'normal', project: '', kpi_key: null,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      completed_at: null, due_date: null, archived: false, meta: { cost_snapshot_start: 0 },
+    }));
+
+    const result = spawnCodex(prompt, { agentsRoot, agentName: 'codex', taskId, timeout: 5 });
+    expect(result.ok).toBe(true);
+
+    const after = JSON.parse(readFileSync(join(taskDir, `${taskId}.json`), 'utf-8'));
+    expect(after.status).toBe('in_progress'); // CLI shim, not library, owns this
+  });
+
+  it('explicit taskAutoComplete=true on sync call DOES close the task', () => {
+    makeFakeCodex('#!/usr/bin/env bash\nprintf "fake codex ok\\n"\n');
+    const { prompt, agentsRoot } = makePrompt();
+    const taskId = 'task_sync_optin_001';
+    writeFileSync(join(taskDir, `${taskId}.json`), JSON.stringify({
+      id: taskId, title: 't', description: '', type: 'agent', needs_approval: false,
+      status: 'in_progress', assigned_to: 'codex', created_by: 'orchestrator', org: 'test-org',
+      priority: 'normal', project: '', kpi_key: null,
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      completed_at: null, due_date: null, archived: false, meta: { cost_snapshot_start: 0 },
+    }));
+
+    const result = spawnCodex(prompt, { agentsRoot, agentName: 'codex', taskId, taskAutoComplete: true, timeout: 5 });
+    expect(result.ok).toBe(true);
+
+    const after = JSON.parse(readFileSync(join(taskDir, `${taskId}.json`), 'utf-8'));
+    expect(after.status).toBe('completed');
   });
 });
