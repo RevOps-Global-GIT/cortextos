@@ -44,7 +44,7 @@
       "name": "supreme-mentions-triage-ingest",
       "type": "recurring",
       "interval": "2h",
-      "prompt": "Run the supreme-mentions-triage update via direct Slack API (no Orgo): bash /home/cortextos/cortextos/scripts/supreme-mentions-triage-run.sh. Log the exit code. If exit non-zero, send-message analyst normal 'supreme-mentions-triage-run.sh failed: <exit code / last error line>'."
+      "prompt": "Run the supreme-mentions-triage update via direct Slack API (no Orgo): bash \"$CTX_FRAMEWORK_ROOT/scripts/supreme-mentions-triage-cron.sh\". Log the exit code. If exit non-zero, send-message analyst normal 'supreme-mentions-triage-cron.sh failed: <exit code / last error line>'."
     },
     {
       "name": "app-signals-deep-qa",

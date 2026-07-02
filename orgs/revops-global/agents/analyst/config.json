@@ -29,7 +29,7 @@
       "name": "heartbeat",
       "type": "recurring",
       "interval": "30m",
-      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task. Piggyback goal-progress probe: cd /home/cortextos/cortextos && cortextos bus goal-progress-probe --notify-agent orchestrator. Review stale-goal flags in the report; do not create a separate cron for this probe."
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task. Piggyback goal-progress probe: cd \"$CTX_FRAMEWORK_ROOT\" && cortextos bus goal-progress-probe --notify-agent orchestrator. Review stale-goal flags in the report; do not create a separate cron for this probe."
     },
     {
       "name": "nightly-metrics",
@@ -37,7 +37,7 @@
       "interval": "24h",
       "runner": "spawn-codex",
       "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-nightly-metrics.md",
-      "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Then run Q6 budget tier flagger: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/budget-tier-flagger.py. Review both outputs. If anomalies (budget tier crossings or metric anomalies), report via: cortextos bus send-message orchestrator normal '<summary>'. For stale-heartbeat anomalies specifically: FILTER to running=true enabled=true agents only before reporting (disabled/non-running agents never heartbeat = expected silence, not a failure). Also exclude codex/codex-2/codex-3/orgo-1 (out of credits 5/28 / Orgo cancelled 5/28) and deleted_agents (tombstone bucket). If only those known-down lanes are stale, treat as zero anomaly. ALSO: if state/heartbeat-liveness-watch-note.md exists, include its content verbatim in the report to orch. Per orch directive 2026-05-30. If clean, do nothing."
+      "prompt": "Run nightly metrics collection: cortextos bus collect-metrics. Then, only if the helper exists, run Q6 budget tier flagger: if [[ -f \"$CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/scripts/budget-tier-flagger.py\" ]]; then python3 \"$CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/scripts/budget-tier-flagger.py\"; else cortextos bus log-event error missing_cron_script error --meta '{\"agent\":\"analyst\",\"cron\":\"nightly-metrics\",\"missing\":\"budget-tier-flagger.py\"}'; cortextos bus send-message orchestrator normal 'nightly-metrics helper missing on this checkout: budget-tier-flagger.py; metrics collection still ran.'; fi. Review outputs. If anomalies (budget tier crossings or metric anomalies), report via: cortextos bus send-message orchestrator normal '<summary>'. For stale-heartbeat anomalies specifically: FILTER to running=true enabled=true agents only before reporting (disabled/non-running agents never heartbeat = expected silence, not a failure). Also exclude codex/codex-2/codex-3/orgo-1 (out of credits 5/28 / Orgo cancelled 5/28) and deleted_agents (tombstone bucket). If only those known-down lanes are stale, treat as zero anomaly. ALSO: if state/heartbeat-liveness-watch-note.md exists, include its content verbatim in the report to orch. Per orch directive 2026-05-30. If clean, do nothing."
     },
     {
       "name": "auto-commit",
@@ -77,7 +77,7 @@
       "name": "upstream-sync",
       "type": "recurring",
       "interval": "24h",
-      "prompt": "Check for CortextOS upstream updates by running: bash /home/cortextos/cortextos/scripts/upgrade.sh --dry-run 2>&1. If output shows commits behind, run: bash /home/cortextos/cortextos/scripts/upgrade.sh 2>&1. Report a summary of what was pulled and whether the upgrade succeeded to orchestrator via: cortextos bus send-message orchestrator normal '<summary>'. Do NOT send Telegram to Greg directly \u2014 orchestrator owns all outbound Telegram and decides whether to surface. If the rebase had conflicts, send the error details to orchestrator so it can route them for manual resolution. If already up to date, do nothing silently."
+      "prompt": "Check for CortextOS upstream updates with current bus tooling: cd \"$CTX_FRAMEWORK_ROOT\" && cortextos bus check-upstream 2>&1. If output shows updates are available, report a summary to orchestrator via: cortextos bus send-message orchestrator normal '<summary>'. Do NOT send Telegram to Greg directly — orchestrator owns all outbound Telegram and decides whether to surface. Do NOT apply/merge automatically from this cron; if conflicts or missing tooling block the check, send the error details to orchestrator so it can route manual resolution. If already up to date, do nothing silently."
     },
     {
       "name": "morning-brief",
@@ -101,7 +101,7 @@
       "name": "activity-sync",
       "type": "recurring",
       "interval": "4h",
-      "prompt": "Run the activity sync to push local agent messages and Telegram outbound to RGOS Supabase: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/prototype/sync_activity_to_supabase.py. If output shows >0 synced, do nothing further. If errors, report to orchestrator."
+      "prompt": "Run the activity sync to push local agent messages and Telegram outbound to RGOS Supabase only if the legacy helper exists: if [[ -f \"$CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/prototype/sync_activity_to_supabase.py\" ]]; then python3 \"$CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/prototype/sync_activity_to_supabase.py\"; else cortextos bus log-event error missing_cron_script error --meta '{\"agent\":\"analyst\",\"cron\":\"activity-sync\",\"missing\":\"sync_activity_to_supabase.py\"}'; cortextos bus send-message orchestrator normal 'activity-sync helper missing on this checkout: sync_activity_to_supabase.py; cron is tagged blocked rather than using a VM path.'; fi. If output shows >0 synced, do nothing further. If errors, report to orchestrator."
     },
     {
       "name": "weekly-content-drafts",
@@ -125,7 +125,7 @@
       "name": "ai-tooling-watch-daily-fallback",
       "type": "recurring",
       "cron": "13 9 * * *",
-      "prompt": "Read the Stack Tooling Watch fallback prompt at /home/cortextos/cortextos/orgs/revops-global/agents/analyst/prompts/cron-ai-tooling-watch-daily-fallback.md and execute it. The prompt is a SILENT-FALLBACK: if today's ai-tooling-watch memo already exists, exit immediately. If not (primary codex run failed/silently-dropped), perform the broadened Lane A/B/C scan inline in this analyst session and write the memo with Lane A (AI model/provider news), Lane B (AI-coding tools), and Lane C (Dev infra/deploy) sections."
+      "prompt": "Read the Stack Tooling Watch fallback prompt at $CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/prompts/cron-ai-tooling-watch-daily-fallback.md and execute it. The prompt is a SILENT-FALLBACK: if today's ai-tooling-watch memo already exists, exit immediately. If not (primary codex run failed/silently-dropped), perform the broadened Lane A/B/C scan inline in this analyst session and write the memo with Lane A (AI model/provider news), Lane B (AI-coding tools), and Lane C (Dev infra/deploy) sections."
     },
     {
       "name": "skill-qa-nightly",
@@ -155,7 +155,7 @@
       "name": "brief-watchdog",
       "type": "recurring",
       "cron": "30 7 * * 1-5",
-      "prompt": "Brief watchdog: check if today's morning brief output file exists. Run: ls /home/cortextos/cortextos/orgs/revops-global/agents/analyst/output/$(date +%Y-%m-%d)-morning-brief*.md 2>/dev/null. If no file found, log error event: cortextos bus log-event error missing_morning_brief error --meta '{\"date\":\"'$(date +%Y-%m-%d)'\",\"agent\":\"analyst\"}' and send inbox message to orchestrator: cortextos bus send-message orchestrator normal 'Missing morning brief for today. No output file produced by 7:30 AM PT. Possible session instability or cron misfire.'"
+      "prompt": "Brief watchdog: check if today's morning brief output file exists. Run: ls $CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/output/$(date +%Y-%m-%d)-morning-brief*.md 2>/dev/null. If no file found, log error event: cortextos bus log-event error missing_morning_brief error --meta '{\"date\":\"'$(date +%Y-%m-%d)'\",\"agent\":\"analyst\"}' and send inbox message to orchestrator: cortextos bus send-message orchestrator normal 'Missing morning brief for today. No output file produced by 7:30 AM PT. Possible session instability or cron misfire.'"
     },
     {
       "name": "memory-decay-sweep",
@@ -168,7 +168,7 @@
       "type": "recurring",
       "interval": "2h",
       "prompt_file": "orgs/revops-global/agents/analyst/prompts/cron-pr-stuck-watcher.md",
-      "prompt": "Run PR stuck watcher: cd /home/cortextos/cortextos && cortextos bus pr-stuck-watcher --stuck-hours 2 --alert-hours 2 --auto-merge --notify-agent orchestrator. It watches the 5 RevOps repos, auto-merges eligible green PRs under blanket policy, and notifies orchestrator for stuck PRs that cannot auto-merge."
+      "prompt": "Run PR stuck watcher: cd \"$CTX_FRAMEWORK_ROOT\" && cortextos bus pr-stuck-watcher --stuck-hours 2 --alert-hours 2 --auto-merge --notify-agent orchestrator. It watches the 5 RevOps repos, auto-merges eligible green PRs under blanket policy, and notifies orchestrator for stuck PRs that cannot auto-merge."
     },
     {
       "name": "automation-noise-audit",
@@ -192,55 +192,55 @@
       "name": "detection-shadow-monitor",
       "type": "recurring",
       "interval": "4h",
-      "prompt": "Run detection-shadow monitor: python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/detection-shadow-monitor.py. Detects three classes of detection-shadow failures: red-main (any of 5 RevOps repos failing CI on main), stale-lock-d (>15min .lock.d in agent inbox), ack-loop (3+ generic acks in 10min without artifact). Alerts orchestrator on each new incident (6h dedup). Per theta-2026-05-24 Phase 7."
+      "prompt": "Run detection-shadow monitor only if the helper exists: if [[ -f \"$CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/scripts/detection-shadow-monitor.py\" ]]; then python3 \"$CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/scripts/detection-shadow-monitor.py\"; else cortextos bus log-event error missing_cron_script error --meta '{\"agent\":\"analyst\",\"cron\":\"detection-shadow-monitor\",\"missing\":\"detection-shadow-monitor.py\"}'; cortextos bus send-message orchestrator normal 'detection-shadow-monitor helper missing on this checkout; cron is tagged blocked rather than using a VM path.'; fi. Detects three classes of detection-shadow failures: red-main (any of 5 RevOps repos failing CI on main), stale-lock-d (>15min .lock.d in agent inbox), ack-loop (3+ generic acks in 10min without artifact). Alerts orchestrator on each new incident (6h dedup). Per theta-2026-05-24 Phase 7."
     },
     {
       "name": "greg-qa-defect-rate",
       "type": "recurring",
       "interval": "4h",
-      "prompt": "python3 /home/cortextos/cortextos/orgs/revops-global/agents/analyst/scripts/greg-qa-defect-rate.py"
+      "prompt": "python3 $CTX_FRAMEWORK_ROOT/orgs/revops-global/agents/analyst/scripts/greg-qa-defect-rate.py"
     },
     {
       "name": "supreme-scanner-triage",
       "type": "recurring",
       "interval": "4h",
-      "prompt": "cd /home/cortextos/cortextos-qa && git fetch fork main --quiet 2>/dev/null && git checkout refs/remotes/fork/main -- orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py 2>/dev/null && git restore --staged orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py 2>/dev/null && python3 orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py --on-demand 2>&1. Then read the output JSON. If total_count > 0 and any item has is_actionable=true OR has text matching triage keywords (unanswered|follow-up|action item|waiting on greg|blocked|needs reply), send a compact summary to orchestrator: cortextos bus send-message orchestrator normal 'Supreme scanner: N actionable items — [brief item summaries]. Full output at analyst/output/supreme-outstanding-latest.json'. If zero actionable items found, do nothing."
+      "prompt": "cd \"$CTX_FRAMEWORK_ROOT\" && git fetch fork main --quiet 2>/dev/null && git checkout refs/remotes/fork/main -- orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py 2>/dev/null && git restore --staged orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py 2>/dev/null && python3 orgs/revops-global/agents/analyst/scripts/supreme-slack-scanner.py --on-demand 2>&1. Then read the output JSON. If total_count > 0 and any item has is_actionable=true OR has text matching triage keywords (unanswered|follow-up|action item|waiting on greg|blocked|needs reply), send a compact summary to orchestrator: cortextos bus send-message orchestrator normal 'Supreme scanner: N actionable items — [brief item summaries]. Full output at analyst/output/supreme-outstanding-latest.json'. If zero actionable items found, do nothing."
     },
     {
       "name": "supreme-scanner-correctness-probe",
       "type": "recurring",
       "interval": "4h",
-      "prompt": "cd /home/cortextos/cortextos && git fetch fork main --quiet 2>/dev/null; git checkout refs/remotes/fork/main -- orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py 2>/dev/null; git restore --staged orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py 2>/dev/null; python3 orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py"
+      "prompt": "cd \"$CTX_FRAMEWORK_ROOT\" && git fetch fork main --quiet 2>/dev/null; git checkout refs/remotes/fork/main -- orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py 2>/dev/null; git restore --staged orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py 2>/dev/null; python3 orgs/revops-global/agents/analyst/scripts/supreme-scanner-correctness-probe.py"
     },
     {
       "name": "vm-sync-push",
       "type": "recurring",
       "interval": "15m",
-      "prompt": "cd /home/cortextos/cortextos && git fetch fork main --quiet 2>/dev/null; git checkout refs/remotes/fork/main -- scripts/cortextos-vm-sync-push.js 2>/dev/null; node scripts/cortextos-vm-sync-push.js"
+      "prompt": "VM-only deployment tag: skip on Mac/Darwin. if [[ \"$(uname -s)\" == \"Darwin\" ]]; then cortextos bus log-event action cron_skipped info --meta '{\"agent\":\"analyst\",\"cron\":\"vm-sync-push\",\"tag\":\"vm-only\",\"reason\":\"non_vm_host\"}'; else cd \"$CTX_FRAMEWORK_ROOT\" && git fetch fork main --quiet 2>/dev/null; git checkout refs/remotes/fork/main -- scripts/cortextos-vm-sync-push.js 2>/dev/null; node scripts/cortextos-vm-sync-push.js; fi"
     },
     {
       "name": "memory-sync",
       "type": "recurring",
       "interval": "30m",
-      "prompt": "node /home/cortextos/cortextos/scripts/sync-agent-memories.js"
+      "prompt": "node $CTX_FRAMEWORK_ROOT/scripts/sync-agent-memories.js"
     },
     {
       "name": "auto-merge-pr",
       "type": "recurring",
       "interval": "15m",
-      "prompt": "node /home/cortextos/cortextos/scripts/auto-merge-pr.js"
+      "prompt": "node $CTX_FRAMEWORK_ROOT/scripts/auto-merge-pr.js"
     },
     {
       "name": "vm-stale-worktree-gc",
       "type": "recurring",
       "cron": "0 3 * * *",
-      "prompt": "node /home/cortextos/cortextos/scripts/vm-stale-worktree-gc.js"
+      "prompt": "VM-only deployment tag: skip on Mac/Darwin. if [[ \"$(uname -s)\" == \"Darwin\" ]]; then cortextos bus log-event action cron_skipped info --meta '{\"agent\":\"analyst\",\"cron\":\"vm-stale-worktree-gc\",\"tag\":\"vm-only\",\"reason\":\"non_vm_host\"}'; else node \"$CTX_FRAMEWORK_ROOT/scripts/vm-stale-worktree-gc.js\"; fi"
     },
     {
       "name": "vm-disk-watchdog",
       "type": "recurring",
       "interval": "6h",
-      "prompt": "node /home/cortextos/cortextos/scripts/vm-disk-watchdog.js"
+      "prompt": "VM-only deployment tag: skip on Mac/Darwin. if [[ \"$(uname -s)\" == \"Darwin\" ]]; then cortextos bus log-event action cron_skipped info --meta '{\"agent\":\"analyst\",\"cron\":\"vm-disk-watchdog\",\"tag\":\"vm-only\",\"reason\":\"non_vm_host\"}'; else node \"$CTX_FRAMEWORK_ROOT/scripts/vm-disk-watchdog.js\"; fi"
     },
     {
       "name": "daily-hero-verify",
