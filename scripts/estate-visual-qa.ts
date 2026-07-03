@@ -9,7 +9,7 @@
  *   - Mandoland                 — CANONICAL: mandoland-design-system-2026-05-23/MANDOLAND-CANONICAL.md (URL TBD)
  *
  * Usage:
- *   cd /home/cortextos/cortextos && npx tsx scripts/estate-visual-qa.ts
+ *   cd "$CTX_FRAMEWORK_ROOT" && npx tsx scripts/estate-visual-qa.ts
  */
 
 import { chromium, Browser, Page } from 'playwright';

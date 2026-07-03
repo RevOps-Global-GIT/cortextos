@@ -8,7 +8,9 @@
 
 set -euo pipefail
 
-REPO_DIR="${REPO_DIR:-/home/cortextos/rgos}"
+: "${HOME:?HOME must be set}"
+WORK_ROOT="${CTX_WORK_ROOT:-$HOME/work}"
+REPO_DIR="${REPO_DIR:-${RGOS_REPO:-$WORK_ROOT/rgos}}"
 DAYS="${DAYS:-2}"
 DRY_RUN=false
 

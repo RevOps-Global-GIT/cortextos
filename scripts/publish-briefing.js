@@ -9,8 +9,10 @@
 //     --file output/2026-06-12-morning-brief.md [--source-agent analyst]
 
 const fs = require("fs");
+const path = require("path");
 
-const SECRETS = "/home/cortextos/cortextos/orgs/revops-global/secrets.env";
+const FRAMEWORK_ROOT = process.env.CTX_FRAMEWORK_ROOT || process.env.CTX_PROJECT_ROOT || process.cwd();
+const SECRETS = process.env.CTX_SECRETS_ENV || path.join(FRAMEWORK_ROOT, "orgs/revops-global/secrets.env");
 const TIMEOUT_MS = 15_000;
 
 function readEnvVar(name) {

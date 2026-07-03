@@ -37,9 +37,10 @@ try:
 except Exception:  # noqa: BLE001
     ZoneInfo = None
 
-SECRETS = "/home/cortextos/cortextos/orgs/revops-global/secrets.env"
-LOGDIR = "/home/cortextos/cortextos/orgs/revops-global/agents/orchestrator/output/health-probes"
-BRIEF_DIR = "/home/cortextos/cortextos/orgs/revops-global/agents/analyst/output"
+FRAMEWORK_ROOT = os.environ.get("CTX_FRAMEWORK_ROOT") or os.environ.get("CTX_PROJECT_ROOT") or os.getcwd()
+SECRETS = os.environ.get("CTX_SECRETS_ENV") or os.path.join(FRAMEWORK_ROOT, "orgs/revops-global/secrets.env")
+LOGDIR = os.environ.get("HEALTH_PROBES_LOGDIR") or os.path.join(FRAMEWORK_ROOT, "orgs/revops-global/agents/orchestrator/output/health-probes")
+BRIEF_DIR = os.environ.get("HEALTH_PROBES_BRIEF_DIR") or os.path.join(FRAMEWORK_ROOT, "orgs/revops-global/agents/analyst/output")
 ORG_ID = "00000000-0000-0000-0000-000000000001"
 HTTP_TIMEOUT = 25
 

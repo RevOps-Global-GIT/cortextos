@@ -7,13 +7,15 @@ set -euo pipefail
 #   team-brain-wiki-refresh.sh wiki
 
 MODE="${1:-}"
-REPO_DIR="${TEAM_BRAIN_REPO:-/home/cortextos/work/team-brain}"
+: "${HOME:?HOME must be set}"
+CORTEXTOS_HOME="${CORTEXTOS_HOME:-$HOME}"
+REPO_DIR="${TEAM_BRAIN_REPO:-$CORTEXTOS_HOME/work/team-brain}"
 LOG_DIR="${TEAM_BRAIN_LOG_DIR:-$REPO_DIR/logs}"
 BRANCH="${TEAM_BRAIN_BRANCH:-main}"
 SINCE_DAYS="${TEAM_BRAIN_WIKI_SINCE_DAYS:-7}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 
-PATH="/usr/local/bin:/usr/bin:/bin:/home/cortextos/.local/bin:$PATH"
+PATH="/usr/local/bin:/usr/bin:/bin:$CORTEXTOS_HOME/.local/bin:$PATH"
 
 if [[ "$MODE" != "fathom" && "$MODE" != "wiki" ]]; then
   echo "usage: $0 {fathom|wiki}" >&2

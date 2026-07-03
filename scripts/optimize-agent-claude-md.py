@@ -42,7 +42,7 @@ Designed to run under systemd as user cortextos on a weekly timer:
   /etc/systemd/system/optimize-agent-claude-md.service
   /etc/systemd/system/optimize-agent-claude-md.timer
 
-Env (loaded from /home/cortextos/cortextos/orgs/revops-global/secrets.env):
+Env (loaded from $CTX_FRAMEWORK_ROOT/orgs/revops-global/secrets.env):
   ANTHROPIC_API_KEY         optional — for execute, eval, mutate. If unset
                             or shape-invalid, the runner fetches from the
                             anthropic-key-fetch edge function instead (see
@@ -52,7 +52,7 @@ Env (loaded from /home/cortextos/cortextos/orgs/revops-global/secrets.env):
   SUPABASE_RGOS_SERVICE_KEY required — for task fetch + budget updates
   INTERNAL_CRON_SECRET      required when ANTHROPIC_API_KEY is not set in
                             env; authenticates to anthropic-key-fetch.
-  CTX_FRAMEWORK_ROOT        default /home/cortextos/cortextos
+  CTX_FRAMEWORK_ROOT        default current working directory
   ORG                       default revops-global
 
 Key resolution: env first (for VM deploys that keep a local copy), then
@@ -228,7 +228,7 @@ def load_dotenv_file(path: pathlib.Path) -> None:
 
 
 def framework_root() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("CTX_FRAMEWORK_ROOT", "/home/cortextos/cortextos"))
+    return pathlib.Path(os.environ.get("CTX_FRAMEWORK_ROOT", str(pathlib.Path.cwd())))
 
 
 def org_name() -> str:

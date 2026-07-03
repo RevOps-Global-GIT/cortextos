@@ -15,12 +15,13 @@
  * Env:
  *   SUPABASE_URL              (required, defaults to prod)
  *   INTERNAL_CRON_SECRET      (required)
- *   CORTEXTOS_ORG_ROOT        (optional, defaults to /home/cortextos/cortextos/orgs/revops-global)
- *   TEAM_BRAIN_ROOT           (optional, defaults to /home/cortextos/work/team-brain)
- *   TEAM_BRAIN_FALLBACK_ROOT  (optional, defaults to /home/cortextos/.cortexos/wiki-publisher/team-brain)
+ *   CTX_FRAMEWORK_ROOT        (optional, defaults to this repository root)
+ *   CORTEXTOS_ORG_ROOT        (optional, defaults to $CTX_FRAMEWORK_ROOT/orgs/revops-global)
+ *   TEAM_BRAIN_ROOT           (optional, defaults to $CTX_WORK_ROOT/team-brain)
+ *   TEAM_BRAIN_FALLBACK_ROOT  (optional, defaults to $CORTEXTOS_HOME/.cortexos/wiki-publisher/team-brain)
  *
  * Manual run:
- *   node /home/cortextos/work/team-brain/scripts/cortextos-deliverables-snapshot.js
+ *   node "$CTX_FRAMEWORK_ROOT/scripts/cortextos-deliverables-snapshot.js"
  */
 
 'use strict';
@@ -36,14 +37,17 @@ const SUPABASE_URL =
   process.env.SB_URL ||
   'https://yyizocyaehmqrottmnaz.supabase.co';
 const INTERNAL_SECRET = process.env.INTERNAL_CRON_SECRET;
+const FRAMEWORK_ROOT = process.env.CTX_FRAMEWORK_ROOT || process.env.CTX_PROJECT_ROOT || path.resolve(__dirname, '..');
+const CORTEXTOS_HOME = process.env.CORTEXTOS_HOME || path.dirname(FRAMEWORK_ROOT);
+const WORK_ROOT = process.env.CTX_WORK_ROOT || path.join(CORTEXTOS_HOME, 'work');
 const ORG_ROOT =
   process.env.CORTEXTOS_ORG_ROOT ||
-  '/home/cortextos/cortextos/orgs/revops-global';
+  path.join(FRAMEWORK_ROOT, 'orgs/revops-global');
 const TEAM_BRAIN_ROOT =
-  process.env.TEAM_BRAIN_ROOT || '/home/cortextos/work/team-brain';
+  process.env.TEAM_BRAIN_ROOT || path.join(WORK_ROOT, 'team-brain');
 const TEAM_BRAIN_FALLBACK_ROOT =
   process.env.TEAM_BRAIN_FALLBACK_ROOT ||
-  '/home/cortextos/.cortexos/wiki-publisher/team-brain';
+  path.join(CORTEXTOS_HOME, '.cortexos/wiki-publisher/team-brain');
 
 if (!INTERNAL_SECRET) {
   console.error('INTERNAL_CRON_SECRET is required');

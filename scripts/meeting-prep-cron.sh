@@ -7,18 +7,19 @@
 set -euo pipefail
 
 # -------- paths --------
-FRAMEWORK_ROOT=/home/cortextos/cortextos
+: "${CTX_FRAMEWORK_ROOT:?CTX_FRAMEWORK_ROOT must be set}"
+: "${HOME:?HOME must be set}"
+FRAMEWORK_ROOT="$CTX_FRAMEWORK_ROOT"
 ORG=revops-global
 AGENT_NAME=meeting-prep
 AGENT_DIR="$FRAMEWORK_ROOT/orgs/$ORG/agents/$AGENT_NAME"
-CTX_ROOT="${CTX_ROOT:-/home/cortextos/.cortextos/cortextos1}"
+CTX_ROOT="${CTX_ROOT:-$HOME/.cortextos/cortextos1}"
 LOG_DIR=/var/log/cortextos
 LOG_FILE="$LOG_DIR/meeting-prep.log"
 PROMPT_FILE="$AGENT_DIR/PROMPT.txt"
 
 # -------- PATH (cron is minimal) --------
-export PATH="/home/cortextos/.local/bin:/usr/local/bin:/usr/bin:/bin"
-export HOME=/home/cortextos
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 mkdir -p "$LOG_DIR"
 echo "=== $(date -u +%Y-%m-%dT%H:%M:%SZ) meeting-prep cron fired ===" >> "$LOG_FILE"

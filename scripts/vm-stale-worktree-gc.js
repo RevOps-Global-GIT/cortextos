@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// vm-stale-worktree-gc.js — GC stale git worktrees under /home/cortextos/work/
+// vm-stale-worktree-gc.js — GC stale git worktrees under $CTX_WORK_ROOT.
 //
 // Removes worktrees whose branch is MERGED to the remote default branch AND
 // whose working tree is clean. NEVER uses --force (that is the critical guard
@@ -14,30 +14,36 @@ const { execSync, spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const HOME = "/home/cortextos";
+const HOME = process.env.CORTEXTOS_HOME || process.env.HOME || path.dirname(process.env.CTX_FRAMEWORK_ROOT || process.cwd());
+const FRAMEWORK_ROOT = process.env.CTX_FRAMEWORK_ROOT || path.join(HOME, "cortextos");
+const WORK_ROOT = process.env.CTX_WORK_ROOT || path.join(HOME, "work");
+const QA_FRAMEWORK_ROOT = process.env.CORTEXTOS_QA_ROOT || path.join(HOME, "cortextos-qa");
+const OB1_APP_ROOT = process.env.OB1_APP_ROOT || path.join(WORK_ROOT, "ob1-app");
+const OB1_PARENTS_ROOT = process.env.OB1_PARENTS_ROOT || path.join(WORK_ROOT, "ob1-parents");
+const RGOS_ROOT = process.env.RGOS_ROOT || path.join(WORK_ROOT, "rgos");
 
 // Primary trees that must never be touched.
 const PROTECTED_PATHS = new Set([
-  `${HOME}/cortextos`,
-  `${HOME}/cortextos-qa`,
-  `${HOME}/ob1-app`,
-  `${HOME}/ob1-parents`,
-  `${HOME}/rgos`,
-  `${HOME}/cortextos/orgs/revops-global/agents/dev/workers/w-dreams-enhance`,
+  FRAMEWORK_ROOT,
+  QA_FRAMEWORK_ROOT,
+  OB1_APP_ROOT,
+  OB1_PARENTS_ROOT,
+  RGOS_ROOT,
+  path.join(FRAMEWORK_ROOT, "orgs/revops-global/agents/dev/workers/w-dreams-enhance"),
 ]);
 
 // Paths containing worktrees to GC (additional to what the primary repos know about).
 const GC_ROOTS = [
-  `${HOME}/work`,
+  WORK_ROOT,
   `/tmp/codex-worktrees`,
 ];
 
 // Primary repos whose worktree registries we prune at the end.
 const PRIMARY_REPOS = [
-  `${HOME}/cortextos`,
-  `${HOME}/ob1-app`,
-  `${HOME}/ob1-parents`,
-  `${HOME}/rgos`,
+  FRAMEWORK_ROOT,
+  OB1_APP_ROOT,
+  OB1_PARENTS_ROOT,
+  RGOS_ROOT,
 ];
 
 function run(cmd, opts = {}) {
@@ -165,7 +171,7 @@ function main() {
       // Use `git -C <path> rev-parse --git-common-dir` to find the common git dir.
       const r = run(`git -C "${p}" rev-parse --git-common-dir 2>/dev/null`);
       if (!r.ok) continue;
-      // common-dir is e.g. /home/cortextos/cortextos/.git
+      // common-dir is e.g. $CTX_FRAMEWORK_ROOT/.git
       const commonDir = r.stdout;
       const ownerGitDir = path.dirname(commonDir.endsWith("/.git") ? commonDir : commonDir + "/x");
       const primary = PRIMARY_REPOS.find((pr) => path.resolve(`${pr}/.git`) === path.resolve(commonDir));
