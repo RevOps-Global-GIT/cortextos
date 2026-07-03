@@ -375,6 +375,21 @@ export class QueueConsumer {
             break;
           }
 
+          case 'discover_posts': {
+            // Keyword discovery for the linkedin-daily-brain scheduled task,
+            // which runs in the cloud and cannot reach 127.0.0.1:3747 directly.
+            const payload = job.payload ?? {};
+            const keywords = payload['keywords'] as string[] | undefined;
+            if (!Array.isArray(keywords) || keywords.length === 0) {
+              throw new Error('keywords array required');
+            }
+            const limit = typeof payload['limit'] === 'number' ? payload['limit'] : 10;
+            const res = await this.dispatch('/discover-posts', { keywords, limit });
+            if (res['error']) throw new Error(String(res['error']));
+            result = { posts: res['posts'] ?? [], count: res['count'] ?? 0 };
+            break;
+          }
+
           case 'fetch_profile_posts': {
             // Self-hosted poster doesn't run agent-browser; return not-supported
             // so the Mac poster can pick it up instead.
