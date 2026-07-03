@@ -23,6 +23,14 @@ describe('isInternalPseudoIdentity', () => {
     expect(isInternalPseudoIdentity('director')).toBe(true);
   });
 
+  it('recognises the Orca async voice reply endpoint as internal', () => {
+    expect(isInternalPseudoIdentity('voice-async-ingest')).toBe(true);
+  });
+
+  it('recognises the Gemini voice relay reply endpoint as internal', () => {
+    expect(isInternalPseudoIdentity('voice-orchestrator')).toBe(true);
+  });
+
   it('does not treat an external user target as internal (draft_only gate must still fire)', () => {
     expect(isInternalPseudoIdentity('8567114601')).toBe(false);
   });
