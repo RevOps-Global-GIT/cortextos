@@ -14,6 +14,75 @@ export const dynamic = 'force-dynamic';
 const VALID_NAME = /^[a-z0-9_-]+$/;
 const VALID_TEMPLATES = ['agent', 'agent-codex', 'orchestrator', 'analyst'];
 
+// Stale cutoff: heartbeats older than 2 h are excluded from the Supabase fallback.
+const SUPABASE_STALE_MS = 2 * 60 * 60 * 1000;
+// Healthy cutoff: heartbeat within 15 min → 'healthy', otherwise 'stale'.
+const SUPABASE_HEALTHY_MS = 15 * 60 * 1000;
+
+interface SupabaseHeartbeatRow {
+  agent_name: string;
+  org: string;
+  last_heartbeat: string;
+  status: string;
+  current_task: string;
+}
+
+/**
+ * Fallback agent list from Supabase orch_agent_heartbeats.
+ * Used when getAllAgents() returns empty (e.g. VM deployment that lacks the
+ * org-fork filesystem but has agents writing heartbeats to Supabase).
+ */
+async function getAgentsFromSupabase(): Promise<Array<Record<string, unknown>>> {
+  const url = (
+    process.env.SUPABASE_RGOS_URL ||
+    process.env.RGOS_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    ''
+  ).replace(/\/$/, '');
+  const key =
+    process.env.SUPABASE_RGOS_SERVICE_KEY ||
+    process.env.RGOS_SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key) return [];
+
+  try {
+    const res = await fetch(
+      `${url}/rest/v1/orch_agent_heartbeats?select=agent_name,org,last_heartbeat,status,current_task&order=last_heartbeat.desc`,
+      {
+        headers: { apikey: key, Authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(5000),
+      },
+    );
+    if (!res.ok) {
+      console.warn(`[api/agents] Supabase fallback HTTP ${res.status}`);
+      return [];
+    }
+    const rows = (await res.json()) as SupabaseHeartbeatRow[];
+    const now = Date.now();
+    const seen = new Set<string>();
+    return rows
+      .filter((r) => {
+        if (!r.agent_name || seen.has(r.agent_name)) return false;
+        seen.add(r.agent_name);
+        return now - new Date(r.last_heartbeat).getTime() < SUPABASE_STALE_MS;
+      })
+      .map((r) => ({
+        name: r.agent_name,
+        org: r.org || 'revops-global',
+        health:
+          now - new Date(r.last_heartbeat).getTime() < SUPABASE_HEALTHY_MS
+            ? 'healthy'
+            : 'stale',
+        lastHeartbeat: r.last_heartbeat,
+        currentTask: r.current_task || undefined,
+        status: r.status || undefined,
+      }));
+  } catch (err) {
+    console.warn('[api/agents] Supabase fallback error:', err);
+    return [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/agents - List all agents
@@ -22,6 +91,14 @@ const VALID_TEMPLATES = ['agent', 'agent-codex', 'orchestrator', 'analyst'];
 export async function GET() {
   try {
     const agents = getAllAgents();
+
+    // When the filesystem scan returns no agents (e.g. VM deployment where the
+    // org-fork agent dirs are absent), fall back to Supabase heartbeat data so
+    // the Fleet/Agents roster still reflects the live fleet.
+    if (agents.length === 0) {
+      return Response.json(await getAgentsFromSupabase());
+    }
+
     const enriched = await Promise.all(
       agents.map(async (agent) => {
         const hb = await getHeartbeat(agent.name);
