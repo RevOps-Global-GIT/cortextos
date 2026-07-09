@@ -779,13 +779,12 @@ def write_snapshot(items: List[Dict[str, Any]], on_demand: bool) -> Dict[str, An
 
 
 def upsert_supabase(env: Dict[str, str], snapshot: Dict[str, Any]) -> None:
-    if not snapshot["items"]:
-        return
+    generated_at = snapshot["generated_at"]
     rows = []
     for it in snapshot["items"]:
         rows.append({
             "id": it["id"],
-            "scanned_at": snapshot["generated_at"],
+            "scanned_at": generated_at,
             "workspace_team_id": snapshot["workspace_team_id"],
             "source": it["source"],
             "status": it["status"],
@@ -801,7 +800,32 @@ def upsert_supabase(env: Dict[str, str], snapshot: Dict[str, Any]) -> None:
             "is_replied_by_greg": it["is_replied_by_greg"],
             "raw_json": it,
         })
-    sb_request(env, "POST", "/supreme_outstanding_items", rows)
+    if rows:
+        sb_request(env, "POST", "/supreme_outstanding_items", rows)
+    # Close out rows this successful scan did NOT re-stamp: everything still open
+    # with scanned_at < this run's timestamp was not re-found, so it is no longer
+    # outstanding (answered, or aged past the scan window). Without this the table
+    # accumulates orphaned "open" rows forever — 214 had piled up back to May 2026,
+    # hidden only by the latest-scan watermark in supreme_outstanding_open_24h.
+    # Only runs after a successful scan (a failed fetch raises ScanFetchFailed
+    # before we get here), and is self-correcting: if a still-open item reappears
+    # in a later scan, the upsert above flips it back to its open status.
+    resolve_superseded_rows(env, generated_at)
+
+
+def resolve_superseded_rows(env: Dict[str, str], generated_at: str) -> None:
+    """Mark any not-yet-resolved supreme_outstanding_items row for this workspace
+    with scanned_at < generated_at as resolved. The current scan re-stamps every
+    still-open item to generated_at, so a strictly-older scanned_at means the item
+    was not re-found by this run."""
+    ts = urllib.parse.quote(generated_at)
+    path = (
+        f"/supreme_outstanding_items"
+        f"?workspace_team_id=eq.{SLACK_TEAM_ID}"
+        f"&status=neq.resolved"
+        f"&scanned_at=lt.{ts}"
+    )
+    sb_request(env, "PATCH", path, {"status": "resolved"})
 
 
 def write_digest(snapshot: Dict[str, Any]) -> str:

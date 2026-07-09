@@ -185,6 +185,45 @@ def test_mention_search_raises_on_api_failure() -> None:
         scanner.slack_get = original_slack_get
 
 
+def test_upsert_resolves_superseded_when_empty() -> None:
+    """A successful but empty scan must still resolve superseded rows (close-out),
+    not no-op — otherwise stale 'open' rows accumulate forever (214 had piled up)."""
+    calls = []
+    original_sb = scanner.sb_request
+    try:
+        scanner.sb_request = lambda env, method, path, body=None: calls.append((method, path, body))
+        snapshot = {"generated_at": "2026-07-09T16:15:00+00:00",
+                    "workspace_team_id": scanner.SLACK_TEAM_ID, "items": []}
+        scanner.upsert_supabase({}, snapshot)
+        methods = [c[0] for c in calls]
+        assert "POST" not in methods, "must not POST when there are no items"
+        assert "PATCH" in methods, "empty scan must still resolve superseded rows"
+        patch = next(c for c in calls if c[0] == "PATCH")
+        assert "status=neq.resolved" in patch[1] and "scanned_at=lt." in patch[1], patch[1]
+        assert patch[2] == {"status": "resolved"}
+    finally:
+        scanner.sb_request = original_sb
+
+
+def test_upsert_posts_then_resolves_when_items_present() -> None:
+    """With items, the scan POSTs the current set then resolves anything it did not
+    re-stamp (scanned_at < this run) — the just-upserted rows are preserved."""
+    calls = []
+    original_sb = scanner.sb_request
+    try:
+        scanner.sb_request = lambda env, method, path, body=None: calls.append((method, path, body))
+        item = {"id": "x", "source": "dm", "status": "unanswered", "channel_id": "C",
+                "channel_name": "DM", "sender_id": "U", "sender_name": "n",
+                "message_preview": "p", "message_ts": "1", "age_seconds": 1,
+                "slack_url": "u", "is_question": True, "is_replied_by_greg": False}
+        snapshot = {"generated_at": "2026-07-09T16:15:00+00:00",
+                    "workspace_team_id": scanner.SLACK_TEAM_ID, "items": [item]}
+        scanner.upsert_supabase({}, snapshot)
+        assert [c[0] for c in calls] == ["POST", "PATCH"], [c[0] for c in calls]
+    finally:
+        scanner.sb_request = original_sb
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
