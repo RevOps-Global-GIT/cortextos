@@ -83,6 +83,17 @@ class ScanRateLimited(Exception):
     single Retry-After header exceeds 60 s. Peer to ScanBudgetExceeded; caller exits 3."""
 
 
+class ScanFetchFailed(Exception):
+    """Raised when a required search.messages fetch returns not-ok (expired/revoked token,
+    ratelimited body, transient Slack error). Previously these were swallowed into an empty
+    result, so a failed scan looked identical to "inbox zero": items=[] → exit 0 → the cron
+    wrapper marked the scanner_triggers row 'completed' → supreme_outstanding_open_24h's
+    latest-completed-scan watermark advanced past the last good batch and orphaned every
+    still-open row (dashboard + triage flipped to 0). Surfacing the failure lets main() exit
+    non-zero so the wrapper records a FAILED trigger; the view then keeps the last completed
+    scan's items instead of wiping them. Caller exits 4."""
+
+
 _rl_state: Dict[str, int] = {"sleep_spent": 0}
 
 REQUIRED_ENV_KEYS = (
@@ -438,12 +449,11 @@ def slack_search_dms(token: str, since_seconds: int) -> List[Dict[str, Any]]:
             "sort_dir": "desc",
         })
         if not result.get("ok"):
-            print(
-                f"[scanner] search.messages(is:dm) failed: {result.get('error')} — "
-                f"DM scan skipped",
-                file=sys.stderr,
-            )
-            return []
+            # Do NOT swallow into an empty result: an empty DM scan is
+            # indistinguishable from "inbox zero" and would let the watermark wipe
+            # every still-open row. Fail loud so main() exits non-zero and the
+            # trigger is recorded FAILED (watermark holds at the last good scan).
+            raise ScanFetchFailed(f"search.messages(is:dm): {result.get('error')}")
         msg_block = result.get("messages") or {}
         page_matches = msg_block.get("matches") or []
         for m in page_matches:
@@ -478,12 +488,10 @@ def slack_search_mentions(token: str, since_seconds: int) -> List[Dict[str, Any]
             "sort_dir": "desc",
         })
         if not result.get("ok"):
-            print(
-                f"[scanner] search.messages failed: {result.get('error')} — "
-                f"falling back to empty mention list",
-                file=sys.stderr,
-            )
-            break
+            # See slack_search_dms: a not-ok mention search (including a mid-pagination
+            # failure) means the scan is incomplete. Discarding partial pages and failing
+            # loud is safer than under-reporting, which would wipe still-open items.
+            raise ScanFetchFailed(f"search.messages(mentions): {result.get('error')}")
         msg_block = result.get("messages") or {}
         page_matches = msg_block.get("matches") or []
         for m in page_matches:
@@ -876,6 +884,14 @@ def main() -> int:
         # Exit 3 = rate_limited_budget_exceeded — distinct from wall-clock timeout (2).
         print(f"[scanner] ERROR: rate_limited_budget_exceeded — {e}", file=sys.stderr)
         return 3
+    except ScanFetchFailed as e:
+        # A required search.messages fetch returned not-ok (e.g. expired/revoked Slack
+        # token). Exit 4 = slack_fetch_failed. The cron wrapper records a FAILED
+        # scanner_triggers row for any non-zero exit, so the latest-completed-scan
+        # watermark does NOT advance and the view keeps the last good batch instead of
+        # wiping every still-open item to zero.
+        print(f"[scanner] ERROR: slack_fetch_failed — {e}", file=sys.stderr)
+        return 4
     print(f"[scanner] found {len(items)} outstanding items", file=sys.stderr)
 
     if not items and _last_source_activity_count:

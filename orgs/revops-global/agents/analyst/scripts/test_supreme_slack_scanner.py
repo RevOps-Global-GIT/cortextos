@@ -153,6 +153,38 @@ def test_greg_is_latest_sender_skips_subtype_messages() -> None:
         scanner.slack_get = original_slack_get
 
 
+def test_dm_search_raises_on_api_failure() -> None:
+    """Regression: a not-ok search.messages(is:dm) must raise ScanFetchFailed rather than
+    return [] — swallowing it made a failed scan look like inbox-zero and wiped the view."""
+    original_slack_get = scanner.slack_get
+    try:
+        scanner.slack_get = lambda token, method, params: {"ok": False, "error": "invalid_auth"}
+        raised = False
+        try:
+            scanner.slack_search_dms("token", 3600)
+        except scanner.ScanFetchFailed:
+            raised = True
+        assert raised, "slack_search_dms swallowed an API failure instead of raising"
+    finally:
+        scanner.slack_get = original_slack_get
+
+
+def test_mention_search_raises_on_api_failure() -> None:
+    """Regression: a not-ok search.messages(mentions) must raise ScanFetchFailed rather than
+    break and return partial/empty matches."""
+    original_slack_get = scanner.slack_get
+    try:
+        scanner.slack_get = lambda token, method, params: {"ok": False, "error": "ratelimited"}
+        raised = False
+        try:
+            scanner.slack_search_mentions("token", 3600)
+        except scanner.ScanFetchFailed:
+            raised = True
+        assert raised, "slack_search_mentions swallowed an API failure instead of raising"
+    finally:
+        scanner.slack_get = original_slack_get
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
